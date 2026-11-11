@@ -1,0 +1,20 @@
+[package]
+name = "sagax-nav"
+description = "Deterministic path search for games: A*, flow fields, smoothing, formations and D* Lite on square and hex grids with levels."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+
+[dependencies]
+sagax-core = { path = "../sagax-core" }
+
+[dev-dependencies]
+sagax-debug = { path = "../sagax-debug" }
+
+[lints]
+workspace = true
