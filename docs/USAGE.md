@@ -15,6 +15,7 @@ exact contracts are in `crates/sagax-ffi/include/sagax.h` (C),
 | A group follows its leader, one cell each | Formation | `sx_nav_formation` | `grid.formation` |
 | Many walkers, same goals | Flow field | `sx_flow_*` | `grid.buildFlow` + `grid.flowNext` |
 | The map changes while a walker is on its way | D* Lite | `sx_dstar_*` | `grid.dstar*` |
+| What should I do, and to whom? | Decisions (utility AI) | `sx_decider_*` | `lib.decider()` |
 
 Everything works on square and hex grids and in every interface.
 
@@ -253,7 +254,69 @@ Game AI often weighs options by ways, not by straight-line distance:
 - **Danger:** zones to avoid as extra `move_cost`; then the cost already
   counts the risk.
 
-## 6. Debugging and logging
+## 6. Decisions (utility AI)
+
+`sagax-decide` chooses what a character does. You list **options** (attack,
+flee, heal ...). Each has a **weight** and **considerations**: one raw number
+the game measured (distance, own health, enemies near ...) turned into a
+factor 0..1 by a **curve**. A **candidate** is one pair of option and target;
+the game fills one row of raw inputs per candidate. The score is the product
+of the factors (one 0 rules the candidate out), compensated for the number of
+factors so options with many considerations are not punished, times the
+weight.
+
+- **Curves:** `t = (input - min) / (max - min)`, clamped to 0..1. `linear` t,
+  `inverse` 1 - t, `quadratic` t², `inverseQuadratic` (1 - t)², `step` 1 if
+  input >= min, `inverseStep` 1 if input < min.
+- **Choice:** `best` (equal scores: the smaller index wins), `weighted`
+  (by chance in proportion to the score) or `uniform` (each equally likely),
+  both among the `top` best (0: all).
+- **Deterministic:** all integer, 1.0 = 65535. No global random numbers; the
+  seed comes from you (e.g. character index + turn). Same inputs and seed,
+  same choice, in Rust, C and JavaScript.
+- **Inputs from ways:** see section 5 (walking cost, reachable this turn,
+  flee). The target number is yours (token, cell index, weapon); Sagax only
+  carries it along.
+
+JavaScript:
+
+```js
+const d = lib.decider();
+const attack = d.addOption(1, [
+  { input: 0, curve: 'inverse', min: 1, max: 10 },   // distance: near is better
+  { input: 1, curve: 'linear', min: 0, max: 100 },   // own health
+]);
+const flee = d.addOption(1, [{ input: 1, curve: 'inverseQuadratic', min: 0, max: 100 }]);
+const choice = d.decide([
+  { option: attack, target: goblin, inputs: [3, hp] },
+  { option: attack, target: orc, inputs: [6, hp] },
+  { option: flee, target: 0, inputs: [0, hp] },
+], { pick: 'weighted', top: 2, seed: actorIndex * 1000 + round });
+// choice: {index, option, target, score, scores} or null if every score is 0
+d.setTrace(true); /* ... */ d.takeTrace();   // [{kind: 'factor'|'scored'|'chosen', ...}]
+d.free();
+```
+
+C:
+
+```c
+sx_decider *d = sx_decider_new();
+int32_t attack = sx_decider_add_option(d, SX_ONE);
+sx_consideration near = {0, SX_CURVE_INVERSE, 1, 10};
+sx_decider_add_consideration(d, attack, &near);
+sx_candidate cands[2] = {{attack, 7}, {attack, 8}};
+int32_t inputs[2] = {6, 2};                 /* one row of stride 1 per candidate */
+sx_choice choice;
+if (sx_decider_decide(d, cands, 2, inputs, 1, SX_PICK_BEST, 0, seed, NULL, &choice) == 1)
+	/* cands[choice.candidate] */;
+sx_decider_set_trace(d, on_event, ctx);     /* SX_DECIDE_FACTOR / SCORED / CHOSEN */
+sx_decider_free(d);
+```
+
+Rust: `sagax_decide::Decider` with `add_option`, `add_consideration`,
+`decide` / `decide_traced` (any `sagax_core::Sink<DecideEvent>`).
+
+## 7. Debugging and logging
 
 Tracing hands every step of a search to you: `started`, `expanded` (cost now
 final), `improved` (reached more cheaply, with the parent cell), `paused`
@@ -281,7 +344,7 @@ Typical uses: colour the expanded cells to see why a search is slow, log
 the `finished` event with `expanded` to find costly searches, and follow
 `improved` to see why a way goes where it goes.
 
-## 7. Pitfalls
+## 8. Pitfalls
 
 - Costs are integers ≥ 0. `move_cost` is an *extra* on top of the step cost.
 - `SX_ANY_LEVEL` (-1, Rust `ANY_LEVEL`) as goal level means any level; D*

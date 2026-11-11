@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+- Decisions (utility AI), new crate `sagax-decide`: options with weights and
+  considerations (raw input, curve, range), scored per pair of option and
+  target in integer fixed point, compensated for the number of factors.
+  Choice: best, or weighted / uniform among the top N with a seed from the
+  caller. Trace per factor. Rust `Decider`, C `sx_decider_*` (API version
+  4, additive), JavaScript `lib.decider()`.
+
 ## 0.3.0
 
 - Several goals in one search: a way to the cheapest of them, e.g. to the

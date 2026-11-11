@@ -8,8 +8,9 @@
   visibly poor ways.
 - **Faster D\* Lite**: after a change some neighbours are asked twice. A
   per-edge cost query would avoid that.
-- **More AI modules** beside navigation (decision making, perception), on the
-  same `sagax-core`.
+- **Decisions, next steps:** a state machine with frame timers and abort
+  conditions, then memory with expiry (last seen position, danger zones).
+- **Perception** (sight lines, cover, flanks), on the same `sagax-core`.
 
 Known limits: flow fields and D* Lite assume moves that work both ways.
 One-way moves (zones with a leave cost, one-sided walls) make their costs

@@ -29,7 +29,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 3
+#define SX_API_VERSION 4
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -264,6 +264,78 @@ typedef void (*sx_trace_fn)(void *context, const sx_event *event);
 int32_t sx_nav_set_trace(sx_nav *nav, sx_trace_fn trace, void *context);
 int32_t sx_flow_set_trace(sx_flow *flow, sx_trace_fn trace, void *context);
 int32_t sx_dstar_set_trace(sx_dstar *dstar, sx_trace_fn trace, void *context);
+
+/* ---- decisions (since version 4) ---------------------------------------- */
+
+/* Utility AI: score every pair of option and target, choose one. All
+ * integer: 0..1 is 0..SX_ONE. Same inputs and seed give the same choice on
+ * every machine. No global random numbers; the seed comes from the game.
+ * Equal scores: the smaller candidate index wins. */
+#define SX_ONE 65535u
+
+/* t = (input - min) / (max - min) clamped to 0..1 (max <= min: 1 if
+ * input >= max, else 0). */
+#define SX_CURVE_LINEAR            0   /* t */
+#define SX_CURVE_INVERSE           1   /* 1 - t */
+#define SX_CURVE_QUADRATIC         2   /* t * t */
+#define SX_CURVE_INVERSE_QUADRATIC 3   /* (1 - t) * (1 - t) */
+#define SX_CURVE_STEP              4   /* 1 if input >= min */
+#define SX_CURVE_INVERSE_STEP      5   /* 1 if input < min */
+
+#define SX_PICK_BEST     0   /* highest score */
+#define SX_PICK_WEIGHTED 1   /* among the top best, by chance in proportion to score */
+#define SX_PICK_UNIFORM  2   /* among the top best, each equally likely */
+
+typedef struct sx_decider sx_decider;
+
+typedef struct sx_consideration {
+	uint32_t input;             /* index into the candidate's row of inputs */
+	uint32_t curve;             /* SX_CURVE_* */
+	int32_t min, max;
+} sx_consideration;
+
+typedef struct sx_candidate {
+	uint32_t option;            /* from sx_decider_add_option */
+	uint32_t target;            /* the game's own number, carried along */
+} sx_candidate;
+
+typedef struct sx_choice {
+	int32_t candidate;          /* index, -1 for none */
+	uint32_t score;
+} sx_choice;
+
+sx_decider *sx_decider_new(void);
+void sx_decider_free(sx_decider *decider);
+/* weight: SX_ONE = 1.0, more allowed. Returns the option number (0, 1, ...). */
+int32_t sx_decider_add_option(sx_decider *decider, uint32_t weight);
+/* The factors of an option are multiplied (0 rules out), compensated for
+ * their number, then times the weight. Returns 0. */
+int32_t sx_decider_add_consideration(sx_decider *decider, uint32_t option,
+                                     const sx_consideration *consideration);
+/* inputs: one row of stride raw numbers per candidate. pick: SX_PICK_*,
+ * top: how many of the best take part (0 all). scores (count, or 0) gets
+ * every score. Returns 1 if chosen, 0 if every score is 0, -1 bad
+ * arguments (also an option or input that does not exist). */
+int32_t sx_decider_decide(sx_decider *decider, const sx_candidate *candidates,
+                          int32_t count, const int32_t *inputs, int32_t stride,
+                          uint32_t pick, uint32_t top, uint64_t seed,
+                          uint32_t *scores, sx_choice *choice);
+
+#define SX_DECIDE_FACTOR 1   /* one consideration of one candidate */
+#define SX_DECIDE_SCORED 2   /* value: product before weight; score */
+#define SX_DECIDE_CHOSEN 3
+
+typedef struct sx_decide_event {
+	int32_t kind;               /* SX_DECIDE_* */
+	int32_t candidate;
+	int32_t consideration;      /* SX_DECIDE_FACTOR, else -1 */
+	int32_t input;              /* SX_DECIDE_FACTOR: raw input */
+	uint32_t value;             /* factor, or product */
+	uint32_t score;
+} sx_decide_event;
+
+typedef void (*sx_decide_trace_fn)(void *context, const sx_decide_event *event);
+int32_t sx_decider_set_trace(sx_decider *decider, sx_decide_trace_fn trace, void *context);
 
 #ifdef __cplusplus
 }

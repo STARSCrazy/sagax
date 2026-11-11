@@ -80,6 +80,7 @@ const way = grid.findPath({ x: 0, y: 0 }, { x: 10, y: 4 }, { output: 'smooth' })
 | Path | What |
 |---|---|
 | `crates/sagax-nav` | the library: `Navigator`, search core, flow fields, smoothing, formations, D* Lite, grids |
+| `crates/sagax-decide` | decisions (utility AI): options x targets, curves, seeded choice |
 | `crates/sagax-ffi` | C interface: `sagax.dll` / `libsagax.so`, header in `include/sagax.h` |
 | `crates/sagax-wasm` | WebAssembly interface |
 | `crates/sagax-core`, `crates/sagax-debug` | diagnostic events and a collector for them |

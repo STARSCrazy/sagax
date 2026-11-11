@@ -67,6 +67,11 @@ class Sagax {
   grid(width, height, rules = {}) {
     return new Grid(this.x, width, height, { ...DEFAULT_RULES, ...rules });
   }
+
+  /** A decider (utility AI) without options; see Decider. */
+  decider() {
+    return new Decider(this.x);
+  }
 }
 
 function outputOf(output) {
@@ -349,6 +354,114 @@ export class Grid {
 
   free() {
     if (this.handle) this.x.sx_grid_free(this.handle);
+    this.handle = 0;
+  }
+}
+
+/** 1.0 in the fixed point of scores (0..1 = 0..ONE). */
+export const ONE = 65535;
+const CURVE = { linear: 0, inverse: 1, quadratic: 2, inverseQuadratic: 3, step: 4, inverseStep: 5 };
+const PICK = { best: 0, weighted: 1, uniform: 2 };
+const DECIDE_TRACE = [null, 'factor', 'scored', 'chosen'];
+
+/**
+ * Utility AI: options with considerations, scored per candidate (option x target).
+ * All integer, deterministic; the seed comes from the caller.
+ *
+ *   const d = lib.decider();
+ *   const attack = d.addOption(1, [{ input: 0, curve: 'inverse', min: 1, max: 10 }]);
+ *   const c = d.decide([{ option: attack, target: 7, inputs: [3] }], { pick: 'best' });
+ *   // c: {index, option, target, score, scores} or null if every score is 0
+ */
+export class Decider {
+  constructor(x) {
+    this.x = x;
+    this.handle = x.sx_decider_new();
+    this.inputCount = 0;
+  }
+
+  /**
+   * Adds an option and returns its number. weight: 1 = normal (more allowed).
+   * considerations: [{input, curve, min, max}], curve one of linear, inverse,
+   * quadratic, inverseQuadratic, step, inverseStep. t = (input - min) / (max - min)
+   * clamped; the factors are multiplied (0 rules out), compensated for their number.
+   */
+  addOption(weight = 1, considerations = []) {
+    const w = Math.round(weight * ONE);
+    if (!(w >= 0 && w <= 0xffffffff)) throw new RangeError(`Sagax: bad weight ${weight}`);
+    const option = this.x.sx_decider_add_option(this.handle, w);
+    for (const c of considerations) this.addConsideration(option, c);
+    return option;
+  }
+
+  /** Adds one consideration {input, curve, min, max} to an option. */
+  addConsideration(option, { input, curve = 'linear', min = 0, max = ONE }) {
+    const k = CURVE[curve];
+    if (k === undefined) throw new RangeError(`Sagax: unknown curve ${curve}`);
+    if (this.x.sx_decider_add_consideration(this.handle, option, input, k, min | 0, max | 0) !== 0) {
+      throw new RangeError(`Sagax: no option ${option}`);
+    }
+    this.inputCount = Math.max(this.inputCount, input + 1);
+  }
+
+  /**
+   * Scores every candidate {option, target, inputs: [raw integers]} and chooses one.
+   * pick: 'best' (equal scores: the earlier one), 'weighted' or 'uniform' among the
+   * top best (0: all), driven by seed (integer below 2^53). Returns
+   * {index, option, target, score, scores} or null if every score is 0.
+   */
+  decide(candidates, { pick = 'best', top = 0, seed = 0 } = {}) {
+    const p = PICK[pick];
+    if (p === undefined) throw new RangeError(`Sagax: pick must be best, weighted or uniform, not ${pick}`);
+    const stride = this.inputCount;
+    const row = stride + 2;
+    const n = candidates.length;
+    const ptr = this.x.sx_decider_input(this.handle, n * row);
+    const buf = new Int32Array(this.x.memory.buffer, ptr, n * row);
+    candidates.forEach((c, i) => {
+      buf[i * row] = c.option;
+      buf[i * row + 1] = c.target ?? 0;
+      for (let k = 0; k < stride; k++) buf[i * row + 2 + k] = c.inputs?.[k] ?? 0;
+    });
+    const low = seed % 0x100000000;
+    const high = Math.floor(seed / 0x100000000);
+    const r = this.x.sx_decider_decide(this.handle, n, stride, p, top, low >>> 0, high >>> 0);
+    if (r === -1) throw new RangeError('Sagax: bad candidates (unknown option?)');
+    const scores = Array.from(new Uint32Array(this.x.memory.buffer, this.x.sx_decider_out(this.handle), n));
+    if (r < 0) return null;
+    return { index: r, option: candidates[r].option, target: candidates[r].target ?? 0, score: scores[r], scores };
+  }
+
+  /** Tracing of decisions on or off. */
+  setTrace(on) {
+    this.x.sx_decider_trace(this.handle, on ? 1 : 0);
+  }
+
+  /**
+   * Events since the last call: [{kind, candidate, consideration, input, value, score}],
+   * kind 'factor' (value: factor of the raw input), 'scored' (value: product before
+   * the weight) or 'chosen'.
+   */
+  takeTrace() {
+    const n = this.x.sx_decider_trace_take(this.handle);
+    const raw = new Int32Array(this.x.memory.buffer, this.x.sx_decider_out(this.handle), n * 6);
+    const events = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const o = i * 6;
+      events[i] = {
+        kind: DECIDE_TRACE[raw[o]],
+        candidate: raw[o + 1],
+        consideration: raw[o + 2],
+        input: raw[o + 3],
+        value: raw[o + 4] >>> 0,
+        score: raw[o + 5] >>> 0,
+      };
+    }
+    return events;
+  }
+
+  free() {
+    if (this.handle) this.x.sx_decider_free(this.handle);
     this.handle = 0;
   }
 }

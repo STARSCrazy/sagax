@@ -3,13 +3,14 @@ resolver = "3"
 members = [
     "crates/sagax-core",
     "crates/sagax-nav",
+    "crates/sagax-decide",
     "crates/sagax-debug",
     "crates/sagax-ffi",
     "crates/sagax-wasm",
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/STARSCrazy/sagax"

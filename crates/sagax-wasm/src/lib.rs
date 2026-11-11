@@ -786,3 +786,238 @@ pub unsafe extern "C" fn sx_trace_dropped(g: *mut WasmGrid) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
     to_i32(std::mem::take(&mut w.trace.borrow_mut().dropped))
 }
+
+// ---- decisions -------------------------------------------------------------
+
+use sagax_core::CallbackSink;
+use sagax_decide::{Candidate, Consideration, Curve, DecideEvent, Decider, Pick};
+
+/// Numbers per decision trace event: kind (1 factor, 2 scored, 3 chosen),
+/// candidate, consideration (-1 if none), input, value, score.
+const DECIDE_STRIDE: usize = 6;
+
+/// A decider with its buffers.
+pub struct WasmDecider {
+    decider: Decider,
+    input: Vec<i32>,
+    candidates: Vec<Candidate>,
+    rows: Vec<i32>,
+    scores: Vec<u32>,
+    trace_on: bool,
+    trace: Vec<i32>,
+    out: Vec<i32>,
+}
+
+macro_rules! decider {
+    ($d:expr, $err:expr) => {
+        // SAFETY: JS passes a handle from sx_decider_new (wrapper guarantees it).
+        match unsafe { $d.as_mut() } {
+            Some(d) => d,
+            None => return $err,
+        }
+    };
+}
+
+/// A decider without options.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_decider_new() -> *mut WasmDecider {
+    Box::into_raw(Box::new(WasmDecider {
+        decider: Decider::new(),
+        input: Vec::new(),
+        candidates: Vec::new(),
+        rows: Vec::new(),
+        scores: Vec::new(),
+        trace_on: false,
+        trace: Vec::new(),
+        out: Vec::new(),
+    }))
+}
+
+/// Frees a decider.
+///
+/// # Safety
+/// `d` is null or from [`sx_decider_new`] and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_free(d: *mut WasmDecider) {
+    if !d.is_null() {
+        // SAFETY: see above.
+        drop(unsafe { Box::from_raw(d) });
+    }
+}
+
+/// Adds an option (`weight` 65535 = 1.0) and returns its number.
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_add_option(d: *mut WasmDecider, weight: u32) -> i32 {
+    to_i32(decider!(d, ERROR_ARGUMENT).decider.add_option(weight))
+}
+
+/// Adds a consideration to `option`: input index, curve 0..5, min, max.
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_add_consideration(
+    d: *mut WasmDecider,
+    option: u32,
+    input: u32,
+    curve: u32,
+    min: i32,
+    max: i32,
+) -> i32 {
+    let w = decider!(d, ERROR_ARGUMENT);
+    let Some(curve) = Curve::from_u32(curve) else {
+        return ERROR_ARGUMENT;
+    };
+    if w.decider
+        .add_consideration(option, Consideration::new(input, curve, min, max))
+    {
+        0
+    } else {
+        ERROR_ARGUMENT
+    }
+}
+
+/// The input buffer, resized to `count` `i32`s: per candidate option,
+/// target and `stride` raw inputs.
+///
+/// # Safety
+/// `d` from [`sx_decider_new`]. The pointer is valid until memory grows.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_input(d: *mut WasmDecider, count: i32) -> *mut i32 {
+    let w = decider!(d, std::ptr::null_mut());
+    w.input.clear();
+    w.input.resize(usize::try_from(count).unwrap_or(0), 0);
+    w.input.as_mut_ptr()
+}
+
+/// The output buffer: the scores of the last decision (`Uint32Array`, one
+/// per candidate) or the trace events after [`sx_decider_trace_take`].
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_out(d: *mut WasmDecider) -> *const i32 {
+    decider!(d, std::ptr::null()).out.as_ptr()
+}
+
+/// Scores the `count` candidates in the input buffer and chooses one
+/// (`pick` 0 best, 1 weighted, 2 uniform among `top` best, 0 all; seed in
+/// two halves). Returns the chosen index, -2 if every score is 0, -1 on bad
+/// arguments. The scores go to the output buffer.
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sx_decider_decide(
+    d: *mut WasmDecider,
+    count: i32,
+    stride: i32,
+    pick: u32,
+    top: u32,
+    seed_low: u32,
+    seed_high: u32,
+) -> i32 {
+    let w = decider!(d, ERROR_ARGUMENT);
+    let (Ok(count), Ok(stride), Some(pick)) = (
+        usize::try_from(count),
+        usize::try_from(stride),
+        Pick::from_u32(pick, top),
+    ) else {
+        return ERROR_ARGUMENT;
+    };
+    let row = stride + 2;
+    if count.checked_mul(row) != Some(w.input.len()) {
+        return ERROR_ARGUMENT;
+    }
+    w.candidates.clear();
+    w.rows.clear();
+    for c in w.input.chunks_exact(row) {
+        let (Ok(option), Ok(target)) = (u32::try_from(c[0]), u32::try_from(c[1])) else {
+            return ERROR_ARGUMENT;
+        };
+        w.candidates.push(Candidate::new(option, target));
+        w.rows.extend_from_slice(&c[2..]);
+    }
+    let seed = u64::from(seed_low) | (u64::from(seed_high) << 32);
+    let result = if w.trace_on {
+        let trace = &mut w.trace;
+        w.decider.decide_traced(
+            &w.candidates,
+            &w.rows,
+            stride,
+            pick,
+            seed,
+            &mut w.scores,
+            &mut CallbackSink(|e| {
+                if trace.len() >= TRACE_LIMIT * DECIDE_STRIDE {
+                    return;
+                }
+                trace.extend_from_slice(&match e {
+                    DecideEvent::Factor {
+                        candidate,
+                        consideration,
+                        input,
+                        value,
+                    } => [
+                        1,
+                        to_i32(candidate),
+                        to_i32(consideration),
+                        input,
+                        value as i32,
+                        0,
+                    ],
+                    DecideEvent::Scored {
+                        candidate,
+                        product,
+                        score,
+                    } => [2, to_i32(candidate), -1, 0, product as i32, score as i32],
+                    DecideEvent::Chosen { candidate, score } => {
+                        [3, to_i32(candidate), -1, 0, 0, score as i32]
+                    }
+                });
+            }),
+        )
+    } else {
+        w.decider
+            .decide(&w.candidates, &w.rows, stride, pick, seed, &mut w.scores)
+    };
+    w.out.clear();
+    // Scores are u32; JS reads them through a Uint32Array.
+    w.out.extend(w.scores.iter().map(|&s| s as i32));
+    match result {
+        Ok(Some(c)) => to_i32(c.candidate),
+        Ok(None) => -2,
+        Err(_) => ERROR_ARGUMENT,
+    }
+}
+
+/// Tracing of decisions on (1) or off (0).
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_trace(d: *mut WasmDecider, on: i32) -> i32 {
+    let w = decider!(d, ERROR_ARGUMENT);
+    w.trace_on = on != 0;
+    if !w.trace_on {
+        w.trace.clear();
+    }
+    0
+}
+
+/// Moves the waiting decision events to the output buffer (6 numbers each,
+/// see [`DECIDE_STRIDE`]) and returns how many.
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_trace_take(d: *mut WasmDecider) -> i32 {
+    let w = decider!(d, ERROR_ARGUMENT);
+    std::mem::swap(&mut w.out, &mut w.trace);
+    w.trace.clear();
+    to_i32(w.out.len() / DECIDE_STRIDE)
+}

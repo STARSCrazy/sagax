@@ -74,8 +74,8 @@ fn wall_line() -> Walls {
 }
 
 #[test]
-fn version_is_3() {
-    assert_eq!(sx_api_version(), 3);
+fn version_is_4() {
+    assert_eq!(sx_api_version(), 4);
 }
 
 #[test]

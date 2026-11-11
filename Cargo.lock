@@ -4,26 +4,34 @@ version = 4
 
 [[package]]
 name = "sagax-core"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "sagax-debug"
-version = "0.3.0"
+version = "0.4.0"
+dependencies = [
+ "sagax-core",
+]
+
+[[package]]
+name = "sagax-decide"
+version = "0.4.0"
 dependencies = [
  "sagax-core",
 ]
 
 [[package]]
 name = "sagax-ffi"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "sagax-core",
+ "sagax-decide",
  "sagax-nav",
 ]
 
 [[package]]
 name = "sagax-nav"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "sagax-core",
  "sagax-debug",
@@ -31,8 +39,9 @@ dependencies = [
 
 [[package]]
 name = "sagax-wasm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "sagax-core",
+ "sagax-decide",
  "sagax-nav",
 ]

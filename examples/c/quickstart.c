@@ -66,5 +66,34 @@ int main(void)
 		printf(" (%d,%d)", way[i].x, way[i].y);
 	printf("\n");
 	sx_nav_destroy(nav);
+
+	/* A decision: attack the nearer of two targets unless health is low. */
+	{
+		sx_decider *d = sx_decider_new();
+		sx_consideration near = {0, SX_CURVE_INVERSE, 1, 10};      /* input 0: distance */
+		sx_consideration healthy = {1, SX_CURVE_LINEAR, 0, 100};   /* input 1: health */
+		sx_consideration hurt = {1, SX_CURVE_INVERSE, 0, 100};
+		sx_candidate candidates[3] = {{0, 7}, {0, 8}, {1, 0}};
+		int32_t inputs[6] = {6, 80, 2, 80, 0, 80};
+		uint32_t scores[3];
+		sx_choice choice;
+		int32_t attack = sx_decider_add_option(d, SX_ONE);
+		int32_t flee = sx_decider_add_option(d, SX_ONE);
+
+		sx_decider_add_consideration(d, (uint32_t)attack, &near);
+		sx_decider_add_consideration(d, (uint32_t)attack, &healthy);
+		sx_decider_add_consideration(d, (uint32_t)flee, &hurt);
+		if (sx_decider_decide(d, candidates, 3, inputs, 2, SX_PICK_BEST, 0, 0,
+		                      scores, &choice) != 1 || choice.candidate != 1) {
+			fprintf(stderr, "wrong decision
+");
+			return 1;
+		}
+		printf("decision: option %u, target %u, score %u
+",
+		       candidates[choice.candidate].option, candidates[choice.candidate].target,
+		       choice.score);
+		sx_decider_free(d);
+	}
 	return 0;
 }

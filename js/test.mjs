@@ -3,7 +3,7 @@
 
 import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
-import { loadSagax, HEX, FORMATION } from './sagax.mjs';
+import { ONE, loadSagax, HEX, FORMATION } from './sagax.mjs';
 
 const wasm = await readFile(new URL('../target/wasm32-unknown-unknown/release/sagax_wasm.wasm', import.meta.url));
 console.log(`wasm size ${(wasm.length / 1024).toFixed(0)} KB`);
@@ -244,6 +244,50 @@ test('flee from threats, flee to the nearest exit', () => {
   const exit = g.findPath({ x: 15, y: 2 }, [{ x: 0, y: 2 }, { x: 19, y: 2 }]);
   assert.deepEqual(exit.cells.at(-1), { x: 19, y: 2 });
   g.free();
+});
+
+test('decide: utility scores, ties, seeded chance, trace', () => {
+  const d = lib.decider();
+  const attack = d.addOption(1, [
+    { input: 0, curve: 'inverse', min: 1, max: 10 },
+    { input: 1, curve: 'linear', min: 0, max: 100 },
+  ]);
+  const flee = d.addOption(1, [{ input: 1, curve: 'inverseQuadratic', min: 0, max: 100 }]);
+  const c = (option, target, inputs) => ({ option, target, inputs });
+  const healthy = d.decide([c(attack, 7, [5, 90]), c(attack, 8, [2, 90]), c(flee, 0, [0, 90])]);
+  assert.equal(healthy.index, 1);
+  assert.equal(healthy.target, 8);
+  const hurt = d.decide([c(attack, 7, [5, 5]), c(attack, 8, [2, 5]), c(flee, 0, [0, 5])]);
+  assert.equal(hurt.option, flee);
+  assert.equal(d.decide([c(attack, 1, [3, 50]), c(attack, 2, [3, 50])]).index, 0);
+  assert.equal(d.decide([c(attack, 1, [20, 50])]), null);
+  assert.throws(() => d.decide([c(9, 0, [0, 0])]));
+
+  // Same function as Rust: SplitMix64 of the seed, modulo the sum of the top scores.
+  const w = lib.decider();
+  w.addOption(3);
+  w.addOption(1);
+  const mix = (seed) => {
+    const m = (1n << 64n) - 1n;
+    let z = (BigInt(seed) + 0x9e3779b97f4a7c15n) & m;
+    z = ((z ^ (z >> 30n)) * 0xbf58476d1ce4e5b9n) & m;
+    z = ((z ^ (z >> 27n)) * 0x94d049bb133111ebn) & m;
+    return z ^ (z >> 31n);
+  };
+  for (const seed of [0, 1, 42, 2 ** 40 + 7]) {
+    const got = w.decide([c(0, 0, []), c(1, 0, [])], { pick: 'weighted', seed });
+    const expect = mix(seed) % BigInt(4 * ONE) < BigInt(3 * ONE) ? 0 : 1;
+    assert.equal(got.index, expect, `seed ${seed}`);
+    assert.deepEqual(got.scores, [3 * ONE, ONE]);
+  }
+  w.free();
+
+  d.setTrace(true);
+  d.decide([c(attack, 0, [1, 100])]);
+  const events = d.takeTrace();
+  assert.deepEqual(events.map((e) => e.kind), ['factor', 'factor', 'scored', 'chosen']);
+  assert.equal(events[0].value, ONE);
+  d.free();
 });
 
 console.log(`${passed} tests passed`);
