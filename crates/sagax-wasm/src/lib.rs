@@ -389,34 +389,68 @@ pub unsafe extern "C" fn sx_hex_neighbors(g: *mut WasmGrid, x: i32, y: i32) -> i
     6
 }
 
-/// Cheapest way from `sx, sy` to `gx, gy` (on failure to the reachable cell
-/// closest to it), written as `output` (0 cells, 1 turning points, 2
-/// smoothed). `budget` 0: no limit.
+/// Cheapest way from `sx, sy` to the cheapest of `count` goals (`x, y`
+/// pairs in the input buffer; on failure to the reachable cell closest to
+/// one), written as `output` (0 cells, 1 turning points, 2 smoothed).
+/// `budget` 0: no limit.
 ///
 /// # Safety
 /// `g` from [`sx_grid_new`].
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn sx_find_path(
     g: *mut WasmGrid,
     sx: i32,
     sy: i32,
-    gx: i32,
-    gy: i32,
+    count: i32,
     budget: i32,
     output: i32,
 ) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
-    let (Some(budget), Some(output)) = (budget_of(budget), output_of(output)) else {
+    let (Some(budget), Some(output), Ok(count)) =
+        (budget_of(budget), output_of(output), usize::try_from(count))
+    else {
         return ERROR_ARGUMENT;
     };
-    let report = w.nav.find_path(
-        &mut w.grid,
-        Cell::new(sx, sy, 0),
-        Cell::new(gx, gy, 0),
-        false,
-        budget,
-    );
+    if !w.input_cells(count) {
+        return ERROR_ARGUMENT;
+    }
+    let report = w
+        .nav
+        .find_path(&mut w.grid, Cell::new(sx, sy, 0), &w.cells, budget);
+    w.report(report);
+    w.begun = Begun::Path(output);
+    w.write_way(output)
+}
+
+/// A way from `sx, sy` away from `count` threats (`x, y` pairs in the input
+/// buffer), within `max_cost`, written as `output`. See
+/// `Navigator::flee`.
+///
+/// # Safety
+/// `g` from [`sx_grid_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_flee(
+    g: *mut WasmGrid,
+    sx: i32,
+    sy: i32,
+    count: i32,
+    max_cost: i32,
+    output: i32,
+) -> i32 {
+    let w = grid!(g, ERROR_ARGUMENT);
+    let (Some(output), Ok(count), Ok(max_cost)) = (
+        output_of(output),
+        usize::try_from(count),
+        Cost::try_from(max_cost),
+    ) else {
+        return ERROR_ARGUMENT;
+    };
+    if !w.input_cells(count) {
+        return ERROR_ARGUMENT;
+    }
+    let report = w
+        .nav
+        .flee(&mut w.grid, Cell::new(sx, sy, 0), &w.cells, max_cost);
     w.report(report);
     w.begun = Begun::Path(output);
     w.write_way(output)

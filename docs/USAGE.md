@@ -8,7 +8,8 @@ exact contracts are in `crates/sagax-ffi/include/sagax.h` (C),
 
 | The game asks | Building block | C | JavaScript |
 |---|---|---|---|
-| One walker, one goal | A* | `sx_nav_find_path` | `grid.findPath` |
+| One walker, one goal (or the nearest of several) | A* | `sx_nav_find_path` | `grid.findPath` |
+| Get away: off the map, or away from threats | Exits as goals, or flee | `sx_nav_find_path` / `sx_nav_flee` | `grid.findPath` / `grid.flee` |
 | Where can I get with X movement? | Reachable area | `sx_nav_reachable` + `sx_nav_path_to` | `grid.reachable` + `grid.pathTo` |
 | A way without staircase steps | Smoothing | output `SX_OUT_SMOOTH` | `output: 'smooth'` |
 | A group follows its leader, one cell each | Formation | `sx_nav_formation` | `grid.formation` |
@@ -71,7 +72,7 @@ map.context = &walker;
 
 sx_point start = { x, y, z }, goal = { gx, gy, SX_ANY_LEVEL };
 sx_point pts[64]; sx_result r;
-int n = sx_nav_find_path(nav, &map, start, goal, 4000, SX_OUT_TURNS, pts, 64, &r);
+int n = sx_nav_find_path(nav, &map, start, &goal, 1, 4000, SX_OUT_TURNS, pts, 64, &r);
 /* n < 0: error. pts[0] is the start, pts[n-1] the goal or (r.status ==
  * SX_PARTIAL) the closest reachable cell. r.cells counts the whole way,
  * even if pts was too small. */
@@ -90,13 +91,29 @@ int n = sx_nav_find_path(nav, &map, start, goal, 4000, SX_OUT_TURNS, pts, 64, &r
 ### Over several frames
 
 ```c
-n = sx_nav_find_path(nav, &map, start, goal, 500, SX_OUT_TURNS, pts, 64, &r);
+n = sx_nav_find_path(nav, &map, start, &goal, 1, 500, SX_OUT_TURNS, pts, 64, &r);
 /* next frame, while r.status == SX_RUNNING and the map is unchanged: */
 n = sx_nav_continue(nav, &map, 500, pts, NULL, 64, &r);
 ```
 
 Many small steps end exactly like one big one. On `SX_RUNNING`, `pts`
 already holds the best way so far.
+
+Several goals: `sx_point exits[] = {...}; sx_nav_find_path(nav, &map, start,
+exits, n, ...)` gives the way to the cheapest one, in one search.
+
+### Fleeing
+
+```c
+sx_point threats[] = { { ox, oy, oz } };
+n = sx_nav_flee(nav, &map, start, threats, 1, move_left, SX_OUT_TURNS, pts, 64, &r);
+/* SX_UNREACHABLE: nothing within move_left is farther from the threats */
+```
+
+Picks the cell, within the walker's budget, that the nearest threat needs
+the longest walk to reach. If the map has exits or a refuge, fleeing *there*
+is usually more sensible: pass them as goals to `sx_nav_find_path`. Give cells
+near the threats an extra `move_cost` so the way does not run past them.
 
 ### Reachable area
 
@@ -184,6 +201,8 @@ grid.setCosts(uint32Array);                       // whole map at once
 const way = grid.findPath(a, b, { output: 'turns', budget: 0 });
 // way.status: 'found' | 'partial' | 'running' (then grid.continue()) | 'unreachable'
 const corners = grid.way('smooth');               // the same way, smoothed
+const exit = grid.findPath(a, [e1, e2, e3]);      // to the nearest of several goals
+const away = grid.flee(a, [enemy], 6);            // away from threats, within 6
 const area = grid.reachable(a, 6).cells;          // [{x, y, cost}]
 const back = grid.pathTo(9, 4);                   // way to one of them, or null
 const { leader, members } = grid.formation(FORMATION.wedge(3));
@@ -201,24 +220,40 @@ with a leave cost (one-way costs); use `findPath` / `reachable` there.
 
 ```rust
 use sagax_nav::grid::{Cell, DenseGrid, GridRules};
-use sagax_nav::nav::{Navigator, Output, Status};
+use sagax_nav::nav::{ANY_LEVEL, Navigator, Output, Status};
 use sagax_nav::topology::Topology;
 
 let mut map = DenseGrid::new(64, 64);
 let mut nav = Navigator::new(Topology::Square(GridRules::default()), 4096);
-let r = nav.find_path(&mut map, Cell::new(0, 0, 0), Cell::new(40, 9, 0), true, usize::MAX);
+let r = nav.find_path(&mut map, Cell::new(0, 0, 0), &[Cell::new(40, 9, ANY_LEVEL)], usize::MAX);
 assert_eq!(r.status, Some(Status::Found));
 let corners = nav.output(&mut map, Output::Smooth);
 ```
 
-`Navigator` bundles search, `resume`, reachable areas (`reachable`, `area`,
-`path_to`), outputs and formations. Underneath: `Search` (A*/Dijkstra with a
+`Navigator` bundles search (to one or several goals), `resume`, reachable
+areas (`reachable`, `area`, `path_to`), `flee`, outputs and formations. Underneath: `Search` (A*/Dijkstra with a
 budget), `flow::FlowField`, `dstar::DStarLite`, `smooth`, `formation` and
 `topology::Topology` (square or hex at run time). Your own maps implement
 `grid::CellMap` (square), `hex::HexMap` (hex) or `Graph` (anything); a
 `&mut` map is a map too.
 
-## 5. Debugging and logging
+## 5. Ways as input for decisions
+
+Game AI often weighs options by ways, not by straight-line distance:
+
+- **Walking distance to a target:** `find_path` (budget 0) and `r.cost`.
+  For many targets at once: one `reachable` from the walker, then the cost
+  of each target cell from the area (no entry: out of reach).
+- **Reachable this turn:** `reachable` with the movement left as `max_cost`;
+  a cell in the area can be reached now, its cost is what it takes.
+- **Attack positions:** the goals of `find_path` can be every cell next to
+  the target; the way ends at the cheapest.
+- **Escape:** exits as goals, or `flee`; `r.status` tells whether there is a
+  way out at all.
+- **Danger:** zones to avoid as extra `move_cost`; then the cost already
+  counts the risk.
+
+## 6. Debugging and logging
 
 Tracing hands every step of a search to you: `started`, `expanded` (cost now
 final), `improved` (reached more cheaply, with the parent cell), `paused`
@@ -246,11 +281,11 @@ Typical uses: colour the expanded cells to see why a search is slow, log
 the `finished` event with `expanded` to find costly searches, and follow
 `improved` to see why a way goes where it goes.
 
-## 6. Pitfalls
+## 7. Pitfalls
 
 - Costs are integers ≥ 0. `move_cost` is an *extra* on top of the step cost.
-- `SX_ANY_LEVEL` (-1) as goal level means any level; D* Lite needs an exact
-  level.
+- `SX_ANY_LEVEL` (-1, Rust `ANY_LEVEL`) as goal level means any level; D*
+  Lite needs an exact level.
 - `SX_PARTIAL` is the best partial way, not an error.
 - Lists are cut when the buffer is too small; `r.cells` still counts all.
 - Flow fields and D* Lite assume moves that work both ways.

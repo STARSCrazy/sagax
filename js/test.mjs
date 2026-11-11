@@ -235,4 +235,15 @@ test('tracing: every step, same result, off again', () => {
   g.free();
 });
 
+test('flee from threats, flee to the nearest exit', () => {
+  const g = lib.grid(20, 5);
+  const away = g.flee({ x: 5, y: 2 }, [{ x: 3, y: 2 }], 8);
+  assert.equal(away.status, 'found');
+  assert.deepEqual(away.cells[0], { x: 5, y: 2 });
+  assert.ok(away.cells.at(-1).x >= 9);
+  const exit = g.findPath({ x: 15, y: 2 }, [{ x: 0, y: 2 }, { x: 19, y: 2 }]);
+  assert.deepEqual(exit.cells.at(-1), { x: 19, y: 2 });
+  g.free();
+});
+
 console.log(`${passed} tests passed`);

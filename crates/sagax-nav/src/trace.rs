@@ -17,7 +17,7 @@
 //! let mut nav = Navigator::new(Topology::Square(GridRules::default()), 1000);
 //! nav.set_tracer(Some(Box::new(move |e: &TraceEvent| sink.lock().unwrap().push(*e))));
 //! let mut map = DenseGrid::new(10, 10);
-//! nav.find_path(&mut map, Cell::new(0, 0, 0), Cell::new(5, 0, 0), false, usize::MAX);
+//! nav.find_path(&mut map, Cell::new(0, 0, 0), &[Cell::new(5, 0, 0)], usize::MAX);
 //! let events = events.lock().unwrap();
 //! assert_eq!(events.first().unwrap().kind, TraceKind::Started);
 //! assert_eq!(events.last().unwrap().kind, TraceKind::Finished);

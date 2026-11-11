@@ -29,7 +29,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 2
+#define SX_API_VERSION 3
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -130,12 +130,25 @@ typedef struct sx_nav sx_nav;
 sx_nav *sx_nav_create(const sx_rules *rules);
 void sx_nav_destroy(sx_nav *nav);
 
-/* Searches a way from start to goal (goal.level may be SX_ANY_LEVEL) and
- * writes it as output into points. If the goal cannot be reached the way
- * leads to the reachable cell closest to it (SX_PARTIAL). On SX_RUNNING the
- * best way so far is written; sx_nav_continue goes on. result may be 0. */
-int32_t sx_nav_find_path(sx_nav *nav, const sx_map *map, sx_point start, sx_point goal,
+/* Searches a way from start to the cheapest of goal_count goals (a goal
+ * level may be SX_ANY_LEVEL) and writes it as output into points. Several
+ * goals, e.g. every exit of a map, cost one search. If no goal can be
+ * reached the way leads to the reachable cell closest to one (SX_PARTIAL;
+ * with more than 16 goals that guess is lost). On SX_RUNNING the best way so
+ * far is written; sx_nav_continue goes on. result may be 0. */
+int32_t sx_nav_find_path(sx_nav *nav, const sx_map *map, sx_point start,
+	const sx_point *goals, int32_t goal_count,
 	int32_t budget, int32_t output, sx_point *points, int32_t max_points, sx_result *result);
+
+/* A way away from threat_count threats: to the cell within max_cost of
+ * start that the nearest threat needs the longest walk to reach (cells no
+ * threat reaches count as farthest; ties: cheaper for the walker). SX_FOUND,
+ * or SX_UNREACHABLE (only start written) if nothing is farther than start.
+ * To flee off the map or to a refuge, use sx_nav_find_path with the exits
+ * as goals. The first call reserves a second search of node_capacity. */
+int32_t sx_nav_flee(sx_nav *nav, const sx_map *map, sx_point start,
+	const sx_point *threats, int32_t threat_count, int32_t max_cost,
+	int32_t output, sx_point *points, int32_t max_points, sx_result *result);
 
 /* Every cell reachable from start at a cost of at most max_cost, with its
  * cost (costs may be 0). Afterwards sx_nav_path_to gives the way to each. */

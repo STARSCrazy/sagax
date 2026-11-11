@@ -7,12 +7,12 @@
 //!
 //! ```
 //! use sagax_nav::grid::{Cell, DenseGrid, GridRules};
-//! use sagax_nav::nav::{Navigator, Output, Status};
+//! use sagax_nav::nav::{ANY_LEVEL, Navigator, Output, Status};
 //! use sagax_nav::topology::Topology;
 //!
 //! let mut map = DenseGrid::new(20, 10);
 //! let mut nav = Navigator::new(Topology::Square(GridRules::default()), 1000);
-//! let report = nav.find_path(&mut map, Cell::new(0, 0, 0), Cell::new(15, 3, 0), true, usize::MAX);
+//! let report = nav.find_path(&mut map, Cell::new(0, 0, 0), &[Cell::new(15, 3, ANY_LEVEL)], usize::MAX);
 //! assert_eq!(report.status, Some(Status::Found));
 //! let corners = nav.output(&mut map, Output::Smooth);
 //! assert_eq!(corners, [Cell::new(0, 0, 0), Cell::new(15, 3, 0)]);
@@ -23,9 +23,46 @@ use sagax_core::NoopSink;
 use crate::formation::Formation;
 use crate::grid::{Cell, CellMap};
 use crate::hex::HexMap;
-use crate::search::{Cost, Limits, NoGoal, Search, SearchStatus};
-use crate::topology::{AnyGoal, Topology};
+use crate::search::{Cost, Goal, Limits, NoGoal, Search, SearchStatus};
+use crate::topology::Topology;
 use crate::trace::{TraceSink, Tracer};
+
+/// Goal level meaning "any level" (no real level is negative: a step
+/// answers -1 for "blocked").
+pub const ANY_LEVEL: i32 = -1;
+
+/// Above this many goals the search runs without an estimate (Dijkstra):
+/// checking every goal per cell would cost more than it saves.
+const MAX_ESTIMATED_GOALS: usize = 16;
+
+/// The goals of a path search: reached at any of them.
+struct Goals<'a> {
+    cells: &'a [Cell],
+    topology: Topology,
+}
+
+impl Goal<Cell> for Goals<'_> {
+    fn is_goal(&self, node: Cell) -> bool {
+        self.cells.iter().any(|g| {
+            g.x == node.x && g.y == node.y && (g.level == ANY_LEVEL || g.level == node.level)
+        })
+    }
+
+    fn estimate(&self, node: Cell) -> Cost {
+        if self.cells.len() > MAX_ESTIMATED_GOALS {
+            return 0;
+        }
+        // the estimate ignores levels: never more than the real cost
+        self.cells
+            .iter()
+            .map(|g| {
+                self.topology
+                    .estimate(node, Cell::new(g.x, g.y, node.level))
+            })
+            .min()
+            .unwrap_or(0)
+    }
+}
 
 /// How a call ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -86,7 +123,8 @@ pub struct Navigator {
     capacity: usize,
     search: Search<Cell>,
     start: Cell,
-    goal: Option<AnyGoal>,
+    goals: Vec<Cell>,
+    flee: Option<Search<Cell>>,
     last: Last,
     keep_first: bool,
     smooth_max_extra: Cost,
@@ -106,7 +144,8 @@ impl Navigator {
             capacity,
             search: Search::with_capacity(capacity),
             start: Cell::new(0, 0, 0),
-            goal: None,
+            goals: Vec::new(),
+            flee: None,
             last: Last::Nothing,
             keep_first: false,
             smooth_max_extra: 0,
@@ -142,31 +181,32 @@ impl Navigator {
         self.smooth_max_extra = max_extra;
     }
 
-    /// Searches a way from `start` to `goal` (on `goal.level`, or on any
-    /// level with `any_level`), expanding at most `budget` cells. Afterwards
-    /// [`path`](Self::path) and [`output`](Self::output) give the way: to the
-    /// goal, or to the reachable cell closest to it.
+    /// Searches a way from `start` to the cheapest of `goals` (a goal on
+    /// level [`ANY_LEVEL`] is reached on any level), expanding at most
+    /// `budget` cells. Afterwards [`path`](Self::path) and
+    /// [`output`](Self::output) give the way: to that goal, or to the
+    /// reachable cell closest to one. Several goals, e.g. every exit of a
+    /// map, cost one search; with more than 16 the closest-cell guess for a
+    /// partial way is lost.
     pub fn find_path<M: CellMap + HexMap>(
         &mut self,
         map: &mut M,
         start: Cell,
-        goal: Cell,
-        any_level: bool,
+        goals: &[Cell],
         budget: usize,
     ) -> Report {
-        let goal = AnyGoal {
-            x: goal.x,
-            y: goal.y,
-            level: (!any_level).then_some(goal.level),
-            topology: self.topology,
-        };
+        self.goals.clear();
+        self.goals.extend_from_slice(goals);
         let limits = Limits {
             max_nodes: self.capacity,
             ..Limits::default()
         };
+        let goal = Goals {
+            cells: &self.goals,
+            topology: self.topology,
+        };
         self.search.begin(start, &goal, limits);
         self.start = start;
-        self.goal = Some(goal);
         self.last = Last::Path;
         self.run_path(map, budget)
     }
@@ -197,10 +237,76 @@ impl Navigator {
         };
         self.search.begin(start, &NoGoal, limits);
         self.start = start;
-        self.goal = None;
         self.last = Last::Area;
         self.path.clear();
         self.run_area(map, budget)
+    }
+
+    /// A way away from `threats`: to the cell, reachable from `start` at a
+    /// cost of at most `max_cost`, that the nearest threat needs the longest
+    /// walk to reach (cells no threat can reach count as farthest). Among
+    /// equally far cells the cheaper one for the walker wins. Status
+    /// [`Status::Found`], or [`Status::Unreachable`] (way: only the start)
+    /// if no reachable cell is farther from the threats than the start.
+    ///
+    /// To flee *off the map* or to a refuge, use [`find_path`](Self::find_path)
+    /// with every exit as a goal instead; to keep the way clear of the
+    /// threats, give cells near them an extra move cost.
+    ///
+    /// The first call reserves a second search of the same capacity.
+    pub fn flee<M: CellMap + HexMap>(
+        &mut self,
+        map: &mut M,
+        start: Cell,
+        threats: &[Cell],
+        max_cost: Cost,
+    ) -> Report {
+        // how far each cell is from the nearest threat, by the threats' walk
+        let capacity = self.capacity;
+        let danger = self
+            .flee
+            .get_or_insert_with(|| Search::with_capacity(capacity));
+        let limits = Limits {
+            max_nodes: capacity,
+            ..Limits::default()
+        };
+        danger.begin_many(threats.iter().copied(), &NoGoal, limits);
+        danger.advance(
+            &mut self.topology.graph(&mut *map, None),
+            &NoGoal,
+            usize::MAX,
+            &mut NoopSink,
+        );
+
+        let area = self.reachable(map, start, max_cost, usize::MAX);
+        let Some(danger) = self.flee.as_ref() else {
+            return Report::default();
+        };
+        let far = |cell| danger.settled_cost(cell).unwrap_or(Cost::MAX);
+        let mut best = (start, far(start), 0);
+        for (cell, cost) in self.search.settled() {
+            let d = far(cell);
+            if d > best.1 || (d == best.1 && d > far(start) && cost < best.2) {
+                best = (cell, d, cost);
+            }
+        }
+        let node_limit_hit = area.node_limit_hit || danger.node_limit_hit();
+        self.last = Last::Nothing;
+        let status = if best.0 == start {
+            self.path.clear();
+            self.path.push(start);
+            Status::Unreachable
+        } else {
+            self.path_to(best.0);
+            Status::Found
+        };
+        Report {
+            status: Some(status),
+            cost: best.2,
+            cells: self.path.len(),
+            expanded: area.expanded,
+            node_limit_hit,
+        }
     }
 
     /// The cells of the last [`reachable`](Self::reachable) (or every cell a
@@ -262,8 +368,9 @@ impl Navigator {
     }
 
     fn run_path<M: CellMap + HexMap>(&mut self, map: &mut M, budget: usize) -> Report {
-        let Some(goal) = self.goal else {
-            return Report::default();
+        let goal = Goals {
+            cells: &self.goals,
+            topology: self.topology,
         };
         let mut graph = self.topology.graph(&mut *map, Some(self.start));
         let status = match self.tracer.as_deref_mut() {
@@ -375,7 +482,7 @@ mod tests {
         wall(&mut map, 10, 0, 15);
         let mut nav = square();
         let start = Cell::new(2, 2, 0);
-        let report = nav.find_path(&mut map, start, Cell::new(18, 2, 0), false, usize::MAX);
+        let report = nav.find_path(&mut map, start, &[Cell::new(18, 2, 0)], usize::MAX);
         assert_eq!(report.status, Some(Status::Found));
         assert_eq!(report.cells, nav.path().len());
         for output in [Output::Cells, Output::Turns, Output::Smooth] {
@@ -394,9 +501,9 @@ mod tests {
         wall(&mut map, 15, 0, 25);
         let (start, goal) = (Cell::new(1, 1, 0), Cell::new(28, 1, 0));
         let mut whole = square();
-        let expected = whole.find_path(&mut map, start, goal, false, usize::MAX);
+        let expected = whole.find_path(&mut map, start, &[goal], usize::MAX);
         let mut nav = square();
-        let mut report = nav.find_path(&mut map, start, goal, false, 7);
+        let mut report = nav.find_path(&mut map, start, &[goal], 7);
         let mut calls = 1;
         while report.status == Some(Status::Running) {
             report = nav.resume(&mut map, 7);
@@ -415,8 +522,7 @@ mod tests {
         let report = nav.find_path(
             &mut map,
             Cell::new(1, 2, 0),
-            Cell::new(18, 2, 0),
-            false,
+            &[Cell::new(18, 2, 0)],
             usize::MAX,
         );
         assert_eq!(report.status, Some(Status::Partial));
@@ -438,12 +544,35 @@ mod tests {
         let report = nav.find_path(
             &mut boxed,
             Cell::new(1, 1, 0),
-            Cell::new(5, 5, 0),
-            false,
+            &[Cell::new(5, 5, 0)],
             usize::MAX,
         );
         assert_eq!(report.status, Some(Status::Unreachable));
         assert_eq!(nav.path(), [Cell::new(1, 1, 0)]);
+    }
+
+    #[test]
+    fn flee_runs_away_and_exits_are_goals() {
+        let mut map = DenseGrid::new(20, 5);
+        let mut nav = square();
+        let start = Cell::new(5, 2, 0);
+        let report = nav.flee(&mut map, start, &[Cell::new(3, 2, 0)], 40);
+        assert_eq!(report.status, Some(Status::Found));
+        let end = *nav.path().last().unwrap();
+        assert!(end.x >= 9, "runs away from the threat, got {end:?}");
+        assert_eq!(nav.path()[0], start);
+
+        // cornered: nothing is farther than here
+        let mut corner = DenseGrid::new(3, 1);
+        let report = nav.flee(&mut corner, Cell::new(2, 0, 0), &[Cell::new(0, 0, 0)], 40);
+        assert_eq!(report.status, Some(Status::Unreachable));
+        assert_eq!(nav.path(), [Cell::new(2, 0, 0)]);
+
+        // two exits: the cheaper one wins
+        let exits = [Cell::new(0, 2, ANY_LEVEL), Cell::new(19, 2, ANY_LEVEL)];
+        let report = nav.find_path(&mut map, start, &exits, usize::MAX);
+        assert_eq!(report.status, Some(Status::Found));
+        assert_eq!(nav.path().last(), Some(&Cell::new(0, 2, 0)));
     }
 
     #[test]
@@ -478,7 +607,7 @@ mod tests {
                 10_000,
             );
             let start = Cell::new(2, 2, 0);
-            let report = nav.find_path(&mut map, start, Cell::new(18, 2, 0), false, usize::MAX);
+            let report = nav.find_path(&mut map, start, &[Cell::new(18, 2, 0)], usize::MAX);
             assert_eq!(report.status, Some(Status::Found), "{layout:?}");
             let smooth = nav.output(&mut map, Output::Smooth).to_vec();
             assert_eq!(smooth.first(), Some(&start));
@@ -498,7 +627,7 @@ mod tests {
         wall(&mut map, 15, 0, 25);
         let (start, goal) = (Cell::new(1, 1, 0), Cell::new(28, 1, 0));
         let mut plain = square();
-        let expected = plain.find_path(&mut map, start, goal, false, usize::MAX);
+        let expected = plain.find_path(&mut map, start, &[goal], usize::MAX);
 
         let events = Arc::new(Mutex::new(Vec::<TraceEvent>::new()));
         let sink = Arc::clone(&events);
@@ -506,7 +635,7 @@ mod tests {
         nav.set_tracer(Some(Box::new(move |e: &TraceEvent| {
             sink.lock().unwrap().push(*e)
         })));
-        let mut report = nav.find_path(&mut map, start, goal, false, 50);
+        let mut report = nav.find_path(&mut map, start, &[goal], 50);
         while report.status == Some(Status::Running) {
             report = nav.resume(&mut map, 50);
         }

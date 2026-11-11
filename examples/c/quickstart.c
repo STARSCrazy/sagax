@@ -47,7 +47,7 @@ int main(void)
 	nav = sx_nav_create(&rules);
 	map.step = step;
 
-	n = sx_nav_find_path(nav, &map, start, goal, 0, SX_OUT_CELLS, way, 64, &result);
+	n = sx_nav_find_path(nav, &map, start, &goal, 1, 0, SX_OUT_CELLS, way, 64, &result);
 	if (n < 0 || result.status != SX_FOUND) {
 		fprintf(stderr, "no way (%d, status %d)\n", n, result.status);
 		return 1;

@@ -192,13 +192,28 @@ export class Grid {
   }
 
   /**
-   * Cheapest way from start to goal. If the goal cannot be reached, the way
-   * ends at the reachable cell closest to it (status 'partial').
+   * Cheapest way from start to goal, or to the cheapest of several goals
+   * (an array, e.g. every exit of the map). If no goal can be reached, the
+   * way ends at the reachable cell closest to one (status 'partial').
    * @param {{budget?: number, output?: 'cells'|'turns'|'smooth'}} options  budget 0: no limit
    */
   findPath(start, goal, { budget = 0, output = 'cells' } = {}) {
+    const goals = Array.isArray(goal) ? goal : [goal];
+    this.writeInput(goals.flatMap((g) => [g.x, g.y]));
     this.last = 2;
-    return this.answer(this.x.sx_find_path(this.handle, start.x, start.y, goal.x, goal.y, budget, outputOf(output)), 2);
+    return this.answer(this.x.sx_find_path(this.handle, start.x, start.y, goals.length, budget, outputOf(output)), 2);
+  }
+
+  /**
+   * A way away from threats ([{x, y}]): to the cell within maxCost that the
+   * nearest threat needs the longest walk to reach. Status 'found', or
+   * 'unreachable' (only the start) if nothing is farther than here. To flee
+   * off the map, use findPath with the exits as goals.
+   */
+  flee(start, threats, maxCost, { output = 'cells' } = {}) {
+    this.writeInput(threats.flatMap((t) => [t.x, t.y]));
+    this.last = 2;
+    return this.answer(this.x.sx_flee(this.handle, start.x, start.y, threats.length, maxCost, outputOf(output)), 2);
   }
 
   /** Every cell reachable from start at a cost of at most maxCost: cells [{x, y, cost}]. */

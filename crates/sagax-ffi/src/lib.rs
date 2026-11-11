@@ -20,14 +20,13 @@ use sagax_nav::topology::Topology;
 use sagax_nav::trace::{TraceEvent, TraceSink, Tracer};
 
 /// Version of the C interface (`SX_API_VERSION`).
-pub const API_VERSION: u32 = 2;
+pub const API_VERSION: u32 = 3;
 
 const ERROR_ARGUMENT: i32 = -1;
 const ERROR_INTERNAL: i32 = -2;
 
 const FOUR_WAYS: u32 = 1;
 const CUT_CORNERS: u32 = 2;
-const ANY_LEVEL: i32 = -1;
 
 const RUNNING: i32 = 1;
 const FOUND: i32 = 2;
@@ -469,6 +468,7 @@ enum Begun {
 pub struct SxNav {
     nav: Navigator,
     begun: Begun,
+    cells: Vec<Cell>,
 }
 
 impl SxNav {
@@ -481,6 +481,11 @@ impl SxNav {
     ) -> i32 {
         self.nav.set_keep_first(map.map.start_step.is_some());
         write_cells(self.nav.output(map, output), out, max)
+    }
+
+    fn take_cells(&mut self, points: &[Point]) {
+        self.cells.clear();
+        self.cells.extend(points.iter().map(|p| p.cell()));
     }
 
     fn write_area(&self, cells: *mut Point, costs: *mut i32, max: usize) -> i32 {
@@ -512,6 +517,7 @@ pub unsafe extern "C" fn sx_nav_create(rules: *const SxRules) -> *mut SxNav {
         Some(SxNav {
             nav,
             begun: Begun::Nothing,
+            cells: Vec::new(),
         })
     })
 }
@@ -529,14 +535,16 @@ pub unsafe extern "C" fn sx_nav_destroy(nav: *mut SxNav) {
 /// `sx_nav_find_path`.
 ///
 /// # Safety
-/// As documented in `sagax.h`: valid pointers, room for `max_points`.
+/// As documented in `sagax.h`: valid pointers, `goal_count` points at
+/// `goals`, room for `max_points`.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn sx_nav_find_path(
     nav: *mut SxNav,
     map: *const SxMap,
     start: Point,
-    goal: Point,
+    goals: *const Point,
+    goal_count: i32,
     budget: i32,
     output: i32,
     points: *mut Point,
@@ -547,18 +555,59 @@ pub unsafe extern "C" fn sx_nav_find_path(
     let (Some(s), Some(mut map)) = (unsafe { nav.as_mut() }, CallbackMap::new(map)) else {
         return ERROR_ARGUMENT;
     };
-    let (Some(budget), Some(output), Some(max)) = (
+    let (Some(budget), Some(output), Some(max), Some(count)) = (
         budget_of(budget),
         output_of(output),
         room(points, max_points),
+        room(goals.cast_mut(), goal_count),
     ) else {
         return ERROR_ARGUMENT;
     };
     guarded(|| {
-        let any_level = goal.level == ANY_LEVEL;
-        let report = s
-            .nav
-            .find_path(&mut map, start.cell(), goal.cell(), any_level, budget);
+        // SAFETY: the caller promised `goal_count` points at `goals`.
+        s.take_cells(unsafe { slice_of(goals, count) });
+        let report = s.nav.find_path(&mut map, start.cell(), &s.cells, budget);
+        s.begun = Begun::Path(output);
+        write_result(result, result_of(report));
+        s.write_way(&mut map, output, points, max)
+    })
+}
+
+/// `sx_nav_flee`.
+///
+/// # Safety
+/// As documented in `sagax.h`: valid pointers, `threat_count` points at
+/// `threats`, room for `max_points`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sx_nav_flee(
+    nav: *mut SxNav,
+    map: *const SxMap,
+    start: Point,
+    threats: *const Point,
+    threat_count: i32,
+    max_cost: i32,
+    output: i32,
+    points: *mut Point,
+    max_points: i32,
+    result: *mut SxResult,
+) -> i32 {
+    // SAFETY: see above.
+    let (Some(s), Some(mut map)) = (unsafe { nav.as_mut() }, CallbackMap::new(map)) else {
+        return ERROR_ARGUMENT;
+    };
+    let (Ok(max_cost), Some(output), Some(max), Some(count)) = (
+        Cost::try_from(max_cost),
+        output_of(output),
+        room(points, max_points),
+        room(threats.cast_mut(), threat_count),
+    ) else {
+        return ERROR_ARGUMENT;
+    };
+    guarded(|| {
+        // SAFETY: the caller promised `threat_count` points at `threats`.
+        s.take_cells(unsafe { slice_of(threats, count) });
+        let report = s.nav.flee(&mut map, start.cell(), &s.cells, max_cost);
         s.begun = Begun::Path(output);
         write_result(result, result_of(report));
         s.write_way(&mut map, output, points, max)

@@ -1,4 +1,5 @@
 use super::*;
+use sagax_nav::nav::ANY_LEVEL;
 
 /// A 20 x 20 map, one level; context points to a list of blocked cells.
 struct Walls {
@@ -73,8 +74,8 @@ fn wall_line() -> Walls {
 }
 
 #[test]
-fn version_is_2() {
-    assert_eq!(sx_api_version(), 2);
+fn version_is_3() {
+    assert_eq!(sx_api_version(), 3);
 }
 
 #[test]
@@ -102,7 +103,8 @@ fn find_path_writes_every_output_from_the_start() {
             nav,
             &map,
             p(0, 0),
-            Point::new(5, 2, ANY_LEVEL),
+            &Point::new(5, 2, ANY_LEVEL),
+            1,
             0,
             1,
             points.as_mut_ptr(),
@@ -125,7 +127,8 @@ fn find_path_writes_every_output_from_the_start() {
             nav,
             &map,
             p(0, 0),
-            p(5, 2),
+            &p(5, 2),
+            1,
             0,
             0,
             points.as_mut_ptr(),
@@ -149,7 +152,8 @@ fn start_is_goal_is_found_with_one_cell() {
             nav,
             &map,
             p(3, 3),
-            p(3, 3),
+            &p(3, 3),
+            1,
             0,
             1,
             points.as_mut_ptr(),
@@ -173,7 +177,8 @@ fn small_budgets_continue_to_the_same_way() {
             nav,
             &map,
             p(2, 2),
-            p(18, 2),
+            &p(18, 2),
+            1,
             0,
             1,
             whole.as_mut_ptr(),
@@ -188,7 +193,8 @@ fn small_budgets_continue_to_the_same_way() {
             nav,
             &map,
             p(2, 2),
-            p(18, 2),
+            &p(18, 2),
+            1,
             5,
             1,
             points.as_mut_ptr(),
@@ -229,7 +235,8 @@ fn closed_off_goal_gives_partial_way() {
             nav,
             &map,
             p(2, 5),
-            p(18, 5),
+            &p(18, 5),
+            1,
             0,
             1,
             points.as_mut_ptr(),
@@ -290,7 +297,8 @@ fn batch_callback_gives_the_same_way_with_fewer_calls() {
                 nav,
                 &map,
                 p(2, 2),
-                p(18, 2),
+                &p(18, 2),
+                1,
                 0,
                 0,
                 points.as_mut_ptr(),
@@ -316,7 +324,8 @@ fn formation_writes_leader_and_members() {
             nav,
             &map,
             p(2, 5),
-            p(8, 5),
+            &p(8, 5),
+            1,
             0,
             0,
             points.as_mut_ptr(),
@@ -443,7 +452,8 @@ fn hex_grids_work_everywhere() {
                 nav,
                 &map,
                 p(2, 2),
-                p(18, 2),
+                &p(18, 2),
+                1,
                 0,
                 2,
                 points.as_mut_ptr(),
@@ -488,7 +498,8 @@ fn tracing_reports_steps_and_turns_off() {
             nav,
             &map,
             p(2, 2),
-            p(18, 2),
+            &p(18, 2),
+            1,
             0,
             1,
             points.as_mut_ptr(),
@@ -509,7 +520,8 @@ fn tracing_reports_steps_and_turns_off() {
             nav,
             &map,
             p(2, 2),
-            p(18, 2),
+            &p(18, 2),
+            1,
             0,
             1,
             points.as_mut_ptr(),
@@ -545,4 +557,50 @@ fn tracing_reports_steps_and_turns_off() {
         result.cells
     );
     unsafe { sx_flow_destroy(flow) };
+}
+
+#[test]
+fn flee_and_several_goals() {
+    let mut w = walls(&[]);
+    let map = map_of(&mut w);
+    let nav = unsafe { sx_nav_create(&rules(0)) };
+    let mut points = [Point::default(); 64];
+    let mut result = SxResult::default();
+    let threats = [p(3, 5)];
+    let n = unsafe {
+        sx_nav_flee(
+            nav,
+            &map,
+            p(5, 5),
+            threats.as_ptr(),
+            1,
+            50,
+            0,
+            points.as_mut_ptr(),
+            64,
+            &mut result,
+        )
+    };
+    assert_eq!(result.status, FOUND);
+    assert_eq!(points[0], p(5, 5));
+    assert!(points[n as usize - 1].x >= 9);
+
+    let exits = [Point::new(0, 5, ANY_LEVEL), Point::new(19, 5, ANY_LEVEL)];
+    let n = unsafe {
+        sx_nav_find_path(
+            nav,
+            &map,
+            p(15, 5),
+            exits.as_ptr(),
+            2,
+            0,
+            0,
+            points.as_mut_ptr(),
+            64,
+            &mut result,
+        )
+    };
+    assert_eq!(result.status, FOUND);
+    assert_eq!(points[n as usize - 1], p(19, 5));
+    unsafe { sx_nav_destroy(nav) };
 }

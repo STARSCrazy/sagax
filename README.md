@@ -11,6 +11,8 @@ dependencies).
 
 - **A\* / Dijkstra** with a work budget: split a search over several frames,
   every split gives the same result.
+- **Several goals at once**: the way to the nearest exit is one search.
+- **Fleeing**: a way away from threats, to where they need longest to follow.
 - **Reachable area**: every cell within a movement budget, and the way to
   each.
 - **Partial ways**: an unreachable goal gives the way to the closest
@@ -37,13 +39,13 @@ Rust:
 
 ```rust
 use sagax_nav::grid::{Cell, DenseGrid, GridRules};
-use sagax_nav::nav::{Navigator, Output};
+use sagax_nav::nav::{ANY_LEVEL, Navigator, Output};
 use sagax_nav::topology::Topology;
 
 let mut map = DenseGrid::new(64, 64);
 map.set(10, 5, DenseGrid::BLOCKED);
 let mut nav = Navigator::new(Topology::Square(GridRules::default()), 4096);
-let report = nav.find_path(&mut map, Cell::new(0, 0, 0), Cell::new(40, 9, 0), true, usize::MAX);
+let report = nav.find_path(&mut map, Cell::new(0, 0, 0), &[Cell::new(40, 9, ANY_LEVEL)], usize::MAX);
 let corners = nav.output(&mut map, Output::Smooth);
 ```
 
@@ -58,7 +60,7 @@ sx_nav *nav = sx_nav_create(&rules);
 sx_map map = { .step = my_step, .context = my_game };
 sx_point start = {2, 4, 0}, goal = {40, 9, SX_ANY_LEVEL}, way[256];
 sx_result r;
-int n = sx_nav_find_path(nav, &map, start, goal, 0, SX_OUT_TURNS, way, 256, &r);
+int n = sx_nav_find_path(nav, &map, start, &goal, 1, 0, SX_OUT_TURNS, way, 256, &r);
 ```
 
 JavaScript:
