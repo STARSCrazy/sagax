@@ -25,6 +25,7 @@ use crate::grid::{Cell, CellMap};
 use crate::hex::HexMap;
 use crate::search::{Cost, Limits, NoGoal, Search, SearchStatus};
 use crate::topology::{AnyGoal, Topology};
+use crate::trace::{TraceSink, Tracer};
 
 /// How a call ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -93,6 +94,7 @@ pub struct Navigator {
     list: Vec<Cell>,
     scratch: Vec<Cell>,
     members: Vec<Vec<Cell>>,
+    tracer: Option<Tracer>,
 }
 
 impl Navigator {
@@ -112,6 +114,7 @@ impl Navigator {
             list: Vec::with_capacity(capacity),
             scratch: Vec::with_capacity(capacity),
             members: Vec::new(),
+            tracer: None,
         }
     }
 
@@ -125,6 +128,12 @@ impl Navigator {
     /// in the middle of their start cell, see `start_step` of the maps).
     pub fn set_keep_first(&mut self, keep: bool) {
         self.keep_first = keep;
+    }
+
+    /// Hands every step of the following searches to `tracer` (`None`:
+    /// off, the default; then tracing costs nothing). See [`crate::trace`].
+    pub fn set_tracer(&mut self, tracer: Option<Tracer>) {
+        self.tracer = tracer;
     }
 
     /// Smoothing may cross cells whose extra move cost is at most `max_extra`
@@ -257,9 +266,14 @@ impl Navigator {
             return Report::default();
         };
         let mut graph = self.topology.graph(&mut *map, Some(self.start));
-        let status = self
-            .search
-            .advance(&mut graph, &goal, budget, &mut NoopSink);
+        let status = match self.tracer.as_deref_mut() {
+            None => self
+                .search
+                .advance(&mut graph, &goal, budget, &mut NoopSink),
+            Some(t) => self
+                .search
+                .advance(&mut graph, &goal, budget, &mut TraceSink(t)),
+        };
         self.search.best_path(&mut self.path);
         let status = match status {
             SearchStatus::Found => Status::Found,
@@ -278,9 +292,14 @@ impl Navigator {
 
     fn run_area<M: CellMap + HexMap>(&mut self, map: &mut M, budget: usize) -> Report {
         let mut graph = self.topology.graph(&mut *map, Some(self.start));
-        let status = self
-            .search
-            .advance(&mut graph, &NoGoal, budget, &mut NoopSink);
+        let status = match self.tracer.as_deref_mut() {
+            None => self
+                .search
+                .advance(&mut graph, &NoGoal, budget, &mut NoopSink),
+            Some(t) => self
+                .search
+                .advance(&mut graph, &NoGoal, budget, &mut TraceSink(t)),
+        };
         Report {
             status: Some(if status == SearchStatus::Running {
                 Status::Running
@@ -468,5 +487,42 @@ mod tests {
             assert_eq!(members.len(), 3);
             assert!(members.iter().all(|m| m.len() == cells));
         }
+    }
+
+    #[test]
+    fn tracing_reports_every_step_and_changes_nothing() {
+        use crate::trace::{TraceEvent, TraceKind};
+        use std::sync::{Arc, Mutex};
+
+        let mut map = DenseGrid::new(30, 30);
+        wall(&mut map, 15, 0, 25);
+        let (start, goal) = (Cell::new(1, 1, 0), Cell::new(28, 1, 0));
+        let mut plain = square();
+        let expected = plain.find_path(&mut map, start, goal, false, usize::MAX);
+
+        let events = Arc::new(Mutex::new(Vec::<TraceEvent>::new()));
+        let sink = Arc::clone(&events);
+        let mut nav = square();
+        nav.set_tracer(Some(Box::new(move |e: &TraceEvent| {
+            sink.lock().unwrap().push(*e)
+        })));
+        let mut report = nav.find_path(&mut map, start, goal, false, 50);
+        while report.status == Some(Status::Running) {
+            report = nav.resume(&mut map, 50);
+        }
+        assert_eq!(report, expected);
+        assert_eq!(nav.path(), plain.path());
+
+        let events = events.lock().unwrap();
+        let count = |k| events.iter().filter(|e| e.kind == k).count();
+        assert_eq!(count(TraceKind::Started), 1);
+        assert_eq!(count(TraceKind::Expanded), report.expanded);
+        assert!(count(TraceKind::Paused) > 5);
+        let last = events.last().unwrap();
+        assert_eq!(
+            (last.kind, last.found, last.expanded),
+            (TraceKind::Finished, true, report.expanded)
+        );
+        assert_eq!(events[0].cell, start);
     }
 }

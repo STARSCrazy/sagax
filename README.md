@@ -26,6 +26,8 @@ dependencies).
   leave (zones of control).
 - **Your map, your rules**: the game answers "can I step from here to
   there?" through a callback. Nothing is copied.
+- **Tracing**: every step of a search for debugging and logging; free when
+  turned off.
 - **Deterministic**: the same answers give the same ways on every machine.
   No allocation during a search within the reserved capacity.
 

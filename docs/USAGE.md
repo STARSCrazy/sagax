@@ -218,7 +218,35 @@ budget), `flow::FlowField`, `dstar::DStarLite`, `smooth`, `formation` and
 `grid::CellMap` (square), `hex::HexMap` (hex) or `Graph` (anything); a
 `&mut` map is a map too.
 
-## 5. Pitfalls
+## 5. Debugging and logging
+
+Tracing hands every step of a search to you: `started`, `expanded` (cost now
+final), `improved` (reached more cheaply, with the parent cell), `paused`
+(budget used up) and `finished` (with `found`). It works for paths, areas,
+flow fields and D* Lite. Off (the default) it costs nothing.
+
+```c
+static void on_step(void *ctx, const sx_event *e) {
+	if (e->kind == SX_TRACE_EXPANDED) mark_cell(ctx, e->cell.x, e->cell.y, e->cost);
+}
+sx_nav_set_trace(nav, on_step, my_debug_view);   /* NULL turns it off */
+```
+
+```js
+grid.setTrace(true);
+grid.findPath(a, b);
+const { events } = grid.takeTrace();   // [{kind, x, y, parent, cost, estimate, expanded, found}]
+```
+
+Rust: `nav.set_tracer(Some(Box::new(|e: &TraceEvent| ...)))`; lower down,
+every `Search::advance` takes a `sagax_core::Sink` of `SearchEvent`s, and
+`sagax-debug` keeps the last N of them.
+
+Typical uses: colour the expanded cells to see why a search is slow, log
+the `finished` event with `expanded` to find costly searches, and follow
+`improved` to see why a way goes where it goes.
+
+## 6. Pitfalls
 
 - Costs are integers ≥ 0. `move_cost` is an *extra* on top of the step cost.
 - `SX_ANY_LEVEL` (-1) as goal level means any level; D* Lite needs an exact

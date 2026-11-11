@@ -212,4 +212,27 @@ test('small budgets, continue, outputs, bulk filling', () => {
   g.free();
 });
 
+test('tracing: every step, same result, off again', () => {
+  const g = lib.grid(20, 20);
+  for (let y = 0; y < 15; y++) g.block(10, y);
+  const plain = g.findPath({ x: 2, y: 2 }, { x: 18, y: 2 });
+  g.setTrace(true);
+  const traced = g.findPath({ x: 2, y: 2 }, { x: 18, y: 2 });
+  assert.deepEqual(traced, plain);
+  const { events, dropped } = g.takeTrace();
+  assert.equal(dropped, 0);
+  assert.equal(events[0].kind, 'started');
+  assert.deepEqual([events[0].x, events[0].y], [2, 2]);
+  assert.equal(events.filter((e) => e.kind === 'expanded').length, traced.expanded);
+  assert.equal(events.at(-1).kind, 'finished');
+  assert.equal(events.at(-1).found, true);
+  g.dstarBegin({ x: 2, y: 2 }, { x: 18, y: 2 });
+  g.dstarCompute();
+  assert.ok(g.takeTrace().events.some((e) => e.kind === 'expanded'));
+  g.setTrace(false);
+  g.findPath({ x: 2, y: 2 }, { x: 18, y: 2 });
+  assert.equal(g.takeTrace().events.length, 0);
+  g.free();
+});
+
 console.log(`${passed} tests passed`);

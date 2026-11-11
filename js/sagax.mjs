@@ -19,6 +19,7 @@ const BLOCKED = 0xffffffff;
 const DIRECTIONS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
 const STATUS = ['idle', 'running', 'found', 'partial', 'unreachable', 'done'];
 const OUTPUT = { cells: 0, turns: 1, smooth: 2 };
+const TRACE = [null, 'started', 'expanded', 'improved', 'paused', 'finished'];
 
 /** Default rules: tabletop style, a diagonal step costs as much as a straight one. */
 const DEFAULT_RULES = { straight: 1, diagonal: 1, fourWays: false, cutCorners: false, hex: null, step: 1 };
@@ -294,6 +295,41 @@ export class Grid {
   dstarCellsChanged(cells) {
     this.writeInput(cells.flatMap((c) => [c.x, c.y]));
     return this.x.sx_dstar_cells_changed(this.handle, cells.length);
+  }
+
+  /**
+   * Tracing: every step of the following searches (findPath, reachable,
+   * buildFlow, dstarCompute) is kept until takeTrace(). Off by default; off
+   * it costs nothing.
+   */
+  setTrace(on) {
+    this.x.sx_trace(this.handle, on ? 1 : 0);
+  }
+
+  /**
+   * The steps since the last call: [{kind, x, y, parent, cost, estimate, expanded, found}],
+   * kind 'started' | 'expanded' | 'improved' | 'paused' | 'finished'.
+   * dropped counts steps lost because more than 200000 were waiting.
+   */
+  takeTrace() {
+    const n = this.x.sx_trace_take(this.handle);
+    const dropped = this.x.sx_trace_dropped(this.handle);
+    const raw = new Int32Array(this.x.memory.buffer, this.x.sx_out(this.handle), n * 9);
+    const events = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const o = i * 9;
+      events[i] = {
+        kind: TRACE[raw[o]],
+        x: raw[o + 1],
+        y: raw[o + 2],
+        parent: { x: raw[o + 3], y: raw[o + 4] },
+        cost: raw[o + 5],
+        estimate: raw[o + 6],
+        expanded: raw[o + 7],
+        found: raw[o + 8] === 1,
+      };
+    }
+    return { events, dropped };
   }
 
   free() {

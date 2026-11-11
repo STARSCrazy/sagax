@@ -59,7 +59,9 @@ use std::hash::Hash;
 
 use crate::grid::{Cell, GridRules};
 use crate::hex::HexLayout;
-use crate::search::{Cost, Graph};
+use sagax_core::{NoopSink, Sink};
+
+use crate::search::{Cost, Graph, SearchEvent, SearchStatus};
 use crate::table::NodeTable;
 
 /// The cost of "no path" in `g`, `rhs` and the keys.
@@ -167,6 +169,7 @@ pub struct DStarLite<N, H> {
     start: Option<N>,
     goal: Option<N>,
     km: u64,
+    computes: u64,
     status: DStarStatus,
     expanded: usize,
     max_nodes: usize,
@@ -197,6 +200,7 @@ impl<N: Copy + Eq + Hash, H: Heuristic<N>> DStarLite<N, H> {
             start: None,
             goal: None,
             km: 0,
+            computes: 0,
             status: DStarStatus::Idle,
             expanded: 0,
             max_nodes: usize::MAX,
@@ -238,9 +242,29 @@ impl<N: Copy + Eq + Hash, H: Heuristic<N>> DStarLite<N, H> {
         graph: &mut G,
         max_expansions: usize,
     ) -> DStarStatus {
+        self.compute_traced(graph, max_expansions, &mut NoopSink)
+    }
+
+    /// As [`compute`](Self::compute), reporting every expansion to `sink`
+    /// (cost: to the goal as known now).
+    pub fn compute_traced<G: Graph<Node = N>, S: Sink<SearchEvent<N>>>(
+        &mut self,
+        graph: &mut G,
+        max_expansions: usize,
+        sink: &mut S,
+    ) -> DStarStatus {
         let Some(start) = self.start else {
             return DStarStatus::Idle;
         };
+        let search = u32::try_from(self.computes).unwrap_or(u32::MAX);
+        self.computes += 1;
+        if sink.enabled() {
+            sink.emit(SearchEvent::Started {
+                search,
+                start,
+                estimate: 0,
+            });
+        }
         let mut succ = std::mem::take(&mut self.succ);
         let mut pred = std::mem::take(&mut self.pred);
 
@@ -289,6 +313,15 @@ impl<N: Copy + Eq + Hash, H: Heuristic<N>> DStarLite<N, H> {
             self.records[i].queued = None;
             left -= 1;
             self.expanded += 1;
+            if sink.enabled() {
+                let cost = record.g.min(record.rhs);
+                sink.emit(SearchEvent::Expanded {
+                    search,
+                    node: record.node,
+                    cost: Cost::try_from(cost).unwrap_or(Cost::MAX),
+                    estimate: Cost::try_from(top.key.0.saturating_sub(cost)).unwrap_or(Cost::MAX),
+                });
+            }
             if record.g > record.rhs {
                 self.records[i].g = record.rhs;
             } else {
@@ -311,6 +344,23 @@ impl<N: Copy + Eq + Hash, H: Heuristic<N>> DStarLite<N, H> {
         } else {
             DStarStatus::Found
         };
+        if sink.enabled() {
+            sink.emit(match self.status {
+                DStarStatus::Running => SearchEvent::Paused {
+                    search,
+                    expanded: self.expanded,
+                },
+                status => SearchEvent::Finished {
+                    search,
+                    status: if status == DStarStatus::Found {
+                        SearchStatus::Found
+                    } else {
+                        SearchStatus::Exhausted
+                    },
+                    expanded: self.expanded,
+                },
+            });
+        }
         self.status
     }
 

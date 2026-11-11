@@ -73,8 +73,8 @@ fn wall_line() -> Walls {
 }
 
 #[test]
-fn version_is_1() {
-    assert_eq!(sx_api_version(), 1);
+fn version_is_2() {
+    assert_eq!(sx_api_version(), 2);
 }
 
 #[test]
@@ -466,4 +466,83 @@ fn hex_grids_work_everywhere() {
         assert_eq!(result.status, FOUND, "grid {grid}");
         unsafe { sx_dstar_destroy(d) };
     }
+}
+
+unsafe extern "C" fn record(ctx: *mut c_void, event: *const SxEvent) {
+    let events = unsafe { &mut *ctx.cast::<Vec<SxEvent>>() };
+    events.push(unsafe { *event });
+}
+
+#[test]
+fn tracing_reports_steps_and_turns_off() {
+    let mut w = wall_line();
+    let map = map_of(&mut w);
+    let nav = unsafe { sx_nav_create(&rules(0)) };
+    let mut events: Vec<SxEvent> = Vec::new();
+    let ctx = (&mut events as *mut Vec<SxEvent>).cast();
+    assert_eq!(unsafe { sx_nav_set_trace(nav, Some(record), ctx) }, 0);
+    let mut points = [Point::default(); 64];
+    let mut result = SxResult::default();
+    unsafe {
+        sx_nav_find_path(
+            nav,
+            &map,
+            p(2, 2),
+            p(18, 2),
+            0,
+            1,
+            points.as_mut_ptr(),
+            64,
+            &mut result,
+        )
+    };
+    let expanded = events.iter().filter(|e| e.kind == 2).count();
+    assert_eq!(expanded as i32, result.expanded);
+    assert_eq!((events[0].kind, events[0].cell), (1, p(2, 2)));
+    let last = *events.last().unwrap();
+    assert_eq!((last.kind, last.found), (5, 1));
+
+    unsafe { sx_nav_set_trace(nav, None, std::ptr::null_mut()) };
+    let before = events.len();
+    unsafe {
+        sx_nav_find_path(
+            nav,
+            &map,
+            p(2, 2),
+            p(18, 2),
+            0,
+            1,
+            points.as_mut_ptr(),
+            64,
+            &mut result,
+        )
+    };
+    assert_eq!(events.len(), before);
+    unsafe { sx_nav_destroy(nav) };
+
+    let d = unsafe { sx_dstar_create(&rules(0)) };
+    let mut events: Vec<SxEvent> = Vec::new();
+    unsafe { sx_dstar_set_trace(d, Some(record), (&mut events as *mut Vec<SxEvent>).cast()) };
+    unsafe { sx_dstar_begin(d, p(2, 2), p(18, 2)) };
+    unsafe { sx_dstar_compute(d, &map, 0, 0, points.as_mut_ptr(), 64, &mut result) };
+    assert_eq!(result.status, FOUND);
+    assert!(events.iter().filter(|e| e.kind == 2).count() > 10);
+    assert_eq!(events.last().map(|e| (e.kind, e.found)), Some((5, 1)));
+    unsafe { sx_dstar_destroy(d) };
+
+    let flow = unsafe { sx_flow_create(&rules(0)) };
+    let mut events: Vec<SxEvent> = Vec::new();
+    unsafe {
+        sx_flow_set_trace(
+            flow,
+            Some(record),
+            (&mut events as *mut Vec<SxEvent>).cast(),
+        )
+    };
+    unsafe { sx_flow_build(flow, &map, [p(18, 2)].as_ptr(), 1, 100_000, &mut result) };
+    assert_eq!(
+        events.iter().filter(|e| e.kind == 2).count() as i32,
+        result.cells
+    );
+    unsafe { sx_flow_destroy(flow) };
 }

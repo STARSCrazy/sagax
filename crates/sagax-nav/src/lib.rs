@@ -3,6 +3,7 @@
 //! * [`nav::Navigator`] is the entry point: one object per kind of grid
 //!   (square or hex) for paths, areas, smoothing and formations. The C and
 //!   WebAssembly interfaces only translate to it.
+//! * [`trace`] shows what a search did, step by step (off: no cost).
 //! * [`Search`] is the one search core. With a [`Goal`] that estimates the
 //!   remaining cost it is A*; with an estimate of 0 it is Dijkstra. It can be
 //!   stopped after any number of expanded nodes and continued later, and it
@@ -30,6 +31,7 @@ pub mod hex;
 pub mod nav;
 pub mod smooth;
 pub mod topology;
+pub mod trace;
 
 pub use search::{
     Cost, Goal, Graph, Limits, NoGoal, PathResult, Search, SearchEvent, SearchStatus, find_path,

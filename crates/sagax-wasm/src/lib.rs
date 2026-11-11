@@ -25,6 +25,44 @@ use sagax_nav::grid::{Cell, DenseGrid, GridRules, Moves};
 use sagax_nav::hex::HexLayout;
 use sagax_nav::nav::{Navigator, Output, Report, Status, WayOptions, write_way};
 use sagax_nav::topology::Topology;
+use sagax_nav::trace::{TraceEvent, TraceSink, Tracer};
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// Numbers per trace event: kind, x, y, parent x, parent y, cost, estimate,
+/// expanded, found.
+const TRACE_STRIDE: usize = 9;
+/// At most this many events wait to be taken; later ones are dropped.
+const TRACE_LIMIT: usize = 200_000;
+
+#[derive(Default)]
+struct TraceBuffer {
+    events: Vec<i32>,
+    dropped: usize,
+}
+
+fn tracer_into(buffer: &Rc<RefCell<TraceBuffer>>) -> Tracer {
+    let buffer = Rc::clone(buffer);
+    Box::new(move |e: &TraceEvent| {
+        let mut b = buffer.borrow_mut();
+        if b.events.len() >= TRACE_LIMIT * TRACE_STRIDE {
+            b.dropped += 1;
+            return;
+        }
+        b.events.extend_from_slice(&[
+            e.kind as i32,
+            e.cell.x,
+            e.cell.y,
+            e.parent.x,
+            e.parent.y,
+            to_i32(e.cost),
+            to_i32(e.estimate),
+            to_i32(e.expanded),
+            i32::from(e.found),
+        ]);
+    })
+}
 
 const ERROR_ARGUMENT: i32 = -1;
 
@@ -62,6 +100,8 @@ pub struct WasmGrid {
     path: Vec<Cell>,
     list: Vec<Cell>,
     scratch: Vec<Cell>,
+    trace: Rc<RefCell<TraceBuffer>>,
+    tracer: Option<Tracer>,
 }
 
 /// Grid kinds as in `sx_rules.grid`: 0 square, 1..4 hex odd rows, even rows,
@@ -147,6 +187,8 @@ impl WasmGrid {
             path: Vec::new(),
             list: Vec::new(),
             scratch: Vec::new(),
+            trace: Rc::default(),
+            tracer: None,
         }
     }
 
@@ -516,7 +558,13 @@ pub unsafe extern "C" fn sx_flow_build(g: *mut WasmGrid, count: i32, max_cost: i
         max_cost,
     };
     let mut graph = w.topology.graph(&mut w.grid, None);
-    w.flow.build(&mut graph, w.cells.iter().copied(), limits);
+    let goals = w.cells.iter().copied();
+    match w.tracer.as_deref_mut() {
+        None => w.flow.build(&mut graph, goals, limits),
+        Some(t) => w
+            .flow
+            .build_traced(&mut graph, goals, limits, &mut TraceSink(t)),
+    }
     to_i32(w.flow.len())
 }
 
@@ -582,7 +630,12 @@ pub unsafe extern "C" fn sx_dstar_compute(g: *mut WasmGrid, budget: i32, output:
     };
     let status = {
         let mut graph = w.topology.graph(&mut w.grid, None);
-        let status = w.dstar.compute(&mut graph, budget);
+        let status = match w.tracer.as_deref_mut() {
+            None => w.dstar.compute(&mut graph, budget),
+            Some(t) => w
+                .dstar
+                .compute_traced(&mut graph, budget, &mut TraceSink(t)),
+        };
         if !(status == DStarStatus::Found && w.dstar.path(&mut graph, &mut w.path)) {
             w.path.clear();
         }
@@ -654,4 +707,48 @@ pub unsafe extern "C" fn sx_dstar_cells_changed(g: *mut WasmGrid, count: i32) ->
         w.topology
             .cells_changed(&mut w.dstar, &mut graph, &w.cells, &mut w.scratch),
     )
+}
+
+/// Tracing on (`on` 1) or off (0) for every search of this grid. Events wait
+/// in a buffer until [`sx_trace_take`]; off it costs nothing.
+///
+/// # Safety
+/// `g` from [`sx_grid_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_trace(g: *mut WasmGrid, on: i32) -> i32 {
+    let w = grid!(g, ERROR_ARGUMENT);
+    if on != 0 {
+        w.nav.set_tracer(Some(tracer_into(&w.trace)));
+        w.tracer = Some(tracer_into(&w.trace));
+    } else {
+        w.nav.set_tracer(None);
+        w.tracer = None;
+    }
+    0
+}
+
+/// Moves the waiting trace events to the output buffer (9 numbers each:
+/// kind, x, y, parent x, parent y, cost, estimate, expanded, found) and
+/// returns how many. Dropped events: [`sx_trace_dropped`].
+///
+/// # Safety
+/// `g` from [`sx_grid_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_trace_take(g: *mut WasmGrid) -> i32 {
+    let w = grid!(g, ERROR_ARGUMENT);
+    let mut b = w.trace.borrow_mut();
+    std::mem::swap(&mut w.out, &mut b.events);
+    b.events.clear();
+    to_i32(w.out.len() / TRACE_STRIDE)
+}
+
+/// Events dropped since the last call because the buffer was full; resets
+/// the count.
+///
+/// # Safety
+/// `g` from [`sx_grid_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_trace_dropped(g: *mut WasmGrid) -> i32 {
+    let w = grid!(g, ERROR_ARGUMENT);
+    to_i32(std::mem::take(&mut w.trace.borrow_mut().dropped))
 }

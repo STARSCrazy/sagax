@@ -17,9 +17,10 @@ use sagax_nav::grid::{Cell, CellMap, DenseGrid, GridRules, Moves};
 use sagax_nav::hex::{HexLayout, HexMap};
 use sagax_nav::nav::{Navigator, Output, Report, Status, WayOptions, write_way};
 use sagax_nav::topology::Topology;
+use sagax_nav::trace::{TraceEvent, TraceSink, Tracer};
 
 /// Version of the C interface (`SX_API_VERSION`).
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = 2;
 
 const ERROR_ARGUMENT: i32 = -1;
 const ERROR_INTERNAL: i32 = -2;
@@ -40,6 +41,48 @@ pub type StepFn = unsafe extern "C" fn(*mut c_void, i32, i32, i32, i32, i32) -> 
 pub type MoveCostFn = unsafe extern "C" fn(*mut c_void, i32, i32, i32, i32, i32, i32) -> i32;
 /// `sx_steps_fn`.
 pub type StepsFn = unsafe extern "C" fn(*mut c_void, i32, i32, i32, i32, i32, *const i32, *mut i32);
+
+/// `sx_trace_fn`.
+pub type TraceFn = unsafe extern "C" fn(*mut c_void, *const SxEvent);
+
+/// `sx_event`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SxEvent {
+    /// `SX_TRACE_*`.
+    pub kind: i32,
+    /// The cell.
+    pub cell: Point,
+    /// Where the cell was reached from.
+    pub parent: Point,
+    /// Cost.
+    pub cost: i32,
+    /// Estimate still to go.
+    pub estimate: i32,
+    /// Cells expanded so far.
+    pub expanded: i32,
+    /// 1 if a goal was reached.
+    pub found: i32,
+}
+
+/// A tracer that calls the game's trace callback, or `None` for null.
+fn tracer_of(trace: Option<TraceFn>, context: *mut c_void) -> Option<Tracer> {
+    let f = trace?;
+    Some(Box::new(move |e: &TraceEvent| {
+        let event = SxEvent {
+            kind: e.kind as i32,
+            cell: Point::of(e.cell),
+            parent: Point::of(e.parent),
+            cost: to_i32(e.cost),
+            estimate: to_i32(e.estimate),
+            expanded: to_i32(e.expanded),
+            found: i32::from(e.found),
+        };
+        // SAFETY: the game passed a valid callback and context for as long
+        // as tracing is on (sagax.h).
+        unsafe { f(context, &event) };
+    }))
+}
 
 /// `sx_point`.
 #[repr(C)]
@@ -721,6 +764,7 @@ pub unsafe extern "C" fn sx_nav_formation(
 /// `sx_flow`.
 pub struct SxFlow {
     field: FlowField<Cell>,
+    tracer: Option<Tracer>,
     topology: Topology,
     capacity: usize,
     goals: Vec<Cell>,
@@ -736,6 +780,7 @@ pub unsafe extern "C" fn sx_flow_create(rules: *const SxRules) -> *mut SxFlow {
         let (topology, capacity, _) = rules_of(rules)?;
         Some(SxFlow {
             field: FlowField::with_capacity(capacity),
+            tracer: None,
             topology,
             capacity,
             goals: Vec::new(),
@@ -785,7 +830,13 @@ pub unsafe extern "C" fn sx_flow_build(
             max_cost,
         };
         let mut graph = f.topology.graph(&mut map, None);
-        f.field.build(&mut graph, f.goals.iter().copied(), limits);
+        let goals = f.goals.iter().copied();
+        match f.tracer.as_deref_mut() {
+            None => f.field.build(&mut graph, goals, limits),
+            Some(t) => f
+                .field
+                .build_traced(&mut graph, goals, limits, &mut TraceSink(t)),
+        }
         write_result(
             result,
             SxResult {
@@ -848,6 +899,7 @@ pub unsafe extern "C" fn sx_flow_next(
 /// `sx_dstar`.
 pub struct SxDStar {
     planner: DStarLite<Cell, Topology>,
+    tracer: Option<Tracer>,
     topology: Topology,
     smooth_max_extra: Cost,
     path: Vec<Cell>,
@@ -867,6 +919,7 @@ pub unsafe extern "C" fn sx_dstar_create(rules: *const SxRules) -> *mut SxDStar 
         planner.set_max_nodes(capacity);
         Some(SxDStar {
             planner,
+            tracer: None,
             topology,
             smooth_max_extra: tolerance,
             path: Vec::with_capacity(capacity),
@@ -935,7 +988,12 @@ pub unsafe extern "C" fn sx_dstar_compute(
     guarded(|| {
         let status = {
             let mut graph = d.topology.graph(&mut map, None);
-            let status = d.planner.compute(&mut graph, budget);
+            let status = match d.tracer.as_deref_mut() {
+                None => d.planner.compute(&mut graph, budget),
+                Some(t) => d
+                    .planner
+                    .compute_traced(&mut graph, budget, &mut TraceSink(t)),
+            };
             if !(status == DStarStatus::Found && d.planner.path(&mut graph, &mut d.path)) {
                 d.path.clear();
             }
@@ -1024,6 +1082,62 @@ pub unsafe extern "C" fn sx_dstar_cells_changed(
             .cells_changed(&mut d.planner, &mut graph, &d.list, &mut d.scratch);
         to_i32(changed)
     })
+}
+
+// ---- tracing ---------------------------------------------------------------
+
+/// `sx_nav_set_trace`.
+///
+/// # Safety
+/// `nav` is null or valid; `trace` and `context` stay valid while tracing is on.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_nav_set_trace(
+    nav: *mut SxNav,
+    trace: Option<TraceFn>,
+    context: *mut c_void,
+) -> i32 {
+    // SAFETY: see above.
+    let Some(s) = (unsafe { nav.as_mut() }) else {
+        return ERROR_ARGUMENT;
+    };
+    s.nav.set_tracer(tracer_of(trace, context));
+    0
+}
+
+/// `sx_flow_set_trace`.
+///
+/// # Safety
+/// As [`sx_nav_set_trace`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_flow_set_trace(
+    flow: *mut SxFlow,
+    trace: Option<TraceFn>,
+    context: *mut c_void,
+) -> i32 {
+    // SAFETY: see above.
+    let Some(f) = (unsafe { flow.as_mut() }) else {
+        return ERROR_ARGUMENT;
+    };
+    f.tracer = tracer_of(trace, context);
+    0
+}
+
+/// `sx_dstar_set_trace`.
+///
+/// # Safety
+/// As [`sx_nav_set_trace`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_dstar_set_trace(
+    dstar: *mut SxDStar,
+    trace: Option<TraceFn>,
+    context: *mut c_void,
+) -> i32 {
+    // SAFETY: see above.
+    let Some(d) = (unsafe { dstar.as_mut() }) else {
+        return ERROR_ARGUMENT;
+    };
+    d.tracer = tracer_of(trace, context);
+    0
 }
 
 #[cfg(test)]

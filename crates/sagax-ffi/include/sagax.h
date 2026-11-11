@@ -29,7 +29,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 1
+#define SX_API_VERSION 2
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -224,6 +224,33 @@ int32_t sx_dstar_move_start(sx_dstar *dstar, sx_point cell);
  * cells were updated (the cells and their neighbours on every level). */
 int32_t sx_dstar_cells_changed(sx_dstar *dstar, const sx_map *map, const sx_point *cells,
 	int32_t count);
+
+/* ---- tracing (since version 2) ------------------------------------------ */
+
+/* Every step of a search, for debugging and logging. Off by default; off it
+ * costs nothing. The callback runs inside the search: keep it short. */
+#define SX_TRACE_STARTED   1   /* a search begins at cell */
+#define SX_TRACE_EXPANDED  2   /* cell expanded: cost is final (D* Lite: for now) */
+#define SX_TRACE_IMPROVED  3   /* cell reached more cheaply from parent */
+#define SX_TRACE_PAUSED    4   /* budget used up */
+#define SX_TRACE_FINISHED  5   /* search ended; found 1 if a goal was reached */
+
+typedef struct sx_event {
+	int32_t kind;               /* SX_TRACE_* */
+	sx_point cell;
+	sx_point parent;            /* SX_TRACE_IMPROVED */
+	int32_t cost;               /* nav: from the start; flow, D* Lite: to the goal */
+	int32_t estimate;           /* estimated cost still to go */
+	int32_t expanded;           /* SX_TRACE_PAUSED, SX_TRACE_FINISHED */
+	int32_t found;              /* SX_TRACE_FINISHED */
+} sx_event;
+
+typedef void (*sx_trace_fn)(void *context, const sx_event *event);
+
+/* trace 0 turns tracing off. Return 0. */
+int32_t sx_nav_set_trace(sx_nav *nav, sx_trace_fn trace, void *context);
+int32_t sx_flow_set_trace(sx_flow *flow, sx_trace_fn trace, void *context);
+int32_t sx_dstar_set_trace(sx_dstar *dstar, sx_trace_fn trace, void *context);
 
 #ifdef __cplusplus
 }
