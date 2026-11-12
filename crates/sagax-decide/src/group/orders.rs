@@ -157,8 +157,12 @@ impl Squad {
     /// active member whose goal has a `then_pos` or starts
     /// [`Start::OnSignal`] gets a second order, sent now like the first:
     /// `pos` = `then_pos` (`unchecked` = `then_unchecked`), or the old `pos`
-    /// without one; `start` = [`Start::Now`]; same plan and start delay.
-    /// False when no plan is active or the signal was already given.
+    /// without one; same plan and start delay. So that all start at the
+    /// same tick, `start` is [`Start::AfterTicks`] of the time between this
+    /// member's order and the slowest second order arriving
+    /// ([`Start::Now`] for the slowest, and for all when they arrive
+    /// together). False when no plan is active or the signal was already
+    /// given.
     pub fn signal(&mut self, now: u32) -> bool {
         self.advance(now);
         let Some(a) = self.active.as_mut() else {
@@ -303,6 +307,7 @@ impl Squad {
     /// second orders (see [`Squad::signal`]).
     fn send(&mut self, at: u32, signal: bool) {
         let mut orders = std::mem::take(&mut self.orders);
+        let sent_from = orders.len();
         if let (Some(a), Some(leader)) = (&self.active, self.acting_leader()) {
             for &(member, goal) in &a.plan.goals {
                 let Some(m) = self.group.index(member).and_then(|i| self.group.get(i)) else {
@@ -327,6 +332,18 @@ impl Squad {
                 };
                 if let Some(t) = arrive {
                     orders.push((Order { member, goal }, t));
+                }
+            }
+        }
+        if signal {
+            // Everyone starts when the slowest second order is in.
+            let new = &mut orders[sent_from..];
+            let last = new.iter().map(|(_, t)| t.wrapping_sub(at)).max();
+            let last = last.unwrap_or(0);
+            for (order, t) in new {
+                let wait = last - t.wrapping_sub(at);
+                if wait > 0 {
+                    order.goal.start = Start::AfterTicks(wait);
                 }
             }
         }

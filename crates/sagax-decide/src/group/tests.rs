@@ -1478,3 +1478,688 @@ fn all_arrived_needs_an_active_member() {
     sq.group_mut().resume(2);
     assert_eq!(sq.check(6 + wait, &[], &[], 0), Ok(Status::Signal));
 }
+
+// --- Reference scenes: scripted members over the public API only ---
+//
+// 17 ticks per second, 4 members, 2 enemies. Each member walks one cell
+// per `STEP` ticks toward its goal's `pos` (greedy over the 8 square or 6
+// hex neighbours) and calls `arrived` when it stands on its gather spot.
+// Per tick: members walk, then `check`, then `orders_due`.
+
+use crate::memory::distance;
+
+/// Ticks per cell of the scripted walk.
+const STEP: u32 = 2;
+/// Channel of every member but the leader: 2 ticks plus 1 per cell.
+const RADIO: Channel = Channel::Radio {
+    base: 2,
+    per_unit: 1,
+};
+const SEED: u64 = 7;
+/// Enemy the leader sees at (20, 0) in the flank scenes.
+const E1: u32 = 10;
+/// Enemy member 2 reports in the flank scenes.
+const E2: u32 = 11;
+/// Members of the square scenes: 1 leads.
+const SQUARE_FOUR: [(u32, i32, i32); 4] = [(1, 0, 0), (2, 0, 2), (3, 0, -2), (4, -3, 0)];
+
+/// What happened, for the scene asserts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ev {
+    Planned { t: u32, tactic: usize },
+    Active { t: u32 },
+    Order { t: u32, member: u32 },
+    Arrived { t: u32, member: u32 },
+    Signal { t: u32 },
+    Attack { t: u32, member: u32 },
+}
+
+/// The scripted body of one member.
+struct Walker {
+    id: u32,
+    goal: Option<Goal>,
+    start_at: u32,
+    gathered: bool,
+    keeper: GoalKeeper,
+}
+
+struct Scene {
+    sq: Squad,
+    metric: Metric,
+    walkers: Vec<Walker>,
+    spots: Vec<Spot>,
+    events: Vec<Ev>,
+    /// The target of every order received, in order.
+    order_targets: Vec<Option<u32>>,
+    out: Vec<Order>,
+    active: Option<PlanId>,
+}
+
+/// One cell from `from` toward `to`: the neighbour nearest to `to`, ties to
+/// the first in the list.
+fn step_toward(metric: Metric, from: Pos, to: Pos) -> Pos {
+    const SQUARE: [(i32, i32); 8] = [
+        (1, 0),
+        (1, 1),
+        (0, 1),
+        (-1, 1),
+        (-1, 0),
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+    ];
+    const HEX: [(i32, i32); 6] = [(1, 0), (0, 1), (-1, 1), (-1, 0), (0, -1), (1, -1)];
+    if from[..2] == to[..2] {
+        return from;
+    }
+    let dirs: &[(i32, i32)] = if metric == Metric::Hex { &HEX } else { &SQUARE };
+    let left = |p: Pos| distance(metric, i64::from(to[0] - p[0]), i64::from(to[1] - p[1]));
+    dirs.iter()
+        .map(|&(dx, dy)| [from[0] + dx, from[1] + dy, from[2]])
+        .min_by_key(|&p| left(p))
+        .unwrap()
+}
+
+impl Scene {
+    /// Members `(id, x, y)` of `skill`; the first leads and is told at once,
+    /// the others by [`RADIO`]. No tactics yet.
+    fn new(metric: Metric, skill: u8, members: &[(u32, i32, i32)], spots: Vec<Spot>) -> Self {
+        let mut sq = Squad::new(8, 8, 4, 8, metric).unwrap();
+        for &(id, x, y) in members {
+            sq.group_mut().add(Member {
+                id,
+                pos: [x, y, 0],
+                roles: 0,
+                skill,
+                state: MemberState::Active,
+            });
+        }
+        assert!(sq.set_leader(members[0].0));
+        for &(id, ..) in &members[1..] {
+            assert!(sq.set_channel(id, RADIO));
+        }
+        sq.set_target_kind(ENEMY);
+        sq.set_skill(skill);
+        let walkers = members
+            .iter()
+            .map(|&(id, ..)| Walker {
+                id,
+                goal: None,
+                start_at: 0,
+                gathered: false,
+                keeper: GoalKeeper::new(),
+            })
+            .collect();
+        Self {
+            sq,
+            metric,
+            walkers,
+            spots,
+            events: Vec::new(),
+            order_targets: Vec::new(),
+            out: Vec::new(),
+            active: None,
+        }
+    }
+
+    /// Adds rush (0), formation (line, spacing 2; 1) and flank (3 sides,
+    /// distance 4; 2), the game team's three levels.
+    fn three_tactics(&mut self) {
+        self.sq.add_tactic(tactics::rush());
+        self.sq.add_tactic(tactics::formation(Shape::Line, 2));
+        self.sq.add_tactic(tactics::flank(3, 4));
+    }
+
+    /// The square flank scene on Chebyshev: [`SQUARE_FOUR`], the three
+    /// tactics, E1 at (20, 0) and E2 at (24, 10).
+    fn square(skill: u8) -> Self {
+        let spots = vec![
+            spot(16, 0, TAG_COVER),
+            spot(16, 2, 0),
+            spot(20, 4, TAG_HIGH),
+            spot(20, -4, 0),
+            spot(12, 8, TAG_COVER),
+        ];
+        let mut s = Self::new(Metric::Chebyshev, skill, &SQUARE_FOUR, spots);
+        s.three_tactics();
+        s.enemies_at_start([24, 10, 0]);
+        s
+    }
+
+    /// The leader's own sighting of E1 at (20, 0) and member 2's report of
+    /// E2 at `e2`, both read at tick 0.
+    fn enemies_at_start(&mut self, e2: Pos) {
+        self.sq.observe(
+            Fact {
+                subject: E1,
+                kind: ENEMY,
+                pos: [20, 0, 0],
+                ..Fact::default()
+            },
+            0,
+        );
+        assert!(self.sq.report(
+            Message {
+                kind: REPORT_ENEMY,
+                subject: E2,
+                pos: e2,
+                sender: 2,
+                ..Message::default()
+            },
+            0,
+        ));
+    }
+
+    fn walker(&mut self, id: u32) -> &mut Walker {
+        self.walkers.iter_mut().find(|w| w.id == id).unwrap()
+    }
+
+    fn tick(&mut self, t: u32) {
+        let metric = self.metric;
+        for w in &mut self.walkers {
+            let i = self.sq.group().index(w.id).unwrap();
+            let m = *self.sq.group().get(i).unwrap();
+            let Some(goal) = w.goal.filter(|_| m.state == MemberState::Active) else {
+                continue;
+            };
+            let to = goal.pos.unwrap();
+            let mut at = m.pos;
+            if t > w.start_at && (t - w.start_at).is_multiple_of(STEP) {
+                at = step_toward(metric, at, to);
+                self.sq.group_mut().set_pos(w.id, at);
+            }
+            let gathers = goal.then_pos.is_some() || goal.start == Start::OnSignal;
+            if gathers && !w.gathered && at[..2] == to[..2] {
+                w.gathered = true;
+                assert!(self.sq.arrived(w.id, t));
+                self.events.push(Ev::Arrived { t, member: w.id });
+            }
+        }
+        match self.sq.check(t, &[], &self.spots, SEED).unwrap() {
+            Status::Replan(_) => {
+                let tactic = self.sq.pending_plan().unwrap().tactic;
+                self.events.push(Ev::Planned { t, tactic });
+            }
+            Status::Signal => self.events.push(Ev::Signal { t }),
+            Status::Keep | Status::NoPlan => {}
+        }
+        self.sq.orders_due(t, &mut self.out);
+        let now_active = self.sq.active_plan().map(|p| p.id);
+        if now_active != self.active {
+            self.active = now_active;
+            self.events.push(Ev::Active { t });
+        }
+        for o in self.out.drain(..) {
+            let w = self.walkers.iter_mut().find(|w| w.id == o.member).unwrap();
+            let after = match o.goal.start {
+                Start::AfterTicks(n) => n,
+                Start::Now | Start::OnSignal => 0,
+            };
+            w.goal = Some(o.goal);
+            w.start_at = t + o.goal.start_delay + after;
+            w.gathered = false;
+            w.keeper.set(o.goal, t);
+            self.order_targets.push(o.goal.target);
+            self.events.push(Ev::Order {
+                t,
+                member: o.member,
+            });
+        }
+        for w in &self.walkers {
+            if let Some(g) = w.goal
+                && g.kind == GoalKind::Attack
+                && g.start != Start::OnSignal
+                && w.start_at == t
+            {
+                self.events.push(Ev::Attack { t, member: w.id });
+            }
+        }
+    }
+
+    fn run(&mut self, ticks: std::ops::RangeInclusive<u32>) {
+        for t in ticks {
+            self.tick(t);
+        }
+    }
+
+    /// `(tick, member)` of the events `pick` selects, in order.
+    fn pairs(&self, pick: impl Fn(&Ev) -> Option<(u32, u32)>) -> Vec<(u32, u32)> {
+        self.events.iter().filter_map(pick).collect()
+    }
+
+    fn orders(&self) -> Vec<(u32, u32)> {
+        self.pairs(|e| match *e {
+            Ev::Order { t, member } => Some((t, member)),
+            _ => None,
+        })
+    }
+
+    fn attacks(&self) -> Vec<(u32, u32)> {
+        self.pairs(|e| match *e {
+            Ev::Attack { t, member } => Some((t, member)),
+            _ => None,
+        })
+    }
+
+    fn arrivals(&self) -> Vec<(u32, u32)> {
+        self.pairs(|e| match *e {
+            Ev::Arrived { t, member } => Some((t, member)),
+            _ => None,
+        })
+    }
+
+    fn first(&self, want: impl Fn(&Ev) -> bool) -> Option<Ev> {
+        self.events.iter().copied().find(|e| want(e))
+    }
+
+    fn plans_made(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|e| matches!(e, Ev::Planned { .. }))
+            .count()
+    }
+}
+
+/// Asserts a flank run of the square or hex scene: one plan, made at 0
+/// and active at 5; the first four orders, the gather arrivals, the signal
+/// tick and one attack tick for all four members.
+fn assert_flank_run(
+    s: &Scene,
+    orders: &[(u32, u32)],
+    arrivals: &[(u32, u32)],
+    signal: u32,
+    attack: u32,
+) {
+    const FLANK: usize = 2;
+    assert_eq!(
+        s.events[0],
+        Ev::Planned {
+            t: 0,
+            tactic: FLANK
+        }
+    );
+    assert_eq!(s.plans_made(), 1, "no replan");
+    assert_eq!(
+        s.first(|e| matches!(e, Ev::Active { .. })),
+        Some(Ev::Active { t: 5 })
+    );
+    assert_eq!(&s.orders()[..4], orders);
+    assert_eq!(s.arrivals(), arrivals);
+    assert_eq!(
+        s.first(|e| matches!(e, Ev::Signal { .. })),
+        Some(Ev::Signal { t: signal })
+    );
+    let mut hits = s.attacks();
+    hits.sort_unstable_by_key(|&(_, m)| m);
+    assert_eq!(hits, [(attack, 1), (attack, 2), (attack, 3), (attack, 4)]);
+}
+
+#[test]
+fn three_levels() {
+    const RUSH: usize = 0;
+    const FORMATION: usize = 1;
+    const FLANK: usize = 2;
+
+    // Skill 0 (level 0) knows only rush (formation needs 64, flank 128):
+    // (rush, E1) and (rush, E2) are the only candidates, so rush wins for
+    // any seed.
+    let mut weak = Scene::square(0);
+    weak.run(0..=40);
+    assert_eq!(weak.events[0], Ev::Planned { t: 0, tactic: RUSH });
+    // Made at 0, think_ticks[0] = 34: active at 34.
+    assert_eq!(
+        weak.first(|e| matches!(e, Ev::Active { .. })),
+        Some(Ev::Active { t: 34 })
+    );
+    // The leader at once (34); 2 and 3 are 2 cells from it: 34 + 2 + 2 =
+    // 38; 4 is 3 cells away: 34 + 2 + 3 = 39.
+    assert_eq!(weak.orders(), [(34, 1), (38, 2), (38, 3), (39, 4)]);
+    // Weak members start apart (timing spread up to 17 ticks, by seed).
+    let late = weak
+        .walkers
+        .iter()
+        .zip([34, 38, 38, 39])
+        .filter(|(w, got)| w.start_at > *got)
+        .count();
+    assert!(late > 0);
+
+    // Skill 64 (level 1) also knows formation: weight 1/2 against rush's
+    // 1/4. Level 1 picks by chance among the best 2, and with two known
+    // targets those are (formation, E1) and (formation, E2), so formation
+    // wins for any seed (only the target is by chance).
+    let mut mid = Scene::square(64);
+    mid.run(0..=30);
+    assert_eq!(
+        mid.events[0],
+        Ev::Planned {
+            t: 0,
+            tactic: FORMATION
+        }
+    );
+    // Made at 0, think_ticks[1] = 20: active at 20; delays as above.
+    assert_eq!(
+        mid.first(|e| matches!(e, Ev::Active { .. })),
+        Some(Ev::Active { t: 20 })
+    );
+    assert_eq!(mid.orders(), [(20, 1), (24, 2), (24, 3), (25, 4)]);
+    assert!(mid.attacks().is_empty(), "formation only moves");
+
+    // Skill 192 (level 3, elite) knows flank: weight 3/4 beats formation
+    // and rush, and level 3 picks the best; (flank, E1) comes before
+    // (flank, E2) on the tie.
+    let mut elite = Scene::square(192);
+    elite.run(0..=60);
+    let p = elite.sq.active_plan().unwrap();
+    assert_eq!((p.tactic, p.target), (FLANK, Some(E1)));
+    // Centre (-1, 0), heading +x: front (16, 0), left (20, 4), right
+    // (20, -4). Front takes 1 (nearest, lower index on the tie), left 2,
+    // right 3, then front 4 (spot (16, 2), next to the taken (16, 0)).
+    let goals: Vec<(u32, u8, Option<Pos>)> =
+        p.goals.iter().map(|(m, g)| (*m, g.slot, g.pos)).collect();
+    assert_eq!(
+        goals,
+        [
+            (1, 0, Some([16, 0, 0])),
+            (2, 1, Some([20, 4, 0])),
+            (3, 2, Some([20, -4, 0])),
+            (4, 0, Some([16, 2, 0])),
+        ]
+    );
+    assert_flank_run(
+        &elite,
+        // Made at 0, think_ticks[3] = 5: active at 5; the leader at once,
+        // 2 and 3 at 5 + 2 + 2 = 9, 4 at 5 + 2 + 3 = 10.
+        &[(5, 1), (9, 2), (9, 3), (10, 4)],
+        // One cell per 2 ticks from the order: 1 walks 16 cells to (16, 0):
+        // 5 + 32 = 37; 4 walks 19 to (16, 2): 10 + 38 = 48; 2 and 3 walk 20
+        // to (20, +-4): 9 + 40 = 49.
+        &[(37, 1), (48, 4), (49, 2), (49, 3)],
+        // The last arrival at 49 fires AllArrived in that tick's check.
+        49,
+        // The attack orders leave the leader at (16, 0) at 49: 4 is 2 cells
+        // away (in at 53), 2 and 3 are 4 away (55). Each is told to start
+        // when the slowest order is in: 55.
+        55,
+    );
+}
+
+#[test]
+fn hex_scene() {
+    // The three_levels flank on axial hex coordinates.
+    let spots = vec![
+        spot(16, 0, 0),
+        spot(16, 1, 0),
+        spot(20, 4, 0),
+        spot(24, -4, 0),
+    ];
+    let mut s = Scene::new(
+        Metric::Hex,
+        192,
+        &[(1, 0, 0), (2, -1, 2), (3, 1, -2), (4, -3, 0)],
+        spots,
+    );
+    s.three_tactics();
+    s.enemies_at_start([24, 10, 0]);
+    s.run(0..=70);
+    // Centre (-1, 0), heading step 0 (+q): front = step 3 -> (16, 0), left
+    // = step 1 -> (20, 4), right = step 5 -> (24, -4), 120 deg apart.
+    let p = s.sq.active_plan().unwrap();
+    let goals: Vec<(u32, u8, Option<Pos>)> =
+        p.goals.iter().map(|(m, g)| (*m, g.slot, g.pos)).collect();
+    assert_eq!(
+        goals,
+        [
+            (1, 0, Some([16, 0, 0])),
+            (2, 1, Some([20, 4, 0])),
+            (3, 2, Some([24, -4, 0])),
+            (4, 0, Some([16, 1, 0])),
+        ]
+    );
+    assert_flank_run(
+        &s,
+        // Active at 5; 2 and 3 are 2 hex steps from the leader (9), 4 is 3
+        // (10).
+        &[(5, 1), (9, 2), (9, 3), (10, 4)],
+        // 1 walks 16 steps: 37; 4 walks 20 to (16, 1): 10 + 40 = 50; 2 and
+        // 3 walk 23: 9 + 46 = 55.
+        &[(37, 1), (50, 4), (55, 2), (55, 3)],
+        55,
+        // From the leader at (16, 0): 4 is 1 step (in at 58), 2 and 3 are 8
+        // (65); all start at 65.
+        65,
+    );
+}
+
+#[test]
+fn game_orders_first() {
+    let mut s = Scene::square(192);
+    s.run(0..=19);
+    // Mid-flank (3 walks toward (20, -4)) the game takes member 3 for its
+    // own order: suspended in the group, its goal postponed and its
+    // keeper suspended.
+    assert!(s.sq.group_mut().suspend(3));
+    let w = s.walker(3);
+    w.keeper.postpone(20);
+    w.keeper.suspend();
+    let give_up = SkillTable::default().give_up_ticks[SkillTable::level(192)];
+    assert!(150 > 20 + give_up);
+    for t in 20..=150 {
+        s.tick(t);
+        for w in &s.walkers {
+            // A member reports its goal broken only once its keeper says
+            // so; a suspended keeper never does.
+            assert!(!w.keeper.broken(t, give_up), "member {} at {t}", w.id);
+        }
+    }
+    // Not off plan: the plan made at 0 stays, nothing replans.
+    assert_eq!(s.plans_made(), 1);
+    // AllArrived counts only the active members: 1 at 37, 4 at 48 and 2 at
+    // 49 (as in three_levels) fire the signal at 49, long before max_wait.
+    assert_eq!(s.arrivals(), [(37, 1), (48, 4), (49, 2)]);
+    assert_eq!(
+        s.first(|e| matches!(e, Ev::Signal { .. })),
+        Some(Ev::Signal { t: 49 })
+    );
+    // The rest attacks together: 4 is 2 cells from the leader (53), 2 is 4
+    // (55); all start at 55. Member 3 gets nothing more.
+    assert_eq!(s.attacks(), [(55, 1), (55, 2), (55, 4)]);
+    assert!(!s.orders().iter().any(|&(t, m)| m == 3 && t >= 20));
+}
+
+#[test]
+fn ambush_on_target_in_radius() {
+    // Two enemies walk in along y = 0, one cell per 2 ticks: E1 from x 40,
+    // E2 4 cells behind it. The leader sees both every tick.
+    let hidden = [
+        spot(1, 3, TAG_HIDDEN),
+        spot(1, -3, TAG_HIDDEN),
+        spot(-3, 3, TAG_HIDDEN),
+        spot(-3, -3, TAG_HIDDEN),
+        spot(-1, 0, 0),
+    ];
+    let mut s = Scene::new(Metric::Chebyshev, 192, &SQUARE_FOUR, hidden.to_vec());
+    let ambush = s.sq.add_tactic(tactics::ambush());
+    let x_at = |start: i32, t: u32| start - (t / STEP) as i32;
+    // Until all attack (86); E2 reaches the group soon after.
+    for t in 0..=87 {
+        for (id, start) in [(E1, 40), (E2, 44)] {
+            s.sq.observe(
+                Fact {
+                    subject: id,
+                    kind: ENEMY,
+                    pos: [x_at(start, t), 0, 0],
+                    seen_at: t,
+                    ..Fact::default()
+                },
+                t,
+            );
+        }
+        s.tick(t);
+    }
+    assert_eq!(
+        s.events[0],
+        Ev::Planned {
+            t: 0,
+            tactic: ambush
+        }
+    );
+    assert_eq!(s.plans_made(), 1);
+    // Ambush scores higher the farther the target still is: E2.
+    let p = s.sq.active_plan().unwrap();
+    assert_eq!(p.target, Some(E2));
+    // Every member holds a hidden spot (the untagged one stays free).
+    for (_, g) in &p.goals {
+        let i = hidden.iter().position(|h| Some(h.pos) == g.pos).unwrap();
+        assert_eq!(hidden[i].tags, TAG_HIDDEN);
+    }
+    // Once all sit on their spots the centre is (-1, 0). E2 is at
+    // 44 - t / 2, within the radius 6 once 45 - t / 2 <= 6: t = 78.
+    assert_eq!(
+        s.first(|e| matches!(e, Ev::Signal { .. })),
+        Some(Ev::Signal { t: 78 })
+    );
+    // No attack before the signal. The "go" orders leave the leader at
+    // (1, 3): 3 at (-3, 3) is 4 cells away (82 + 2 = 84), 2 at (1, -3) and
+    // 4 at (-3, -3) are 6 (86); all start at 86.
+    assert_eq!(s.attacks(), [(86, 1), (86, 2), (86, 3), (86, 4)]);
+}
+
+#[test]
+fn no_tags_scene() {
+    // The game knows no tags: every spot has tags 0.
+    let plain = [
+        spot(16, 0, 0),
+        spot(15, 1, 0),
+        spot(20, 4, 0),
+        spot(19, 5, 0),
+        spot(20, -4, 0),
+        spot(21, -5, 0),
+    ];
+    let mut s = Scene::square(192);
+    s.spots = plain.to_vec();
+    s.run(0..=5);
+    let p = s.sq.active_plan().unwrap();
+    let mut sides = [0usize; 3];
+    for (_, g) in &p.goals {
+        sides[usize::from(g.slot)] += 1;
+        assert!(!g.unchecked && !g.then_unchecked);
+        let pos = g.pos.unwrap();
+        assert!(plain.iter().any(|sp| sp.pos == pos));
+        // Front faces the group (x < 20), left is +y, right is -y.
+        match g.slot {
+            0 => assert!(pos[0] < 20),
+            1 => assert!(pos[1] > 0),
+            _ => assert!(pos[1] < 0),
+        }
+    }
+    assert_eq!(sides, [2, 1, 1], "three sides, the front takes the fourth");
+
+    // Without any spot the flank still plans, on unchecked wish points.
+    let mut bare = Scene::square(192);
+    bare.spots.clear();
+    bare.run(0..=5);
+    let p = bare.sq.active_plan().unwrap();
+    let wish: Vec<(u8, Option<Pos>, bool)> = p
+        .goals
+        .iter()
+        .map(|(_, g)| (g.slot, g.pos, g.unchecked))
+        .collect();
+    assert_eq!(
+        wish,
+        [
+            (0, Some([16, 0, 0]), true),
+            (1, Some([20, 4, 0]), true),
+            (2, Some([20, -4, 0]), true),
+            (0, Some([16, 0, 0]), true),
+        ]
+    );
+
+    // Every shipped tactic with a target plans on tag-0 spots only.
+    for tactic in [
+        tactics::rush(),
+        tactics::formation(Shape::Wedge, 2),
+        tactics::flank(2, 4),
+        tactics::ambush(),
+        tactics::focus(),
+        tactics::isolate(),
+    ] {
+        let mut one = Scene::new(Metric::Chebyshev, 255, &SQUARE_FOUR, plain.to_vec());
+        one.sq.add_tactic(tactic);
+        one.enemies_at_start([24, 10, 0]);
+        one.run(0..=5);
+        let p = one.sq.active_plan().unwrap();
+        assert_eq!(p.goals.len(), 4);
+        assert!(p.goals.iter().all(|(_, g)| !g.unchecked));
+    }
+}
+
+#[test]
+fn no_cheat() {
+    // The true world: E1 and E2 in the open, E3 behind a wall right next
+    // to the group, the nearest of all and so the best focus target.
+    const E3: u32 = 12;
+    const SIGHT: i128 = 30;
+    let world: [(u32, Pos, bool); 3] = [
+        (E1, [20, 0, 0], true),
+        (E2, [24, 10, 0], true),
+        (E3, [2, 1, 0], false),
+    ];
+    let run = |see_hidden: bool| {
+        let mut s = Scene::new(Metric::Chebyshev, 192, &SQUARE_FOUR, Vec::new());
+        s.sq.add_tactic(tactics::focus());
+        let mut targets = Vec::new();
+        for t in 0..=150 {
+            // Members see what is in the open and within sight; the leader
+            // observes, the others report by radio once a second.
+            let leader = s.sq.leader().unwrap();
+            let members: Vec<Member> = s.sq.group().iter().copied().collect();
+            let lpos = members.iter().find(|m| m.id == leader).unwrap().pos;
+            for m in &members {
+                for &(id, pos, open) in &world {
+                    let d = distance(
+                        Metric::Chebyshev,
+                        i64::from(pos[0] - m.pos[0]),
+                        i64::from(pos[1] - m.pos[1]),
+                    );
+                    if !(open || see_hidden) || d > SIGHT {
+                        continue;
+                    }
+                    if m.id == leader {
+                        let fact = Fact {
+                            subject: id,
+                            kind: ENEMY,
+                            pos,
+                            seen_at: t,
+                            ..Fact::default()
+                        };
+                        s.sq.observe(fact, t);
+                    } else if t % 17 == 0 {
+                        let at = RADIO.arrival(Metric::Chebyshev, m.pos, lpos, t).unwrap();
+                        let msg = Message {
+                            kind: REPORT_ENEMY,
+                            subject: id,
+                            pos,
+                            seen_at: t,
+                            sender: m.id,
+                            ..Message::default()
+                        };
+                        s.sq.report(msg, at);
+                    }
+                }
+            }
+            s.tick(t);
+            assert!(see_hidden || s.sq.knowledge().iter().all(|f| f.subject != E3));
+            if let Some(p) = s.sq.active_plan() {
+                targets.push(p.target);
+            }
+        }
+        targets.extend(s.order_targets.iter().copied());
+        targets
+    };
+    // Control: once seen, E3 is the target.
+    assert!(run(true).contains(&Some(E3)));
+    // Never seen nor reported: never the target of a plan or an order.
+    let targets = run(false);
+    assert!(!targets.is_empty());
+    assert!(targets.iter().all(|&t| t == Some(E1) || t == Some(E2)));
+}
