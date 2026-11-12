@@ -23,6 +23,9 @@ dependencies).
   at doors.
 - **Flow fields**: one search for many walkers with the same goals.
 - **D\* Lite**: one walker's way, repaired while the map changes.
+- **Decisions and memory**: utility AI, state machines, a memory of the
+  world, and **group tactics**: a squad leader plans from what it knows,
+  hands out goals with shout or radio delay, and strikes at the same moment.
 - **Square and hex grids** (pointy or flat top, odd or even offset), 4 or 8
   directions, walls between cells, extra costs, zones that cost extra to
   leave (zones of control).
@@ -80,7 +83,7 @@ const way = grid.findPath({ x: 0, y: 0 }, { x: 10, y: 4 }, { output: 'smooth' })
 | Path | What |
 |---|---|
 | `crates/sagax-nav` | the library: `Navigator`, search core, flow fields, smoothing, formations, D* Lite, grids |
-| `crates/sagax-decide` | decisions (utility AI): options x targets, curves, seeded choice |
+| `crates/sagax-decide` | decisions (utility AI), state machines, memory of the world, group tactics |
 | `crates/sagax-ffi` | C interface: `sagax.dll` / `libsagax.so`, header in `include/sagax.h` |
 | `crates/sagax-wasm` | WebAssembly interface |
 | `crates/sagax-core`, `crates/sagax-debug` | diagnostic events and a collector for them |

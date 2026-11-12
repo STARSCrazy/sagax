@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.8.0
+
+- Group tactics, in `sagax-decide` (module `group`): a squad leader plans
+  for a group, the members act on their goals with their own decisions.
+  Integer only, deterministic, wrap-safe time, seeds from the game, fixed
+  sizes.
+  - `Squad`: member list, leader (the next active member takes over when it
+    is lost, the plan stays valid), its own `Knowledge`, `Areas` and inbox
+    (the leader plans only with what it saw or was told), tactic scoring per
+    (tactic, target), planning with think time from skill, `check` (keep,
+    replan, signal), `orders_due`, `signal`, `arrived`.
+  - Orders with a channel per member (shout with a range, radio, none) and
+    a delay from the leader's position. The signal lines up the starts
+    (`AfterTicks`), so all members attack at the same tick.
+  - Tactics as data (slots, scoring, abort rules, trigger) and shipped ones:
+    rush, formation (line, wedge, column), flank (gather, then attack on
+    signal), ambush, focus, isolate, fall back. They work with few or no
+    spot tags (fall back to the nearest spot, then to the wish point).
+  - `SkillTable`: what skill changes (which plan, how fast, how well, how
+    long a goal is held). `GoalKeeper` for the member side, `discipline`,
+    `suspend` / `resume` (the game's orders come first), `gather` (free
+    characters of a faction within a radius).
+  - `Areas::move_cost`, an adapter that turns areas into path costs.
+- Rust `sagax_decide::group`; C `sx_squad_*`, `sx_keeper_*`, `sx_tactic_*`,
+  `sx_gather`, `sx_discipline`, `sx_areas_move_cost`; JavaScript
+  `lib.squad()`, `lib.keeper()`, `lib.tactic()`, `lib.tactics`,
+  `lib.skillTable()`, `lib.discipline()`, `lib.gather()`,
+  `lib.areasMoveCost()`. The JavaScript group wrappers throw on a time or
+  value out of range; the older wrappers still coerce.
+- Examples `squad` (a flank on a small grid: sighting, plan, radio orders,
+  gather, signal, simultaneous attack) and `examples/c/squad.c`; section 8
+  of the guide.
+- C API version 8. `SX_API_VERSION` is now 8, so the version check of a game
+  built with the new header refuses an older library; the functions are
+  additive.
+
 ## 0.7.0
 
 - Memory of the world, in `sagax-decide` (module `memory`), built from generic

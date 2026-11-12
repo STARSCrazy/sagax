@@ -18,6 +18,7 @@ exact contracts are in `crates/sagax-ffi/include/sagax.h` (C),
 | What should I do, and to whom? | Decisions (utility AI) | `sx_decider_*` | `lib.decider()` |
 | Patrol, chase, search: behaviour over time | State machine | `sx_machine_*` | `lib.machine()` |
 | Who did I see, where, how long ago; where is it dangerous | Memory of the world | `sx_sightings_*`, `sx_zones_*`, ... | `lib.sightings()`, `lib.zones()` |
+| Several characters act together: flank, ambush, advance in line | Group tactics | `sx_squad_*`, `sx_keeper_*`, `sx_gather` | `lib.squad()`, `lib.tactics`, `lib.keeper()` |
 
 Everything works on square and hex grids and in every interface.
 
@@ -733,7 +734,228 @@ The same works on hex grids, since the game converts the cell to a position.
 In JavaScript, call `a.blocks(cell, start, goal)` and `a.cost(cell, start,
 goal)` while building the grid's walls and costs before the search.
 
-## 8. Debugging and logging
+## 8. Group tactics
+
+Several characters should act together: advance side by side, come from
+several sides and strike at the same moment, hold an ambush. Hand-written,
+that is a squad AI per game. The blocks of `sagax_decide::group` give the
+parts: a **squad leader** that plans from what it knows, **goals** that
+reach the members as messages, and **tactics as data**. The game keeps
+control of who is a group and what the roles mean. Same rules as the memory
+blocks: integer only, wrap-safe `u32` time (any unit, all durations the
+same one), seeds from the game, ties to the lower index or id, fixed sizes.
+
+The snippets assume `use sagax_decide::group::*;` and
+`use sagax_decide::memory::*;`.
+
+### Two levels
+
+1. **The rough plan (squad).** The leader picks a tactic and gives every
+   member a *goal*. The plan holds as long as it works.
+2. **Acting in the moment (member).** Each member decides with its own
+   `Decider` (section 6). **The group goal is one option among the others**
+   (shoot, take cover, flee). It normally wins; a surprise makes another
+   option win, and the member picks the goal up again when things calm down.
+
+The member's inputs come from `GoalKeeper::inputs`: has goal, distance to
+the goal spot, goal age, signal given, discipline. Give the goal option the
+*current bonus* of the decider (section 6) so it is not dropped lightly;
+`discipline(skill, &table)` says how much, so elite members cling longer.
+Call `postpone` when another option wins and `resume` when the goal wins
+again. A goal postponed for `give_up_ticks` is *broken*:
+`keeper.broken(now, give_up_ticks)` is your cue to send a
+`REPORT_GOAL_BROKEN` back, and the plan may change.
+
+**The game's orders come first.** `suspend(member)` takes a member out (a
+cut-scene, a player command): it gets no goal, does not count as off plan,
+slot assignment skips it, and its keeper's clock stands still. `resume`
+puts it back. A suspension never produces "goal broken"; only `report`
+does. `GoalKeeper::suspend` / `unsuspend` do the same on the member side.
+
+### The squad and its memory (no cheating)
+
+```rust
+let mut sq = Squad::new(8, 16, 4, 8, Metric::Chebyshev)?;   // members, facts, areas, inbox
+sq.group_mut().add(Member { id: 1, pos: [0, 0, 0], roles: ROLE_RANGED,
+                            skill: 192, state: MemberState::Active });
+sq.set_leader(1);
+sq.set_skill(192);
+sq.set_target_kind(ENEMY);                 // which fact kind counts as a target
+sq.set_channel(2, Channel::Radio { base: 2, per_unit: 1 });
+sq.add_tactic(tactics::flank(3, 4));
+sq.add_tactic(tactics::formation(Shape::Line, 2));
+sq.add_tactic(tactics::rush());
+```
+
+**The leader plans only with what it knows.** The squad keeps its own
+`Knowledge`, `Areas` and inbox. They are filled only by the leader's own
+sightings (`sq.observe(fact, now)`) and by member reports that *arrive*
+(`sq.report(message, arrive_at)`, kinds `REPORT_ENEMY`, `REPORT_DANGER`,
+`REPORT_GOAL_BROKEN`). Targets are read from this memory
+(`sq.targets()`), never from the true world; the game's `extra` row only
+adds columns on top. A shout or radio delay on the report is your own
+`route` / `arrival` from section 7.
+
+**If the leader is lost** (`set_gone`), the next active member in slot order
+takes over. The active plan stays valid: members keep their goals and the
+new leader keeps checking the same plan. A loss counts once in the loss
+column of the abort rules, nothing more. A new plan comes only if the new
+leader's `check` asks for it, and it costs think time as usual. Delays are
+measured from the leader's position.
+
+### Planning, orders, signal
+
+```rust
+// every tick:
+match sq.check(now, &[], &spots, seed)? {
+    Status::Replan(id) => { /* a new plan is pending while the squad "thinks" */ }
+    Status::Signal => { /* the attack starts now */ }
+    Status::Keep | Status::NoPlan => {}
+}
+let mut orders = Vec::new();
+sq.orders_due(now, &mut orders);          // goals whose message has arrived
+for o in &orders { give_to_member(o.member, o.goal); }
+// a member reached its gather spot:
+sq.arrived(member_id, now);
+```
+
+`check` makes the first plan and replans; `plan` forces one. A new plan is
+*pending* for the think time from the skill table (`think_ticks`), then it
+becomes *active* and the orders go out: the leader's at once, the others by
+their `Channel` (`Shout { range }` arrives after one tick per unit of
+distance and only within range, `Radio { base, per_unit }` anywhere, `None`
+never). **Making and spreading a plan costs ticks:** a plan can be stale
+when it arrives, as in a real chain of command.
+
+**Signal and the simultaneous attack.** The shipped flank tactic first
+*gathers*: each slot walks to its gather spot. The trigger
+(`Trigger::AllArrived { max_wait }`) fires when every active member called
+`arrived`, or `max_wait` ticks after the gather orders went out, whichever
+comes first; then `check` returns `Status::Signal`. You can also call
+`sq.signal(now)` by hand (`Trigger::Manual`), or use `TargetInRadius`.
+On the signal each member gets a second order (its place at the target).
+The orders line up: `start` is `AfterTicks(n)`, the time until the slowest
+second order arrives, so **all members start at the same tick** however
+far the radio or shout travels; the member's `start_delay` (the timing
+spread of weak squads) comes on top. See
+`crates/sagax-decide/examples/squad.rs` for the whole scene.
+
+**No "Better" replan after the signal.** Before the signal `check` replans
+when another tactic beats the active one by more than the hold bonus of the
+skill table (no flicker). Once the signal is given, a started attack is
+carried through; only an abort rule (own losses, members off plan, target
+gone for too long) ends it.
+
+### Skill
+
+One `skill: u8` for the squad (0 weak, 255 elite) and one per member. The
+`SkillTable` (four levels, `skill / 64`, every number can be changed) sets:
+
+| What | Weak squad | Elite squad |
+|---|---|---|
+| Which tactics it knows | only those with a low `min_skill` (rush) | all |
+| How it picks | weighted among the top 3 | the best |
+| Think time before a plan is active | long (`think_ticks`, 34) | short (5) |
+| Spot choice | up to `spot_rank_error` ranks off (2) | the best spot |
+| Start of the attack | spread by `timing_spread` (17) | together |
+| Plan hold bonus / member discipline | 12.5 % | 50 % |
+| Goal given up after | `give_up_ticks` (17) | 68 |
+
+The numbers in brackets are the defaults, in ticks. All random effects use
+the caller's seed mixed with member index and tick, so a replay is
+identical. Weak enemies therefore look weak: they plan late, take poor
+spots, start unevenly and give up their goal sooner. The defaults assume
+about 17 ticks per second; scale them for your time unit.
+
+### Spots with few tags
+
+The game passes candidate spots, `Spot { pos, tags }` (cover, high, hidden,
+choke, your own bits). A tactic computes a *wish point* (front, left, right,
+rear of the target, between target and its friends, a formation offset) and
+takes the best spot near it. Spots are picked, never invented. **Every
+shipped tactic works when a tag is missing:** it falls back to the nearest
+free spot, and without any spot to the wish point itself, flagged
+`unchecked` on the goal so you can verify it. A game that knows only "free",
+"high" and "choke" can pass tags 0 everywhere and still get plans.
+
+### Group kinds are your business
+
+The member list is fixed and finished; Sagax does not decide who belongs.
+`gather(...)` (C `sx_gather`, JS `lib.gather`) is a helper for the common
+case: the free characters of a faction within a radius of an initiator,
+nearest first, ties to the lower id. Use it for "call the 3 nearest free
+members", "everybody of the faction within the shout range" or a travelling
+party; nobody forces you to.
+
+### Areas to path costs
+
+Danger areas the squad remembers (`sq.areas()`, filled from
+`REPORT_DANGER`) and the game's own `Areas` become path costs with
+`Areas::move_cost(from, to, start, goal)` (Rust), `sx_areas_move_cost`
+(C) and `lib.areasMoveCost(areas, from, to, start, goal)` (JS). Only the
+cell moved to is judged: blocked by an area that holds neither start nor
+goal gives `None` / `-1`, otherwise the extra cost (at most `INT32_MAX - 1`
+in C). The level is the `z` coordinate. A "go around the place the shooter
+stood" route needs nothing else.
+
+In C, `map.move_cost = sx_areas_move_cost` with `map.context` pointing to an
+`sx_areas_cost_ctx` (areas, start, goal) is enough when the map has no other
+context. **The context is shared with the map's other callbacks:** if your
+`step` callback needs its own, do not set `sx_areas_move_cost` directly;
+call it from your own `move_cost` with a prepared `sx_areas_cost_ctx`:
+
+```c
+static int32_t my_move_cost(void *ctx, int32_t x, int32_t y, int32_t lv,
+                            int32_t tx, int32_t ty, int32_t tl) {
+	struct game *g = ctx;                      /* g->cost: an sx_areas_cost_ctx */
+	return sx_areas_move_cost(&g->cost, x, y, lv, tx, ty, tl);
+}
+```
+
+### The same in C and JavaScript
+
+```c
+sx_squad *sq = sx_squad_new(8, 16, 4, 8, SX_METRIC_CHEBYSHEV);
+sx_member m = { .id = 1, .roles = SX_ROLE_RANGED, .skill = 192 };
+sx_squad_add_member(sq, &m);
+sx_squad_set_leader(sq, 1);
+sx_squad_set_skill(sq, 192);
+sx_squad_add_shipped(sq, SX_TACTIC_FLANK, 4);
+uint32_t plan_id;
+int32_t st = sx_squad_check(sq, now, NULL, 0, spots, n_spots, seed, &plan_id);
+sx_order due[8];
+int32_t n = sx_squad_orders_due(sq, now, due, 8);
+```
+
+```js
+const sq = lib.squad({ groupCap: 8, memoryCap: 16, areaCap: 4, inboxCap: 8, metric: 'chebyshev' });
+sq.addMember({ id: 1, pos: [0, 0, 0], roles: SQUAD.roleRanged, skill: 192 });
+sq.setLeader(1); sq.setSkill(192); sq.setTargetKind(ENEMY);
+sq.addTactic(lib.tactics.flank(3, 4));
+sq.observe({ subject: 9, kind: ENEMY, pos: [20, 0, 0], seenAt: now }, now);
+const { status } = sq.check(now, { spots, seed });        // 'keep' | 'replan' | 'signal' | 'noPlan'
+for (const order of sq.ordersDue(now)) give(order);
+```
+
+The tactics are data: `lib.tactic(...)` / `sx_squad_add_tactic` build your
+own from slots (role bits, count, place, goal kind, start), scoring
+considerations over the row (`SQUAD.inLosses`, `inTargetDist`, ...), abort
+rules and a trigger. `validate` finds a tactic that reads a column the row
+does not have.
+
+**JavaScript note:** the group wrappers (`Squad`, `Keeper`, tactics,
+`gather`) throw `RangeError` on a time outside `0 .. 2^32 - 1`, an id or
+skill out of range and so on. The older wrappers coerce such values quietly;
+the new ones do not, because a wrong time would silently skew every age.
+
+### Debugging the plan
+
+`validate` before the first tick, then watch `Status` and `active_plan()` /
+`pending_plan()` (tactic, target, think time, when it became active). The
+example `squad` prints the whole sequence: sighting, plan, orders by radio,
+arrival at the gather spots, signal, attack.
+
+## 9. Debugging and logging
 
 Tracing hands every step of a search to you: `started`, `expanded` (cost now
 final), `improved` (reached more cheaply, with the parent cell), `paused`
@@ -761,7 +983,7 @@ Typical uses: colour the expanded cells to see why a search is slow, log
 the `finished` event with `expanded` to find costly searches, and follow
 `improved` to see why a way goes where it goes.
 
-## 9. Pitfalls
+## 10. Pitfalls
 
 - Costs are integers ≥ 0. `move_cost` is an *extra* on top of the step cost.
 - `SX_ANY_LEVEL` (-1, Rust `ANY_LEVEL`) as goal level means any level; D*

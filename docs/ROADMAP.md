@@ -8,11 +8,13 @@
   visibly poor ways.
 - **Faster D\* Lite**: after a change some neighbours are asked twice. A
   per-edge cost query would avoid that.
-- **Decisions, next steps:** memory of the world is done (0.7.0, generic
-  blocks for turn-based, real-time, stealth and action games). Next: a group
-  block (rally point, calls to the nearest, shared orders), then a mission /
-  intention planner.
+- **Decisions, next steps:** memory of the world (0.7.0) and group tactics
+  (0.8.0: squad leader, orders, signal, skill) are done. Next: a mission /
+  intention planner that hands goals to groups the way groups hand goals to
+  members.
 - **Perception** (sight lines, cover, flanks), on the same `sagax-core`.
+  Later, with it: *indirect coordination*, where characters see allies
+  attack or flee and join in, only when they actually saw it.
 
 Known limits: flow fields and D* Lite assume moves that work both ways.
 One-way moves (zones with a leave cost, one-sided walls) make their costs
