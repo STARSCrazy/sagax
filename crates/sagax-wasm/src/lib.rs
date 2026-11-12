@@ -1454,8 +1454,14 @@ fn area_of(r: &[u32; AREA_SIZE]) -> Area {
 /// (the squad's own memory, see [`sx_squad_knowledge`]).
 enum Held<T> {
     Own(T),
-    /// Points into a [`WasmSquad`], which outlives the handle (it frees it).
-    Lent(*mut T),
+    /// Lent by a [`WasmSquad`], which outlives the handle (it frees it).
+    /// Only the squad's root pointer is kept: the table is reached through
+    /// it anew on every call, so no pointer into the squad is held across
+    /// calls that borrow the squad itself.
+    Lent {
+        root: *mut WasmSquad,
+        get: fn(&mut Squad) -> &mut T,
+    },
 }
 
 impl<T> std::ops::Deref for Held<T> {
@@ -1463,9 +1469,10 @@ impl<T> std::ops::Deref for Held<T> {
     fn deref(&self) -> &T {
         match self {
             Self::Own(t) => t,
-            // SAFETY: a lent pointer is valid while its squad lives, and the
-            // squad frees the handle with itself.
-            Self::Lent(p) => unsafe { &**p },
+            // SAFETY: the root is valid while its squad lives, and the squad
+            // frees the handle with itself; JS is single threaded, so no
+            // other reference into the squad is alive during a call.
+            Self::Lent { root, get } => get(unsafe { &mut (**root).squad }),
         }
     }
 }
@@ -1474,9 +1481,8 @@ impl<T> std::ops::DerefMut for Held<T> {
     fn deref_mut(&mut self) -> &mut T {
         match self {
             Self::Own(t) => t,
-            // SAFETY: as in `deref`; JS is single threaded, so no other
-            // reference into the squad is alive during a call.
-            Self::Lent(p) => unsafe { &mut **p },
+            // SAFETY: as in `deref`.
+            Self::Lent { root, get } => get(unsafe { &mut (**root).squad }),
         }
     }
 }
@@ -1529,7 +1535,7 @@ pub unsafe extern "C" fn sx_knowledge_free(k: *mut WasmKnowledge) {
         // A squad's own memory is freed with the squad.
         None
         | Some(WasmKnowledge {
-            knowledge: Held::Lent(_),
+            knowledge: Held::Lent { .. },
             ..
         }) => {}
         // SAFETY: see above.
@@ -2041,7 +2047,7 @@ pub unsafe extern "C" fn sx_areas_free(a: *mut WasmAreas) {
         // A squad's own memory is freed with the squad.
         None
         | Some(WasmAreas {
-            areas: Held::Lent(_),
+            areas: Held::Lent { .. },
             ..
         }) => {}
         // SAFETY: see above.
@@ -2454,8 +2460,9 @@ const SPOT_SIZE: usize = 4;
 /// Numbers per gather candidate: id, faction, x, y, z, free.
 const CANDIDATE_SIZE: usize = 6;
 /// Numbers per slot record: roles, min, max, place (kind, x, y, z, value),
-/// gather (the same five), kind, custom, start, start ticks, want tags, dist.
-const SLOT_SIZE: usize = 19;
+/// gather (the same five), kind, custom, start, start ticks, want tags, dist,
+/// gather dist.
+const SLOT_SIZE: usize = 20;
 /// Numbers per goal record: kind, custom, x, y, z, then x, y, z, target,
 /// start, start ticks, slot, plan, issued at, start delay, has pos,
 /// unchecked, has then pos, then unchecked, has target.
@@ -2592,6 +2599,7 @@ fn slot_of(r: &[i32]) -> Option<Slot> {
         start: start_of(r[15], r[16])?,
         want_tags: r[17] as u32,
         dist: r[18],
+        gather_dist: r[19],
     })
 }
 
@@ -2731,8 +2739,9 @@ pub extern "C" fn sx_gather(
 
 /// The extra cost of the move from cell to cell (see `Areas::move_cost`);
 /// reads 12 integers from the scratch buffer (from, to, start, goal).
-/// Returns 0 if blocked, else 1 with the cost (a `u32`) in the first
-/// number of the scratch buffer; -1 on bad arguments.
+/// Returns 0 if blocked, else 1 with the cost (at most `i32::MAX - 1`, as
+/// in C) in the first number of the scratch buffer; -1 on bad arguments.
+/// The areas and cells are in the same (cell) coordinates.
 ///
 /// # Safety
 /// `a` from [`sx_areas_new`] or [`sx_squad_areas`].
@@ -2745,7 +2754,7 @@ pub unsafe extern "C" fn sx_areas_move_cost(a: *mut WasmAreas) -> i32 {
     let cell = |i: usize| [p[i], p[i + 1], p[i + 2]];
     match w.areas.move_cost(cell(0), cell(3), cell(6), cell(9)) {
         Some(cost) => {
-            scratch_put(&[cost as i32]);
+            scratch_put(&[cost.min(i32::MAX as u32 - 1) as i32]);
             1
         }
         None => 0,
@@ -2965,14 +2974,19 @@ pub extern "C" fn sx_squad_new(
     // SAFETY: `s` was just made; the squad stays at this address until
     // sx_squad_free, which frees the two handles first.
     unsafe {
-        let squad = &raw mut (*s).squad;
         (*s).knowledge = Box::into_raw(Box::new(WasmKnowledge {
-            knowledge: Held::Lent(std::ptr::from_mut((*squad).knowledge_mut())),
+            knowledge: Held::Lent {
+                root: s,
+                get: Squad::knowledge_mut,
+            },
             record: [0; FACT_SIZE],
             out: Vec::new(),
         }));
         (*s).areas = Box::into_raw(Box::new(WasmAreas {
-            areas: Held::Lent(std::ptr::from_mut((*squad).areas_mut())),
+            areas: Held::Lent {
+                root: s,
+                get: Squad::areas_mut,
+            },
             record: [0; AREA_SIZE],
         }));
     }
@@ -3075,13 +3089,14 @@ pub unsafe extern "C" fn sx_squad_suspend(s: *mut WasmSquad, id: u32) -> i32 {
     i32::from(squad!(s).squad.group_mut().suspend(id))
 }
 
-/// Puts a suspended member back; 1, or 0 if unknown.
+/// Puts a member back and, if it was suspended, sends it its goal of the
+/// active plan (see `Squad::resume`); 1, or 0 if unknown.
 ///
 /// # Safety
 /// `s` from [`sx_squad_new`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_squad_resume(s: *mut WasmSquad, id: u32) -> i32 {
-    i32::from(squad!(s).squad.group_mut().resume(id))
+pub unsafe extern "C" fn sx_squad_resume(s: *mut WasmSquad, id: u32, now: u32) -> i32 {
+    i32::from(squad!(s).squad.resume(id, now))
 }
 
 /// Marks a member dead or lost; 1, or 0 if unknown.
@@ -3252,13 +3267,39 @@ pub unsafe extern "C" fn sx_squad_set_target_kind(s: *mut WasmSquad, kind: u32) 
     0
 }
 
-/// How many of the game's own columns each scoring row has. Returns 0.
+/// How many of the game's own columns each scoring row has. Returns 0; -1
+/// above `MAX_EXTRA_COLUMNS` (nothing changes).
 ///
 /// # Safety
 /// `s` from [`sx_squad_new`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_set_extra_columns(s: *mut WasmSquad, count: u32) -> i32 {
-    squad!(s).squad.set_extra_columns(count as usize);
+    if squad!(s).squad.set_extra_columns(count as usize) {
+        0
+    } else {
+        ERROR_ARGUMENT
+    }
+}
+
+/// How far a spot may be from a slot's wish point; negative: the default
+/// (3 * the slot's dist). Returns 0; -1 above `u32::MAX` or not a whole
+/// number.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_spot_radius(s: *mut WasmSquad, radius: f64) -> i32 {
+    let w = squad!(s);
+    if radius.fract() != 0.0 || radius.is_nan() {
+        return ERROR_ARGUMENT;
+    }
+    if radius < 0.0 {
+        w.squad.set_spot_radius(None);
+    } else if radius <= f64::from(u32::MAX) {
+        w.squad.set_spot_radius(Some(radius as u32));
+    } else {
+        return ERROR_ARGUMENT;
+    }
     0
 }
 
@@ -3336,7 +3377,11 @@ pub unsafe extern "C" fn sx_squad_add_tactic(s: *mut WasmSquad, t: *mut WasmTact
 
 /// [`ERROR_PLAN`] with the tactic and column in the out buffer.
 fn plan_error(w: &mut WasmSquad, e: PlanError) -> i32 {
-    let PlanError::InputOutOfRange { tactic, input } = e;
+    let (tactic, input) = match e {
+        PlanError::InputOutOfRange { tactic, input } => (tactic, input),
+        // No column: -1 in the out buffer.
+        PlanError::TooManySlots { tactic } => (tactic, u32::MAX),
+    };
     w.out.clear();
     w.out.extend([to_i32(tactic), input as i32]);
     ERROR_PLAN
@@ -3451,6 +3496,18 @@ pub unsafe extern "C" fn sx_squad_check(
 pub unsafe extern "C" fn sx_squad_orders_due(s: *mut WasmSquad, now: u32, max: u32) -> i32 {
     let w = squad!(s);
     w.squad.orders_due(now, &mut w.due);
+    // Orders held back from an earlier call may be stale by now: drop those
+    // of another plan and of members no longer active.
+    let squad = &w.squad;
+    let plan = squad.active_plan().map(|p| p.id);
+    w.due.retain(|o| {
+        let active = squad
+            .group()
+            .index(o.member)
+            .and_then(|i| squad.group().get(i))
+            .is_some_and(|m| m.state == MemberState::Active);
+        active && Some(o.goal.plan) == plan
+    });
     let n = w.due.len().min(max as usize);
     w.out.clear();
     for o in w.due.drain(..n) {

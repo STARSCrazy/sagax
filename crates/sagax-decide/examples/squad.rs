@@ -173,7 +173,10 @@ fn run_scene(end: u32) -> Vec<Event> {
                 at = step_toward(at, to);
                 sq.group_mut().set_pos(w.id, at);
             }
-            if o.goal.start == Start::OnSignal && !w.gathered && at == to {
+            // A gather order names its second spot; a hold-until-signal
+            // order waits where it is sent.
+            let gathering = o.goal.then_pos.is_some() || o.goal.start == Start::OnSignal;
+            if gathering && !w.gathered && at == to {
                 w.gathered = true;
                 sq.arrived(w.id, t);
                 ev.push(Event::Arrived { t, member: w.id });

@@ -181,8 +181,11 @@ pub struct SxSlot {
     pub start_ticks: u32,
     /// Tag bits a spot should have.
     pub want_tags: u32,
-    /// Distance from the target for sides and between.
+    /// Distance from the target for sides and between (also sets the spot
+    /// radius).
     pub dist: i32,
+    /// Like `dist`, for the gather place.
+    pub gather_dist: i32,
 }
 
 impl SxSlot {
@@ -197,6 +200,7 @@ impl SxSlot {
             start: start_of(self.start, self.start_ticks)?,
             want_tags: self.want_tags,
             dist: self.dist,
+            gather_dist: self.gather_dist,
         })
     }
 }
@@ -691,8 +695,8 @@ pub unsafe extern "C" fn sx_squad_suspend(squad: *mut SxSquad, id: u32) -> i32 {
 /// # Safety
 /// `squad` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_squad_resume(squad: *mut SxSquad, id: u32) -> i32 {
-    i32::from(squad!(squad).group_mut().resume(id))
+pub unsafe extern "C" fn sx_squad_resume(squad: *mut SxSquad, id: u32, now: u32) -> i32 {
+    i32::from(squad!(squad).resume(id, now))
 }
 
 /// `sx_squad_set_gone`.
@@ -918,11 +922,39 @@ pub unsafe extern "C" fn sx_squad_set_target_kind(squad: *mut SxSquad, kind: u32
 /// `squad` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_set_extra_columns(squad: *mut SxSquad, count: u32) -> i32 {
-    squad!(squad).set_extra_columns(count as usize);
-    0
+    if squad!(squad).set_extra_columns(count as usize) {
+        0
+    } else {
+        ERROR_ARGUMENT
+    }
+}
+
+/// `sx_squad_set_spot_radius`.
+///
+/// # Safety
+/// `squad` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_spot_radius(squad: *mut SxSquad, radius: i64) -> i32 {
+    let s = &mut squad!(squad);
+    if radius < 0 {
+        s.set_spot_radius(None);
+        return 0;
+    }
+    match u32::try_from(radius) {
+        Ok(r) => {
+            s.set_spot_radius(Some(r));
+            0
+        }
+        Err(_) => ERROR_ARGUMENT,
+    }
 }
 
 /// `sx_squad_knowledge`: the leader's knowledge, owned by the squad.
+///
+/// The pointer aliases the squad: it is valid until the squad is freed, and
+/// is only used while no other call on this squad runs (the C interface is
+/// single-threaded per handle). It must not be passed to
+/// `sx_knowledge_free`.
 ///
 /// # Safety
 /// `squad` is null or valid.
@@ -937,6 +969,9 @@ pub unsafe extern "C" fn sx_squad_knowledge(squad: *mut SxSquad) -> *mut SxKnowl
 }
 
 /// `sx_squad_areas`: the leader's danger areas, owned by the squad.
+///
+/// Aliases the squad as [`sx_squad_knowledge`] does; never pass it to
+/// `sx_areas_free`.
 ///
 /// # Safety
 /// `squad` is null or valid.
@@ -1042,10 +1077,10 @@ pub unsafe extern "C" fn sx_squad_add_tactic(squad: *mut SxSquad, tactic: *mut S
 /// # Safety
 /// `tactic` and `input` are null or writable.
 unsafe fn plan_error(e: PlanError, tactic: *mut u32, input: *mut u32) -> i32 {
-    let PlanError::InputOutOfRange {
-        tactic: t,
-        input: i,
-    } = e;
+    let (t, i) = match e {
+        PlanError::InputOutOfRange { tactic, input } => (tactic, input),
+        PlanError::TooManySlots { tactic } => (tactic, u32::MAX),
+    };
     // SAFETY: see above.
     unsafe {
         put(tactic, u32::try_from(t).unwrap_or(u32::MAX));
@@ -1179,6 +1214,18 @@ pub unsafe extern "C" fn sx_squad_orders_due(
         return ERROR_ARGUMENT;
     }
     s.squad.orders_due(now, &mut s.due);
+    // Orders held back from an earlier call may be stale by now: drop those
+    // of another plan and of members no longer active.
+    let squad = &s.squad;
+    let plan = squad.active_plan().map(|p| p.id);
+    s.due.retain(|o| {
+        let active = squad
+            .group()
+            .index(o.member)
+            .and_then(|i| squad.group().get(i))
+            .is_some_and(|m| m.state == MemberState::Active);
+        active && Some(o.goal.plan) == plan
+    });
     let n = s.due.len().min(cap as usize);
     for (i, o) in s.due.drain(..n).enumerate() {
         // SAFETY: within `cap` (see above).

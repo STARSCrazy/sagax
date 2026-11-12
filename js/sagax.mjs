@@ -1428,14 +1428,15 @@ Object.assign(Sagax.prototype, {
 
 /** Columns of the scoring row, role bits, spot tags and report kinds. */
 export const SQUAD = {
-  inLosses: 0, // members marked gone
+  inLosses: 0, // members marked gone and still listed (not reset by a new plan)
   inOffPlan: 1, // active members whose goal of the active plan broke
   inTargetAge: 2, // ticks since the target was seen
   inTargetDist: 3, // group centre to target
   inRanged: 4, // active members with roleRanged
   inArea: 5, // active members with roleArea
   inPlanAge: 6, // ticks since the active plan became active (its own row only)
-  inExtra: 7, // first column of the game's own (setExtraColumns)
+  inTargetFriendDist: 7, // target to its nearest other known target; none: -1
+  inExtra: 8, // first column of the game's own (setExtraColumns)
   roleRanged: 1,
   roleArea: 2,
   tagCover: 1,
@@ -1445,6 +1446,8 @@ export const SQUAD = {
   reportGoalBroken: 1, // sender: the member; data: the plan id of its goal
   reportEnemy: 2, // subject, pos, seenAt, strength, data: a target (told)
   reportDanger: 3, // pos: the danger's centre; the shooter at x = strength, y = data
+  reportArrived: 4, // sender: the member; data: the plan id: at its gather spot
+  maxExtraColumns: 1024, // most columns setExtraColumns takes
 };
 
 const ERROR_PLAN = -3;
@@ -1616,12 +1619,17 @@ function slotValues(s) {
     ...placeValues(s.place, false), ...placeValues(s.gather ?? { kind: 'none' }, true),
     kind, kind === GOAL_KIND.custom ? u32Of(s.custom ?? 0, 'custom') : 0,
     ...startValues(s.start), u32Of(s.wantTags ?? 0, 'wantTags'), i32Of(s.dist ?? 0, 'dist'),
+    i32Of(s.gatherDist ?? s.dist ?? 0, 'gatherDist'),
   ].map(i32);
 }
 
-/** The seed as two u32 halves. */
+/** The seed (a safe integer, or a BigInt for the full 64 bits) as two u32 halves. */
 function seedOf(seed) {
-  if (!Number.isSafeInteger(seed) || seed < 0) throw new RangeError('Sagax: seed must be a safe integer, 0 or more');
+  if (typeof seed === 'bigint') {
+    if (seed < 0n || seed > 0xffffffffffffffffn) throw new RangeError('Sagax: a BigInt seed must be 0 .. 2^64 - 1');
+    return [Number(seed & 0xffffffffn), Number(seed >> 32n)];
+  }
+  if (!Number.isSafeInteger(seed) || seed < 0) throw new RangeError('Sagax: seed must be a safe integer or a BigInt, 0 or more');
   return [seed % 0x100000000, Math.floor(seed / 0x100000000)];
 }
 
@@ -1644,7 +1652,10 @@ export class Tactic extends Table {
   /**
    * Adds a slot and returns its index. A slot: {roles = 0, min = 1, max = 1,
    * place, gather = {kind: 'none'}, kind = 'move', custom = 0,
-   * start = {kind: 'now'}, wantTags = 0, dist = 0}. A place: {kind: 'offset',
+   * start = {kind: 'now'}, wantTags = 0, dist = 0, gatherDist = dist}. dist:
+   * from the target for 'side' and 'between' places (spots count within
+   * 3 * dist of the wish point, see Squad.setSpotRadius); gatherDist: the
+   * same for the gather place. A place: {kind: 'offset',
    * pos: [x, y, z]} (from the leader, +x toward the target, +y to its left),
    * {kind: 'side', side: 'front'|'left'|'right'|'rear'}, {kind: 'between'},
    * {kind: 'tagged', tags}, {kind: 'here'}; gather may also be {kind: 'none'}.
@@ -1746,9 +1757,13 @@ export class Squad extends Table {
     return this.x.sx_squad_suspend(this.h, u32Of(id, 'id')) === 1;
   }
 
-  /** Puts a suspended member back. False if unknown. */
-  resume(id) {
-    return this.x.sx_squad_resume(this.h, u32Of(id, 'id')) === 1;
+  /**
+   * Puts a member back into play and, if it was suspended, sends it its goal
+   * of the active plan at now over its channel (after the signal: the
+   * signal order). False if unknown.
+   */
+  resume(id, now) {
+    return this.x.sx_squad_resume(this.h, u32Of(id, 'id'), timeOf(now)) === 1;
   }
 
   /** Marks a member dead or lost (counts in SQUAD.inLosses). False if unknown. */
@@ -1831,9 +1846,22 @@ export class Squad extends Table {
     this.x.sx_squad_set_target_kind(this.h, u32Of(kind, 'kind'));
   }
 
-  /** How many of the game's own columns each scoring row has from SQUAD.inExtra on (default 0). */
+  /** How many of the game's own columns each scoring row has from SQUAD.inExtra on (default 0, at most SQUAD.maxExtraColumns). */
   setExtraColumns(count) {
-    this.x.sx_squad_set_extra_columns(this.h, u32Of(count, 'count'));
+    if (this.x.sx_squad_set_extra_columns(this.h, u32Of(count, 'count')) !== 0) {
+      throw new RangeError(`Sagax: at most ${SQUAD.maxExtraColumns} extra columns`);
+    }
+  }
+
+  /**
+   * How far (inclusive, x and y in the squad's metric) a spot may be from a
+   * slot's wish point to be taken; beyond it a spot does not count, and with
+   * none within the wish point is used unchecked. null: the default, 3 * the
+   * slot's dist (at least 1).
+   */
+  setSpotRadius(radius) {
+    const r = radius === null ? -1 : u32Of(radius, 'radius');
+    this.x.sx_squad_set_spot_radius(this.h, r);
   }
 
   /** The squad's own knowledge (a Knowledge; it is freed with the squad). */
@@ -1876,13 +1904,14 @@ export class Squad extends Table {
   /** Takes a tactic over (it cannot be used afterwards). Returns its index. */
   addTactic(tactic) {
     if (!(tactic instanceof Tactic)) throw new TypeError('Sagax: addTactic takes a Tactic');
+    if (!tactic.handle) throw new Error('Sagax: this tactic was already given to a squad (or freed)');
     const t = tactic.h;
     const r = this.x.sx_squad_add_tactic(this.h, t);
     tactic.handle = 0;
     return this.#checked(r);
   }
 
-  /** null if every consideration reads a column the rows have, else {tactic, input}. */
+  /** null if every consideration reads a column the rows have and no tactic has more than 255 slots, else {tactic, input} (input 4294967295 for too many slots). */
   validate() {
     if (this.x.sx_squad_validate(this.h) === 0) return null;
     const [tactic, input] = this.#out(2);
@@ -1937,7 +1966,7 @@ export class Squad extends Table {
     return this.x.sx_squad_signal_given(this.h) === 1;
   }
 
-  /** The member reached its first spot (for the 'allArrived' trigger). False if it has no goal in the active plan. */
+  /** The member reached its first spot (for the 'allArrived' trigger), seen by the leader at once; a member that must tell the leader sends a SQUAD.reportArrived report instead. False if it has no goal in the active plan. */
   arrived(id, now) {
     return this.x.sx_squad_arrived(this.h, u32Of(id, 'id'), timeOf(now)) === 1;
   }
@@ -2089,7 +2118,8 @@ Object.assign(Sagax.prototype, {
   /**
    * The extra cost of the move from -> to for a path search (only the cell
    * moved to counts): null if a blocking area holds it but neither start nor
-   * goal, else the cost as for Areas.cost.
+   * goal, else the cost as for Areas.cost, at most 2^31 - 2 (as in C). The
+   * areas must be in the same (cell) coordinates as the cells.
    */
   areasMoveCost(areas, from, to, start, goal) {
     if (!(areas instanceof Areas)) throw new TypeError('Sagax: areasMoveCost takes an Areas');

@@ -1139,7 +1139,7 @@ test('tactics: shipped ones and the custom builder, taken over by a squad', () =
   const t = lib.tactics;
   const all = [t.rush(), t.formation('line', 2), t.formation('wedge', 2), t.formation('column', 2), t.flank(2, 4), t.flank(3, 4), t.ambush(), t.focus(), t.isolate(), t.fallBack()];
   all.forEach((tactic, i) => assert.equal(sq.addTactic(tactic), i));
-  assert.throws(() => sq.addTactic(all[0]), /free/, 'a tactic is taken over once');
+  assert.throws(() => sq.addTactic(all[0]), /already given to a squad/, 'a tactic is taken over once');
   assert.throws(() => t.formation('ring', 2), RangeError);
   // custom: one slot that holds a tagged spot, scored by distance, ends on losses
   const c = lib.tactic({ weight: 0.5, minSkill: 0, needsTarget: true });
@@ -1191,7 +1191,8 @@ test('squad: members, leader, skill, skill table, channels, validated', () => {
   assert.equal(sq.setPos(3, [7, -8, 1]), true);
   assert.equal(sq.setPos(9, [0, 0, 0]), false);
   assert.deepEqual(sq.members()[2].pos, [7, -8, 1]);
-  assert.equal(sq.resume(2), true);
+  assert.equal(sq.resume(2, 0), true);
+  assert.equal(sq.resume(9, 0), false);
   assert.equal(sq.suspend(3), true);
   assert.equal(sq.leader(), 1, 'a suspended leader does not act');
   assert.equal(sq.setGone(1), true);
@@ -1274,7 +1275,7 @@ test('areasMoveCost: blocked is null, else the cost of the cell moved to', () =>
   const s = lib.areas(2);
   s.add({ kind: 1, pos: [0, 0, 0], radius: 100, lifetime: 255, strength: 4294967295 }, 0);
   s.add({ kind: 2, pos: [0, 0, 0], radius: 100, lifetime: 255, strength: 9 }, 0);
-  assert.equal(lib.areasMoveCost(s, [0, 0, 0], [10, 0, 0], start, goal), 4294967295, 'saturates, unsigned');
+  assert.equal(lib.areasMoveCost(s, [0, 0, 0], [10, 0, 0], start, goal), 2 ** 31 - 2, 'saturates as in C');
   z.free();
   assert.throws(() => lib.areasMoveCost(z, [0, 0, 0], [0, 0, 0], start, goal), /free/);
 });
@@ -1315,8 +1316,8 @@ test('plans: goals, orders by channel, signal lines up the start, errors', () =>
   bad.addConsideration({ input: SQUAD.inExtra + 1, curve: 'linear', min: 0, max: 10 });
   sq.addTactic(bad);
   assert.deepEqual(sq.validate(), { tactic: 1, input: SQUAD.inExtra + 1 });
-  assert.throws(() => sq.plan(30), /tactic 1 reads column 8/);
-  assert.throws(() => sq.check(30), /tactic 1 reads column 8/);
+  assert.throws(() => sq.plan(30), /tactic 1 reads column 9/);
+  assert.throws(() => sq.check(30), /tactic 1 reads column 9/);
   sq.setExtraColumns(2);
   assert.equal(sq.validate(), null);
   assert.equal(typeof sq.plan(30, { extra: [0, 0, 1, 1], spots: [{ pos: [1, 1, 0], tags: 0 }], seed: 2 ** 40 }), 'number');
@@ -1325,6 +1326,82 @@ test('plans: goals, orders by channel, signal lines up the start, errors', () =>
   assert.throws(() => sq.plan(0, { seed: -1 }), RangeError);
   assert.throws(() => sq.plan(0, { spots: [{ pos: [0, 0, 0], tags: -1 }] }), RangeError);
   assert.throws(() => sq.plan(0, { extra: [2 ** 31] }), RangeError);
+  // BigInt seeds take the full 64 bits
+  assert.equal(typeof sq.plan(31, { extra: [0, 0, 1, 1], seed: 0xffffffffffffffffn }), 'number');
+  assert.throws(() => sq.plan(0, { seed: -1n }), RangeError);
+  assert.throws(() => sq.plan(0, { seed: 2n ** 64n }), RangeError);
+  // extra columns are bounded
+  sq.setExtraColumns(SQUAD.maxExtraColumns);
+  assert.throws(() => sq.setExtraColumns(SQUAD.maxExtraColumns + 1), RangeError);
+  sq.free();
+});
+
+/** An elite squad of four with rush and a 2-side flank, enemy 10 at (20, 0), all hearing at once; the flank is active at 5. */
+function activeFlank() {
+  const sq = squadOf('euclid', [[1, 0, 0], [2, 1, 0], [3, 0, 1], [4, 1, 1]], { radio: false });
+  sq.addTactic(lib.tactics.rush());
+  sq.addTactic(lib.tactics.flank(2, 4));
+  sq.setSkill(255);
+  sq.observe(enemy(10, 20, 0), 0);
+  const { status, plan } = sq.check(0);
+  assert.equal(status, 'replan');
+  assert.deepEqual(sq.check(5), { status: 'keep', plan: null });
+  return [sq, plan];
+}
+
+test('gather orders, arrival reports, resume, stale orders, spot radius', () => {
+  let [sq, id] = activeFlank();
+  // gather first: move now to the gather spot, 2 * dist out; attack on the signal
+  const first = sq.ordersDue(5);
+  assert.equal(first.length, 4);
+  for (const o of first) {
+    assert.deepEqual([o.kind, o.start.kind, o.plan], ['move', 'now', id]);
+    assert.notEqual(o.thenPos, null);
+  }
+  assert.deepEqual(first.map((o) => Math.abs(o.pos[1])).sort(), [8, 8, 8, 8]);
+  // arrival reports count once they are in
+  for (const m of [1, 2, 3, 4]) assert.equal(sq.report({ kind: SQUAD.reportArrived, sender: m, data: id }, 20), true);
+  assert.equal(sq.check(19).status, 'keep');
+  assert.equal(sq.check(20).status, 'signal');
+  const attack = sq.ordersDue(20);
+  assert.deepEqual(attack.map((o) => o.kind), ['attack', 'attack', 'attack', 'attack']);
+  // a member back after the signal gets the attack order again
+  assert.equal(sq.suspend(3), true);
+  assert.equal(sq.resume(3, 30), true);
+  const again = sq.ordersDue(30);
+  assert.deepEqual(again.map((o) => [o.member, o.kind, o.plan]), [[3, 'attack', id]]);
+  sq.free();
+
+  // orders held back beyond max go stale when their member leaves play
+  [sq, id] = activeFlank();
+  const one = sq.ordersDue(5, 1);
+  assert.equal(one.length, 1);
+  for (const m of [1, 2, 3, 4]) if (m !== one[0].member) sq.suspend(m);
+  assert.deepEqual(sq.ordersDue(5), []);
+  sq.free();
+
+  // a spot beyond the radius does not count
+  sq = squadOf('euclid', [[1, 0, 0]]);
+  sq.addTactic(lib.tactics.rush());
+  sq.observe(enemy(10, 20, 0), 0);
+  const spots = [{ pos: [14, 0, 0], tags: 0 }];
+  sq.plan(0, { spots });
+  assert.deepEqual([sq.pendingPlan().goals[0].pos, sq.pendingPlan().goals[0].unchecked], [[19, 0, 0], true]);
+  sq.setSpotRadius(5);
+  sq.plan(0, { spots });
+  assert.deepEqual([sq.pendingPlan().goals[0].pos, sq.pendingPlan().goals[0].unchecked], [[14, 0, 0], false]);
+  sq.setSpotRadius(null);
+  assert.throws(() => sq.setSpotRadius(-1), RangeError);
+  // a custom slot gathers at its dist unless gatherDist says otherwise
+  const t = lib.tactic({ weight: 1 });
+  assert.equal(t.addSlot({ place: { kind: 'side', side: 'left' }, gather: { kind: 'side', side: 'left' }, dist: 2, gatherDist: 6, kind: 'attack', start: { kind: 'signal' } }), 0);
+  const only = squadOf('chebyshev', [[1, 0, 0]]);
+  only.addTactic(t);
+  only.observe(enemy(10, 20, 0), 0);
+  only.plan(0);
+  const g = only.pendingPlan().goals[0];
+  assert.deepEqual([g.pos, g.thenPos], [[20, 6, 0], [20, 2, 0]]);
+  only.free();
   sq.free();
 });
 

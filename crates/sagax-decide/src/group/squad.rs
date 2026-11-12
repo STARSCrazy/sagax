@@ -8,7 +8,10 @@ use crate::memory::{
 };
 use crate::{Candidate, Decider, INPUT_SINCE_OPTION, choose, mix};
 
-/// Built-in row column: own losses (members marked gone).
+/// Built-in row column: own losses, every member marked gone (also the
+/// leader) that is still listed, however long ago; the count does not reset
+/// with a new plan. Remove a gone member ([`Group::remove`]) to stop
+/// counting it, for example when the group regroups.
 pub const IN_LOSSES: usize = 0;
 /// Built-in row column: active members that reported their goal of the
 /// active plan broken ([`REPORT_GOAL_BROKEN`](super::REPORT_GOAL_BROKEN)); 0 in the row of any other
@@ -28,8 +31,14 @@ pub const IN_AREA: usize = 5;
 /// Built-in row column: ticks since the active plan became active, in the
 /// row of the active (tactic, target); 0 in the row of any other candidate.
 pub const IN_PLAN_AGE: usize = 6;
+/// Built-in row column: distance from the target to its nearest other known
+/// target, measured as [`IN_TARGET_DIST`]; -1 without a target or without
+/// another known target (a curve starting at 0 reads it as 0).
+pub const IN_TARGET_FRIEND_DIST: usize = 7;
 /// First caller column (see [`Squad::set_extra_columns`]).
-pub const IN_EXTRA: usize = 7;
+pub const IN_EXTRA: usize = 8;
+/// Most caller columns a row may have ([`Squad::set_extra_columns`]).
+pub const MAX_EXTRA_COLUMNS: usize = 1024;
 
 /// Role bit counted by [`IN_RANGED`]: fights from a distance.
 pub const ROLE_RANGED: u32 = 1;
@@ -39,13 +48,19 @@ pub const ROLE_AREA: u32 = 2;
 /// The number of a plan; each new plan gets a higher one (wrapping).
 pub type PlanId = u32;
 
-/// What one member is told to do.
+/// What one member is told to do: `pos` is where to go now; `kind` and
+/// `start` are what to do there and when.
+///
+/// A slot that gathers first gets two orders: the plan's goal (the first
+/// order) is [`GoalKind::Move`], [`Start::Now`] to the gather spot, with
+/// `then_pos` set; on the signal the second order brings `then_pos` as
+/// `pos`, the slot's own kind and a lined-up start (see [`Squad::signal`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Goal {
-    /// What to do.
+    /// What to do at `pos`.
     pub kind: GoalKind,
-    /// Where: a candidate spot, or the wish point itself when `unchecked`.
-    /// [`Squad::plan`] always sets it.
+    /// Where to go now: a candidate spot, or the wish point itself when
+    /// `unchecked`. [`Squad::plan`] always sets it.
     pub pos: Option<Pos>,
     /// True when no free spot was there and `pos` is the plain wish point,
     /// not checked by the game.
@@ -59,7 +74,7 @@ pub struct Goal {
     pub then_unchecked: bool,
     /// The target's id, if the tactic has one.
     pub target: Option<u32>,
-    /// When to start.
+    /// When to start what `kind` says, once at `pos`.
     pub start: Start,
     /// Index of the slot in the tactic.
     pub slot: u8,
@@ -101,6 +116,12 @@ pub enum PlanError {
         /// The column it reads.
         input: u32,
     },
+    /// Tactic `tactic` has more than 255 slots (a goal keeps the slot index
+    /// as a `u8`).
+    TooManySlots {
+        /// Index of the tactic.
+        tactic: usize,
+    },
 }
 
 impl std::fmt::Display for PlanError {
@@ -108,6 +129,9 @@ impl std::fmt::Display for PlanError {
         match self {
             Self::InputOutOfRange { tactic, input } => {
                 write!(f, "tactic {tactic} reads column {input}, beyond the row")
+            }
+            Self::TooManySlots { tactic } => {
+                write!(f, "tactic {tactic} has more than 255 slots")
             }
         }
     }
@@ -118,6 +142,7 @@ impl std::error::Error for PlanError {}
 /// Salts that keep the seeded draws apart.
 const SALT_SPOT: u64 = 0x5350_4f54_0000_0001;
 const SALT_TIME: u64 = 0x5449_4d45_0000_0002;
+const SALT_PICK: u64 = 0x5049_434b_0000_0003;
 
 /// A seeded number for one member at one tick.
 fn draw(seed: u64, salt: u64, member: usize, now: u32) -> u64 {
@@ -241,6 +266,7 @@ pub struct Squad {
     pub(super) orders: Vec<(Order, u32)>,
     pub(super) channels: Vec<(u32, Channel)>,
     pub(super) danger: Area,
+    pub(super) spot_radius: Option<u32>,
     pub(super) next_id: PlanId,
     pub(super) scratch: Scratch,
 }
@@ -274,6 +300,7 @@ impl Squad {
             orders: Vec::new(),
             channels: Vec::new(),
             danger: DANGER,
+            spot_radius: None,
             next_id: 1,
             scratch: Scratch::default(),
         })
@@ -426,13 +453,37 @@ impl Squad {
         self.knowledge.iter().filter(move |f| f.kind == kind)
     }
 
+    /// How far from its wish point a spot may be to count, in the metric
+    /// (for [`Metric::Euclid`] the squared distance is compared with the
+    /// radius squared). `None` (the default): per slot `3 * slot.dist`, at
+    /// least 1, for both phases. A spot beyond it is not ranked at all; with
+    /// no free spot within, the goal is the unchecked wish point.
+    pub fn set_spot_radius(&mut self, radius: Option<u32>) {
+        self.spot_radius = radius;
+    }
+
+    /// The spot radius (see [`Squad::set_spot_radius`]).
+    pub fn spot_radius(&self) -> Option<u32> {
+        self.spot_radius
+    }
+
+    /// The spot radius for `slot` (see [`Squad::set_spot_radius`]).
+    fn spot_radius_of(&self, slot: &Slot) -> i64 {
+        self.spot_radius
+            .map_or_else(|| (3 * i64::from(slot.dist)).max(1), i64::from)
+    }
+
     /// Checks that every consideration of every tactic reads a column the
-    /// rows have (or one of the decider's memory inputs). [`Squad::plan`]
-    /// and [`Squad::check`] run this first. (An [`Abort`](super::Abort) on a
-    /// column beyond the row never fires.)
+    /// rows have (or one of the decider's memory inputs), and that no tactic
+    /// has more than 255 slots. [`Squad::plan`] and [`Squad::check`] run
+    /// this first. (An [`Abort`](super::Abort) on a column beyond the row
+    /// never fires.)
     pub fn validate(&self) -> Result<(), PlanError> {
         let stride = IN_EXTRA + self.extra_columns;
         for (t, tactic) in self.tactics.iter().enumerate() {
+            if tactic.slots.len() > usize::from(u8::MAX) {
+                return Err(PlanError::TooManySlots { tactic: t });
+            }
             for c in &tactic.considerations {
                 if c.input < INPUT_SINCE_OPTION && c.input as usize >= stride {
                     return Err(PlanError::InputOutOfRange {
@@ -447,9 +498,14 @@ impl Squad {
 
     /// How many caller columns each scoring row has after the built-in ones
     /// (from [`IN_EXTRA`] on; default 0). See [`Squad::plan`] for the
-    /// layout of `extra`.
-    pub fn set_extra_columns(&mut self, count: usize) {
+    /// layout of `extra`. False (nothing changes) above
+    /// [`MAX_EXTRA_COLUMNS`].
+    pub fn set_extra_columns(&mut self, count: usize) -> bool {
+        if count > MAX_EXTRA_COLUMNS {
+            return false;
+        }
         self.extra_columns = count;
+        true
     }
 
     /// The plan made last, while it waits to become active.
@@ -544,9 +600,18 @@ impl Squad {
         row[IN_AREA] = to_i32(count_role(ROLE_AREA));
         row[IN_TARGET_AGE] = i32::MAX;
         row[IN_TARGET_DIST] = i32::MAX;
+        row[IN_TARGET_FRIEND_DIST] = -1;
         if let Some(f) = target {
             row[IN_TARGET_AGE] = clamp_i32(i128::from(now.wrapping_sub(f.seen_at)));
             row[IN_TARGET_DIST] = plain_dist(self.metric, centre, f.pos);
+            if let Some(d) = self
+                .targets()
+                .filter(|o| o.subject != f.subject)
+                .map(|o| plain_dist(self.metric, f.pos, o.pos))
+                .min()
+            {
+                row[IN_TARGET_FRIEND_DIST] = d;
+            }
         }
         if let Some(a) = self.active.as_ref().filter(|_| active) {
             let off = a
@@ -560,7 +625,8 @@ impl Squad {
         if let Some(b) = block {
             let n = self.extra_columns;
             for c in 0..n {
-                row[IN_EXTRA + c] = extra.get(b * n + c).copied().unwrap_or(0);
+                let at = b.checked_mul(n).and_then(|i| i.checked_add(c));
+                row[IN_EXTRA + c] = at.and_then(|i| extra.get(i)).copied().unwrap_or(0);
             }
         }
     }
@@ -682,9 +748,13 @@ impl Squad {
     /// Makes a new plan and keeps it as the pending one.
     ///
     /// First a pending plan whose think time has passed becomes active (see
-    /// [`Squad::orders_due`]), and the reports that have arrived are read
-    /// (see [`Squad::report`]). The new plan replaces a pending one and
-    /// becomes active `think_ticks` (from skill) after `now`.
+    /// [`Squad::orders_due`]), the reports that have arrived are read (see
+    /// [`Squad::report`]) and danger areas whose lifetime is over are
+    /// dropped ([`Areas::expire`]). The leader's knowledge is not aged here:
+    /// forget old facts yourself (`knowledge_mut().expire(..)`, C
+    /// `sx_knowledge_expire` on `sx_squad_knowledge`). The new plan replaces
+    /// a pending one and becomes active `think_ticks` (from skill) after
+    /// `now`.
     ///
     /// **Candidates** are every tactic the skill knows ([`Tactic::min_skill`]
     /// `<= skill`) whose slots can all reach their minimum at once with the
@@ -696,13 +766,15 @@ impl Squad {
     /// abort rules fire on its row scores 0.
     ///
     /// **Rows:** each candidate is scored with its tactic's considerations
-    /// over a row of the built-in inputs ([`IN_LOSSES`] ..= [`IN_PLAN_AGE`])
+    /// over a row of the built-in inputs ([`IN_LOSSES`] ..=
+    /// [`IN_TARGET_FRIEND_DIST`])
     /// followed by the caller's extra columns. `extra` holds one block of
     /// [`Squad::set_extra_columns`] values for the candidates without a
     /// target, then one block per known target in [`Squad::targets`] order;
     /// missing values read as 0. [`IN_OFF_PLAN`] and [`IN_PLAN_AGE`] are
     /// the active plan's in the row of the active (tactic, target), else 0.
-    /// The pick is the skill's [`Pick`](crate::Pick) with `seed`.
+    /// The pick is the skill's [`Pick`](crate::Pick) with `seed` mixed with
+    /// `now`.
     ///
     /// **Assignment:** first every slot gets its minimum (slots with role
     /// bits first, in slot order, then the others, so a slot open to anyone
@@ -716,10 +788,15 @@ impl Squad {
     /// [`pick_spot`] with `slot.want_tags | place.tags()`; with weak skill a
     /// spot may be up to `spot_rank_error` ranks off the best (from `seed`).
     ///
+    /// Spots farther than the spot radius from the wish point do not count
+    /// (see [`Squad::set_spot_radius`]).
+    ///
     /// **Wish points** ([`wish_point`]) face the target; the goal's `pos` is
-    /// the slot's `gather` place when it has one (then `then_pos` is its
-    /// `place`), else its `place`. Gather and place spots are taken
-    /// separately, so both phases can use the same spots. Between
+    /// the slot's `gather` place when it has one (at [`Slot::gather_dist`];
+    /// then `then_pos` is its `place` at [`Slot::dist`] and the goal is a
+    /// [`GoalKind::Move`], [`Start::Now`]; see [`Goal`]), else its `place`.
+    /// Gather and place spots are taken separately, so both phases can use
+    /// the same spots. Between
     /// uses the target's nearest other known target as the friend. A tactic
     /// without a target faces the nearest known target or, without one, the
     /// nearest danger area (from the group centre) and moves away from it
@@ -741,22 +818,24 @@ impl Squad {
         self.validate()?;
         self.advance(now);
         self.read_reports(now);
-        self.plan_now(now, extra, spots, seed, false)
+        self.areas.expire(now);
+        self.plan_now(now, extra, spots, seed, None)
     }
 
-    /// [`Squad::plan`] without the first steps. With `skip_active` the
-    /// active (tactic, target) is no candidate, so a replan for a better
-    /// plan cannot pick the same pair again.
+    /// [`Squad::plan`] without the first steps. With a `bar` every
+    /// candidate scoring at most `bar` is out, so a replan for a better plan
+    /// picks only among the clearly better ones (never the active pair,
+    /// which scores at most the bar).
     pub(super) fn plan_now(
         &mut self,
         now: u32,
         extra: &[i32],
         spots: &[Spot],
         seed: u64,
-        skip_active: bool,
+        bar: Option<u64>,
     ) -> Result<Option<PlanId>, PlanError> {
         let mut s = std::mem::take(&mut self.scratch);
-        let made = self.plan_with(&mut s, now, extra, spots, seed, skip_active);
+        let made = self.plan_with(&mut s, now, extra, spots, seed, bar);
         self.scratch = s;
         made
     }
@@ -768,7 +847,7 @@ impl Squad {
         extra: &[i32],
         spots: &[Spot],
         seed: u64,
-        skip_active: bool,
+        bar: Option<u64>,
     ) -> Result<Option<PlanId>, PlanError> {
         let (Some(leader), Some(centre)) = (self.acting_leader().map(|m| m.pos), self.centre())
         else {
@@ -779,14 +858,16 @@ impl Squad {
         s.targets.clear();
         s.targets.extend(self.targets().copied());
         self.score_candidates(s, now, centre, extra)?;
-        if skip_active && let Some(a) = &self.active {
-            for (&(t, ti), score) in s.candidates.iter().zip(s.scores.iter_mut()) {
-                if t == a.plan.tactic && ti.map(|i| s.targets[i].subject) == a.plan.target {
+        if let Some(bar) = bar {
+            for score in &mut s.scores {
+                if u64::from(*score) <= bar {
                     *score = 0;
                 }
             }
         }
-        let Some(choice) = choose(&s.scores, self.table.pick[level], seed, &mut s.order) else {
+        let pick_seed = mix(seed ^ SALT_PICK ^ u64::from(now));
+        let Some(choice) = choose(&s.scores, self.table.pick[level], pick_seed, &mut s.order)
+        else {
             return Ok(None);
         };
         let (t, target) = s.candidates[choice.candidate];
@@ -814,8 +895,10 @@ impl Squad {
         s.wishes.clear();
         s.then_wishes.clear();
         for slot in &tactic.slots {
-            let first = slot.gather.unwrap_or(slot.place);
-            s.wishes.push(wish_of(&first, slot.dist));
+            s.wishes.push(match &slot.gather {
+                Some(g) => wish_of(g, slot.gather_dist),
+                None => wish_of(&slot.place, slot.dist),
+            });
             s.then_wishes
                 .push(slot.gather.map(|_| wish_of(&slot.place, slot.dist)));
         }
@@ -865,9 +948,10 @@ impl Squad {
             let first = slot.gather.unwrap_or(slot.place);
             let skip = (draw(seed, SALT_SPOT, mi, now) % (err + 1)) as u8;
             let metric = self.metric;
+            let radius = self.spot_radius_of(slot);
             let pick = |wish: Pos, place: &super::Place, taken: &mut Vec<bool>| {
                 let want = slot.want_tags | place.tags();
-                match pick_spot(wish, want, spots, taken, skip, metric) {
+                match pick_spot(wish, want, spots, taken, skip, metric, radius) {
                     SpotPick::Spot(i) => {
                         taken[i] = true;
                         (spots[i].pos, false)
@@ -883,14 +967,20 @@ impl Squad {
                 }
                 None => (None, false),
             };
+            // A gathering slot first only moves; its own kind and start come
+            // with the second order on the signal.
+            let (kind, start) = match then_pos {
+                Some(_) => (GoalKind::Move, Start::Now),
+                None => (slot.kind, slot.start),
+            };
             let goal = Goal {
-                kind: slot.kind,
+                kind,
                 pos: Some(pos),
                 unchecked,
                 then_pos,
                 then_unchecked,
                 target: target_fact.map(|f| f.subject),
-                start: slot.start,
+                start,
                 slot: si.min(usize::from(u8::MAX)) as u8,
                 plan: id,
                 issued_at: now,

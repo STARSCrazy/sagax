@@ -3,6 +3,7 @@
  * one signal, so every attack starts at the same tick.
  * Build and run: sh examples/c/run.sh */
 
+#include <stddef.h>
 #include <stdio.h>
 #include "sagax.h"
 
@@ -12,11 +13,20 @@ typedef char layout_member[sizeof(sx_member) == 24 ? 1 : -1];
 typedef char layout_spot[sizeof(sx_spot) == 16 ? 1 : -1];
 typedef char layout_gather_candidate[sizeof(sx_gather_candidate) == 24 ? 1 : -1];
 typedef char layout_place[sizeof(sx_place) == 20 ? 1 : -1];
-typedef char layout_slot[sizeof(sx_slot) == 72 ? 1 : -1];
+typedef char layout_slot[sizeof(sx_slot) == 76 ? 1 : -1];
 typedef char layout_goal[sizeof(sx_goal) == 68 ? 1 : -1];
 typedef char layout_order[sizeof(sx_order) == 72 ? 1 : -1];
 typedef char layout_plan[sizeof(sx_plan) == 28 ? 1 : -1];
 typedef char layout_skill_table[sizeof(sx_skill_table) == 100 ? 1 : -1];
+/* A few key field offsets too (all of them are checked on the Rust side). */
+typedef char layout_member_state[offsetof(sx_member, state) == 21 ? 1 : -1];
+typedef char layout_slot_place[offsetof(sx_slot, place) == 8 ? 1 : -1];
+typedef char layout_slot_gather_dist[offsetof(sx_slot, gather_dist) == 72 ? 1 : -1];
+typedef char layout_goal_then_pos[offsetof(sx_goal, then_pos) == 20 ? 1 : -1];
+typedef char layout_goal_has_target[offsetof(sx_goal, has_target) == 64 ? 1 : -1];
+typedef char layout_order_goal[offsetof(sx_order, goal) == 4 ? 1 : -1];
+typedef char layout_plan_has_target[offsetof(sx_plan, has_target) == 24 ? 1 : -1];
+typedef char layout_skill_table_error[offsetof(sx_skill_table, spot_rank_error) == 96 ? 1 : -1];
 
 #define CHECK(cond) \
 	do { \
@@ -144,6 +154,7 @@ int main(void)
 		for (k = 0; k < 5; k++)
 			if (around[k].id == called[i])
 				break;
+		CHECK(k < 5);
 		m.id = called[i];
 		m.pos[0] = around[k].pos[0];
 		m.pos[1] = around[k].pos[1];
@@ -299,6 +310,7 @@ int main(void)
 		slot.max = 255;
 		slot.place.kind = SX_PLACE_TAGGED;
 		slot.place.value = SX_TAG_CHOKE;
+		slot.dist = 4; /* choke spots count within 3 * 4 of the group centre */
 		slot.kind = SX_GOAL_HOLD;
 		slot.start = SX_START_NOW;
 		CHECK(sx_tactic_add_slot(hold, &slot) == 0);

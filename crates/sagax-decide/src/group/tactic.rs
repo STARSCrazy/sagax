@@ -102,8 +102,13 @@ pub struct Slot {
     /// Tag bits a spot should have (see [`super::pick_spot`]); 0 takes any.
     pub want_tags: u32,
     /// Distance from the target for [`Place::Side`] and [`Place::Between`]
-    /// (without a friend), for both `gather` and `place`.
+    /// (without a friend) of `place`. Also sets how far a spot may be from
+    /// the wish point, in both phases (see
+    /// [`Squad::set_spot_radius`](super::Squad::set_spot_radius)).
     pub dist: i32,
+    /// Like `dist`, for the `gather` place: the shipped [`tactics::flank`]
+    /// gathers at twice the attack distance, out of the target's reach.
+    pub gather_dist: i32,
 }
 
 /// When the group signal fires by itself. Once the signal was given, the
@@ -113,9 +118,11 @@ pub struct Slot {
 pub enum Trigger {
     /// Never by itself.
     None,
-    /// When every assigned active member has arrived at its gather spot,
-    /// or `max_wait` ticks after the gather orders went out, whichever
-    /// comes first; never while no assigned member is active.
+    /// When every assigned active member has arrived at its gather spot
+    /// ([`Squad::arrived`](super::Squad::arrived) or a
+    /// [`REPORT_ARRIVED`](super::REPORT_ARRIVED) that has come in), or
+    /// `max_wait` ticks after the gather orders went out, whichever comes
+    /// first; never while no assigned member is active.
     AllArrived {
         /// Longest wait for stragglers.
         max_wait: u32,
@@ -179,13 +186,17 @@ pub enum Shape {
 /// The scoring rows they read are the Squad's built-in inputs
 /// ([`IN_LOSSES`](crate::group::IN_LOSSES),
 /// [`IN_OFF_PLAN`](crate::group::IN_OFF_PLAN),
-/// [`IN_TARGET_DIST`](crate::group::IN_TARGET_DIST)).
+/// [`IN_TARGET_AGE`](crate::group::IN_TARGET_AGE),
+/// [`IN_TARGET_DIST`](crate::group::IN_TARGET_DIST),
+/// [`IN_TARGET_FRIEND_DIST`](crate::group::IN_TARGET_FRIEND_DIST)).
 ///
 /// Formation offsets are in the square frame (+x forward, +y left) also on
 /// a hex map, where they are read as axial coordinates; the shapes then
 /// look skewed, but members fill the same slots in the same order.
 pub mod tactics {
-    use super::super::squad::{IN_LOSSES, IN_OFF_PLAN, IN_TARGET_DIST};
+    use super::super::squad::{
+        IN_LOSSES, IN_OFF_PLAN, IN_TARGET_AGE, IN_TARGET_DIST, IN_TARGET_FRIEND_DIST,
+    };
     use super::*;
     use crate::{Curve, ONE};
 
@@ -195,6 +206,9 @@ pub mod tactics {
     pub const FALL_BACK_DIST: i32 = 8;
     /// Radius of [`ambush`]'s trigger.
     pub const AMBUSH_RADIUS: i64 = 6;
+    /// Ticks without a sighting after which the shipped tactics (all but
+    /// [`rush`] and [`fall_back`]) give their target up.
+    pub const TARGET_LOST_TICKS: i32 = 255;
 
     fn slot(place: Place, kind: GoalKind) -> Slot {
         Slot {
@@ -207,10 +221,12 @@ pub mod tactics {
             start: Start::Now,
             want_tags: 0,
             dist: 1,
+            gather_dist: 2,
         }
     }
 
-    /// Replan when this many members were lost or are off plan.
+    /// Replan when two members were lost or are off plan, or the target was
+    /// not seen for [`TARGET_LOST_TICKS`].
     fn usual_aborts() -> Vec<Abort> {
         vec![
             Abort {
@@ -220,6 +236,10 @@ pub mod tactics {
             Abort {
                 input: IN_OFF_PLAN,
                 at_least: 2,
+            },
+            Abort {
+                input: IN_TARGET_AGE,
+                at_least: TARGET_LOST_TICKS,
             },
         ]
     }
@@ -271,9 +291,10 @@ pub mod tactics {
 
     /// Come from `sides` sides of the target (clamped to 2 ..= 3): 2 is
     /// left and right, 3 adds the front. Each slot first gathers at its
-    /// side, `dist` from the target, then all attack at once on the signal
-    /// ([`Trigger::AllArrived`] with [`FLANK_MAX_WAIT`]). Slots take 1 ..= 3
-    /// members. Skill 128. A `dist` of 4 suits a grid of cells.
+    /// side, `2 * dist` from the target, then all attack at once on the
+    /// signal from `dist` ([`Trigger::AllArrived`] with
+    /// [`FLANK_MAX_WAIT`]). Slots take 1 ..= 3 members. Skill 128. A `dist`
+    /// of 4 suits a grid of cells.
     pub fn flank(sides: u8, dist: i32) -> Tactic {
         let chosen: &[Side] = if sides >= 3 {
             &[Side::Front, Side::Left, Side::Right]
@@ -287,6 +308,7 @@ pub mod tactics {
                 gather: Some(Place::Side(side)),
                 start: Start::OnSignal,
                 dist,
+                gather_dist: dist.saturating_mul(2),
                 ..slot(Place::Side(side), GoalKind::Attack)
             })
             .collect();
@@ -303,13 +325,14 @@ pub mod tactics {
         }
     }
 
-    /// Hold hidden spots near the group and attack when the target comes
-    /// within [`AMBUSH_RADIUS`]. Better the farther the target still is
-    /// (distance 0 ..= 100). Skill 128.
+    /// Hold hidden spots near the group (within 12 of its centre: `dist` 4)
+    /// and attack when the target comes within [`AMBUSH_RADIUS`]. Better
+    /// the farther the target still is (distance 0 ..= 100). Skill 128.
     pub fn ambush() -> Tactic {
         Tactic {
             slots: vec![Slot {
                 start: Start::OnSignal,
+                dist: 4,
                 ..slot(Place::Tagged(TAG_HIDDEN), GoalKind::Attack)
             }],
             considerations: vec![Consideration::new(
@@ -346,8 +369,9 @@ pub mod tactics {
     }
 
     /// One or two members hold between the target and its nearest friend
-    /// (preferring choke spots); the rest attack it. Which target is the
-    /// most isolated is for the caller's row to score. Skill 192.
+    /// (preferring choke spots); the rest attack it. The more isolated the
+    /// target (its distance to its nearest friend, 0 ..= 32), the better;
+    /// a target without a known friend scores 0. Skill 192.
     pub fn isolate() -> Tactic {
         Tactic {
             slots: vec![
@@ -359,7 +383,12 @@ pub mod tactics {
                 },
                 slot(Place::Side(Side::Front), GoalKind::Attack),
             ],
-            considerations: Vec::new(),
+            considerations: vec![Consideration::new(
+                IN_TARGET_FRIEND_DIST as u32,
+                Curve::Linear,
+                0,
+                32,
+            )],
             weight: ONE * 3 / 4,
             aborts: usual_aborts(),
             trigger: Trigger::None,

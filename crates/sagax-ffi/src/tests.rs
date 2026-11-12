@@ -607,8 +607,9 @@ fn flee_and_several_goals() {
 
 mod areas_cost {
     use super::*;
-    use crate::memory::SxAreasCostCtx;
-    use crate::memory::{SxArea, sx_areas_add, sx_areas_free, sx_areas_move_cost, sx_areas_new};
+    use crate::memory::{
+        SxArea, SxAreasCostCtx, sx_areas_add, sx_areas_free, sx_areas_move_cost, sx_areas_new,
+    };
 
     fn circle(kind: u32, x: i32, y: i32, radius: i32, strength: u32, blocking: u8) -> SxArea {
         SxArea {
@@ -758,7 +759,7 @@ mod areas_cost {
         a.kind = 2;
         a.pos = [60, 50, 0];
         a.blocking = 1;
-        unsafe { sx_areas_add(areas, &a, 0) };
+        assert_eq!(unsafe { sx_areas_add(areas, &a, 0) }, 1);
         ctx.areas = areas;
         ctx.goal = [0, 0, 0];
         let c = (&mut ctx as *mut SxAreasCostCtx).cast();
@@ -783,10 +784,11 @@ mod squad {
     use crate::{ERROR_ARGUMENT, ERROR_PLAN};
     use sagax_decide::group::{
         IN_AREA, IN_EXTRA, IN_LOSSES, IN_OFF_PLAN, IN_PLAN_AGE, IN_RANGED, IN_TARGET_AGE,
-        IN_TARGET_DIST, REPORT_DANGER, REPORT_ENEMY, REPORT_GOAL_BROKEN, ROLE_AREA, ROLE_RANGED,
-        TAG_CHOKE, TAG_COVER, TAG_HIDDEN, TAG_HIGH,
+        IN_TARGET_DIST, IN_TARGET_FRIEND_DIST, MAX_EXTRA_COLUMNS, REPORT_ARRIVED, REPORT_DANGER,
+        REPORT_ENEMY, REPORT_GOAL_BROKEN, ROLE_AREA, ROLE_RANGED, TAG_CHOKE, TAG_COVER, TAG_HIDDEN,
+        TAG_HIGH,
     };
-    use std::mem::size_of;
+    use std::mem::{offset_of, size_of};
     use std::ptr::{null, null_mut};
 
     const HEADER: &str = include_str!("../include/sagax.h");
@@ -880,7 +882,7 @@ mod squad {
         assert_eq!(size_of::<SxSpot>(), 16);
         assert_eq!(size_of::<SxGatherCandidate>(), 24);
         assert_eq!(size_of::<SxPlace>(), 20);
-        assert_eq!(size_of::<SxSlot>(), 72);
+        assert_eq!(size_of::<SxSlot>(), 76);
         assert_eq!(size_of::<SxGoal>(), 68);
         assert_eq!(size_of::<SxOrder>(), 72);
         assert_eq!(size_of::<SxPlan>(), 28);
@@ -895,6 +897,7 @@ mod squad {
             ("SX_IN_RANGED", IN_RANGED as i64),
             ("SX_IN_AREA", IN_AREA as i64),
             ("SX_IN_PLAN_AGE", IN_PLAN_AGE as i64),
+            ("SX_IN_TARGET_FRIEND_DIST", IN_TARGET_FRIEND_DIST as i64),
             ("SX_IN_EXTRA", IN_EXTRA as i64),
             ("SX_ROLE_RANGED", i64::from(ROLE_RANGED)),
             ("SX_ROLE_AREA", i64::from(ROLE_AREA)),
@@ -905,6 +908,7 @@ mod squad {
             ("SX_REPORT_GOAL_BROKEN", i64::from(REPORT_GOAL_BROKEN)),
             ("SX_REPORT_ENEMY", i64::from(REPORT_ENEMY)),
             ("SX_REPORT_DANGER", i64::from(REPORT_DANGER)),
+            ("SX_REPORT_ARRIVED", i64::from(REPORT_ARRIVED)),
         ];
         let ffi = [
             ("SX_MEMBER_ACTIVE", 0),
@@ -960,6 +964,96 @@ mod squad {
     }
 
     #[test]
+    fn field_offsets_match_header() {
+        // Mirrors the C layout of sagax.h (and the checks in squad.c).
+        let member = [
+            offset_of!(SxMember, id),
+            offset_of!(SxMember, pos),
+            offset_of!(SxMember, roles),
+            offset_of!(SxMember, skill),
+            offset_of!(SxMember, state),
+        ];
+        assert_eq!(member, [0, 4, 16, 20, 21]);
+        assert_eq!([offset_of!(SxSpot, pos), offset_of!(SxSpot, tags)], [0, 12]);
+        let candidate = [
+            offset_of!(SxGatherCandidate, id),
+            offset_of!(SxGatherCandidate, faction),
+            offset_of!(SxGatherCandidate, pos),
+            offset_of!(SxGatherCandidate, free),
+        ];
+        assert_eq!(candidate, [0, 4, 8, 20]);
+        let place = [
+            offset_of!(SxPlace, kind),
+            offset_of!(SxPlace, x),
+            offset_of!(SxPlace, y),
+            offset_of!(SxPlace, z),
+            offset_of!(SxPlace, value),
+        ];
+        assert_eq!(place, [0, 4, 8, 12, 16]);
+        let slot = [
+            offset_of!(SxSlot, roles),
+            offset_of!(SxSlot, min),
+            offset_of!(SxSlot, max),
+            offset_of!(SxSlot, place),
+            offset_of!(SxSlot, gather),
+            offset_of!(SxSlot, kind),
+            offset_of!(SxSlot, custom),
+            offset_of!(SxSlot, start),
+            offset_of!(SxSlot, start_ticks),
+            offset_of!(SxSlot, want_tags),
+            offset_of!(SxSlot, dist),
+            offset_of!(SxSlot, gather_dist),
+        ];
+        assert_eq!(slot, [0, 4, 5, 8, 28, 48, 52, 56, 60, 64, 68, 72]);
+        let goal = [
+            offset_of!(SxGoal, kind),
+            offset_of!(SxGoal, custom),
+            offset_of!(SxGoal, pos),
+            offset_of!(SxGoal, then_pos),
+            offset_of!(SxGoal, target),
+            offset_of!(SxGoal, start),
+            offset_of!(SxGoal, start_ticks),
+            offset_of!(SxGoal, slot),
+            offset_of!(SxGoal, plan),
+            offset_of!(SxGoal, issued_at),
+            offset_of!(SxGoal, start_delay),
+            offset_of!(SxGoal, has_pos),
+            offset_of!(SxGoal, unchecked),
+            offset_of!(SxGoal, has_then_pos),
+            offset_of!(SxGoal, then_unchecked),
+            offset_of!(SxGoal, has_target),
+        ];
+        assert_eq!(
+            goal,
+            [0, 4, 8, 20, 32, 36, 40, 44, 48, 52, 56, 60, 61, 62, 63, 64]
+        );
+        assert_eq!(
+            [offset_of!(SxOrder, member), offset_of!(SxOrder, goal)],
+            [0, 4]
+        );
+        let plan = [
+            offset_of!(SxPlan, id),
+            offset_of!(SxPlan, tactic),
+            offset_of!(SxPlan, target),
+            offset_of!(SxPlan, made_at),
+            offset_of!(SxPlan, active_at),
+            offset_of!(SxPlan, goal_count),
+            offset_of!(SxPlan, has_target),
+        ];
+        assert_eq!(plan, [0, 4, 8, 12, 16, 20, 24]);
+        let table = [
+            offset_of!(SxSkillTable, pick),
+            offset_of!(SxSkillTable, pick_top),
+            offset_of!(SxSkillTable, think_ticks),
+            offset_of!(SxSkillTable, timing_spread),
+            offset_of!(SxSkillTable, hold_bonus),
+            offset_of!(SxSkillTable, give_up_ticks),
+            offset_of!(SxSkillTable, spot_rank_error),
+        ];
+        assert_eq!(table, [0, 16, 32, 48, 64, 80, 96]);
+    }
+
+    #[test]
     fn members_through_c() {
         unsafe {
             assert!(sx_squad_new(0, 8, 4, 8, EUCLID).is_null());
@@ -987,7 +1081,8 @@ mod squad {
             assert_eq!(sx_squad_suspend(sq, 2), 1);
             assert_eq!(sx_squad_member_at(sq, 1, &mut m), 1);
             assert_eq!(m.state, 1);
-            assert_eq!(sx_squad_resume(sq, 2), 1);
+            assert_eq!(sx_squad_resume(sq, 2, 0), 1);
+            assert_eq!(sx_squad_resume(sq, 9, 0), 0);
             assert_eq!(sx_squad_suspend(sq, 9), 0);
             // Leader: the set one while active, else the next active member.
             let mut id = 0;
@@ -1129,6 +1224,27 @@ mod squad {
             assert_eq!(check(sq, 0, &mut id), ERROR_PLAN);
             assert_eq!(sx_squad_set_extra_columns(sq, 1), 0);
             assert_eq!(sx_squad_validate(sq, null_mut(), null_mut()), 0);
+            let most = MAX_EXTRA_COLUMNS as u32;
+            assert_eq!(sx_squad_set_extra_columns(sq, most + 1), ERROR_ARGUMENT);
+            assert_eq!(sx_squad_set_extra_columns(sq, u32::MAX), ERROR_ARGUMENT);
+            assert_eq!(sx_squad_validate(sq, null_mut(), null_mut()), 0);
+            assert_eq!(sx_squad_set_extra_columns(sq, most), 0);
+            // More than 255 slots.
+            let big = sx_tactic_new(ONE_WEIGHT, 0, 0);
+            let mut s = SxSlot {
+                place: SxPlace {
+                    kind: PLACE_HERE,
+                    ..SxPlace::default()
+                },
+                ..SxSlot::default()
+            };
+            s.max = 1;
+            for i in 0..256 {
+                assert_eq!(sx_tactic_add_slot(big, &s), i);
+            }
+            assert_eq!(sx_squad_add_tactic(sq, big), 11);
+            assert_eq!(sx_squad_validate(sq, &mut tactic, &mut input), ERROR_PLAN);
+            assert_eq!((tactic, input), (11, u32::MAX));
             sx_squad_free(sq);
         }
     }
@@ -1183,11 +1299,9 @@ mod squad {
             members.sort_unstable();
             assert_eq!(members, [1, 2, 3, 4]);
             for o in &out {
+                // Gather first: go there now, only move.
                 let g = &o.goal;
-                assert_eq!(
-                    (g.kind, g.start, g.plan),
-                    (GOAL_ATTACK, START_ON_SIGNAL, id)
-                );
+                assert_eq!((g.kind, g.start, g.plan), (GOAL_MOVE, START_NOW, id));
                 assert_eq!((g.has_pos, g.has_then_pos, g.has_target), (1, 1, 1));
                 assert_eq!(g.target, E1);
             }
@@ -1208,7 +1322,10 @@ mod squad {
             for o in &attack[..4] {
                 let before = out.iter().find(|f| f.member == o.member).unwrap();
                 assert_eq!(o.goal.pos, before.goal.then_pos);
-                assert_eq!((o.goal.start, o.goal.issued_at), (START_NOW, 9));
+                assert_eq!(
+                    (o.goal.kind, o.goal.start, o.goal.issued_at),
+                    (GOAL_ATTACK, START_NOW, 9)
+                );
             }
 
             // Two members report their goal broken: the flank's abort rule
@@ -1227,6 +1344,118 @@ mod squad {
             assert!(next > id);
             assert_eq!(sx_squad_pending_plan(sq, &mut plan, null_mut(), 0), 1);
             assert_eq!(plan.tactic, 0);
+            sx_squad_free(sq);
+        }
+    }
+
+    /// The elite flank of `plan_check_and_orders_through_c`, active at 5,
+    /// everyone hearing at once.
+    unsafe fn active_flank() -> (*mut SxSquad, u32) {
+        let sq = squad_of(EUCLID, &[(1, 0, 0), (2, 1, 0), (3, 0, 1), (4, 1, 1)]);
+        let mut id = 0;
+        unsafe {
+            for m in 2..=4 {
+                assert_eq!(sx_squad_set_channel(sq, m, CHANNEL_RADIO, 0, 0), 1);
+            }
+            assert_eq!(sx_squad_add_shipped(sq, TACTIC_RUSH, 0), 0);
+            assert_eq!(sx_squad_add_shipped(sq, TACTIC_FLANK, 4), 1);
+            assert_eq!(sx_squad_set_skill(sq, 255), 0);
+            assert_eq!(sx_squad_observe(sq, &enemy(E1, 20, 0), 0, null_mut()), 0);
+            assert_eq!(check(sq, 0, &mut id), SQUAD_REPLAN);
+            assert_eq!(check(sq, 5, &mut id), SQUAD_KEEP);
+        }
+        (sq, id)
+    }
+
+    #[test]
+    fn held_back_orders_go_stale() {
+        unsafe {
+            // Three of four orders wait beyond the cap; their members are
+            // suspended before the next call.
+            let (sq, _) = active_flank();
+            let mut out = [SxOrder::default(); 8];
+            assert_eq!(sx_squad_orders_due(sq, 5, out.as_mut_ptr(), 1), 1);
+            for m in (1..=4).filter(|&m| m != out[0].member) {
+                assert_eq!(sx_squad_suspend(sq, m), 1);
+            }
+            assert_eq!(sx_squad_orders_due(sq, 5, out.as_mut_ptr(), 8), 0);
+            sx_squad_free(sq);
+
+            // Three wait while a new plan becomes active: only its own
+            // orders come out.
+            let (sq, id) = active_flank();
+            assert_eq!(sx_squad_orders_due(sq, 5, out.as_mut_ptr(), 1), 1);
+            for sender in [2, 3] {
+                let broken = SxMessage {
+                    kind: REPORT_GOAL_BROKEN,
+                    sender,
+                    data: id,
+                    ..SxMessage::default()
+                };
+                assert_eq!(sx_squad_report(sq, &broken, 6), 1);
+            }
+            let mut next = 0;
+            assert_eq!(check(sq, 6, &mut next), SQUAD_REPLAN);
+            // At 11 the new plan becomes active (check may plan again).
+            check(sq, 11, &mut 0);
+            let mut plan = SxPlan::default();
+            assert_eq!(sx_squad_active_plan(sq, &mut plan, null_mut(), 0), 1);
+            assert_eq!(plan.id, next);
+            let n = sx_squad_orders_due(sq, 11, out.as_mut_ptr(), 8);
+            assert_eq!(n, 4);
+            assert!(out[..4].iter().all(|o| o.goal.plan == next));
+            sx_squad_free(sq);
+        }
+    }
+
+    #[test]
+    fn arrival_report_resume_and_spot_radius_through_c() {
+        unsafe {
+            // Arrival reports count once they are in.
+            let (sq, id) = active_flank();
+            for sender in 1..=4 {
+                let arrived = SxMessage {
+                    kind: REPORT_ARRIVED,
+                    sender,
+                    data: id,
+                    ..SxMessage::default()
+                };
+                assert_eq!(sx_squad_report(sq, &arrived, 20), 1);
+            }
+            let mut next = 0;
+            assert_eq!(check(sq, 19, &mut next), SQUAD_KEEP);
+            assert_eq!(check(sq, 20, &mut next), SQUAD_SIGNAL);
+            // The attack orders replace the gather orders not yet taken.
+            let mut out = [SxOrder::default(); 8];
+            assert_eq!(sx_squad_orders_due(sq, 20, out.as_mut_ptr(), 8), 4);
+            assert!(out[..4].iter().all(|o| o.goal.kind == GOAL_ATTACK));
+            // A member back after the signal gets the attack order again.
+            assert_eq!(sx_squad_suspend(sq, 3), 1);
+            assert_eq!(sx_squad_resume(sq, 3, 30), 1);
+            assert_eq!(sx_squad_orders_due(sq, 30, out.as_mut_ptr(), 8), 1);
+            let g = out[0].goal;
+            assert_eq!((out[0].member, g.kind, g.plan), (3, GOAL_ATTACK, id));
+            sx_squad_free(sq);
+
+            // Rush's wish is (19, 0); a spot 5 away counts only with a
+            // larger radius.
+            let sq = squad_of(EUCLID, &[(1, 0, 0)]);
+            assert_eq!(sx_squad_add_shipped(sq, TACTIC_RUSH, 0), 0);
+            assert_eq!(sx_squad_observe(sq, &enemy(E1, 20, 0), 0, null_mut()), 0);
+            let spots = [spot(14, 0, 0)];
+            let mut plan = [SxOrder::default(); 1];
+            for (radius, pos, unchecked) in [(-1, [19, 0, 0], 1), (5, [14, 0, 0], 0)] {
+                assert_eq!(sx_squad_set_spot_radius(sq, radius), 0);
+                let made = sx_squad_plan(sq, 0, null(), 0, spots.as_ptr(), 1, 0, &mut next);
+                assert_eq!(made, 1);
+                assert_eq!(
+                    sx_squad_pending_plan(sq, null_mut(), plan.as_mut_ptr(), 1),
+                    1
+                );
+                assert_eq!((plan[0].goal.pos, plan[0].goal.unchecked), (pos, unchecked));
+            }
+            assert_eq!(sx_squad_set_spot_radius(sq, 1 << 32), ERROR_ARGUMENT);
+            assert_eq!(sx_squad_set_spot_radius(sq, i64::from(u32::MAX)), 0);
             sx_squad_free(sq);
         }
     }
@@ -1390,7 +1619,8 @@ mod squad {
             assert_eq!(sx_squad_remove_member(n, 1), e);
             assert_eq!(sx_squad_set_pos(n, 1, 0, 0, 0), e);
             assert_eq!(sx_squad_suspend(n, 1), e);
-            assert_eq!(sx_squad_resume(n, 1), e);
+            assert_eq!(sx_squad_resume(n, 1, 0), e);
+            assert_eq!(sx_squad_set_spot_radius(n, 1), e);
             assert_eq!(sx_squad_set_gone(n, 1), e);
             assert_eq!(sx_squad_set_leader(n, 1), e);
             assert_eq!(sx_squad_leader(n, &mut id), e);

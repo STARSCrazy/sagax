@@ -196,11 +196,14 @@ pub fn wish_point(
 
 /// Chooses a free spot for `wish`.
 ///
-/// Free spots (not `taken[i]`; missing entries count as free) are ranked:
-/// first those with all `want_tags` bits (0 makes every spot fit), then the
-/// rest; within each, nearest to `wish` first (x and y in `metric`), ties
-/// to the lower index. The result is rank `skip` (0 = best), clamped to the
-/// last ranked spot. With no free spot: [`SpotPick::Unchecked`] of `wish`.
+/// Only free spots (not `taken[i]`; missing entries count as free) within
+/// `radius` of `wish` count (x and y in `metric`, inclusive; for
+/// [`Metric::Euclid`] the squared distance is compared with `radius²`; a
+/// negative radius takes none). They are ranked: first those with all
+/// `want_tags` bits (0 makes every spot fit), then the rest; within each,
+/// nearest to `wish` first, ties to the lower index. The result is rank
+/// `skip` (0 = best), clamped to the last ranked spot. With no such spot:
+/// [`SpotPick::Unchecked`] of `wish`.
 pub fn pick_spot(
     wish: Pos,
     want_tags: u32,
@@ -208,7 +211,13 @@ pub fn pick_spot(
     taken: &[bool],
     skip: u8,
     metric: Metric,
+    radius: i64,
 ) -> SpotPick {
+    let limit = if metric == Metric::Euclid {
+        i128::from(radius) * i128::from(radius)
+    } else {
+        i128::from(radius)
+    };
     let key = |i: usize, s: &Spot| {
         let miss = s.tags & want_tags != want_tags;
         let dx = i64::from(s.pos[0]) - i64::from(wish[0]);
@@ -224,6 +233,7 @@ pub fn pick_spot(
             .enumerate()
             .filter(|&(i, _)| !taken.get(i).copied().unwrap_or(false))
             .map(|(i, s)| key(i, s))
+            .filter(|k| radius >= 0 && k.1 <= limit)
             .filter(|k| picked.is_none_or(|p| *k > p))
             .min();
         match next {

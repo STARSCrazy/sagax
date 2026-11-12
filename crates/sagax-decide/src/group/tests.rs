@@ -113,6 +113,9 @@ fn gather_hex_metric() {
 
 // --- Tactics as data, wish points, spot pick ---
 
+/// A spot radius that takes every spot of the tests.
+const FAR: i64 = 1000;
+
 fn spot(x: i32, y: i32, tags: u32) -> Spot {
     Spot {
         pos: [x, y, 0],
@@ -247,17 +250,17 @@ fn pick_spot_prefers_tags_then_nearest() {
     let o = [0, 0, 0];
     // Index 2 and 3 have tag 2 at equal distance: lower index wins.
     assert_eq!(
-        pick_spot(o, 2, &spots, &[], 0, Metric::Euclid),
+        pick_spot(o, 2, &spots, &[], 0, Metric::Euclid, FAR),
         SpotPick::Spot(2)
     );
     // Both bits wanted: only 2 and 3 have 2|4.
     assert_eq!(
-        pick_spot([6, 0, 0], 6, &spots, &[], 0, Metric::Euclid),
+        pick_spot([6, 0, 0], 6, &spots, &[], 0, Metric::Euclid, FAR),
         SpotPick::Spot(2)
     );
     // No spot fits: nearest free spot.
     assert_eq!(
-        pick_spot(o, 8, &spots, &[], 0, Metric::Euclid),
+        pick_spot(o, 8, &spots, &[], 0, Metric::Euclid, FAR),
         SpotPick::Spot(0)
     );
 }
@@ -278,7 +281,7 @@ fn pick_spot_tags_zero_falls_back_nearest() {
     for t in &all {
         for s in &t.slots {
             let want = s.want_tags | s.place.tags();
-            let pick = pick_spot([1, 1, 0], want, &spots, &[], 0, Metric::Chebyshev);
+            let pick = pick_spot([1, 1, 0], want, &spots, &[], 0, Metric::Chebyshev, FAR);
             assert_eq!(pick, SpotPick::Spot(1));
         }
     }
@@ -288,13 +291,13 @@ fn pick_spot_tags_zero_falls_back_nearest() {
 fn pick_spot_no_spots_unchecked() {
     let wish = [4, 5, 6];
     assert_eq!(
-        pick_spot(wish, 1, &[], &[], 0, Metric::Hex),
+        pick_spot(wish, 1, &[], &[], 0, Metric::Hex, FAR),
         SpotPick::Unchecked(wish)
     );
     // All taken counts as none.
     let spots = [spot(0, 0, 1)];
     assert_eq!(
-        pick_spot(wish, 0, &spots, &[true], 0, Metric::Hex),
+        pick_spot(wish, 0, &spots, &[true], 0, Metric::Hex, FAR),
         SpotPick::Unchecked(wish)
     );
 }
@@ -304,11 +307,11 @@ fn pick_spot_skips_taken() {
     let spots = [spot(1, 0, 1), spot(2, 0, 1), spot(3, 0, 0)];
     let w = [0, 0, 0];
     assert_eq!(
-        pick_spot(w, 1, &spots, &[true], 0, Metric::Manhattan),
+        pick_spot(w, 1, &spots, &[true], 0, Metric::Manhattan, FAR),
         SpotPick::Spot(1)
     );
     assert_eq!(
-        pick_spot(w, 1, &spots, &[true, true], 0, Metric::Manhattan),
+        pick_spot(w, 1, &spots, &[true, true], 0, Metric::Manhattan, FAR),
         SpotPick::Spot(2)
     );
 }
@@ -317,7 +320,7 @@ fn pick_spot_skips_taken() {
 fn pick_spot_skip_takes_next_best() {
     let spots = [spot(3, 0, 0), spot(1, 0, 1), spot(2, 0, 1), spot(1, 0, 0)];
     let w = [0, 0, 0];
-    let pick = |skip| pick_spot(w, 1, &spots, &[], skip, Metric::Euclid);
+    let pick = |skip| pick_spot(w, 1, &spots, &[], skip, Metric::Euclid, FAR);
     // Ranked: tagged 1, 2, then untagged 3 (distance 1), 0 (distance 3).
     assert_eq!(pick(0), SpotPick::Spot(1));
     assert_eq!(pick(1), SpotPick::Spot(2));
@@ -328,7 +331,7 @@ fn pick_spot_skip_takes_next_best() {
     // Taken spots are not ranked.
     let taken = [false, false, true];
     assert_eq!(
-        pick_spot(w, 1, &spots, &taken, 1, Metric::Euclid),
+        pick_spot(w, 1, &spots, &taken, 1, Metric::Euclid, FAR),
         SpotPick::Spot(3)
     );
 }
@@ -508,6 +511,7 @@ fn assign_roles_first_then_distance() {
         start: Start::Now,
         want_tags: 0,
         dist: 1,
+        gather_dist: 2,
     };
     let t = Tactic {
         slots: vec![slot(ROLE_RANGED), slot(0), slot(0)],
@@ -732,10 +736,10 @@ fn fall_back_without_target_moves_away_from_danger() {
 #[test]
 fn weak_spot_error_seeded() {
     // Spots along x; the wish point (the target's front, 19) is nearest
-    // the spot at 16, then 15, 14, ...
+    // the spot at 19, then 18, 17, ...; rush's spot radius (3) reaches 16.
     let spots: Vec<Spot> = (0..6)
         .map(|i| Spot {
-            pos: [16 - i, 0, 0],
+            pos: [19 - i, 0, 0],
             tags: 0,
         })
         .collect();
@@ -749,10 +753,10 @@ fn weak_spot_error_seeded() {
     };
     let mut ranks = [false; 6];
     for seed in 0..64 {
-        assert_eq!(first_spot(255, seed), [16, 0, 0]);
+        assert_eq!(first_spot(255, seed), [19, 0, 0]);
         let p = first_spot(0, seed);
         assert_eq!(p, first_spot(0, seed));
-        ranks[(16 - p[0]) as usize] = true;
+        ranks[(19 - p[0]) as usize] = true;
     }
     // Weak: up to 2 ranks off, never more.
     assert_eq!(ranks, [true, true, true, false, false, false]);
@@ -778,9 +782,10 @@ fn plan_ids_increase_and_stamp_time() {
             IN_RANGED,
             IN_AREA,
             IN_PLAN_AGE,
+            IN_TARGET_FRIEND_DIST,
             IN_EXTRA
         ],
-        [0, 1, 2, 3, 4, 5, 6, 7]
+        [0, 1, 2, 3, 4, 5, 6, 7, 8]
     );
 }
 
@@ -856,6 +861,7 @@ fn open_slot_does_not_use_up_specialist() {
         start: Start::Now,
         want_tags: 0,
         dist: 1,
+        gather_dist: 2,
     };
     let t = Tactic {
         slots: vec![slot(0), slot(ROLE_RANGED)],
@@ -888,8 +894,8 @@ fn gather_slot_has_then_pos() {
     // Gather at the leader first, then the target's front.
     let g = sq.pending_plan().unwrap().goals[0].1;
     assert_eq!((g.pos, g.then_pos), (Some([0, 0, 0]), Some([19, 0, 0])));
-    // Flank: gather and attack point coincide; both phases may take the
-    // same spot.
+    // Flank: with spots only near the target both phases take the same
+    // spot (each phase picks from all spots).
     let mut sq = squad_of(Metric::Euclid, &[(1, 0, 0, 0), (2, 1, 0, 0)]);
     sq.add_tactic(tactics::flank(2, 4));
     see(&mut sq, 10, 20, 0, 0);
@@ -1226,7 +1232,12 @@ fn flank_gather_then_simultaneous_attack() {
     let mut first = Vec::new();
     sq.orders_due(5, &mut first);
     assert_eq!(first.len(), 4);
-    assert!(first.iter().all(|o| o.goal.start == Start::OnSignal));
+    // Gather first: go there now, only move; the attack comes on the signal.
+    assert!(
+        first
+            .iter()
+            .all(|o| (o.goal.kind, o.goal.start) == (GoalKind::Move, Start::Now))
+    );
     assert!(first.iter().all(|o| o.goal.then_pos.is_some()));
     for (m, t) in [(4, 6), (2, 7), (3, 8)] {
         assert!(sq.arrived(m, t));
@@ -1248,8 +1259,8 @@ fn flank_gather_then_simultaneous_attack() {
         assert_eq!(o.goal.pos, before.goal.then_pos);
         assert_eq!(o.goal.unchecked, before.goal.then_unchecked);
         assert_eq!(
-            (o.goal.start, o.goal.plan, o.goal.issued_at),
-            (Start::Now, id, 9)
+            (o.goal.kind, o.goal.start, o.goal.plan, o.goal.issued_at),
+            (GoalKind::Attack, Start::Now, id, 9)
         );
         assert_eq!(o.goal.start_delay, 0);
     }
@@ -1384,6 +1395,7 @@ fn role_feasibility_is_joint() {
         start: Start::Now,
         want_tags: 0,
         dist: 1,
+        gather_dist: 2,
     };
     let t = |slots| Tactic {
         slots,
@@ -2133,7 +2145,8 @@ fn no_tags_scene() {
     }
     assert_eq!(sides, [2, 1, 1], "three sides, the front takes the fourth");
 
-    // Without any spot the flank still plans, on unchecked wish points.
+    // Without any spot the flank still plans, on unchecked wish points:
+    // the gather points, twice the attack distance from the target.
     let mut bare = Scene::square(192);
     bare.spots.clear();
     bare.run(0..=5);
@@ -2146,14 +2159,29 @@ fn no_tags_scene() {
     assert_eq!(
         wish,
         [
-            (0, Some([16, 0, 0]), true),
-            (1, Some([20, 4, 0]), true),
-            (2, Some([20, -4, 0]), true),
-            (0, Some([16, 0, 0]), true),
+            (0, Some([12, 0, 0]), true),
+            (1, Some([20, 8, 0]), true),
+            (2, Some([20, -8, 0]), true),
+            (0, Some([12, 0, 0]), true),
+        ]
+    );
+    let then: Vec<Option<Pos>> = p.goals.iter().map(|(_, g)| g.then_pos).collect();
+    assert_eq!(
+        then,
+        [
+            Some([16, 0, 0]),
+            Some([20, 4, 0]),
+            Some([20, -4, 0]),
+            Some([16, 0, 0])
         ]
     );
 
-    // Every shipped tactic with a target plans on tag-0 spots only.
+    // Every shipped tactic with a target plans on tag-0 spots only: a grid
+    // of them, so every wish point has free spots within its radius.
+    let grid: Vec<Spot> = (-6..=24)
+        .step_by(2)
+        .flat_map(|x| (-8..=12).step_by(2).map(move |y| spot(x, y, 0)))
+        .collect();
     for tactic in [
         tactics::rush(),
         tactics::formation(Shape::Wedge, 2),
@@ -2162,7 +2190,7 @@ fn no_tags_scene() {
         tactics::focus(),
         tactics::isolate(),
     ] {
-        let mut one = Scene::new(Metric::Chebyshev, 255, &SQUARE_FOUR, plain.to_vec());
+        let mut one = Scene::new(Metric::Chebyshev, 255, &SQUARE_FOUR, grid.clone());
         one.sq.add_tactic(tactic);
         one.enemies_at_start([24, 10, 0]);
         one.run(0..=5);
@@ -2244,4 +2272,382 @@ fn no_cheat() {
     let targets = run(false);
     assert!(!targets.is_empty());
     assert!(targets.iter().all(|&t| t == Some(E1) || t == Some(E2)));
+}
+
+// --- Final review fixes ---
+
+#[test]
+fn lost_target_ends_the_plan() {
+    // After the signal the plan holds, but not once its target is gone
+    // from the leader's knowledge.
+    let (mut sq, id) = active_flank();
+    assert!(sq.signal(6));
+    see(&mut sq, 11, 30, 0, 6);
+    assert!(sq.knowledge_mut().remove(10, ENEMY));
+    let Ok(Status::Replan(next)) = sq.check(7, &[], &[], 0) else {
+        panic!("a lost target ends the plan");
+    };
+    assert_ne!(next, id);
+    assert_eq!(sq.pending_plan().unwrap().target, Some(11));
+    // With no target left nothing can be planned: the plan is dropped.
+    let (mut sq, _) = active_flank();
+    assert!(sq.signal(6));
+    sq.knowledge_mut().clear();
+    assert_eq!(sq.check(7, &[], &[], 0), Ok(Status::NoPlan));
+    assert!(sq.active_plan().is_none());
+    // A target not seen for 255 ticks ends the shipped tactics too.
+    let (mut sq, _) = active_flank();
+    assert_eq!(sq.check(254, &[], &[], 0), Ok(Status::Signal));
+    assert!(matches!(sq.check(255, &[], &[], 0), Ok(Status::Replan(_))));
+    assert_eq!(sq.pending_plan().unwrap().tactic, 0, "rush has no abort");
+}
+
+#[test]
+fn better_replan_takes_only_clearly_better() {
+    // A (1/2), then B (1.0) and C (0.1): the weak bonus is 1/8, so only B
+    // beats A; C must never be picked, for any constant seed.
+    let think = SkillTable::default().think_ticks[0];
+    for seed in 0..32 {
+        let mut sq = squad_of(Metric::Euclid, &four());
+        let a = sq.add_tactic(Tactic {
+            weight: ONE / 2,
+            ..tactics::rush()
+        });
+        let column = |c: usize| Tactic {
+            considerations: vec![Consideration::new(
+                (IN_EXTRA + c) as u32,
+                Curve::Linear,
+                0,
+                100,
+            )],
+            weight: ONE,
+            ..tactics::rush()
+        };
+        let b = sq.add_tactic(column(0));
+        sq.add_tactic(column(1));
+        sq.set_extra_columns(2);
+        sq.set_skill(0);
+        see(&mut sq, 10, 20, 0, 0);
+        assert!(matches!(
+            sq.check(0, &[0, 0, 0, 0], &[], seed),
+            Ok(Status::Replan(_))
+        ));
+        assert_eq!(sq.check(think, &[0, 0, 0, 0], &[], seed), Ok(Status::Keep));
+        assert_eq!(sq.active_plan().unwrap().tactic, a);
+        for now in think + 1..think + 300 {
+            if let Ok(Status::Replan(_)) = sq.check(now, &[0, 0, 100, 10], &[], seed) {
+                assert_eq!(sq.pending_plan().unwrap().tactic, b, "seed {seed} at {now}");
+            }
+        }
+        assert_eq!(sq.active_plan().unwrap().tactic, b, "seed {seed}");
+    }
+}
+
+#[test]
+fn second_order_never_overtakes_the_first() {
+    // Member 2 is far when the ambush becomes active (its order needs 42
+    // ticks), then steps next to the leader; the signal right after must
+    // not reach it before the first order would have.
+    let mut sq = squad_of(Metric::Euclid, &[(1, 0, 0, 0), (2, 40, 0, 0)]);
+    sq.add_tactic(tactics::ambush());
+    sq.set_skill(255);
+    see(&mut sq, 10, 60, 0, 0);
+    assert!(sq.set_channel(2, RADIO));
+    assert!(matches!(sq.check(0, &[], &[], 0), Ok(Status::Replan(_))));
+    let mut got = Vec::new();
+    let mut out = Vec::new();
+    sq.orders_due(5, &mut out);
+    got.extend(out.drain(..).map(|o| (5, o)));
+    assert!(sq.group_mut().set_pos(2, [1, 0, 0]));
+    assert!(sq.signal(6));
+    for t in 6..=100 {
+        sq.orders_due(t, &mut out);
+        got.extend(out.drain(..).map(|o| (t, o)));
+    }
+    let two: Vec<(u32, u32)> = got
+        .iter()
+        .filter(|(_, o)| o.member == 2)
+        .map(|(t, o)| (*t, o.goal.issued_at))
+        .collect();
+    // One order only, the signal's (issued at 6), when the first would
+    // have come: 5 + 2 + 40.
+    assert_eq!(two, [(47, 6)]);
+    // The leader waits for it: its own second order starts then too.
+    let lead = got
+        .iter()
+        .find(|(_, o)| o.member == 1 && o.goal.issued_at == 6)
+        .unwrap();
+    assert_eq!((lead.0, lead.1.goal.start), (6, Start::AfterTicks(41)));
+}
+
+#[test]
+fn areas_expire_inside_the_squad() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::fall_back());
+    sq.set_skill(255);
+    assert!(sq.set_gone(3) && sq.set_gone(4));
+    sq.areas_mut().add(
+        Area {
+            pos: [20, 0, 0],
+            radius: 3,
+            lifetime: 10,
+            ..Area::default()
+        },
+        0,
+    );
+    sq.plan(9, &[], &[], 0).unwrap().unwrap();
+    let g = sq.pending_plan().unwrap().goals[0].1;
+    assert_eq!(g.pos, Some([-tactics::FALL_BACK_DIST, 0, 0]));
+    // Its lifetime is over: no danger left, the members stay.
+    sq.plan(10, &[], &[], 0).unwrap().unwrap();
+    assert!(sq.areas().is_empty());
+    let g = sq.pending_plan().unwrap().goals[0].1;
+    assert_eq!(g.pos, Some([0, 0, 0]));
+}
+
+#[test]
+fn fall_back_does_not_take_cover_near_the_enemy() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::fall_back());
+    sq.set_skill(255);
+    assert!(sq.set_gone(3) && sq.set_gone(4));
+    see(&mut sq, 10, 10, 0, 0);
+    // Cover right at the enemy, a plain spot near the retreat point.
+    let spots = [spot(9, 0, TAG_COVER), spot(-7, 0, 0)];
+    sq.plan(0, &[], &spots, 0).unwrap().unwrap();
+    let got: Vec<Option<Pos>> = sq
+        .pending_plan()
+        .unwrap()
+        .goals
+        .iter()
+        .map(|(_, g)| g.pos)
+        .collect();
+    assert_eq!(got, [Some([-7, 0, 0]), Some([-8, 0, 0])]);
+}
+
+#[test]
+fn resumed_member_rejoins_after_signal() {
+    // As game_orders_first, but member 3 comes back after the signal.
+    let mut s = Scene::square(192);
+    s.run(0..=19);
+    assert!(s.sq.group_mut().suspend(3));
+    s.run(20..=59);
+    assert_eq!(
+        s.first(|e| matches!(e, Ev::Signal { .. })),
+        Some(Ev::Signal { t: 49 })
+    );
+    assert!(s.sq.resume(3, 60));
+    assert!(!s.sq.resume(99, 60));
+    s.run(60..=120);
+    // It gets the attack order by radio and attacks.
+    let late: Vec<(u32, u32)> = s
+        .orders()
+        .into_iter()
+        .filter(|&(t, m)| m == 3 && t >= 60)
+        .collect();
+    assert_eq!(late.len(), 1, "one order after the resume");
+    assert!(s.attacks().iter().any(|&(t, m)| m == 3 && t >= late[0].0));
+}
+
+#[test]
+fn resume_before_signal_resends_the_gather_order() {
+    let (mut sq, id) = active_flank();
+    let mut out = Vec::new();
+    sq.orders_due(5, &mut out);
+    assert!(sq.group_mut().suspend(3));
+    assert!(sq.resume(3, 6));
+    out.clear();
+    sq.orders_due(6, &mut out);
+    assert_eq!(members_of(&out), [3]);
+    let g = out[0].goal;
+    assert_eq!((g.kind, g.start, g.plan), (GoalKind::Move, Start::Now, id));
+    assert!(g.then_pos.is_some());
+    // A member that was not suspended gets nothing again.
+    assert!(sq.resume(2, 7));
+    sq.orders_due(7, &mut out);
+    assert_eq!(members_of(&out), [3]);
+    // Without an active plan a resume only puts the member back.
+    let mut sq = squad_of(Metric::Euclid, &four());
+    assert!(sq.group_mut().suspend(2));
+    assert!(sq.resume(2, 0));
+    assert_eq!(sq.group().get(1).unwrap().state, MemberState::Active);
+}
+
+#[test]
+fn arrival_reports_count_once_in() {
+    let arrived = |member: u32, plan: PlanId| Message {
+        kind: REPORT_ARRIVED,
+        sender: member,
+        data: plan,
+        ..Message::default()
+    };
+    // Sent at 6, in at 20; a sender that is no member does not count.
+    let (mut sq, id) = active_flank();
+    for m in 1..=4 {
+        assert!(sq.report(arrived(m, id), 20));
+    }
+    assert!(sq.report(arrived(9, id), 7));
+    assert_eq!(sq.check(19, &[], &[], 0), Ok(Status::Keep));
+    assert_eq!(sq.check(20, &[], &[], 0), Ok(Status::Signal));
+    // A report for another plan does not count.
+    let (mut sq, id) = active_flank();
+    for m in 1..=4 {
+        assert!(sq.report(arrived(m, id + 1), 7));
+    }
+    assert_eq!(sq.check(8, &[], &[], 0), Ok(Status::Keep));
+    assert_eq!(REPORT_ARRIVED, 4);
+}
+
+#[test]
+fn pick_spot_radius_bounds_the_search() {
+    // A tagged spot beyond the radius does not count; the nearest free
+    // spot within does; with none within, the wish point.
+    let spots = [spot(10, 0, TAG_COVER), spot(2, 0, 0), spot(3, 3, 0)];
+    let w = [0, 0, 0];
+    let pick = |r| pick_spot(w, TAG_COVER, &spots, &[], 0, Metric::Euclid, r);
+    assert_eq!(pick(FAR), SpotPick::Spot(0));
+    assert_eq!(pick(3), SpotPick::Spot(1));
+    assert_eq!(pick(1), SpotPick::Unchecked(w));
+    assert_eq!(pick(-1), SpotPick::Unchecked(w));
+    // Euclid compares squares: (3, 3) is 18 > 9 away.
+    let taken = [false, true];
+    assert_eq!(
+        pick_spot(w, 0, &spots, &taken, 0, Metric::Euclid, 3),
+        SpotPick::Unchecked(w)
+    );
+    // Chebyshev: (3, 3) is 3 away, inclusive.
+    assert_eq!(
+        pick_spot(w, 0, &spots, &taken, 0, Metric::Chebyshev, 3),
+        SpotPick::Spot(2)
+    );
+    // A spot error never reaches past the radius.
+    assert_eq!(
+        pick_spot(w, 0, &spots, &[], 9, Metric::Chebyshev, 3),
+        SpotPick::Spot(2)
+    );
+}
+
+#[test]
+fn squad_spot_radius_setting() {
+    let mut sq = squad_of(Metric::Euclid, &[(1, 0, 0, 0)]);
+    sq.add_tactic(tactics::rush());
+    sq.set_skill(255);
+    see(&mut sq, 10, 20, 0, 0);
+    assert_eq!(sq.spot_radius(), None);
+    // Rush's wish is (19, 0); its default spot radius is 3.
+    let spots = [spot(14, 0, 0)];
+    sq.plan(0, &[], &spots, 0).unwrap().unwrap();
+    let g = sq.pending_plan().unwrap().goals[0].1;
+    assert_eq!((g.pos, g.unchecked), (Some([19, 0, 0]), true));
+    sq.set_spot_radius(Some(5));
+    assert_eq!(sq.spot_radius(), Some(5));
+    sq.plan(0, &[], &spots, 0).unwrap().unwrap();
+    let g = sq.pending_plan().unwrap().goals[0].1;
+    assert_eq!((g.pos, g.unchecked), (Some([14, 0, 0]), false));
+    sq.set_spot_radius(None);
+    assert_eq!(sq.spot_radius(), None);
+}
+
+#[test]
+fn flank_gathers_off_the_attack_spot() {
+    let f = tactics::flank(3, 4);
+    assert!(f.slots.iter().all(|s| (s.dist, s.gather_dist) == (4, 8)));
+    // Gather spots near the gather points, attack spots near the target.
+    let mut sq = squad_of(Metric::Chebyshev, &[(1, 0, 0, 0), (2, 0, 2, 0)]);
+    sq.add_tactic(tactics::flank(2, 4));
+    sq.set_skill(255);
+    see(&mut sq, 10, 20, 0, 0);
+    let spots = [
+        spot(20, 9, 0),
+        spot(20, -9, 0),
+        spot(20, 4, 0),
+        spot(20, -4, 0),
+    ];
+    sq.plan(0, &[], &spots, 0).unwrap().unwrap();
+    let mut got: Vec<(Option<Pos>, Option<Pos>)> = sq
+        .pending_plan()
+        .unwrap()
+        .goals
+        .iter()
+        .map(|(_, g)| (g.pos, g.then_pos))
+        .collect();
+    got.sort_unstable();
+    assert_eq!(
+        got,
+        [
+            (Some([20, -9, 0]), Some([20, -4, 0])),
+            (Some([20, 9, 0]), Some([20, 4, 0])),
+        ]
+    );
+}
+
+#[test]
+fn isolate_scores_the_friend_distance() {
+    // No caller columns: the built-in friend distance scores isolate.
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::isolate());
+    sq.set_skill(255);
+    see(&mut sq, 10, 20, 0, 0);
+    // Alone: no friend, isolate scores 0.
+    assert_eq!(sq.plan(0, &[], &[], 0), Ok(None));
+    see(&mut sq, 11, 22, 0, 0);
+    see(&mut sq, 12, 20, 30, 0);
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
+    assert_eq!(sq.pending_plan().unwrap().target, Some(12));
+}
+
+#[test]
+fn extra_columns_are_bounded() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    assert!(sq.set_extra_columns(MAX_EXTRA_COLUMNS));
+    assert!(!sq.set_extra_columns(MAX_EXTRA_COLUMNS + 1));
+    assert!(!sq.set_extra_columns(usize::MAX));
+    // The refused counts changed nothing: the last column still reads.
+    let mut t = tactics::rush();
+    t.considerations.push(Consideration::new(
+        (IN_EXTRA + MAX_EXTRA_COLUMNS - 1) as u32,
+        Curve::Linear,
+        0,
+        1,
+    ));
+    sq.add_tactic(t);
+    sq.set_skill(255);
+    assert_eq!(sq.validate(), Ok(()));
+    see(&mut sq, 10, 20, 0, 0);
+    // One block for no target, then the target's block.
+    let mut extra = vec![0; 2 * MAX_EXTRA_COLUMNS];
+    assert_eq!(sq.plan(0, &extra, &[], 0), Ok(None));
+    extra[2 * MAX_EXTRA_COLUMNS - 1] = 1;
+    assert!(sq.plan(0, &extra, &[], 0).unwrap().is_some());
+}
+
+#[test]
+fn validate_rejects_more_than_255_slots() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::rush());
+    let mut big = tactics::rush();
+    big.slots = vec![big.slots[0]; 256];
+    big.slots.iter_mut().for_each(|s| s.min = 0);
+    let t = sq.add_tactic(big.clone());
+    let err = PlanError::TooManySlots { tactic: t };
+    assert_eq!(sq.validate(), Err(err));
+    assert_eq!(sq.plan(0, &[], &[], 0), Err(err));
+    assert_eq!(err.to_string(), "tactic 1 has more than 255 slots");
+    let mut ok = squad_of(Metric::Euclid, &four());
+    big.slots.truncate(255);
+    ok.add_tactic(big);
+    assert_eq!(ok.validate(), Ok(()));
+}
+
+#[test]
+fn gather_negative_radius_and_zero_max() {
+    let c = [near(1, 7, 0, 0, true), near(2, 7, 1, 0, true)];
+    let mut out = vec![99];
+    gather([0; 3], 7, -1, Metric::Chebyshev, false, &c, &mut out, 10);
+    assert!(out.is_empty(), "a negative radius reaches nobody");
+    out.push(99);
+    gather([0; 3], 7, 10, Metric::Chebyshev, false, &c, &mut out, 0);
+    assert!(out.is_empty(), "max 0 takes nobody");
+    gather([0; 3], 7, 0, Metric::Chebyshev, false, &c, &mut out, 10);
+    assert_eq!(out, [1], "radius 0 is inclusive");
 }

@@ -140,7 +140,9 @@ impl Areas {
     /// `to` is blocked (see [`Areas::blocks`]), else `Some` of the cost of
     /// `to` (see [`Areas::cost`]). Only the destination cell is judged;
     /// `from` is accepted for symmetry with the search's callback and is
-    /// not used yet.
+    /// not used yet. The cells are compared with the areas as they are: keep
+    /// both in the same (cell) coordinates, or convert the cell first and
+    /// call [`Areas::blocks`] and [`Areas::cost`] yourself.
     pub fn move_cost(&self, _from: Pos, to: Pos, start: Pos, goal: Pos) -> Option<u32> {
         if self.blocks(to, start, goal) {
             None

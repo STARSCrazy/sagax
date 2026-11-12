@@ -170,6 +170,17 @@ mod tests {
     }
 
     #[test]
+    fn give_up_zero_breaks_at_once() {
+        let mut k = GoalKeeper::new();
+        k.set(goal(None, 0), 0);
+        assert!(!k.broken(5, 0), "not postponed: never broken");
+        k.postpone(5);
+        assert!(k.broken(5, 0));
+        k.suspend();
+        assert!(!k.broken(5, 0));
+    }
+
+    #[test]
     fn suspended_never_broken() {
         let mut k = GoalKeeper::new();
         k.set(goal(None, 0), 0);
