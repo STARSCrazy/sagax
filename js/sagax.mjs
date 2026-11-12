@@ -10,7 +10,8 @@
 //   grid.free();
 //
 // Every search answers with the same object:
-//   {cells, status, reached, cost, total, expanded, nodeLimitHit}
+//   {cells, status, reached, cost, steps, zonesLeft, total, expanded, nodeLimitHit}
+//   cost = steps (walking and terrain) + zonesLeft * leave cost
 //   status: 'running' (budget used up, call grid.continue()), 'found',
 //   'partial' (goal unreachable, way to the closest cell), 'unreachable',
 //   'done' (area complete). Ways always begin with the start.
@@ -162,7 +163,24 @@ export class Grid {
 
   /** Cost added for each zone a move leaves (e.g. an attack of opportunity). */
   setLeaveCost(cost) {
-    this.x.sx_grid_set_leave_cost(this.handle, cost >>> 0);
+    this.leaveCost = cost >>> 0;
+    this.x.sx_grid_set_leave_cost(this.handle, this.leaveCost);
+  }
+
+  /**
+   * Zones the way leaves, cell by cell (each one e.g. an attack of
+   * opportunity). cells: the whole way (output 'cells').
+   */
+  zonesLeft(cells) {
+    const zones = this.zones();
+    let left = 0;
+    for (let i = 1; i < cells.length; i++) {
+      const a = zones[cells[i - 1].y * this.width + cells[i - 1].x];
+      const b = zones[cells[i].y * this.width + cells[i].x];
+      let bits = (a & ~b) >>> 0;
+      while (bits) { bits = (bits & (bits - 1)) >>> 0; left++; }
+    }
+    return left;
   }
 
   readCells(count, stride) {
@@ -181,15 +199,24 @@ export class Grid {
     new Int32Array(this.x.memory.buffer, ptr, numbers.length).set(numbers);
   }
 
-  answer(n, stride) {
+  answer(n, stride, split = false) {
     if (n < 0) throw new RangeError('Sagax: bad arguments');
     const r = new Int32Array(this.x.memory.buffer, this.x.sx_result(this.handle), 5);
     const status = STATUS[r[0]];
+    const cells = this.readCells(n, stride);
+    // Ways: split the cost into walking (steps and terrain) and zone penalty.
+    let zonesLeft = 0;
+    if (split && this.leaveCost && n > 1) {
+      const whole = this.x.sx_way(this.handle, 0);
+      if (whole > 1) zonesLeft = this.zonesLeft(this.readCells(whole, 2));
+    }
     return {
-      cells: this.readCells(n, stride),
+      cells,
       status,
       reached: status === 'found',
       cost: r[2],
+      steps: r[2] - zonesLeft * (this.leaveCost ?? 0),
+      zonesLeft,
       total: r[1],
       expanded: r[3],
       nodeLimitHit: r[4] === 1,
@@ -206,7 +233,7 @@ export class Grid {
     const goals = Array.isArray(goal) ? goal : [goal];
     this.writeInput(goals.flatMap((g) => [g.x, g.y]));
     this.last = 2;
-    return this.answer(this.x.sx_find_path(this.handle, start.x, start.y, goals.length, budget, outputOf(output)), 2);
+    return this.answer(this.x.sx_find_path(this.handle, start.x, start.y, goals.length, budget, outputOf(output)), 2, true);
   }
 
   /**
@@ -218,7 +245,7 @@ export class Grid {
   flee(start, threats, maxCost, { output = 'cells' } = {}) {
     this.writeInput(threats.flatMap((t) => [t.x, t.y]));
     this.last = 2;
-    return this.answer(this.x.sx_flee(this.handle, start.x, start.y, threats.length, maxCost, outputOf(output)), 2);
+    return this.answer(this.x.sx_flee(this.handle, start.x, start.y, threats.length, maxCost, outputOf(output)), 2, true);
   }
 
   /** Every cell reachable from start at a cost of at most maxCost: cells [{x, y, cost}]. */
@@ -229,12 +256,12 @@ export class Grid {
 
   /** After status 'running': goes on with the last findPath / reachable. */
   continue(budget = 0) {
-    return this.answer(this.x.sx_continue(this.handle, budget), this.last ?? 2);
+    return this.answer(this.x.sx_continue(this.handle, budget), this.last ?? 2, (this.last ?? 2) === 2);
   }
 
   /** After reachable() or findPath(): the way from that start to x, y, or null. */
   pathTo(x, y, output = 'cells') {
-    const a = this.answer(this.x.sx_path_to(this.handle, x, y, outputOf(output)), 2);
+    const a = this.answer(this.x.sx_path_to(this.handle, x, y, outputOf(output)), 2, true);
     return a.reached ? a : null;
   }
 

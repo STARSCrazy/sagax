@@ -368,6 +368,15 @@ impl DenseGrid {
         self.leave_cost = cost;
     }
 
+    /// Zones `path` leaves, cell by cell (each one e.g. an attack of
+    /// opportunity). The way's cost minus this times the leave cost is what
+    /// walking and terrain cost alone.
+    pub fn zones_left(&self, path: &[Cell]) -> u32 {
+        path.windows(2)
+            .map(|w| (self.zones(w[0].x, w[0].y) & !self.zones(w[1].x, w[1].y)).count_ones())
+            .sum()
+    }
+
     /// Removes all zones.
     pub fn clear_zones(&mut self) {
         self.zones.fill(0);
@@ -477,6 +486,8 @@ mod tests {
         let c = |x| Cell::new(x, 0, 0);
         assert_eq!(g.move_cost(c(0), c(1)), Some(50)); // leaves zone 2
         assert_eq!(g.move_cost(c(1), c(2)), Some(50)); // leaves zone 1
+        assert_eq!(g.zones_left(&[c(0), c(1), c(2)]), 2);
+        assert_eq!(g.zones_left(&[c(0)]), 0);
         assert_eq!(g.move_cost(c(1), c(0)), Some(0)); // enters only
     }
 

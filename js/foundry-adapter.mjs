@@ -25,14 +25,15 @@ const HEX_LAYOUT_BY_GRID_TYPE = { 2: HEX.oddR, 3: HEX.evenR, 4: HEX.oddQ, 5: HEX
 /**
  * @param {object} lib        result of loadSagax()
  * @param {object} options
- * @param {{document: TokenDocument}} options.walker  the token that moves
- * @param {{document: TokenDocument}[]} options.enemies  tokens whose reach costs extra to leave (at most 32)
+ * @param {Token|TokenDocument} options.walker  the token that moves (placeable or document)
+ * @param {(Token|TokenDocument)[]} options.enemies  tokens whose reach costs extra to leave (at most 32)
  * @param {(t) => number} options.reachOf  reach radius in cells
  * @param {number} [options.leaveCost=4]  extra cost for leaving one enemy's reach
  * @returns {{grid, toCell(point), toPoint(cell), cellOf(tokenDocument), walkerCell}}
  *   the grid already carries the rules (square or hex)
  */
 export function buildCombatGrid(lib, { walker, enemies = [], reachOf = () => 1, leaveCost = 4 }) {
+  const docOf = (t) => t.document ?? t;
   const fgrid = canvas.grid;
   const hex = fgrid.isHexagonal ? HEX_LAYOUT_BY_GRID_TYPE[fgrid.type] : null;
   if (!fgrid.isSquare && hex === undefined) throw new Error(`Sagax: grid type ${fgrid.type} not supported`);
@@ -85,7 +86,7 @@ export function buildCombatGrid(lib, { walker, enemies = [], reachOf = () => 1, 
   // other tokens block their cells. Uses the scene's token documents:
   // placeables are missing for tokens the viewer does not see.
   for (const doc of canvas.scene.tokens) {
-    if (doc === walker.document) continue;
+    if (doc === docOf(walker)) continue;
     if (hex === null) {
       const c = toCell({ x: doc.x, y: doc.y });
       for (let dx = 0; dx < (doc.width ?? 1); dx++) {
@@ -102,10 +103,10 @@ export function buildCombatGrid(lib, { walker, enemies = [], reachOf = () => 1, 
   grid.setLeaveCost(0);
   const reaches = enemies.slice(0, 32).map((enemy) => {
     const r = reachOf(enemy);
-    return r > 0 ? grid.reachable(cellOf(enemy.document), r).cells : [];
+    return r > 0 ? grid.reachable(cellOf(docOf(enemy)), r).cells : [];
   });
   reaches.forEach((cells, zone) => cells.forEach((c) => grid.addZone(c.x, c.y, zone)));
   grid.setLeaveCost(leaveCost);
 
-  return { grid, rules, toCell, toPoint, cellOf, walkerCell: cellOf(walker.document) };
+  return { grid, rules, toCell, toPoint, cellOf, walkerCell: cellOf(docOf(walker)) };
 }

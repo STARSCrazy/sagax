@@ -246,6 +246,22 @@ test('flee from threats, flee to the nearest exit', () => {
   g.free();
 });
 
+test('ways split walking cost and zone penalty', () => {
+  const g = lib.grid(10, 1);
+  for (let x = 0; x <= 3; x++) g.addZone(x, 0, 0);
+  g.setLeaveCost(5);
+  const way = g.findPath({ x: 2, y: 0 }, { x: 7, y: 0 });
+  assert.equal(way.cost, 10);
+  assert.equal(way.steps, 5);
+  assert.equal(way.zonesLeft, 1);
+  g.reachable({ x: 2, y: 0 }, 20);
+  const back = g.pathTo(6, 0);
+  assert.deepEqual([back.steps, back.zonesLeft], [4, 1]);
+  g.setLeaveCost(0);
+  assert.deepEqual([g.findPath({ x: 2, y: 0 }, { x: 7, y: 0 }).steps, g.findPath({ x: 2, y: 0 }, { x: 7, y: 0 }).zonesLeft], [5, 0]);
+  g.free();
+});
+
 test('decide: utility scores, ties, seeded chance, trace', () => {
   const d = lib.decider();
   const attack = d.addOption(1, [

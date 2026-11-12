@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+- Ways split their cost: JavaScript results carry `steps` (walking and
+  terrain) and `zonesLeft` (zones left, e.g. attacks of opportunity) beside
+  `cost`. Rust `DenseGrid::zones_left`.
+- Foundry adapter: walker and enemies may be tokens or token documents.
+
 ## 0.4.0
 
 - Decisions (utility AI), new crate `sagax-decide`: options with weights and

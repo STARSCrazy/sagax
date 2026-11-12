@@ -253,6 +253,14 @@ Game AI often weighs options by ways, not by straight-line distance:
   way out at all.
 - **Danger:** zones to avoid as extra `move_cost`; then the cost already
   counts the risk.
+- **Movement budget with zones:** with a leave cost, `cost` mixes walking
+  and penalty. JavaScript ways also give `steps` (walking and terrain only)
+  and `zonesLeft` (zones left, e.g. attacks of opportunity provoked), so
+  `cost = steps + zonesLeft * leaveCost`. Check `steps` against the movement
+  left; Rust: `DenseGrid::zones_left(path)`. In C the penalty is part of your
+  own `move_cost`, so you already know it. For "where can I get this turn"
+  without zones, run `reachable` with leave cost 0; then check single targets
+  with `findPath` and zones on.
 
 ## 6. Decisions (utility AI)
 
