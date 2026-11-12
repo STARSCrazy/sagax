@@ -492,6 +492,10 @@ test('knowledge: expire, expire with per-kind ages, expireKind', () => {
   assert.deepEqual(k.expire(20, 0, (f) => (f.kind === 1 ? 5 : 15)).map((f) => f.subject), [3]);
   assert.deepEqual(keys(k), [[4, 2]]);
   assert.throws(() => k.expire(20, 0, () => undefined), TypeError);
+  // Infinity and limits past 2^32 - 1 never expire; bad limits are refused
+  assert.deepEqual(k.expire(1e9, 0, () => Infinity), []);
+  assert.deepEqual(k.expire(1e9, 0, () => 2 ** 32), []);
+  for (const bad of [-1, NaN, 1.5, -Infinity]) assert.throws(() => k.expire(20, 0, () => bad), RangeError);
   assert.equal(k.count(), 1); // a bad callback removes nothing
   const e = lib.knowledge(5);
   e.learn(fact(1, 1, 0), 0);
@@ -808,6 +812,22 @@ test('alertness: levels, jumps, hold then decay, hysteresis, wrap', () => {
   assert.deepEqual(a.update(4294967290, cfg), [0, 3]);
   assert.deepEqual(a.update(10, cfg), [3, 0]);
   assert.equal(a.value, 0);
+  // stimulus applies the owed decay first (50 - 100 saturates to 0, then +10)
+  cfg = alertCfg(1, 0, 0);
+  a = new Alertness();
+  a.stimulus(50, 0, cfg);
+  a.update(0, cfg);
+  a.stimulus(10, 100, cfg);
+  assert.equal(a.level, 2); // the level is left to update
+  assert.deepEqual(a.update(100, cfg), [2, 0]);
+  assert.equal(a.value, 10);
+  // a lowered count cannot leave the level stuck
+  cfg = alertCfg(0, 0, 0);
+  a = new Alertness();
+  a.stimulus(90, 0, cfg);
+  assert.deepEqual(a.update(0, cfg), [0, 3]);
+  assert.deepEqual(a.update(1, { ...cfg, thresholds: [20] }), [3, 1]);
+  assert.deepEqual(a.update(2, { ...cfg, thresholds: [] }), [1, 0]);
   // thresholds: at most 8 (Rust clamps a larger count, JS refuses it)
   const big = { max: 100, decayPerTick: 1, hold: 0, hysteresis: 0, thresholds: [1, 2, 3, 4, 5, 6, 7, 8] };
   a = new Alertness();
@@ -846,6 +866,9 @@ test('sine: fine quarter points and symmetry, coarse reference', () => {
   assert.throws(() => lib.sine(0, 'rough'), RangeError);
 });
 
+// The reference numbers were made on a 0..32767 map.
+const COARSE = { sine: 'coarse', min: [0, 0], max: [32767, 32767] };
+
 test('pointsAround: coarse matches the reference, fine defaults', () => {
   const want = [
     [[0, 0], 0, [[0, 256], [0, 1280], [1629, 1629], [0, 2172]]],
@@ -869,11 +892,14 @@ test('pointsAround: coarse matches the reference, fine defaults', () => {
   ];
   for (const [c, agent, pts] of want) {
     pts.forEach(([x, y], step) => {
-      assert.deepEqual(lib.pointsAround(agent, step, [c[0], c[1], 7], { sine: 'coarse' }), [x, y, 7], `agent ${agent} step ${step} centre ${c}`);
+      assert.deepEqual(lib.pointsAround(agent, step, [c[0], c[1], 7], COARSE), [x, y, 7], `agent ${agent} step ${step} centre ${c}`);
     });
   }
-  assert.equal(lib.pointsAround(0, 4, [0, 0, 0], { sine: 'coarse' }), null);
+  assert.equal(lib.pointsAround(0, 4, [0, 0, 0], COARSE), null);
   assert.equal(lib.pointsAround(3, 4, [0, 0, 0]), null);
+  // the default pattern is not clamped (generic i32 box), with or without a pattern object
+  assert.deepEqual(lib.pointsAround(0, 1, [-5000, -5000, 0]), [-5000, -3720, 0]);
+  assert.deepEqual(lib.pointsAround(0, 1, [-5000, -5000, 0], {}), [-5000, -3720, 0]);
   assert.equal(lib.pointsAround(3, 4294967295, [0, 0, 0]), null);
   // fine is the default, with or without a pattern
   assert.deepEqual(lib.pointsAround(0, 0, [0, 0, 7]), [0, 256, 7]);

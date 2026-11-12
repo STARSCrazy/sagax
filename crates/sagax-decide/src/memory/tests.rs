@@ -330,6 +330,32 @@ fn alertness_decay_to_zero_and_wrap() {
 }
 
 #[test]
+fn alertness_stimulus_applies_owed_decay_first() {
+    let cfg = alert_cfg(1, 0, 0);
+    let mut a = Alertness::default();
+    a.stimulus(50, 0, &cfg);
+    a.update(0, &cfg);
+    // 100 ticks owed: 50 - 100 saturates to 0, then +10 (not 50 + 10).
+    a.stimulus(10, 100, &cfg);
+    assert_eq!(a.level(), 2, "stimulus leaves the level to update");
+    assert_eq!(a.update(100, &cfg), Some((2, 0)));
+    assert_eq!(a.value(), 10);
+}
+
+#[test]
+fn alertness_lowered_count_does_not_stick() {
+    let mut cfg = alert_cfg(0, 0, 0);
+    let mut a = Alertness::default();
+    a.stimulus(90, 0, &cfg);
+    assert_eq!(a.update(0, &cfg), Some((0, 3)));
+    cfg.count = 1;
+    // Reached is 1 (< 3): the level falls to the new count, not stuck at 3.
+    assert_eq!(a.update(1, &cfg), Some((3, 1)));
+    cfg.count = 0;
+    assert_eq!(a.update(2, &cfg), Some((1, 0)));
+}
+
+#[test]
 fn alert_layout_is_stable() {
     assert_eq!(std::mem::size_of::<AlertConfig>(), 52);
     assert_eq!(std::mem::size_of::<Alertness>(), 16);
@@ -338,6 +364,8 @@ fn alert_layout_is_stable() {
 /// The default pattern with the v1 sine, for the golden numbers.
 fn coarse() -> PointPattern {
     PointPattern {
+        min: (0, 0),
+        max: (32767, 32767),
         sine: Sine::Coarse,
         ..PointPattern::default()
     }
@@ -466,6 +494,21 @@ fn points_around_clamps() {
     assert_eq!(points_around(0, 1, [500, 250, 0], &p), Some([500, 300, 0]));
     // agent 255, step 3: towards -y by 12 cells.
     assert_eq!(points_around(255, 3, [50, 250, 0], &p), Some([100, 200, 0]));
+}
+
+#[test]
+fn points_around_default_is_unclamped() {
+    let p = PointPattern::default();
+    assert_eq!((p.min, p.max), ((i32::MIN, i32::MIN), (i32::MAX, i32::MAX)));
+    // Agent 0, step 1: 5 cells along +y; a centre below zero stays there.
+    assert_eq!(
+        points_around(0, 1, [-5000, -5000, 0], &p),
+        Some([-5000, -3720, 0])
+    );
+    assert_eq!(
+        points_around(0, 0, [i32::MAX, 0, 0], &p).map(|q| q[0]),
+        Some(i32::MAX)
+    );
 }
 
 #[test]

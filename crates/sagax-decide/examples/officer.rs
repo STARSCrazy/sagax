@@ -125,6 +125,8 @@ struct Officer {
 fn pattern() -> PointPattern {
     PointPattern {
         sine: Sine::Coarse,
+        min: (0, 0),
+        max: (32767, 32767),
         ..PointPattern::default()
     }
 }

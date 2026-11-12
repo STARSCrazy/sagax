@@ -69,6 +69,10 @@ pub fn sine(h: i32, s: Sine) -> i32 {
 /// `first_distance` away along it, and step `n` (1-based) turns by
 /// `offsets[n-1]` and goes `distances[n-1]` out. Points are clamped to
 /// `min ..= max` per axis.
+///
+/// The ring is Euclidean (x and y are plain axes). On an axial hex grid it is
+/// therefore skewed: convert the centre to the game's world coordinates first
+/// and convert the result back, or snap the result to the nearest hex.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PointPattern {
     /// Heading between neighbouring agents (a full turn is 256).
@@ -91,7 +95,8 @@ pub struct PointPattern {
 impl Default for PointPattern {
     /// Heading step 0x62 (near the golden angle), step 0 at 0x100, then
     /// three points at 5, 9 and 12 times 256 with turns 0, 0x20, -0x20,
-    /// clamped to `0 ..= 32767`, with [`Sine::Fine`].
+    /// not clamped (`min` and `max` span all of `i32`), with [`Sine::Fine`].
+    /// Set `min` and `max` for a bounded map.
     fn default() -> Self {
         Self {
             heading_step: 0x62,
@@ -99,8 +104,8 @@ impl Default for PointPattern {
             offsets: vec![0, 0x20, -0x20],
             distances: vec![5 * 256, 9 * 256, 12 * 256],
             sine: Sine::Fine,
-            min: (0, 0),
-            max: (32767, 32767),
+            min: (i32::MIN, i32::MIN),
+            max: (i32::MAX, i32::MAX),
         }
     }
 }

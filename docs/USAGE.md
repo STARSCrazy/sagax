@@ -534,7 +534,8 @@ game (`SEEN`, `NOISE`, `LIT`, ...) are your own numbers.
   earlier candidate), `InRange(r)` (all with distance `<= r`, candidate
   order; with `Metric::Euclid` the square is compared with `r * r`), `All`,
   `To(id)`. `Metric` is `Euclid`, `Manhattan`, `Chebyshev` or `Hex` (axial);
-  each axis is divided by the divisor first (truncating). A message is a
+  each axis is divided by the divisor first (truncating; the hex `/ 2` then
+  truncates an odd sum). A message is a
   plain value: after `due` you may refresh `pos` and `seen_at` before
   routing. `sender_gone` drops the messages of a sender that died, except
   those with `keep_if_sender_gone` (a noise stays, a radio call is lost).
@@ -622,6 +623,10 @@ game (`SEEN`, `NOISE`, `LIT`, ...) are your own numbers.
   **sweep** (turning the view while looking around). `PointPattern::default()`
   holds all numbers; change any of them. `Sine::Fine` is accurate;
   `Sine::Coarse` is the small table that reproduces older numbers exactly.
+  The default box is not clamped (`min` and `max` span all of `i32`): set
+  `min` and `max` for a bounded map. The ring is Euclidean, so on an axial
+  hex grid it is skewed: convert to the game's world coordinates first (and
+  back), or snap the result to the nearest hex.
 
   ```rust
   let pattern = PointPattern::default();

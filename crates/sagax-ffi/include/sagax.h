@@ -465,7 +465,7 @@ typedef struct sx_timers sx_timers;
 #define SX_METRIC_EUCLID    0 /* dx*dx + dy*dy (a squared distance) */
 #define SX_METRIC_MANHATTAN 1 /* |dx| + |dy| */
 #define SX_METRIC_CHEBYSHEV 2 /* max(|dx|, |dy|) */
-#define SX_METRIC_HEX       3 /* (|dx| + |dy| + |dx + dy|) / 2 */
+#define SX_METRIC_HEX       3 /* (|dx| + |dy| + |dx + dy|) / 2, truncating */
 
 /* Sine tables (256 = full turn of a heading). */
 #define SX_SINE_FINE   0    /* 65536 = 1.0; 64 steps per quarter turn */
@@ -660,8 +660,10 @@ uint32_t sx_arrival(uint32_t now, uint32_t base, uint32_t distance, uint32_t per
  * distance r for SX_ROUTE_IN_RANGE (candidate order; for SX_METRIC_EUCLID
  * the squared distance is compared with r * r), the id for SX_ROUTE_TO, and
  * ignored for SX_ROUTE_ALL. Distances are measured per axis as
- * (dx / divisor, dy / divisor) with truncating division; a divisor <= 0
- * counts as 1. Returns -1 for an unknown rule or metric, a negative arg for
+ * (dx / divisor, dy / divisor) with truncating division (SX_METRIC_HEX then
+ * halves its sum, truncating, so an odd sum after a divisor loses a half); a
+ * divisor <= 0 counts as 1. With n == 0 nothing is written and 0 is returned
+ * (candidates and out may be null). Returns -1 for an unknown rule or metric, a negative arg for
  * NEAREST, or an arg outside 0 .. 2^32 - 1 for TO. */
 int32_t sx_route(int32_t rule, int64_t arg, int32_t ox, int32_t oy,
                  const sx_nearby *candidates, uint32_t n, int32_t metric, int32_t divisor,
@@ -737,14 +739,16 @@ int32_t sx_interval_mark(sx_interval *i, uint32_t now);
 /* Back to never marked. */
 int32_t sx_interval_reset(sx_interval *i);
 
-/* Add amount (capped at cfg->max) and note the time of the stimulus. Returns
- * 0. */
+/* Let the value decay up to now (as sx_alertness_update does), add amount
+ * (capped at cfg->max) and note the time of the stimulus. The level does not
+ * change here; call sx_alertness_update for it. Returns 0. */
 int32_t sx_alertness_stimulus(sx_alertness *a, uint32_t amount, uint32_t now,
                               const sx_alert_config *cfg);
 /* Let the value decay up to now and find the level. It jumps straight to
  * the level the value reaches (no steps between). Returns 1 if the level
  * changed (the old and the new level go to levels[0] and levels[1]; levels
- * may be null, else it has room for 2), else 0. Call it once per tick or
+ * may be null, else it has room for 2), else 0. A level above cfg->count
+ * is first cut back to cfg->count. Call it once per tick or
  * whenever the level is needed; the decay is by elapsed time. */
 int32_t sx_alertness_update(sx_alertness *a, uint32_t now, const sx_alert_config *cfg,
                             int32_t *levels);
@@ -762,8 +766,11 @@ int32_t sx_sine(int32_t heading, int32_t kind);
 /* Point `step` of `agent` around cx, cy, cz, without random numbers: each
  * agent has its own heading (agent * heading_step); step 0 is first_distance
  * away along it, step n (1-based) turns by offsets[n-1] and goes
- * distances[n-1] out. z is kept; x and y are clamped. pattern null: the
- * default (fine sine, three points at 5, 9 and 12 times 256). out: 3
+ * distances[n-1] out. z is kept; x and y are clamped to the pattern's box.
+ * pattern null: the default (fine sine, three points at 5, 9 and 12 times
+ * 256, box INT32_MIN .. INT32_MAX on both axes, so no clamping). The ring is
+ * Euclidean: on an axial hex grid it is skewed, so convert to the game's
+ * world coordinates first or snap the result to the nearest hex. out: 3
  * integers. Returns 1, or 0 if step is past the last point; -1 if
  * pattern->count > 8 or pattern->sine is not SX_SINE_*. */
 int32_t sx_points_around(uint32_t agent, uint32_t step, int32_t cx, int32_t cy, int32_t cz,

@@ -9,7 +9,9 @@ pub enum Metric {
     /// Largest axis distance (`max(|dx|, |dy|)`).
     Chebyshev = 2,
     /// Hex grid in axial coordinates (`q = x`, `r = y`):
-    /// `(|dq| + |dr| + |dq + dr|) / 2`.
+    /// `(|dq| + |dr| + |dq + dr|) / 2`. The sum is even for whole hex steps;
+    /// with a divisor the axis differences are truncated first, and the
+    /// final `/ 2` truncates an odd sum.
     Hex = 3,
 }
 

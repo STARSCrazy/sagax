@@ -1950,7 +1950,7 @@ pub unsafe extern "C" fn sx_inbox_take_due(i: *mut WasmInbox, now: u32, max: u32
 /// # Safety
 /// `i` from [`sx_inbox_new`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_inbox_len(i: *mut WasmInbox) -> i32 {
+pub unsafe extern "C" fn sx_inbox_count(i: *mut WasmInbox) -> i32 {
     to_i32(inbox!(i).inbox.len())
 }
 

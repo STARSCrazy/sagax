@@ -875,15 +875,19 @@ export class Knowledge extends Table {
   /**
    * Forgets facts at least maxAge old; returns them in slot order. With
    * perKind (a function fact => maxAge) every fact has its own age limit and
-   * maxAge is ignored.
+   * maxAge is ignored. A limit of Infinity (or above 2^32 - 1) never expires;
+   * a negative, fractional or NaN limit throws a RangeError.
    */
   expire(now, maxAge, perKind) {
     if (!perKind) return this.#facts(this.x.sx_knowledge_expire(this.h, u32(now), u32(maxAge)));
     const gone = [];
     for (const f of this.list()) {
       const limit = perKind(f);
-      if (typeof limit !== 'number' || Number.isNaN(limit)) throw new TypeError('Sagax: perKind must return a number');
-      if (u32(u32(now) - f.seenAt) >= u32(limit)) gone.push(f);
+      if (typeof limit !== 'number') throw new TypeError('Sagax: perKind must return a number');
+      // Infinity (or any integer past 2^32 - 1) never expires; other bad limits are refused.
+      if (limit === Infinity || limit > ALL) continue;
+      if (!Number.isInteger(limit) || limit < 0) throw new RangeError('Sagax: perKind must return a whole number of ticks, 0 or more (Infinity: never)');
+      if (u32(u32(now) - f.seenAt) >= limit) gone.push(f);
     }
     for (const f of gone) this.remove(f.subject, f.kind);
     return gone;
@@ -977,7 +981,7 @@ export class Inbox extends Table {
 
   /** Number of messages on their way. */
   count() {
-    return this.x.sx_inbox_len(this.h);
+    return this.x.sx_inbox_count(this.h);
   }
 
   /** Drops all messages. */
@@ -1210,23 +1214,29 @@ export class Alertness {
     this.level = 0;
   }
 
-  /** Adds amount (up to max) and remembers now as the last stimulus. */
+  /** Applies the decay owed up to now, adds amount (up to max) and remembers now as the last stimulus. The level changes in update. */
   stimulus(amount, now, cfg) {
     const c = alertConfig(cfg);
+    now = u32(now);
+    this.#decay(now, c);
     this.value = Math.min(c.max, Math.min(this.value + u32(amount), ALL));
-    this.lastStimulus = u32(now);
+    this.lastStimulus = now;
   }
 
-  /** Decays up to now and sets the level. Returns [from, to] if it changed, else null. */
-  update(now, cfg) {
-    const c = alertConfig(cfg);
-    now = u32(now);
+  #decay(now, c) {
     const sinceLast = u32(now - this.last);
     const afterHold = Math.max(0, u32(now - this.lastStimulus) - c.hold);
     // The product can pass 2^53, but then it is far above any value anyway.
     const lost = c.decay * Math.min(sinceLast, afterHold);
     this.value = lost >= this.value ? 0 : this.value - lost;
     this.last = now;
+  }
+
+  /** Decays up to now and sets the level. Returns [from, to] if it changed, else null. */
+  update(now, cfg) {
+    const c = alertConfig(cfg);
+    now = u32(now);
+    this.#decay(now, c);
 
     const th = c.thresholds;
     const from = this.level;
@@ -1235,6 +1245,7 @@ export class Alertness {
     if (reached > to) {
       to = reached;
     } else {
+      to = Math.min(from, th.length);
       while (to > 0 && to - 1 < th.length && this.value < Math.max(0, th[to - 1] - c.hysteresis)) to--;
     }
     this.level = to;
@@ -1292,8 +1303,8 @@ const POINT_DEFAULT = {
   firstDistance: 0x100,
   offsets: [0, 0x20, -0x20],
   distances: [5 * 256, 9 * 256, 12 * 256],
-  min: [0, 0],
-  max: [32767, 32767],
+  min: [-2147483648, -2147483648],
+  max: [2147483647, 2147483647],
   sine: 'fine',
 };
 

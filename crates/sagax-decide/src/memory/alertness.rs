@@ -31,19 +31,18 @@ pub struct Alertness {
 }
 
 impl Alertness {
-    /// Adds `amount` (capped at `cfg.max`) and notes the time. Call
-    /// [`update`](Self::update) to get the new level.
+    /// Applies the decay owed up to `now` (as [`update`](Self::update) does),
+    /// adds `amount` (capped at `cfg.max`) and notes the time. The level is
+    /// not changed here: call [`update`](Self::update) to get it.
     pub fn stimulus(&mut self, amount: u32, now: u32, cfg: &AlertConfig) {
+        self.decay(now, cfg);
         self.value = self.value.saturating_add(amount).min(cfg.max);
         self.last_stimulus = now;
     }
 
-    /// Decays for the ticks since the last update that lie after the hold
-    /// (`last_stimulus + hold`), then finds the level: it rises straight to
-    /// the highest threshold reached and falls straight to the level whose
-    /// threshold minus `hysteresis` is still met. Returns `(from, to)` if
-    /// the level changed.
-    pub fn update(&mut self, now: u32, cfg: &AlertConfig) -> Option<(u8, u8)> {
+    /// Loses the value owed for the ticks since the last decay that lie after
+    /// the hold (`last_stimulus + hold`), and sets `last = now`.
+    fn decay(&mut self, now: u32, cfg: &AlertConfig) {
         let since_last = now.wrapping_sub(self.last);
         let after_hold = now
             .wrapping_sub(self.last_stimulus)
@@ -52,6 +51,16 @@ impl Alertness {
         let lost = u64::from(cfg.decay_per_tick) * u64::from(ticks);
         self.value = u64::from(self.value).saturating_sub(lost) as u32;
         self.last = now;
+    }
+
+    /// Decays for the ticks since the last update that lie after the hold
+    /// (`last_stimulus + hold`), then finds the level: it rises straight to
+    /// the highest threshold reached and falls straight to the level whose
+    /// threshold minus `hysteresis` is still met (a level above `cfg.count`
+    /// is first cut back to `cfg.count`). Returns `(from, to)` if the level
+    /// changed.
+    pub fn update(&mut self, now: u32, cfg: &AlertConfig) -> Option<(u8, u8)> {
+        self.decay(now, cfg);
 
         let n = (cfg.count as usize).min(MAX_LEVELS);
         let th = &cfg.thresholds[..n];
@@ -61,6 +70,7 @@ impl Alertness {
         if reached > to {
             to = reached;
         } else {
+            to = from.min(n as u8);
             while to > 0
                 && th
                     .get(usize::from(to) - 1)

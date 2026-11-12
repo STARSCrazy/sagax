@@ -1553,10 +1553,10 @@ mod tests {
                 offsets: [0, 0x20, -0x20, 0, 0, 0, 0, 0],
                 distances: [5 * 256, 9 * 256, 12 * 256, 0, 0, 0, 0, 0],
                 sine: 0,
-                min_x: 0,
-                min_y: 0,
-                max_x: 32767,
-                max_y: 32767,
+                min_x: i32::MIN,
+                min_y: i32::MIN,
+                max_x: i32::MAX,
+                max_y: i32::MAX,
             };
             for step in 0..5 {
                 let a = sx_points_around(3, step, 1000, 2000, 4, null(), out.as_mut_ptr());
