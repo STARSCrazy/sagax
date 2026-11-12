@@ -18,7 +18,7 @@
 - Capacity fixed at creation; no growth after `new`.
 - Public repo: no game names, no "police"/"suspect" in API or docs (examples may say "guard"/"officer").
 - Version 0.7.0, `API_VERSION = 7`. CI: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace`, `js/run.sh`.
-- One commit per finished task (Manuel's wish).
+- One commit per finished task.
 
 ## Review Focus
 
