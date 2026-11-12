@@ -23,6 +23,7 @@
 //! Everything is integer only and deterministic. On equal distance the
 //! lower id (or index) wins.
 
+mod keeper;
 mod members;
 mod orders;
 mod skill;
@@ -33,6 +34,7 @@ mod tactic;
 #[cfg(test)]
 mod tests;
 
+pub use keeper::{GoalKeeper, discipline};
 pub use members::{Group, Member, MemberState, Nearby, gather};
 pub use orders::{Channel, Order, REPORT_DANGER, REPORT_ENEMY, REPORT_GOAL_BROKEN, Status};
 pub use skill::SkillTable;
