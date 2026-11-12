@@ -11,98 +11,328 @@ fn interval_first_due_then_every() {
     assert!(t.due(1, 255));
 }
 
-#[test]
-fn zone_renews_first_within_radius() {
-    let mut z = Zones::new(4, 0x200, 255).unwrap();
-    assert_eq!(z.add([0, 0, 0], 0, 1, None), 0);
-    assert_eq!(z.add([0x1ff, 0, 0], 10, 2, Some([5, 6, 7])), 0);
-    assert_eq!(z.len(), 1);
-    let zone = z.iter().next().unwrap();
-    assert_eq!(zone.pos, [0x1ff, 0, 0]);
-    assert_eq!(zone.data, 2);
-    assert_eq!(zone.since, 10);
-    assert_eq!(zone.source, [5, 6, 7]);
-    assert_eq!(zone.has_source, 1);
+fn area(kind: u32, x: i32, radius: i32) -> Area {
+    Area {
+        kind,
+        pos: [x, 0, 0],
+        radius,
+        lifetime: 255,
+        ..Area::default()
+    }
 }
 
 #[test]
-fn zone_at_exact_radius_is_new() {
-    let mut z = Zones::new(4, 0x200, 255).unwrap();
-    z.add([0, 0, 0], 0, 0, None);
-    assert_eq!(z.add([0x200, 0, 0], 1, 0, None), 1);
+fn area_renews_first_same_kind_within_radius() {
+    let mut z = Areas::new(4).unwrap();
+    assert_eq!(z.add(area(1, 0, 0x200), 0), 0);
+    let mut a = area(1, 0x1ff, 0x200);
+    a.data = 2;
+    a.source = [5, 6, 7];
+    a.has_source = 1;
+    assert_eq!(z.add(a, 10), 0);
+    assert_eq!(z.len(), 1);
+    let got = z.iter().next().unwrap();
+    assert_eq!(got.pos, [0x1ff, 0, 0]);
+    assert_eq!(got.data, 2);
+    assert_eq!(got.since, 10);
+    assert_eq!(got.source, [5, 6, 7]);
+    assert_eq!(got.has_source, 1);
+}
+
+#[test]
+fn area_at_exact_radius_is_new() {
+    let mut z = Areas::new(4).unwrap();
+    z.add(area(1, 0, 0x200), 0);
+    assert_eq!(z.add(area(1, 0x200, 0x200), 1), 1);
     assert_eq!(z.len(), 2);
 }
 
 #[test]
-fn zone_full_drops_oldest() {
-    let mut z = Zones::new(2, 10, 255).unwrap();
-    z.add([0, 0, 0], 5, 1, None);
-    z.add([100, 0, 0], 2, 2, None);
-    assert_eq!(z.add([200, 0, 0], 6, 3, None), 1);
+fn areas_other_kind_not_merged() {
+    let mut z = Areas::new(4).unwrap();
+    z.add(area(1, 0, 100), 0);
+    assert_eq!(z.add(area(2, 0, 100), 1), 1);
+    assert_eq!(z.len(), 2);
+    assert_eq!(z.contains_kind([0, 0, 0], 2), Some(1));
+    assert_eq!(z.contains_kind([0, 0, 0], 3), None);
+}
+
+#[test]
+fn area_renewal_uses_existing_radius() {
+    let mut z = Areas::new(4).unwrap();
+    z.add(area(1, 0, 10), 0);
+    // New radius is big, but the existing one (10) decides.
+    assert_eq!(z.add(area(1, 50, 1000), 1), 1);
+    // Within the existing radius of 10: renewed, and radius replaced.
+    assert_eq!(z.add(area(1, 5, 20), 2), 0);
+    assert_eq!(z.iter().next().unwrap().radius, 20);
+}
+
+#[test]
+fn area_full_drops_oldest() {
+    let mut z = Areas::new(2).unwrap();
+    let mut a = area(1, 0, 10);
+    a.data = 1;
+    z.add(a, 5);
+    a.pos[0] = 100;
+    a.data = 2;
+    z.add(a, 2);
+    a.pos[0] = 200;
+    a.data = 3;
+    assert_eq!(z.add(a, 6), 1);
     let d: Vec<u32> = z.iter().map(|x| x.data).collect();
     assert_eq!(d, vec![1, 3]);
 }
 
 #[test]
-fn zone_expire_at_lifetime() {
-    let mut z = Zones::new(4, 10, 255).unwrap();
-    z.add([0, 0, 0], 0, 1, None);
-    z.add([100, 0, 0], 1, 2, None);
-    assert_eq!(z.expire(255), 1);
+fn area_expire_per_own_lifetime() {
+    let mut z = Areas::new(4).unwrap();
+    let mut a = area(1, 0, 10);
+    a.lifetime = 100;
+    z.add(a, 0);
+    a.pos[0] = 100;
+    a.lifetime = 300;
+    a.data = 2;
+    z.add(a, 1);
+    assert_eq!(z.expire(99), 0);
+    assert_eq!(z.expire(100), 1);
     assert_eq!(z.len(), 1);
     assert_eq!(z.iter().next().unwrap().data, 2);
-    assert_eq!(z.expire(255), 0);
+    assert_eq!(z.expire(300), 0);
+    assert_eq!(z.expire(301), 1);
+    assert!(z.is_empty());
 }
 
 #[test]
-fn zone_blocks_rule() {
-    let mut z = Zones::new(4, 100, 255).unwrap();
-    z.add([0, 0, 0], 0, 0, None);
+fn areas_blocks_any_blocking() {
+    let mut z = Areas::new(4).unwrap();
+    let mut a = area(1, 0, 100);
+    a.blocking = 1;
+    z.add(a, 0);
     let out = [1000, 0, 0];
     assert!(z.blocks([10, 0, 0], out, [2000, 0, 0]));
     assert!(!z.blocks([10, 0, 0], [20, 0, 0], out));
     assert!(!z.blocks([10, 0, 0], out, [20, 0, 0]));
     assert!(!z.blocks([500, 0, 0], out, [2000, 0, 0]));
-    // Overlapping zones: blocked if any zone qualifies.
-    z.add([150, 0, 0], 0, 0, None);
+    // Overlapping blocking area of another kind: blocked if any qualifies.
+    let mut b = area(2, 150, 100);
+    b.blocking = 1;
+    z.add(b, 0);
     assert_eq!(z.len(), 2);
-    // cell in both; start in first only -> second still blocks.
     assert!(z.blocks([90, 0, 0], [-50, 0, 0], out));
     assert_eq!(z.contains([90, 0, 0]), Some(0));
+    // Non-blocking areas never block.
+    let mut n = Areas::new(1).unwrap();
+    n.add(area(1, 0, 100), 0);
+    assert!(!n.blocks([10, 0, 0], out, [2000, 0, 0]));
     // radius <= 0: nothing inside.
-    let mut n = Zones::new(1, 0, 10).unwrap();
-    n.add([0, 0, 0], 0, 0, None);
-    assert_eq!(n.contains([0, 0, 0]), None);
+    let mut e = Areas::new(1).unwrap();
+    e.add(area(1, 0, 0), 0);
+    assert_eq!(e.contains([0, 0, 0]), None);
 }
 
 #[test]
-fn zone_full_evicts_slot0_then_appends() {
-    let mut z = Zones::new(3, 10, 255).unwrap();
-    z.add([0, 0, 0], 0, 1, None);
-    z.add([100, 0, 0], 5, 2, None);
-    z.add([200, 0, 0], 6, 3, None);
-    assert_eq!(z.add([300, 0, 0], 7, 4, None), 2);
+fn areas_cost_sums_nonblocking_saturating() {
+    let mut z = Areas::new(4).unwrap();
+    let mut a = area(1, 0, 100);
+    a.strength = 7;
+    z.add(a, 0);
+    a.kind = 2;
+    a.strength = 5;
+    z.add(a, 0);
+    a.kind = 3;
+    a.strength = 1000;
+    a.blocking = 1;
+    z.add(a, 0);
+    let out = [1000, 0, 0];
+    assert_eq!(z.cost([10, 0, 0], out, [2000, 0, 0]), 12);
+    assert_eq!(z.cost([500, 0, 0], out, [2000, 0, 0]), 0);
+    // Start inside all areas: none counts.
+    assert_eq!(z.cost([10, 0, 0], [20, 0, 0], out), 0);
+    let mut s = Areas::new(2).unwrap();
+    let mut b = area(1, 0, 100);
+    b.strength = u32::MAX;
+    s.add(b, 0);
+    b.kind = 2;
+    b.strength = 9;
+    s.add(b, 0);
+    assert_eq!(s.cost([10, 0, 0], out, [2000, 0, 0]), u32::MAX);
+}
+
+#[test]
+fn area_full_evicts_slot0_then_appends() {
+    let mut z = Areas::new(3).unwrap();
+    let mut a = area(1, 0, 10);
+    for (i, t) in [0u32, 5, 6].into_iter().enumerate() {
+        a.pos[0] = 100 * i as i32;
+        a.data = i as u32 + 1;
+        z.add(a, t);
+    }
+    a.pos[0] = 300;
+    a.data = 4;
+    assert_eq!(z.add(a, 7), 2);
     let d: Vec<u32> = z.iter().map(|x| x.data).collect();
     assert_eq!(d, vec![2, 3, 4]);
 }
 
 #[test]
-fn zone_full_age_tie_evicts_earlier_slot() {
-    let mut z = Zones::new(3, 10, 255).unwrap();
-    z.add([0, 0, 0], 5, 1, None);
-    z.add([100, 0, 0], 5, 2, None);
-    z.add([200, 0, 0], 6, 3, None);
-    assert_eq!(z.add([300, 0, 0], 7, 4, None), 2);
+fn area_full_age_tie_evicts_earlier_slot() {
+    let mut z = Areas::new(3).unwrap();
+    let mut a = area(1, 0, 10);
+    for (i, t) in [5u32, 5, 6].into_iter().enumerate() {
+        a.pos[0] = 100 * i as i32;
+        a.data = i as u32 + 1;
+        z.add(a, t);
+    }
+    a.pos[0] = 300;
+    a.data = 4;
+    assert_eq!(z.add(a, 7), 2);
     let d: Vec<u32> = z.iter().map(|x| x.data).collect();
     assert_eq!(d, vec![2, 3, 4]);
 }
 
 #[test]
-fn zone_expire_wraps() {
-    let mut z = Zones::new(2, 10, 255).unwrap();
-    z.add([0, 0, 0], u32::MAX - 10, 1, None);
+fn area_expire_wraps() {
+    let mut z = Areas::new(2).unwrap();
+    let mut a = area(1, 0, 10);
+    a.lifetime = 255;
+    z.add(a, u32::MAX - 10);
     assert_eq!(z.expire(243), 0);
     assert_eq!(z.expire(245), 1);
+}
+
+#[test]
+fn areas_extreme_coordinates_do_not_overflow() {
+    let mut z = Areas::new(2).unwrap();
+    let mut a = area(1, 0, i32::MAX);
+    a.pos = [i32::MIN, i32::MIN, 0];
+    a.blocking = 1;
+    z.add(a, 0);
+    assert_eq!(z.contains([i32::MIN, i32::MIN, 0]), Some(0));
+    // dx and dy are 2^32 - 1: the squares do not fit in i64.
+    assert_eq!(z.contains([i32::MAX, i32::MAX, 0]), None);
+    let far = [i32::MAX, i32::MAX, 0];
+    let near = [i32::MIN, i32::MIN, 0];
+    assert!(z.blocks(near, far, far));
+    assert!(!z.blocks(near, near, far));
+    // Renewal check with extreme centres does not overflow either.
+    let mut b = a;
+    b.pos = far;
+    assert_eq!(z.add(b, 1), 1);
+}
+
+#[test]
+fn area_layout_is_stable() {
+    assert_eq!(std::mem::size_of::<Area>(), 52);
+    assert_eq!(std::mem::offset_of!(Area, pos), 4);
+    assert_eq!(std::mem::offset_of!(Area, radius), 16);
+    assert_eq!(std::mem::offset_of!(Area, source), 36);
+    assert_eq!(std::mem::offset_of!(Area, blocking), 48);
+    assert_eq!(std::mem::offset_of!(Area, has_source), 49);
+}
+
+fn alert_cfg(decay: u32, hold: u32, hysteresis: u32) -> AlertConfig {
+    let mut thresholds = [0; 8];
+    thresholds[..3].copy_from_slice(&[20, 50, 80]);
+    AlertConfig {
+        max: 100,
+        decay_per_tick: decay,
+        hold,
+        hysteresis,
+        count: 3,
+        thresholds,
+    }
+}
+
+#[test]
+fn alertness_rises_levels() {
+    let cfg = alert_cfg(2, 5, 5);
+    let mut a = Alertness::default();
+    a.stimulus(10, 0, &cfg);
+    assert_eq!(a.update(0, &cfg), None);
+    a.stimulus(10, 0, &cfg);
+    assert_eq!(a.update(0, &cfg), Some((0, 1)));
+    a.stimulus(30, 0, &cfg);
+    assert_eq!(a.value(), 50);
+    assert_eq!(a.update(0, &cfg), Some((1, 2)));
+    a.stimulus(500, 0, &cfg);
+    assert_eq!(a.value(), 100);
+    assert_eq!(a.update(0, &cfg), Some((2, 3)));
+    assert_eq!(a.level(), 3);
+}
+
+#[test]
+fn alertness_jumps_levels() {
+    let cfg = alert_cfg(2, 5, 5);
+    let mut a = Alertness::default();
+    a.stimulus(90, 0, &cfg);
+    assert_eq!(a.update(0, &cfg), Some((0, 3)));
+    // Falls straight down too: value 0 after long decay.
+    assert_eq!(a.update(1000, &cfg), Some((3, 0)));
+    assert_eq!(a.value(), 0);
+}
+
+#[test]
+fn alertness_hold_then_decay() {
+    let cfg = alert_cfg(2, 5, 5);
+    let mut a = Alertness::default();
+    a.stimulus(50, 10, &cfg);
+    assert_eq!(a.update(10, &cfg), Some((0, 2)));
+    // Hold lasts until tick 15: nothing decays yet.
+    assert_eq!(a.update(15, &cfg), None);
+    assert_eq!(a.value(), 50);
+    // Ticks 16..=20 decay: 5 * 2 = 10; 40 < 50 - 5, so level 1.
+    assert_eq!(a.update(20, &cfg), Some((2, 1)));
+    assert_eq!(a.value(), 40);
+    // A late update only decays the part after the hold.
+    let mut b = Alertness::default();
+    b.stimulus(100, 10, &cfg);
+    b.update(10, &cfg);
+    b.update(40, &cfg);
+    assert_eq!(b.value(), 100 - 2 * 25);
+}
+
+#[test]
+fn alertness_hysteresis() {
+    let cfg = alert_cfg(1, 0, 5);
+    let mut a = Alertness::default();
+    a.stimulus(50, 0, &cfg);
+    assert_eq!(a.update(0, &cfg), Some((0, 2)));
+    assert_eq!(a.update(4, &cfg), None); // 46
+    assert_eq!(a.update(5, &cfg), None); // 45, not below 45
+    assert_eq!(a.update(6, &cfg), Some((2, 1))); // 44
+    // Rising needs the plain threshold again: 49 stays level 1.
+    a.stimulus(5, 6, &cfg);
+    assert_eq!(a.value(), 49);
+    assert_eq!(a.update(6, &cfg), None);
+    assert_eq!(a.level(), 1);
+    a.stimulus(1, 6, &cfg);
+    assert_eq!(a.update(6, &cfg), Some((1, 2)));
+}
+
+#[test]
+fn alertness_decay_to_zero_and_wrap() {
+    let cfg = alert_cfg(10, 5, 5);
+    let mut a = Alertness::default();
+    let t0 = u32::MAX - 5;
+    a.stimulus(100, t0, &cfg);
+    assert_eq!(a.update(t0, &cfg), Some((0, 3)));
+    // 16 ticks later across the wrap; 11 of them after the hold: 110 > 100.
+    assert_eq!(a.update(10, &cfg), Some((3, 0)));
+    assert_eq!(a.value(), 0);
+    // A count above 8 is treated as 8.
+    let mut big = alert_cfg(1, 0, 0);
+    big.count = 100;
+    big.thresholds = [1, 2, 3, 4, 5, 6, 7, 8];
+    let mut b = Alertness::default();
+    b.stimulus(100, 0, &big);
+    assert_eq!(b.update(0, &big), Some((0, 8)));
+}
+
+#[test]
+fn alert_layout_is_stable() {
+    assert_eq!(std::mem::size_of::<AlertConfig>(), 52);
+    assert_eq!(std::mem::size_of::<Alertness>(), 16);
 }
 
 #[test]
@@ -187,19 +417,6 @@ fn search_point_past_last_step_is_none() {
     assert!(search_point(3, 3, [0; 3], &p).is_some());
     assert_eq!(search_point(3, 4, [0; 3], &p), None);
     assert_eq!(search_point(3, usize::MAX, [0; 3], &p), None);
-}
-
-#[test]
-fn zones_extreme_coordinates_do_not_overflow() {
-    let mut z = Zones::new(2, i32::MAX, 10).unwrap();
-    z.add([i32::MIN, i32::MIN, 0], 0, 0, None);
-    assert_eq!(z.contains([i32::MIN, i32::MIN, 0]), Some(0));
-    // dx and dy are 2^32 - 1: the squares do not fit in i64.
-    assert_eq!(z.contains([i32::MAX, i32::MAX, 0]), None);
-    let far = [i32::MAX, i32::MAX, 0];
-    let near = [i32::MIN, i32::MIN, 0];
-    assert!(z.blocks(near, far, far));
-    assert!(!z.blocks(near, near, far));
 }
 
 #[test]
