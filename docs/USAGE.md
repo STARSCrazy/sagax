@@ -460,120 +460,255 @@ Time may wrap around. C: `sx_machine_*` with condition bits in a
 
 ## 7. Memory of the world
 
-Characters should remember things for a while: who they saw, where and
-when, which places are dangerous, what a colleague called over the radio.
-The blocks of `sagax_decide::memory` do that, each usable alone, and with
-the state machine and the decider they make up a whole watch-and-search
-behaviour. The game says what is seen (no sight lines in here), the blocks
-keep it. Positions are integers `[x, y, z]`, time is the game's own `u32`
-count (ages use wrapping subtraction), no random numbers, and sizes are
-fixed at creation. **Every time and limit is a parameter:** try a short
-memory against a long one and keep what plays best.
+Characters should remember things for a while: what they saw and heard,
+where and when, what a colleague told them, which places are dangerous or
+lit, how alert they are. The blocks of `sagax_decide::memory` do that, each
+usable alone, and with the state machine and the decider they make up a
+whole behaviour for turn-based tactics, real-time strategy, stealth or
+action games. **The game decides what is perceived** (no sight lines or
+hearing in here): it says "seen", "heard", and gives positions. The blocks
+keep it, pass it on and let it fade. Positions are integers `[x, y, z]` (on
+a hex grid use axial `(q, r)` in `x`, `y`), time is the game's own `u32`
+count (frames or rounds; ages use wrapping subtraction), no random numbers,
+and sizes are fixed at creation. **Every time and limit is a parameter:** try
+a short memory against a long one, a slow message against a fast one, and
+keep what plays best.
 
-- **Sightings** (table of known ids, last place and time): `seen` updates or
-  adds, and when full drops the oldest. `expire(now, max_age, f)` forgets
-  old ones.
+The snippets assume `use sagax_decide::memory::*;` and, in Rust, a function
+that may use `?` (a capacity of 0 is an error). Kinds, ids and areas of the
+game (`SEEN`, `NOISE`, `LIT`, ...) are your own numbers.
+
+- **Knowledge** (what a character knows): a table of facts keyed by
+  `(subject, kind)`. A `Fact` has `pos`, `seen_at` (when it was observed, not
+  when it arrived), `source` (`SOURCE_OWN`, `SOURCE_HEARD`, `SOURCE_TOLD`,
+  more of your own are fine), and free `strength` and `data`. When full,
+  `Evict::Oldest` or `Evict::Weakest` makes room. `learn` always
+  overwrites; `merge` only if the new fact is not older.
 
   ```rust
-  let mut known = Sightings::new(8)?;
-  let dropped = known.seen(7, [4000, 4000, 0], now);      // Option<u32>: evicted id
-  known.set_pos(7, [4100, 4000, 0]);                       // radio report: place only; false if id unknown
-  known.expire(now, 2040, |id| forget(id));
-  if let Some(s) = known.get(7) { search_near(s.pos, now.wrapping_sub(s.last_seen)); }
+  let mut known = Knowledge::new(8, Evict::Oldest)?;
+  let fact = Fact { subject: 7, kind: SEEN, pos: [4000, 4000, 0], seen_at: now,
+                    strength: 100, data: 0, source: SOURCE_OWN };
+  let dropped = known.learn(fact, now);                  // Option<Fact>: the evicted one
+  known.merge(heard_about_7, now);                       // keeps a newer own fact
+  known.touch(7, SEEN, now);                             // seen again, same place
+  known.set_pos(7, SEEN, [4100, 4000, 0]);               // false if unknown
+  known.expire(now, 2040, |f| forget(f));                // age >= 2040 goes
+  if let Some(f) = known.get(7, SEEN) { search_near(f.pos, now.wrapping_sub(f.seen_at)); }
   ```
 
-  C `sx_sightings_*` (handle), JS `lib.sightings(8)`.
-- **Zones** (areas to stay out of: shots, alarms): a new zone near an old one
-  (closer than the radius) renews it. `blocks(cell, start, goal)` is true
-  inside a zone unless start or goal is in it too. See the recipe below.
+  Also `remove`, `remove_subject`, `set_data`, `set_strength`, `expire_kind`,
+  `expire_with` (an age per fact), `iter`, `len`, `clear`,
+  `learn_message` / `merge_message` (turn a message into a fact). C
+  `sx_knowledge_*` (handle, `sx_fact`, `SX_SOURCE_*`, `SX_EVICT_*`, `at` for
+  walking the table, `sx_knowledge_expire_kind` for one age per kind), JS
+  `lib.knowledge(8, 'oldest')` with `list()`, `expire(now, age, perKind)`.
+- **Messages** (who tells whom, and when it arrives): three parts.
+  The `Outbox` of a sender holds messages that become due after a delay,
+  with a cooldown between posts. `route` picks the recipients among
+  candidates you give (filter team and free state yourself). The `Inbox` of
+  a receiver holds messages with their arrival time; `arrival` computes
+  `now + base + distance * per_unit`, so a shout can take one round per cell.
 
   ```rust
-  let mut zones = Zones::new(4, 600, 3000)?;               // capacity, radius, lifetime
-  zones.add([x, y, 0], now, 0, Some([sx, sy, 0]));         // data, source
-  zones.expire(now);
-  ```
-
-  C `sx_zones_*`, JS `lib.zones(4, 600, 3000)`.
-- **Pursuit** (following one target): `begin`, `seen(pos)`, `missed(step)`,
-  then `lost(limit)` (not seen for `limit`) and `stalled(distance, now,
-  min_gain, limit)` (no progress for `limit`).
-
-  ```rust
-  let mut p = Pursuit::default();
-  p.begin(7, pos, distance, now);
-  if sees { p.seen(pos) } else { p.missed(4) }             // sight checked every 4th tick
-  if p.lost(34) || p.stalled(distance, now, 0x80, 85) { give_up(); }
-  ```
-
-  C `sx_pursuit` struct plus `sx_pursuit_*`, JS `new Pursuit()`.
-- **Ignore** (leave this one alone for a while): `add(id, now)`,
-  `ignores(id, now, duration)`. Nothing to clear by hand.
-
-  ```rust
-  let mut skip = Ignore::new(1)?;
-  skip.add(7, now);
-  if !skip.ignores(7, now, 170) { chase(7); }
-  ```
-
-  C `sx_ignore_*`, JS `lib.ignore(1)`.
-- **Radio** (a call that arrives later, with a cooldown) and **Interval**
-  ("again every N ticks"). `start` is refused while a call is pending or
-  inside the cooldown; `take` gives the place; `cancel` if the sender is
-  gone. `nearest` picks the k closest candidates (equal distance: the
-  earlier one; coordinates divided by `divisor`, truncating).
-
-  ```rust
-  let (mut radio, mut report) = (Radio::default(), Interval::default());
-  if report.due(now, 255) && radio.start(pos, now, 170) { report.mark(now); }
-  if radio.due(now, 102) {
-      let at = radio.take().unwrap();
-      let mut out = Vec::new();
-      nearest(&free, (at[0], at[1]), 3, 16, &mut out);     // free: &[(id, x, y)]
-      for id in out { send_to(id, at); }
+  let mut out = Outbox::new(4)?;
+  let msg = Message { kind: SEEN, subject: 7, pos: [4000, 4000, 0], seen_at: now,
+                      strength: 0, data: 0, sender: me, keep_if_sender_gone: 0 };
+  match out.post(msg, now, 102, 170) {                   // delay, cooldown
+      Ok(()) => {}
+      Err(Refused::Cooldown) | Err(Refused::Full) => {}
   }
+  let mut due = Vec::new();
+  out.due(now, &mut due);                                // delay over, in post order
+  // `free`: &[(id, x, y)]; the ids go to `ids`
+  let mut ids = Vec::new();
+  route(Route::Nearest(3), (x, y), &free, Metric::Euclid, 16, &mut ids);
+  let mut inbox = Inbox::new(4)?;                        // one per receiver
+  inbox.push(msg, arrival(now, 0, dist, 2));             // false if refused
+  let mut got = Vec::new();
+  inbox.take_due(now, &mut got);                         // arrived, in push order
+  for m in &got { known.merge_message(m, SOURCE_TOLD, now); }
   ```
 
-  C `sx_radio_*`, `sx_interval_*`, `sx_nearest`; JS `new Radio()`,
-  `new Interval()`, `lib.nearest(candidates, [x, y], 3, 16)`.
-- **Search pattern** (agents spread out around a place without random
-  numbers): `search_point(agent, step, centre, &pattern)` gives the points,
-  `look_heading(base, elapsed, step_ticks, &LOOK_OFFSETS)` turns the view
-  while looking around. `SearchPattern::default()` holds all numbers; change
-  any of them.
+  Rules of `route`: `Route::Nearest(k)` (nearest first, a tie keeps the
+  earlier candidate), `InRange(r)` (all with distance `<= r`, candidate
+  order; with `Metric::Euclid` the square is compared with `r * r`), `All`,
+  `To(id)`. `Metric` is `Euclid`, `Manhattan`, `Chebyshev` or `Hex` (axial);
+  each axis is divided by the divisor first (truncating). A message is a
+  plain value: after `due` you may refresh `pos` and `seen_at` before
+  routing. `sender_gone` drops the messages of a sender that died, except
+  those with `keep_if_sender_gone` (a noise stays, a radio call is lost).
+  `due_max` and `take_due_max` take at most some. An `Inbox` compares
+  arrival times by their wrapping difference, so all stored arrivals must
+  lie within a window narrower than 2^31 ticks.
+
+  C `sx_outbox_*` (`sx_outbox_post` returns 0, `SX_REFUSED_FULL` or
+  `SX_REFUSED_COOLDOWN`), `sx_inbox_*`, `sx_arrival`, `sx_route` (with
+  `SX_ROUTE_*`, `SX_METRIC_*`, `sx_nearby`), `sx_message`. JS `lib.outbox(4)`
+  (`post` gives `'ok'`, `'full'` or `'cooldown'`), `lib.inbox(4)`,
+  `lib.arrival`, `lib.route({nearest: 3}, [x, y], candidates, 'euclid', 16)`
+  with candidates `[{id, x, y}]`.
+- **Areas** (places to stay out of or pay extra for): a circle with a kind,
+  centre, radius, `lifetime`, `strength` (cost per cell) and `blocking`.
+  Adding an area of the same kind whose centre lies inside an existing one
+  renews that one; when full the oldest goes.
 
   ```rust
-  let pattern = SearchPattern::default();
-  let first = search_point(me, 0, last_pos, &pattern).unwrap();
-  let heading = look_heading(base, elapsed, 51, &LOOK_OFFSETS);
+  let mut areas = Areas::new(8)?;
+  let lit = Area { kind: LIT, pos: [x, y, 0], radius: 600, strength: 20,
+                   lifetime: 3000, blocking: 0, ..Area::default() };
+  let index = areas.add(lit, now);                       // since = now
+  areas.expire(now);                                     // age >= lifetime goes
+  let inside = areas.contains(pos);                      // Option<usize>
+  let blocked = areas.blocks(cell, start, goal);         // for move_cost, see below
+  let extra = areas.cost(cell, start, goal);             // u32, for move_cost
   ```
 
-  C `sx_search_point`, `sx_look_heading`, `sx_sin256`; JS `lib.searchPoint`,
-  `lib.lookHeading`, `lib.sin256`.
+  Start and goal are exempt in both `blocks` and `cost`, so a way can always
+  leave an area and reach a goal inside one. Also `contains_kind`, `iter`,
+  `len`, `clear`. C `sx_areas_*` with `sx_area`, JS `lib.areas(8)`.
+- **Progress** (does the chase still get closer): a lower value is better,
+  usually a distance. "Lost" is not here: it is the age of the fact in
+  `Knowledge`.
+
+  ```rust
+  let mut p = Progress::default();
+  p.start(distance, now);
+  p.update(distance, now, 0x80);                         // true if it improved by 0x80
+  if p.stalled(now, 85) { give_up(); }                   // no gain for 85 ticks
+  ```
+
+  C `sx_progress` plus `sx_progress_*`, JS `new Progress()`.
+- **Timers** (ids that are "on" for a while: ignore a target, no alarm
+  again): `set` renews, when full the entry with the least time left is
+  replaced.
+
+  ```rust
+  let mut skip = Timers::new(4)?;
+  skip.set(7, now, 170);
+  if !skip.active(7, now) { chase(7); }
+  let left = skip.left(7, now);                          // ticks still to go
+  ```
+
+  Also `remove`, `len`, `clear`. C `sx_timers_*`, JS `lib.timers(4)`.
+- **Interval** ("again every N ticks"; never marked counts as due):
+
+  ```rust
+  let mut report = Interval::default();
+  if report.due(now, 255) { report.mark(now); }
+  ```
+
+  C `sx_interval` plus `sx_interval_*`, JS `new Interval()`.
+- **Alertness** (a value with levels): stimuli raise it, time lowers it. The
+  level jumps straight to the highest threshold reached and falls when the
+  value is below its threshold minus `hysteresis`. Decay only counts ticks
+  after `hold` ticks since the last stimulus. The levels mean what you say
+  (unaware, suspicious, searching, alert) and are good conditions for a
+  state machine.
+
+  ```rust
+  let cfg = AlertConfig { max: 100, decay_per_tick: 2, hold: 5, hysteresis: 5,
+                          count: 3, thresholds: [20, 50, 80, 0, 0, 0, 0, 0] };
+  let mut alert = Alertness::default();
+  alert.stimulus(30, now, &cfg);                         // a noise
+  if let Some((from, to)) = alert.update(now, &cfg) { on_level(from, to); }
+  let level = alert.level();                             // 0 ..= cfg.count
+  ```
+
+  C `sx_alertness` and `sx_alert_config` plus `sx_alertness_*` (`update`
+  returns 1 and fills the two levels), JS `new Alertness()` with a config
+  `{max, decayPerTick, hold, hysteresis, thresholds}`.
+- **Points around a place** (agents spread out without random numbers) and
+  **sweep** (turning the view while looking around). `PointPattern::default()`
+  holds all numbers; change any of them. `Sine::Fine` is accurate;
+  `Sine::Coarse` is the small table that reproduces older numbers exactly.
+
+  ```rust
+  let pattern = PointPattern::default();
+  let first = points_around(me, 0, last_pos, &pattern).unwrap();   // step 0, then 1..=3
+  let heading = sweep_heading(base, elapsed, 51, &LOOK_OFFSETS);   // 0..=255
+  let s = sine(heading, Sine::Fine);                               // 65536 = 1.0
+  ```
+
+  C `sx_points_around` (a `sx_point_pattern` or null), `sx_sweep_heading`,
+  `sx_sine`; JS `lib.pointsAround`, `lib.sweepHeading`, `lib.sine`.
+
+### Recipe: radio
+
+One call, delayed and with a cooldown, to the nearest free colleagues. The
+sender posts a message to its `Outbox` with delay 102 and cooldown 170; when
+`due` hands it out, refresh `pos` and `seen_at` from your current fact, then
+`route(Route::Nearest(3), ...)` over the colleagues who are free at that
+moment, and `merge_message` with `SOURCE_TOLD` at each receiver. If the
+sender dies before the delay is over, `sender_gone` drops the call.
+
+### Recipe: shout
+
+Everyone within reach hears at once: `Route::InRange(r)` with `Metric::Hex`
+or `Euclid`, and `arrival(now, 0, 0, 0)` (base 0, per unit 0), or push
+straight into the receivers' `Inbox`es. A `Timers` entry keeps the shouter
+quiet for a while.
+
+### Recipe: messenger
+
+A message that travels: the same as a shout, but `arrival(now, base,
+distance, per_unit)` with `per_unit > 0`, so far receivers hear later. Use
+`Metric::Hex` and a distance in cells on a hex grid. A receiver with a full
+`Inbox` drops the message that would arrive last.
+
+### Recipe: noise
+
+A noise is a message nobody sends on purpose: build a `Message` with
+`keep_if_sender_gone: 1`, `route(Route::InRange(loudness), ...)` over all
+guards whatever they do, `Inbox::push` it with `arrival` (base 0 and
+`per_unit` 0 for "heard at once"), and let each receiver
+`learn_message(&m, SOURCE_HEARD, now)` and raise its `Alertness`. A louder
+noise reaches further because `r` is the loudness. The stealth guard example
+does this in round 2.
 
 ### Recipe: the officer
 
 A witness chases, calls for help, loses sight and searches; the three
 nearest free colleagues come; the table forgets. Walk, look, chase and idle
-are states of a `StateMachine`; the loop each tick: radio due, send to
-`nearest`; report interval; sight (every 4th tick) into `seen` / `Pursuit`;
-`lost` or `stalled` leads to `Ignore::add` and a search; `expire` once. The
-state machine flags (`lost`, `stalled`, `arrived`, `give up`) are the
-conditions you pass in. A complete, runnable version with the numbers for 17
-ticks per second: `cargo run -p sagax-decide --example officer`
-(`crates/sagax-decide/examples/officer.rs`); in C `examples/c/memory.c`.
+are states of a `StateMachine`; the loop each tick: `Outbox::due` and
+`route` for the radio; report `Interval`; sight (every 4th tick) into
+`Knowledge` and `Progress`; "lost" is the age of the fact, `stalled` or lost
+leads to a `Timers` entry (ignore) and a search; `expire` once. The state
+machine flags (`lost`, `stalled`, `arrived`, `give up`) are the conditions
+you pass in. A complete, runnable version with the numbers for 17 ticks per
+second: `cargo run -p sagax-decide --example officer`
+(`crates/sagax-decide/examples/officer.rs`); in C `examples/c/memory.c`
+(`sh examples/c/run.sh`).
 
-### Recipe: keep out of remembered zones
+### Recipe: stealth guard
 
-`Zones::blocks` fits the map's `move_cost` (Rust `CellMap::move_cost`, C
-`sx_move_cost_fn`): turn the cell into its centre position and forbid the
-move. Start and goal are exempt, so a way can always leave a zone and reach
-a goal inside one.
+Alertness levels drive the state machine on a hex grid: a noise is a
+`SOURCE_HEARD` fact and raises `Alertness` to "suspicious", the guard goes to
+look, sees the player (a `SOURCE_OWN` fact, level "alert"), shouts to the
+guards in range (`Route::InRange` with `Metric::Hex`, `arrival` with one round
+per cell), loses the player (the age of the fact), searches the points
+around the last place (`Sine::Fine`) and calms down as the value decays.
+Lit cells cost extra on the way (`Areas::cost`). Run it with
+`cargo run -p sagax-decide --example stealth_guard`
+(`crates/sagax-decide/examples/stealth_guard.rs`, with the derivation of
+every round number in the test).
+
+### Recipe: area blocking and cost in `move_cost`
+
+`Areas::blocks` and `Areas::cost` fit the map's `move_cost` (Rust
+`CellMap::move_cost`, C `sx_move_cost_fn`): turn the cell into its centre
+position, forbid the move, or add the cost. Start and goal are exempt, so a
+way can always leave an area and reach a goal inside one.
 
 ```rust
-// `self` is your map: it holds the zones and the start and goal positions.
+// `self` is your map: it holds the areas and the start and goal positions.
 fn move_cost(&mut self, _from: Cell, to: Cell) -> Option<Cost> {
     let centre = [to.x * 256 + 128, to.y * 256 + 128, 0];     // your cell size
-    if self.zones.blocks(centre, self.start, self.goal) { None } else { Some(0) }
+    if self.areas.blocks(centre, self.start, self.goal) {
+        None                                                  // forbidden
+    } else {
+        Some(self.areas.cost(centre, self.start, self.goal))  // extra cost, 0 outside
+    }
 }
 ```
 
@@ -582,14 +717,16 @@ static int32_t move_cost(void *ctx, int32_t x, int32_t y, int32_t lv,
                          int32_t tx, int32_t ty, int32_t tl) {
 	struct game *g = ctx;
 	int32_t cell[3] = { tx * 256 + 128, ty * 256 + 128, 0 };
-	return sx_zones_blocks(g->zones, cell, g->start, g->goal) ? -1 : 0;
+	uint32_t extra = 0;
+	if (sx_areas_blocks(g->areas, cell, g->start, g->goal) == 1) return -1;
+	sx_areas_cost(g->areas, cell, g->start, g->goal, &extra);
+	return (int32_t)extra;
 }
 ```
 
 The same works on hex grids, since the game converts the cell to a position.
-In JavaScript, call `z.blocks(cell, start, goal)` while building the grid's
-walls before the search. Zones only block; for "avoid, but possible" return
-a high cost instead (use `zones.contains`).
+In JavaScript, call `a.blocks(cell, start, goal)` and `a.cost(cell, start,
+goal)` while building the grid's walls and costs before the search.
 
 ## 8. Debugging and logging
 

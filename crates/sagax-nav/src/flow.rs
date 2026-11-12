@@ -3,7 +3,7 @@
 //! A flow field knows, for every node it reached, the cost of the cheapest
 //! way to the nearest goal. A walker anywhere in the field asks for its next
 //! step and needs no search of its own. That pays when many walkers head for
-//! the same place (a crowd following its leader, police converging on an
+//! the same place (a crowd following its leader, guards converging on an
 //! alarm, all enemies hunting the player).
 //!
 //! The field is built by searching outward *from* the goals along the

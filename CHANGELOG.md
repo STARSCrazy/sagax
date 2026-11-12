@@ -2,22 +2,35 @@
 
 ## 0.7.0
 
-- Memory of the world, in `sagax-decide` (module `memory`): `Sightings`
-  (table of known ids with place and time, oldest dropped when full),
-  `Zones` (remembered areas, merge radius, lifetime, `blocks` for a map's
-  `move_cost`), `Pursuit` (lost / stalled), `Ignore`, `Radio` with cooldown,
-  `Interval`, `nearest`, and a deterministic search pattern (`search_point`,
-  `look_heading`, `sin256`). Integer only, wrap-safe time, fixed sizes; every
-  time and limit is a parameter. Rust `sagax_decide::memory`, C `sx_sightings_*`,
-  `sx_zones_*`, `sx_ignore_*`, `sx_pursuit_*`, `sx_radio_*`, `sx_interval_*`,
-  `sx_nearest`, `sx_search_point`, `sx_look_heading`, JavaScript
-  `lib.sightings()`, `lib.zones()`, `lib.ignore()`, `Pursuit`, `Radio`,
-  `Interval`, `lib.nearest()`, `lib.searchPoint()`. Also `clear` and counts:
-  `Zones::clear`, `Ignore::clear`/`len`/`is_empty`, C `sx_zones_clear`,
-  `sx_ignore_clear`, JavaScript `Zones.count()`/`clear()`,
-  `Sightings.count()`, `Ignore.clear()`.
-- Example `officer` (Rust, with a reference test) and `examples/c/memory.c`;
-  recipes in the guide (section 7).
+- Memory of the world, in `sagax-decide` (module `memory`), built from generic
+  blocks that serve turn-based tactics, real-time strategy, stealth and
+  action games alike. Integer only, no random numbers, wrap-safe time, fixed
+  sizes; every time and limit is a parameter. The game decides what is
+  perceived; the blocks keep, pass on and forget it.
+  - `Knowledge`: facts keyed by (subject, kind) with place, observation
+    time, source (own, heard, told), strength and data; evicts the oldest or
+    the weakest; `learn`, `merge` (newer wins), per-kind expiry.
+  - `Outbox`, `Inbox`, `route`, `arrival`: messages with a delay and a
+    cooldown, recipients picked by `Nearest(k)`, `InRange(r)`, `All` or
+    `To(id)` under a metric (Euclid, Manhattan, Chebyshev, hex), arrival
+    times that grow with distance. Recipes: radio, shout, messenger, noise.
+  - `Areas`: remembered or announced circles with a lifetime, blocking or
+    with a cost per cell, for a map's `move_cost` (`blocks`, `cost`).
+  - `Progress` (does a chase still get closer), `Timers` (ids that are on for
+    a while), `Interval`.
+  - `Alertness`: a value with stimuli, hold, decay, levels and hysteresis;
+    the levels drive a state machine.
+  - `points_around` (fine or coarse sine table), `sweep_heading`, `sine`.
+- Rust `sagax_decide::memory`; C `sx_knowledge_*`, `sx_outbox_*`,
+  `sx_inbox_*`, `sx_areas_*`, `sx_timers_*`, `sx_progress_*`,
+  `sx_interval_*`, `sx_alertness_*`, `sx_route`, `sx_arrival`,
+  `sx_points_around`, `sx_sweep_heading`, `sx_sine`; JavaScript
+  `lib.knowledge()`, `lib.outbox()`, `lib.inbox()`, `lib.areas()`,
+  `lib.timers()`, `Progress`, `Interval`, `Alertness`, `lib.route()`,
+  `lib.arrival()`, `lib.pointsAround()`, `lib.sweepHeading()`, `lib.sine()`.
+- Examples `officer` (the reference officer behaviour on the generic blocks,
+  with a test) and `stealth_guard` (hex grid, alertness levels, shouts, lit
+  cells), plus `examples/c/memory.c`; recipes in the guide (section 7).
 - C API version 7. `SX_API_VERSION` is now 7, so the version check of a game
   built with the new header refuses an older library; the functions are
   additive and nothing was changed in the older ones.

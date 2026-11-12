@@ -177,8 +177,8 @@ impl Inbox {
     /// arrives strictly earlier, and the new one is appended (true);
     /// otherwise the new one is refused (false). Arrival times are compared
     /// by their wrapping difference as a signed number, so a wrapped clock
-    /// works as long as the stored arrivals lie within 2^31 of each other
-    /// (the same assumption as [`Inbox::take_due`]).
+    /// works as long as all stored arrivals lie within a window narrower than
+    /// 2^31 (the same assumption as [`Inbox::take_due`]).
     pub fn push(&mut self, msg: Message, arrive_at: u32) -> bool {
         // True if `a` arrives strictly before `b`.
         fn before(a: u32, b: u32) -> bool {

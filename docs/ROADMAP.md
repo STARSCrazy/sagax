@@ -8,9 +8,10 @@
   visibly poor ways.
 - **Faster D\* Lite**: after a change some neighbours are asked twice. A
   per-edge cost query would avoid that.
-- **Decisions, next steps:** memory of the world is done (0.7.0). Next:
-  groups (rally point, calls to the nearest), then a mission / intention
-  planner.
+- **Decisions, next steps:** memory of the world is done (0.7.0, generic
+  blocks for turn-based, real-time, stealth and action games). Next: a group
+  block (rally point, calls to the nearest, shared orders), then a mission /
+  intention planner.
 - **Perception** (sight lines, cover, flanks), on the same `sagax-core`.
 
 Known limits: flow fields and D* Lite assume moves that work both ways.

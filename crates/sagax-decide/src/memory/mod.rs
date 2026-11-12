@@ -1,14 +1,19 @@
 //! World memory: what a character knows, and for how long.
 //!
-//! [`Knowledge`] is a bounded table of [`Fact`]s keyed by subject and kind.
-//! [`Timers`] are ids that count as "on" for a while (ignore a target, no
-//! alarm again), [`Progress`] tells whether a chase still gets closer, and
-//! [`Interval`] is a small timer for "do this every N ticks". [`Areas`] are
-//! places to stay out of or pay extra for, [`Alertness`] is a value
-//! with levels, [`Outbox`] and [`Inbox`] carry messages (recipients are picked
-//! with [`route`]), [`points_around`] spreads points around a place and
-//! [`sweep_heading`]
-//! turns the view while looking around.
+//! The blocks, each usable alone:
+//!
+//! - [`Knowledge`]: a bounded table of [`Fact`]s keyed by subject and kind.
+//! - [`Outbox`], [`Inbox`] and [`route`]: messages with a delay and a
+//!   cooldown; [`route`] picks the recipients and [`arrival`] the time a
+//!   message reaches one.
+//! - [`Areas`]: places to stay out of or pay extra for.
+//! - [`Progress`]: whether a chase still gets closer.
+//! - [`Timers`]: ids that count as "on" for a while (ignore a target, no
+//!   alarm again).
+//! - [`Interval`]: "do this every N ticks".
+//! - [`Alertness`]: a value with levels that rises and decays.
+//! - [`points_around`] and [`sweep_heading`]: spread points around a place
+//!   and turn the view while looking around.
 //!
 //! Time is the game's own count (u32); ages are computed with wrapping
 //! subtraction, so a wrapped clock still works. Everything is integer only
