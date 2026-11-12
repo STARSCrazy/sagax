@@ -1,5 +1,6 @@
 //! An officer recipe built only from the memory blocks and the state
-//! machine: a witness chases, calls for help, loses sight and searches;
+//! machine: a witness chases (on a stall it ignores the actor and searches
+//! as if lost), calls for help, loses sight and searches;
 //! the three nearest free officers come to help; the table forgets.
 //! `cargo run -p sagax-decide --example officer`
 //!
@@ -11,10 +12,14 @@ use sagax_decide::memory::{
 };
 use sagax_decide::state::{StateMachine, Transition};
 
-const IDLE: u32 = 0;
-const WALK: u32 = 1;
-const LOOK: u32 = 2;
-const CHASE: u32 = 3;
+/// State: nothing to do.
+pub const IDLE: u32 = 0;
+/// State: walking to a search point.
+pub const WALK: u32 = 1;
+/// State: looking around at a search point.
+pub const LOOK: u32 = 2;
+/// State: chasing the actor.
+pub const CHASE: u32 = 3;
 const NAMES: [&str; 4] = ["Idle", "Walk", "Look", "Chase"];
 
 const F_LOST: u64 = 1;
@@ -22,7 +27,8 @@ const F_STALLED: u64 = 2;
 const F_ARRIVED: u64 = 4;
 const F_GIVE_UP: u64 = 8;
 
-const ACTOR: u32 = 7;
+/// Id of the actor.
+pub const ACTOR: u32 = 7;
 const CRIME_TICK: u32 = 1;
 const VISIBLE_UNTIL: u32 = 40;
 const SPEED: i32 = 16;
@@ -36,7 +42,8 @@ const RADIO_COOLDOWN: u32 = 170;
 const REPORT_EVERY: u32 = 255;
 const FORGET_TICKS: u32 = 2040;
 const TABLE_SIZE: usize = 8;
-const HELPERS: usize = 3;
+/// How many free officers a call brings.
+pub const HELPERS: usize = 3;
 const LOOK_SENT: u32 = 170;
 const LOOK_AFTER_CHASE: u32 = 51;
 const LOOK_LATER: u32 = 51;
@@ -49,23 +56,37 @@ const CLOSE: i32 = 0x100;
 
 /// What happened, for the trace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Event {
+pub enum Event {
+    /// An officer changed state.
     State {
+        /// Tick.
         t: u32,
+        /// Officer index.
         officer: u32,
+        /// State left.
         from: u32,
+        /// State entered.
         to: u32,
     },
+    /// An officer started a call.
     RadioSent {
+        /// Tick.
         t: u32,
+        /// Officer index.
         officer: u32,
     },
+    /// A call was delivered.
     Helpers {
+        /// Tick.
         t: u32,
+        /// Helpers chosen, nearest first.
         ids: [u32; HELPERS],
     },
+    /// The table forgot an id.
     Forgotten {
+        /// Tick.
         t: u32,
+        /// Id forgotten.
         id: u32,
     },
 }
@@ -107,7 +128,7 @@ fn officer(pos: Pos) -> Officer {
     let mut sm = StateMachine::new(4, IDLE).unwrap();
     sm.add_transition(Transition::new(CHASE, WALK, F_LOST))
         .unwrap();
-    sm.add_transition(Transition::new(CHASE, IDLE, F_STALLED))
+    sm.add_transition(Transition::new(CHASE, WALK, F_STALLED))
         .unwrap();
     sm.add_transition(Transition::new(WALK, IDLE, F_GIVE_UP))
         .unwrap();
@@ -145,10 +166,11 @@ fn report(o: &mut Officer, me: u32, at: Pos, t: u32, ev: &mut Vec<Event>) {
     }
 }
 
-fn run_scene(end: u32) -> Vec<Event> {
+/// Runs the scene for ticks `1 ..= end` and returns what happened.
+pub fn run_scene(end: u32) -> Vec<Event> {
     let mut ev = Vec::new();
     let mut table = Sightings::new(TABLE_SIZE).unwrap();
-    let mut cops = [
+    let mut officers = [
         officer([3000, 4000, 0]),
         officer([6008, 4000, 0]),
         officer([4008, 3000, 0]),
@@ -159,14 +181,14 @@ fn run_scene(end: u32) -> Vec<Event> {
         let actor = actor_at(t);
         table.expire(t, FORGET_TICKS, |id| {
             ev.push(Event::Forgotten { t, id });
-            for o in cops.iter_mut() {
+            for o in officers.iter_mut() {
                 o.known.remove(id);
             }
         });
-        for i in 0..cops.len() {
+        for i in 0..officers.len() {
             let me = i as u32;
             let sees = me == 0 && t <= VISIBLE_UNTIL;
-            let o = &mut cops[i];
+            let o = &mut officers[i];
             let mut flags = 0;
             if t == CRIME_TICK && sees && !o.ignore.ignores(ACTOR, t, IGNORE_TICKS) {
                 // Witness: remember, report at once, chase.
@@ -227,6 +249,7 @@ fn run_scene(end: u32) -> Vec<Event> {
                     to: c.to,
                 });
                 match (c.from, c.to) {
+                    // Lost or stalled: search around the last seen place.
                     (CHASE, WALK) => {
                         let centre = o.pursuit.last_pos;
                         begin_search(o, me, centre, LOOK_AFTER_CHASE);
@@ -235,12 +258,12 @@ fn run_scene(end: u32) -> Vec<Event> {
                         let s = o.search.as_mut().unwrap();
                         if s.step >= LAST_STEP || s.searched >= SEARCH_TOTAL {
                             o.search = None;
-                            o.sm.set_state(IDLE, t).unwrap();
+                            let back = o.sm.set_state(IDLE, t).unwrap();
                             ev.push(Event::State {
                                 t,
                                 officer: me,
-                                from: WALK,
-                                to: IDLE,
+                                from: back.from,
+                                to: back.to,
                             });
                         } else {
                             s.step += 1;
@@ -258,10 +281,10 @@ fn run_scene(end: u32) -> Vec<Event> {
             // The call goes out in the sender's own tick, to the nearest
             // free officers; they search where the sender now thinks the
             // actor is.
-            if cops[i].radio.due(t, RADIO_DELAY) {
-                let call = cops[i].radio.take().unwrap();
-                let centre = cops[i].known.get(ACTOR).map_or(call, |s| s.pos);
-                let free: Vec<(u32, i32, i32)> = cops
+            if officers[i].radio.due(t, RADIO_DELAY) {
+                let call = officers[i].radio.take().unwrap();
+                let centre = officers[i].known.get(ACTOR).map_or(call, |s| s.pos);
+                let free: Vec<(u32, i32, i32)> = officers
                     .iter()
                     .enumerate()
                     .filter(|(j, c)| *j != i && c.sm.state() == IDLE)
@@ -272,7 +295,7 @@ fn run_scene(end: u32) -> Vec<Event> {
                 ids[..picked.len()].copy_from_slice(&picked);
                 ev.push(Event::Helpers { t, ids });
                 for &h in &picked {
-                    let c = &mut cops[h as usize];
+                    let c = &mut officers[h as usize];
                     c.known.seen(ACTOR, centre, t);
                     c.report.mark(t);
                     begin_search(c, h, centre, LOOK_SENT);
