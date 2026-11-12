@@ -73,6 +73,14 @@ class Sagax {
   decider() {
     return new Decider(this.x);
   }
+
+  /**
+   * A state machine: machine(['patrol', 'chase', 'search'], ['seen', 'hit'], 'patrol').
+   * States and conditions by name (at most 64 conditions); see Machine.
+   */
+  machine(states, conditions = [], initial = states[0]) {
+    return new Machine(this.x, states, conditions, initial);
+  }
 }
 
 function outputOf(output) {
@@ -391,6 +399,13 @@ const CURVE = {
   linear: 0, inverse: 1, quadratic: 2, inverseQuadratic: 3, step: 4, inverseStep: 5,
   sCurve: 6, inverseSCurve: 7, root: 8, cubic: 9,
 };
+/** Inputs read from the decider's memory instead of the candidate's row. */
+export const MEMORY = {
+  sinceOption: 0xfffffff0, // time since this option was done (never: 2^31 - 1)
+  sincePair: 0xfffffff1, // ... on this target
+  countOption: 0xfffffff2, // how often within the window
+  countPair: 0xfffffff3, // ... on this target
+};
 const COMBINE = { product: 0, geometricMean: 1, minimum: 2, average: 3, median: 4 };
 const APPLY = { combine: 0, multiply: 1 };
 const fixed = (v, what) => {
@@ -450,7 +465,31 @@ export class Decider {
     if (a === undefined) throw new RangeError(`Sagax: apply must be combine or multiply, not ${apply}`);
     const r = this.x.sx_decider_add_weighted(this.handle, option, input, k, min | 0, max | 0, fixed(pull, 'pull'), a);
     if (r !== 0) throw new RangeError(`Sagax: no option ${option}`);
-    this.inputCount = Math.max(this.inputCount, input + 1);
+    if (input < MEMORY.sinceOption) this.inputCount = Math.max(this.inputCount, input + 1);
+  }
+
+  /**
+   * Memory of actions for cooldowns and dislike. Time is the game's own count
+   * (frames, turns); setNow before deciding, record what really happened.
+   */
+  setNow(now) {
+    this.x.sx_decider_set_now(this.handle, now >>> 0);
+  }
+  record({ option, target = 0 }, now) {
+    this.x.sx_decider_record(this.handle, option, target >>> 0, now >>> 0);
+  }
+  forget() {
+    this.x.sx_decider_forget(this.handle);
+  }
+  /** Counts look back less than time (0: all of the last 256 actions). */
+  setWindow(time) {
+    this.x.sx_decider_set_window(this.handle, time >>> 0);
+  }
+  /** After the option was done it scores 0 until time has passed (0: none). */
+  setCooldown(option, time) {
+    if (this.x.sx_decider_set_cooldown(this.handle, option, time >>> 0) !== 0) {
+      throw new RangeError(`Sagax: no option ${option}`);
+    }
   }
 
   /**
@@ -536,6 +575,91 @@ export class Decider {
 
   free() {
     if (this.handle) this.x.sx_decider_free(this.handle);
+    this.handle = 0;
+  }
+}
+
+const REASON = [null, 'transition', 'timeout', 'set'];
+
+/**
+ * A state machine with timers and aborts. Every tick: update(now, {seen: true}).
+ * Transitions are checked in the order added (put aborts first), then the
+ * state's timeout; at most one change per update.
+ *
+ *   const m = lib.machine(['patrol', 'chase', 'search', 'dead'], ['seen', 'killed']);
+ *   m.transition({ from: '*', to: 'dead', when: ['killed'] });       // abort
+ *   m.transition({ from: 'patrol', to: 'chase', when: ['seen'] });
+ *   m.transition({ from: 'chase', to: 'search', unless: ['seen'], after: 10 });
+ *   m.timeout('search', 300, 'patrol');
+ *   const change = m.update(frame, { seen: canSee });   // {from, to, reason, transition} or null
+ */
+export class Machine {
+  constructor(x, states, conditions, initial) {
+    if (conditions.length > 64) throw new RangeError('Sagax: at most 64 conditions');
+    this.x = x;
+    this.states = states;
+    this.conditions = conditions;
+    this.handle = x.sx_machine_new(states.length, this.stateOf(initial));
+    if (!this.handle) throw new RangeError('Sagax: bad states');
+  }
+
+  stateOf(name) {
+    const i = typeof name === 'number' ? name : this.states.indexOf(name);
+    if (!(i >= 0 && i < this.states.length)) throw new RangeError(`Sagax: unknown state ${name}`);
+    return i;
+  }
+
+  bits(names = []) {
+    let mask = 0n;
+    for (const n of names) {
+      const i = this.conditions.indexOf(n);
+      if (i < 0) throw new RangeError(`Sagax: unknown condition ${n}`);
+      mask |= 1n << BigInt(i);
+    }
+    return [Number(mask & 0xffffffffn) >>> 0, Number(mask >> 32n) >>> 0];
+  }
+
+  /** {from ('*' for any), to, when: [conditions], unless: [conditions], after: time}. Returns its index. */
+  transition({ from = '*', to, when = [], unless = [], after = 0 }) {
+    const f = from === '*' ? -1 : this.stateOf(from);
+    const [wl, wh] = this.bits(when);
+    const [ul, uh] = this.bits(unless);
+    const i = this.x.sx_machine_add_transition(this.handle, f, this.stateOf(to), wl, wh, ul, uh, after >>> 0);
+    if (i < 0) throw new RangeError('Sagax: bad transition');
+    return i;
+  }
+
+  /** After time in state, go to next. */
+  timeout(state, time, next) {
+    if (this.x.sx_machine_set_timeout(this.handle, this.stateOf(state), time >>> 0, this.stateOf(next)) !== 0) {
+      throw new RangeError('Sagax: bad timeout');
+    }
+  }
+
+  /** One tick; flags {name: true}. Returns {from, to, reason, transition} or null. */
+  update(now, flags = {}) {
+    const [l, h] = this.bits(Object.keys(flags).filter((k) => flags[k]));
+    if (this.x.sx_machine_update(this.handle, now >>> 0, l, h) !== 1) return null;
+    const c = new Int32Array(this.x.memory.buffer, this.x.sx_machine_change(this.handle), 4);
+    return { from: this.states[c[0]], to: this.states[c[1]], reason: REASON[c[2]], transition: c[3] };
+  }
+
+  get state() {
+    return this.states[this.x.sx_machine_state(this.handle)];
+  }
+
+  /** When the current state was entered. */
+  get entered() {
+    return this.x.sx_machine_entered(this.handle) >>> 0;
+  }
+
+  /** Puts the machine into state at now (also to start the clock). */
+  setState(state, now) {
+    this.x.sx_machine_set_state(this.handle, this.stateOf(state), now >>> 0);
+  }
+
+  free() {
+    if (this.handle) this.x.sx_machine_free(this.handle);
     this.handle = 0;
   }
 }

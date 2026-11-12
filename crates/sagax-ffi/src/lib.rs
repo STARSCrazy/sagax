@@ -20,7 +20,7 @@ use sagax_nav::topology::Topology;
 use sagax_nav::trace::{TraceEvent, TraceSink, Tracer};
 
 /// Version of the C interface (`SX_API_VERSION`).
-pub const API_VERSION: u32 = 5;
+pub const API_VERSION: u32 = 6;
 
 const ERROR_ARGUMENT: i32 = -1;
 const ERROR_INTERNAL: i32 = -2;
@@ -1193,3 +1193,4 @@ pub unsafe extern "C" fn sx_dstar_set_trace(
 mod tests;
 
 pub mod decide;
+pub mod machine;

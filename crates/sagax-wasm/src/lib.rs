@@ -968,6 +968,73 @@ pub unsafe extern "C" fn sx_decider_set_current(
     0
 }
 
+/// The time for the next decisions.
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_set_now(d: *mut WasmDecider, now: u32) -> i32 {
+    decider!(d, ERROR_ARGUMENT).decider.set_now(now);
+    0
+}
+
+/// Remembers that option, target was done at `now`.
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_record(
+    d: *mut WasmDecider,
+    option: u32,
+    target: u32,
+    now: u32,
+) -> i32 {
+    decider!(d, ERROR_ARGUMENT)
+        .decider
+        .record(Candidate::new(option, target), now);
+    0
+}
+
+/// Forgets every recorded action.
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_forget(d: *mut WasmDecider) -> i32 {
+    decider!(d, ERROR_ARGUMENT).decider.forget();
+    0
+}
+
+/// Window of the count inputs (0: all remembered).
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_set_window(d: *mut WasmDecider, time: u32) -> i32 {
+    decider!(d, ERROR_ARGUMENT).decider.set_window(time);
+    0
+}
+
+/// Hard cooldown of an option (0: none).
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_set_cooldown(
+    d: *mut WasmDecider,
+    option: u32,
+    time: u32,
+) -> i32 {
+    if decider!(d, ERROR_ARGUMENT)
+        .decider
+        .set_cooldown(option, time)
+    {
+        0
+    } else {
+        ERROR_ARGUMENT
+    }
+}
+
 /// The input buffer, resized to `count` `i32`s: per candidate option,
 /// target and `stride` raw inputs.
 ///
@@ -1108,4 +1175,167 @@ pub unsafe extern "C" fn sx_decider_trace_take(d: *mut WasmDecider) -> i32 {
     std::mem::swap(&mut w.out, &mut w.trace);
     w.trace.clear();
     to_i32(w.out.len() / DECIDE_STRIDE)
+}
+
+// ---- state machine ---------------------------------------------------------
+
+use sagax_decide::state::{ANY, Reason, StateMachine, Transition};
+
+/// A state machine and its last change.
+pub struct WasmMachine {
+    machine: StateMachine,
+    /// from, to, reason (0 none, 1 transition, 2 timeout, 3 set), transition index
+    change: [i32; 4],
+}
+
+macro_rules! machine {
+    ($m:expr) => {
+        // SAFETY: JS passes a handle from sx_machine_new (wrapper guarantees it).
+        match unsafe { $m.as_mut() } {
+            Some(m) => m,
+            None => return ERROR_ARGUMENT,
+        }
+    };
+}
+
+/// A machine with `states` states starting in `initial`; null if invalid.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_machine_new(states: u32, initial: u32) -> *mut WasmMachine {
+    match StateMachine::new(states, initial) {
+        Ok(machine) => Box::into_raw(Box::new(WasmMachine {
+            machine,
+            change: [0; 4],
+        })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Frees a machine.
+///
+/// # Safety
+/// `m` is null or from [`sx_machine_new`] and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_machine_free(m: *mut WasmMachine) {
+    if !m.is_null() {
+        // SAFETY: see above.
+        drop(unsafe { Box::from_raw(m) });
+    }
+}
+
+/// After `time` in `state`, go to `next`.
+///
+/// # Safety
+/// `m` from [`sx_machine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_machine_set_timeout(
+    m: *mut WasmMachine,
+    state: u32,
+    time: u32,
+    next: u32,
+) -> i32 {
+    match machine!(m).machine.set_timeout(state, time, next) {
+        Ok(()) => 0,
+        Err(_) => ERROR_ARGUMENT,
+    }
+}
+
+/// A transition (`from` -1: any); condition masks in 32-bit halves.
+///
+/// # Safety
+/// `m` from [`sx_machine_new`].
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sx_machine_add_transition(
+    m: *mut WasmMachine,
+    from: i32,
+    to: u32,
+    when_low: u32,
+    when_high: u32,
+    unless_low: u32,
+    unless_high: u32,
+    after: u32,
+) -> i32 {
+    let w = machine!(m);
+    let from = if from < 0 { ANY } else { from as u32 };
+    let when = u64::from(when_low) | (u64::from(when_high) << 32);
+    let unless = u64::from(unless_low) | (u64::from(unless_high) << 32);
+    match w
+        .machine
+        .add_transition(Transition::new(from, to, when).unless(unless).after(after))
+    {
+        Ok(i) => to_i32(i),
+        Err(_) => ERROR_ARGUMENT,
+    }
+}
+
+/// One tick. Returns 1 if the state changed (see [`sx_machine_change`]).
+///
+/// # Safety
+/// `m` from [`sx_machine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_machine_update(
+    m: *mut WasmMachine,
+    now: u32,
+    flags_low: u32,
+    flags_high: u32,
+) -> i32 {
+    let w = machine!(m);
+    let flags = u64::from(flags_low) | (u64::from(flags_high) << 32);
+    let state = to_i32(w.machine.state());
+    w.change = match w.machine.update(now, flags) {
+        None => [state, state, 0, -1],
+        Some(c) => {
+            let (reason, index) = match c.reason {
+                Reason::Transition(i) => (1, to_i32(i)),
+                Reason::Timeout => (2, -1),
+                Reason::Set => (3, -1),
+            };
+            [to_i32(c.from), to_i32(c.to), reason, index]
+        }
+    };
+    i32::from(w.change[2] != 0)
+}
+
+/// The last change: from, to, reason, transition index (4 `i32`s).
+///
+/// # Safety
+/// `m` from [`sx_machine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_machine_change(m: *mut WasmMachine) -> *const i32 {
+    // SAFETY: see above.
+    match unsafe { m.as_ref() } {
+        Some(w) => w.change.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// The current state.
+///
+/// # Safety
+/// `m` from [`sx_machine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_machine_state(m: *mut WasmMachine) -> i32 {
+    to_i32(machine!(m).machine.state())
+}
+
+/// When the current state was entered (as `u32`).
+///
+/// # Safety
+/// `m` from [`sx_machine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_machine_entered(m: *mut WasmMachine) -> u32 {
+    // SAFETY: see above.
+    unsafe { m.as_ref() }.map_or(0, |w| w.machine.entered())
+}
+
+/// Puts the machine into `state` at `now`.
+///
+/// # Safety
+/// `m` from [`sx_machine_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_machine_set_state(m: *mut WasmMachine, state: u32, now: u32) -> i32 {
+    match machine!(m).machine.set_state(state, now) {
+        Ok(_) => 0,
+        Err(_) => ERROR_ARGUMENT,
+    }
 }

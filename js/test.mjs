@@ -3,7 +3,7 @@
 
 import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
-import { ONE, loadSagax, HEX, FORMATION } from './sagax.mjs';
+import { MEMORY, ONE, loadSagax, HEX, FORMATION } from './sagax.mjs';
 
 const wasm = await readFile(new URL('../target/wasm32-unknown-unknown/release/sagax_wasm.wasm', import.meta.url));
 console.log(`wasm size ${(wasm.length / 1024).toFixed(0)} KB`);
@@ -333,6 +333,50 @@ test('decide: combine, pull, multiply, rank, current', () => {
   assert.throws(() => d.setCombine('nope'));
   assert.throws(() => d.addConsideration(one, { input: 0, apply: 'nope' }));
   d.free();
+});
+
+test('decide: memory, cooldown, dislike', () => {
+  const d = lib.decider();
+  const strike = d.addOption(1, [{ input: MEMORY.sincePair, curve: 'linear', min: 0, max: 10 }]);
+  const wait = d.addOption(0.5);
+  const cands = [{ option: strike, target: 1 }, { option: strike, target: 2 }, { option: wait }];
+  d.setNow(100);
+  assert.equal(d.decide(cands).index, 0);
+  d.record(cands[0], 100);
+  d.setNow(102);
+  assert.equal(d.decide(cands).index, 1); // target 1 was struck just now
+  d.setCooldown(strike, 3);
+  assert.equal(d.decide(cands).option, wait);
+  d.setNow(103);
+  assert.equal(d.decide(cands).index, 1);
+  d.setWindow(2);
+  d.forget();
+  assert.equal(d.decide(cands).index, 0);
+  d.free();
+});
+
+test('state machine: patrol, chase, search, abort', () => {
+  const m = lib.machine(['patrol', 'chase', 'search', 'dead'], ['seen', 'killed']);
+  m.transition({ from: '*', to: 'dead', when: ['killed'] });
+  m.transition({ from: 'patrol', to: 'chase', when: ['seen'] });
+  m.transition({ from: 'chase', to: 'search', unless: ['seen'], after: 10 });
+  m.transition({ from: 'search', to: 'chase', when: ['seen'] });
+  m.timeout('search', 100, 'patrol');
+  assert.equal(m.update(1), null);
+  assert.deepEqual(m.update(2, { seen: true }), { from: 'patrol', to: 'chase', reason: 'transition', transition: 1 });
+  assert.equal(m.update(5), null);
+  assert.equal(m.update(12).to, 'search');
+  assert.equal(m.update(111), null);
+  assert.equal(m.update(112).reason, 'timeout');
+  assert.equal(m.state, 'patrol');
+  assert.equal(m.entered, 112);
+  assert.equal(m.update(113, { seen: true, killed: true }).to, 'dead');
+  assert.equal(m.update(114, { killed: true }), null);
+  m.setState('patrol', 200);
+  assert.equal(m.state, 'patrol');
+  assert.throws(() => m.update(201, { nope: true }));
+  assert.throws(() => m.transition({ to: 'nowhere' }));
+  m.free();
 });
 
 console.log(`${passed} tests passed`);

@@ -29,7 +29,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 5
+#define SX_API_VERSION 6
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -364,8 +364,60 @@ int32_t sx_decider_set_rank(sx_decider *decider, uint32_t option, uint32_t rank)
 /* The action going on now scores times (1 + bonus / SX_ONE); null for none. */
 int32_t sx_decider_set_current(sx_decider *decider, const sx_candidate *current, uint32_t bonus);
 
+/* ---- decisions: memory and cooldowns (since version 6) ----------------- */
+
+/* Inputs read from the decider's memory instead of the row (put them in
+ * sx_consideration.input). Never done: INT32_MAX. */
+#define SX_INPUT_SINCE_OPTION 0xFFFFFFF0u   /* time since this option was done */
+#define SX_INPUT_SINCE_PAIR   0xFFFFFFF1u   /* ... on this target */
+#define SX_INPUT_COUNT_OPTION 0xFFFFFFF2u   /* how often within the window */
+#define SX_INPUT_COUNT_PAIR   0xFFFFFFF3u   /* ... on this target */
+
+/* Time is the game's own count (frames, turns); it may wrap around. */
+int32_t sx_decider_set_now(sx_decider *decider, uint32_t now);
+/* The game says what it really did; the last 256 actions are kept. */
+int32_t sx_decider_record(sx_decider *decider, const sx_candidate *done, uint32_t now);
+int32_t sx_decider_forget(sx_decider *decider);
+/* Counts look back less than time (0: everything remembered). */
+int32_t sx_decider_set_window(sx_decider *decider, uint32_t time);
+/* After the option was done it scores 0 until time has passed (0: none). */
+int32_t sx_decider_set_cooldown(sx_decider *decider, uint32_t option, uint32_t time);
+
 typedef void (*sx_decide_trace_fn)(void *context, const sx_decide_event *event);
 int32_t sx_decider_set_trace(sx_decider *decider, sx_decide_trace_fn trace, void *context);
+
+/* ---- state machine (since version 6) ------------------------------------ */
+
+/* States are numbers 0..states-1; conditions are bits the game sets every
+ * tick. Transitions are checked in the order added (put aborts first); the
+ * first match wins, then the state's timeout. At most one change per update.
+ * A transition from any state (from -1) does not fire in its own target. */
+typedef struct sx_machine sx_machine;
+
+#define SX_REASON_TRANSITION 1
+#define SX_REASON_TIMEOUT    2
+#define SX_REASON_SET        3
+
+typedef struct sx_change {
+	int32_t from, to;
+	int32_t reason;             /* SX_REASON_*, 0 if nothing changed */
+	int32_t transition;         /* index, or -1 */
+} sx_change;
+
+/* Null if initial >= states. The clock starts at time 0 (see set_state). */
+sx_machine *sx_machine_new(uint32_t states, uint32_t initial);
+void sx_machine_free(sx_machine *machine);
+/* After time in state, go to next (time 0: never). */
+int32_t sx_machine_set_timeout(sx_machine *machine, uint32_t state, uint32_t time, uint32_t next);
+/* Fires when all bits of when are set and all bits of unless are clear and
+ * the state has run at least after. from -1: any state. Returns its index. */
+int32_t sx_machine_add_transition(sx_machine *machine, int32_t from, uint32_t to,
+                                  uint64_t when, uint64_t unless, uint32_t after);
+/* Returns 1 if the state changed (change filled), 0 if not, -1 bad arguments. */
+int32_t sx_machine_update(sx_machine *machine, uint32_t now, uint64_t flags, sx_change *change);
+int32_t sx_machine_state(sx_machine *machine);
+int32_t sx_machine_entered(sx_machine *machine, uint32_t *entered);
+int32_t sx_machine_set_state(sx_machine *machine, uint32_t state, uint32_t now);
 
 #ifdef __cplusplus
 }

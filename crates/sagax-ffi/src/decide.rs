@@ -283,6 +283,87 @@ pub unsafe extern "C" fn sx_decider_set_current(
     0
 }
 
+/// `sx_decider_set_now`.
+///
+/// # Safety
+/// `decider` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_set_now(decider: *mut SxDecider, now: u32) -> i32 {
+    // SAFETY: see above.
+    let Some(d) = (unsafe { decider.as_mut() }) else {
+        return ERROR_ARGUMENT;
+    };
+    d.decider.set_now(now);
+    0
+}
+
+/// `sx_decider_record`.
+///
+/// # Safety
+/// `decider` is null or valid; `done` is null or points to one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_record(
+    decider: *mut SxDecider,
+    done: *const SxCandidate,
+    now: u32,
+) -> i32 {
+    // SAFETY: see above.
+    let (Some(d), Some(c)) = (unsafe { decider.as_mut() }, unsafe { done.as_ref() }) else {
+        return ERROR_ARGUMENT;
+    };
+    d.decider.record(Candidate::new(c.option, c.target), now);
+    0
+}
+
+/// `sx_decider_forget`.
+///
+/// # Safety
+/// `decider` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_forget(decider: *mut SxDecider) -> i32 {
+    // SAFETY: see above.
+    let Some(d) = (unsafe { decider.as_mut() }) else {
+        return ERROR_ARGUMENT;
+    };
+    d.decider.forget();
+    0
+}
+
+/// `sx_decider_set_window`.
+///
+/// # Safety
+/// `decider` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_set_window(decider: *mut SxDecider, time: u32) -> i32 {
+    // SAFETY: see above.
+    let Some(d) = (unsafe { decider.as_mut() }) else {
+        return ERROR_ARGUMENT;
+    };
+    d.decider.set_window(time);
+    0
+}
+
+/// `sx_decider_set_cooldown`.
+///
+/// # Safety
+/// `decider` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_set_cooldown(
+    decider: *mut SxDecider,
+    option: u32,
+    time: u32,
+) -> i32 {
+    // SAFETY: see above.
+    let Some(d) = (unsafe { decider.as_mut() }) else {
+        return ERROR_ARGUMENT;
+    };
+    if d.decider.set_cooldown(option, time) {
+        0
+    } else {
+        ERROR_ARGUMENT
+    }
+}
+
 /// `sx_decider_decide`.
 ///
 /// # Safety
@@ -529,6 +610,30 @@ mod tests {
             assert_eq!((r, choice.candidate), (1, 1));
             assert_eq!(sx_decider_set_current(d, &both[1], 6553), 0);
             assert_eq!(sx_decider_set_current(d, std::ptr::null(), 0), 0);
+
+            // Stage 2: memory and cooldown.
+            assert_eq!(sx_decider_set_now(d, 10), 0);
+            assert_eq!(sx_decider_record(d, &both[1], 10), 0);
+            assert_eq!(sx_decider_record(d, std::ptr::null(), 10), ERROR_ARGUMENT);
+            assert_eq!(sx_decider_set_cooldown(d, 1, 3), 0);
+            assert_eq!(sx_decider_set_cooldown(d, 8, 3), ERROR_ARGUMENT);
+            assert_eq!(sx_decider_set_window(d, 5), 0);
+            let r = sx_decider_decide(
+                d,
+                both.as_ptr(),
+                2,
+                [9, 9].as_ptr(),
+                1,
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+                &mut choice,
+            );
+            // option 1 cools down, so option 0 is chosen
+            assert_eq!(r, 1);
+            assert_eq!(choice.candidate, 0);
+            assert_eq!(sx_decider_forget(d), 0);
             sx_decider_free(d);
         }
     }
