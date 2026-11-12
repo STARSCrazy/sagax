@@ -33,6 +33,21 @@ use sagax_core::{NoopSink, Sink};
 /// 1.0 in the fixed point of factors and weights.
 pub const ONE: u32 = 65535;
 
+/// Input number of a consideration that reads the time since this option
+/// was last done (any target), from the decider's memory instead of the
+/// row. Never done: `i32::MAX`.
+pub const INPUT_SINCE_OPTION: u32 = 0xFFFF_FFF0;
+/// Time since this option was last done on this target.
+pub const INPUT_SINCE_PAIR: u32 = 0xFFFF_FFF1;
+/// How often this option was done within the window (any target).
+pub const INPUT_COUNT_OPTION: u32 = 0xFFFF_FFF2;
+/// How often this option was done on this target within the window.
+pub const INPUT_COUNT_PAIR: u32 = 0xFFFF_FFF3;
+
+/// The decider remembers at most this many recorded actions; older ones
+/// are forgotten first.
+pub const MEMORY_LIMIT: usize = 256;
+
 /// How a raw input becomes a factor 0..[`ONE`].
 ///
 /// All curves first place the input between `min` and `max`:
@@ -428,6 +443,7 @@ struct Factor {
 struct OptionDef {
     weight: u32,
     rank: u32,
+    cooldown: u32,
     combine: Option<Combine>,
     factors: Vec<Factor>,
 }
@@ -438,6 +454,9 @@ pub struct Decider {
     options: Vec<OptionDef>,
     combine: Combine,
     current: Option<(Candidate, u32)>,
+    now: u32,
+    window: u32,
+    memory: std::collections::VecDeque<(Candidate, u32)>,
     order: Vec<usize>,
     values: RefCell<Vec<u32>>,
     ranked: Vec<u32>,
@@ -455,6 +474,7 @@ impl Decider {
         self.options.push(OptionDef {
             weight,
             rank: 0,
+            cooldown: 0,
             combine: None,
             factors: Vec::new(),
         });
@@ -521,6 +541,85 @@ impl Decider {
         self.current = current.map(|c| (c, bonus));
     }
 
+    /// The game's time for the next decisions (frames, turns, seconds; it
+    /// may wrap around). Needed for cooldowns and the memory inputs.
+    pub fn set_now(&mut self, now: u32) {
+        self.now = now;
+    }
+
+    /// Remembers that `candidate` was done at `now`. Only the game knows
+    /// whether the chosen action really happened, so it records it.
+    pub fn record(&mut self, candidate: Candidate, now: u32) {
+        if self.memory.len() == MEMORY_LIMIT {
+            self.memory.pop_front();
+        }
+        self.memory.push_back((candidate, now));
+    }
+
+    /// Forgets every recorded action.
+    pub fn forget(&mut self) {
+        self.memory.clear();
+    }
+
+    /// The window of [`INPUT_COUNT_OPTION`] and [`INPUT_COUNT_PAIR`]: actions
+    /// less than `time` ago count (default: all remembered).
+    pub fn set_window(&mut self, time: u32) {
+        self.window = time;
+    }
+
+    /// After `option` was done (any target), it scores 0 until `time` has
+    /// passed: a hard cooldown, e.g. a rule "once every 3 turns". 0: none.
+    /// `false` if the option does not exist.
+    pub fn set_cooldown(&mut self, option: u32, time: u32) -> bool {
+        self.options
+            .get_mut(option as usize)
+            .map(|o| o.cooldown = time)
+            .is_some()
+    }
+
+    /// Time since `option` (and, with `target`, on that target) was last
+    /// done at the current time, or `None` if never.
+    pub fn since(&self, option: u32, target: Option<u32>) -> Option<u32> {
+        self.memory
+            .iter()
+            .rev()
+            .find(|(c, _)| c.option == option && target.is_none_or(|t| t == c.target))
+            .map(|&(_, at)| self.now.wrapping_sub(at))
+    }
+
+    /// How often `option` (and, with `target`, on that target) was done
+    /// within the window.
+    pub fn count(&self, option: u32, target: Option<u32>) -> u32 {
+        let window = if self.window == 0 {
+            u32::MAX
+        } else {
+            self.window
+        };
+        self.memory
+            .iter()
+            .filter(|(c, at)| {
+                c.option == option
+                    && target.is_none_or(|t| t == c.target)
+                    && self.now.wrapping_sub(*at) < window
+            })
+            .count() as u32
+    }
+
+    fn input_of(&self, candidate: Candidate, row: &[i32], input: u32) -> Option<i32> {
+        let since = |t| {
+            self.since(candidate.option, t)
+                .map_or(i32::MAX, |s| i32::try_from(s).unwrap_or(i32::MAX))
+        };
+        let count = |t| i32::try_from(self.count(candidate.option, t)).unwrap_or(i32::MAX);
+        match input {
+            INPUT_SINCE_OPTION => Some(since(None)),
+            INPUT_SINCE_PAIR => Some(since(Some(candidate.target))),
+            INPUT_COUNT_OPTION => Some(count(None)),
+            INPUT_COUNT_PAIR => Some(count(Some(candidate.target))),
+            _ => row.get(input as usize).copied(),
+        }
+    }
+
     /// Number of options.
     pub fn option_count(&self) -> usize {
         self.options.len()
@@ -547,12 +646,12 @@ impl Decider {
         let mut multiply = ONE;
         for (i, f) in option.factors.iter().enumerate() {
             let c = &f.consideration;
-            let input = *row
-                .get(c.input as usize)
-                .ok_or(DecideError::InputOutOfRange {
-                    candidate: index,
-                    input: c.input,
-                })?;
+            let input =
+                self.input_of(candidate, row, c.input)
+                    .ok_or(DecideError::InputOutOfRange {
+                        candidate: index,
+                        input: c.input,
+                    })?;
             let value = pull(c.curve.apply(input, c.min, c.max), f.pull);
             if sink.enabled() {
                 sink.emit(DecideEvent::Factor {
@@ -566,6 +665,13 @@ impl Decider {
                 Apply::Combine => values.push(value),
                 Apply::Multiply => multiply = mul(multiply, value),
             }
+        }
+        if option.cooldown > 0
+            && self
+                .since(candidate.option, None)
+                .is_some_and(|s| s < option.cooldown)
+        {
+            multiply = 0;
         }
         let how = option.combine.unwrap_or(self.combine);
         let product = mul(combine(how, &mut values), multiply);

@@ -370,3 +370,78 @@ fn rank_and_inertia() {
         .unwrap();
     assert_eq!(c.candidate, 0);
 }
+
+#[test]
+fn memory_cooldown_and_dislike() {
+    let mut d = Decider::new();
+    let strike = d.add_option(ONE);
+    let other = d.add_option(ONE / 2);
+    // soft dislike: the longer ago, the better (full again after 10)
+    d.add_consideration(
+        strike,
+        Consideration::new(INPUT_SINCE_PAIR, Curve::Linear, 0, 10),
+    );
+    let cands = [
+        Candidate::new(strike, 1),
+        Candidate::new(strike, 2),
+        Candidate::new(other, 0),
+    ];
+    let mut s = Vec::new();
+    d.set_now(100);
+    // never done: full score, the first target
+    assert_eq!(
+        d.decide(&cands, &[], 0, Pick::Best, 0, &mut s)
+            .unwrap()
+            .unwrap()
+            .candidate,
+        0
+    );
+    d.record(cands[0], 100);
+    d.set_now(102);
+    // target 1 was struck 2 ago: target 2 is preferred now
+    assert_eq!(
+        d.decide(&cands, &[], 0, Pick::Best, 0, &mut s)
+            .unwrap()
+            .unwrap()
+            .candidate,
+        1
+    );
+    assert_eq!(d.since(strike, None), Some(2));
+    assert_eq!(d.since(strike, Some(2)), None);
+
+    // hard cooldown: 3 ticks after any strike nothing but the other option
+    assert!(d.set_cooldown(strike, 3));
+    assert_eq!(
+        d.decide(&cands, &[], 0, Pick::Best, 0, &mut s)
+            .unwrap()
+            .unwrap()
+            .candidate,
+        2
+    );
+    d.set_now(103);
+    assert_eq!(
+        d.decide(&cands, &[], 0, Pick::Best, 0, &mut s)
+            .unwrap()
+            .unwrap()
+            .candidate,
+        1
+    );
+    assert!(!d.set_cooldown(9, 1));
+
+    // counting within a window
+    d.record(cands[1], 103);
+    d.record(cands[1], 104);
+    d.set_now(105);
+    assert_eq!(d.count(strike, None), 3);
+    d.set_window(3);
+    assert_eq!(d.count(strike, None), 2);
+    assert_eq!(d.count(strike, Some(1)), 0);
+    d.forget();
+    assert_eq!(d.count(strike, None), 0);
+    for i in 0..300 {
+        d.record(cands[2], i);
+    }
+    d.set_window(0);
+    d.set_now(300);
+    assert_eq!(d.count(other, None), MEMORY_LIMIT as u32);
+}
