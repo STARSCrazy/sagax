@@ -1,11 +1,13 @@
 #!/bin/sh
-# Builds the Sagax C library and runs examples/c/quickstart.c against it.
+# Builds the Sagax C library and runs the C examples (quickstart.c, memory.c) against it.
 set -e
 cd "$(dirname "$0")/../.."
 CC=${CC:-cc}
 cargo build --release -p sagax-ffi
 mkdir -p examples/c/out
-"$CC" -std=c99 -O2 -Wall -Wextra -I crates/sagax-ffi/include \
-	examples/c/quickstart.c -L target/release -lsagax -o examples/c/out/quickstart
-PATH="$PWD/target/release:$PATH" LD_LIBRARY_PATH="$PWD/target/release" DYLD_LIBRARY_PATH="$PWD/target/release" \
-	examples/c/out/quickstart
+for name in quickstart memory; do
+	"$CC" -std=c99 -O2 -Wall -Wextra -I crates/sagax-ffi/include \
+		examples/c/$name.c -L target/release -lsagax -o examples/c/out/$name
+	PATH="$PWD/target/release:$PATH" LD_LIBRARY_PATH="$PWD/target/release" DYLD_LIBRARY_PATH="$PWD/target/release" \
+		examples/c/out/$name
+done

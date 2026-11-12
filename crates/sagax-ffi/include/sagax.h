@@ -29,7 +29,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 6
+#define SX_API_VERSION 7
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -418,6 +418,219 @@ int32_t sx_machine_update(sx_machine *machine, uint32_t now, uint64_t flags, sx_
 int32_t sx_machine_state(sx_machine *machine);
 int32_t sx_machine_entered(sx_machine *machine, uint32_t *entered);
 int32_t sx_machine_set_state(sx_machine *machine, uint32_t state, uint32_t now);
+
+/* ---- world memory ---------------------------------------------------------- */
+
+/* What a character has seen, what it avoids and what it ignores. Time is the
+ * game's own count (uint32_t); ages use wrapping subtraction, so a wrapped
+ * clock still works. Places are x, y, z in the game's own units.
+ *
+ * Return values: functions that ask a question return 1 (yes) or 0 (no); the
+ * others return 0 or a count (>= 0). Errors are negative (SX_ERROR_*): a
+ * null handle, struct or required pointer.
+ *
+ * Handles (sx_sightings, sx_zones, sx_ignore) are made with a capacity and
+ * reserve it at once; capacity 0 gives null. The value structs below
+ * (sx_pursuit, sx_radio, sx_interval) are plain data owned by the game: start
+ * them zeroed (= {0}), copy or save them as you like, and pass a pointer. */
+
+typedef struct sx_sightings sx_sightings;
+typedef struct sx_zones sx_zones;
+typedef struct sx_ignore sx_ignore;
+
+/* The last known place and time of one id. */
+typedef struct sx_sighting {
+	uint32_t id;
+	int32_t pos[3];
+	uint32_t last_seen;
+	uint32_t data;              /* a number the game may attach (kind, flags, ...) */
+} sx_sighting;
+
+/* An area to stay out of, centred on pos. */
+typedef struct sx_zone {
+	int32_t pos[3];
+	uint32_t since;             /* when it was added or renewed */
+	uint32_t data;
+	int32_t source[3];          /* what caused it; valid if has_source != 0 */
+	uint8_t has_source;
+} sx_zone;
+
+/* Chasing one target. Start zeroed, then sx_pursuit_begin. */
+typedef struct sx_pursuit {
+	uint32_t target;
+	int32_t last_pos[3];        /* last known place of the target */
+	uint32_t unseen;            /* time spent without seeing it */
+	int32_t best;               /* smallest distance reached so far */
+	uint32_t since;             /* time that distance was reached */
+} sx_pursuit;
+
+/* A call for help. Start zeroed. */
+typedef struct sx_radio {
+	int32_t pos[3];             /* where the pending call was started */
+	uint32_t started;
+	uint32_t last_start;        /* valid if has_sent != 0 */
+	uint8_t pending;            /* 1 while a call waits to be taken */
+	uint8_t has_sent;
+} sx_radio;
+
+/* A timer for "every N ticks". Start zeroed (counts as due). */
+typedef struct sx_interval {
+	uint32_t last;
+	uint8_t started;
+} sx_interval;
+
+/* A candidate for sx_nearest. */
+typedef struct sx_nearby {
+	uint32_t id;
+	int32_t x, y;
+} sx_nearby;
+
+/* Where an agent searches around a centre (see sx_search_point). count is the
+ * number of used entries of offsets and distances, at most 8. */
+typedef struct sx_search_pattern {
+	int32_t heading_step;       /* heading between neighbouring agents (256 = full turn) */
+	int32_t first_distance;     /* distance of step 0 from the centre */
+	uint32_t count;
+	int32_t offsets[8];         /* turn of each later step */
+	int32_t distances[8];       /* distance of each later step */
+	int32_t min_x, min_y, max_x, max_y;  /* points are clamped to this box */
+} sx_search_pattern;
+
+/* -- sightings: a bounded list of last known places, in insertion order -- */
+
+/* Null if capacity is 0. */
+sx_sightings *sx_sightings_new(uint32_t capacity);
+void sx_sightings_free(sx_sightings *s);
+/* id was seen at x, y, z at now. A known id is updated in place (its data is
+ * kept). A new id is added; if the list is full, the one seen longest ago is
+ * dropped. Returns 1 if one was dropped (its id goes to *evicted, which may
+ * be null), else 0. */
+int32_t sx_sightings_seen(sx_sightings *s, uint32_t id, int32_t x, int32_t y, int32_t z,
+                          uint32_t now, uint32_t *evicted);
+/* Renew the time of id without changing its place. Return 1, or 0 if unknown. */
+int32_t sx_sightings_touch(sx_sightings *s, uint32_t id, uint32_t now);
+int32_t sx_sightings_set_pos(sx_sightings *s, uint32_t id, int32_t x, int32_t y, int32_t z);
+int32_t sx_sightings_set_data(sx_sightings *s, uint32_t id, uint32_t data);
+/* Return 1 if id was there. */
+int32_t sx_sightings_remove(sx_sightings *s, uint32_t id);
+/* Fill *out. Return 1, or 0 if id is unknown. */
+int32_t sx_sightings_get(sx_sightings *s, uint32_t id, sx_sighting *out);
+/* Number of sightings. */
+int32_t sx_sightings_count(sx_sightings *s);
+/* Fill *out with the sighting in slot index (0 .. count - 1). Return 1, or 0
+ * if there is none. */
+int32_t sx_sightings_at(sx_sightings *s, uint32_t index, sx_sighting *out);
+/* Forget every sighting at least max_age old. Returns how many were
+ * forgotten; their ids, in slot order, go to removed (may be null), at most
+ * removed_cap of them. */
+int32_t sx_sightings_expire(sx_sightings *s, uint32_t now, uint32_t max_age,
+                            uint32_t *removed, uint32_t removed_cap);
+int32_t sx_sightings_clear(sx_sightings *s);
+
+/* -- zones: areas to stay out of -- */
+
+/* Zones are circles of the given radius (<= 0: nothing is ever inside) that
+ * last lifetime ticks. Null if capacity is 0. */
+sx_zones *sx_zones_new(uint32_t capacity, int32_t radius, uint32_t lifetime);
+void sx_zones_free(sx_zones *z);
+/* Add a zone at x, y, z. If that place is already inside a zone (the first in
+ * slot order), the zone is renewed (centre, time, data, source replaced).
+ * When full, the oldest zone goes and the new one is last. source: 3
+ * integers, or null for none. Returns the index of the zone. */
+int32_t sx_zones_add(sx_zones *zones, int32_t x, int32_t y, int32_t z, uint32_t now,
+                     uint32_t data, const int32_t *source);
+/* Remove zones whose age is at least lifetime. Returns how many. */
+int32_t sx_zones_expire(sx_zones *z, uint32_t now);
+/* Return 1 if x, y, z is inside a zone (index of the first one goes to
+ * *index, which may be null), else 0. */
+int32_t sx_zones_contains(sx_zones *zones, int32_t x, int32_t y, int32_t z, uint32_t *index);
+/* Return 1 if cell is inside a zone that holds neither start nor goal. cell,
+ * start and goal are 3 integers each (x, y, z). Use it as the map's "closed". */
+int32_t sx_zones_blocks(sx_zones *z, const int32_t *cell, const int32_t *start,
+                        const int32_t *goal);
+int32_t sx_zones_count(sx_zones *z);
+/* Fill *out with the zone in slot index. Return 1, or 0 if there is none. */
+int32_t sx_zones_at(sx_zones *z, uint32_t index, sx_zone *out);
+
+/* -- ignore: ids to leave alone for a while -- */
+
+/* Null if capacity is 0. */
+sx_ignore *sx_ignore_new(uint32_t capacity);
+void sx_ignore_free(sx_ignore *i);
+/* Ignore id from now. A present id is renewed; when full, the oldest entry
+ * is replaced. Returns 0. */
+int32_t sx_ignore_add(sx_ignore *i, uint32_t id, uint32_t now);
+/* Return 1 if id was added less than duration ago. */
+int32_t sx_ignore_ignores(sx_ignore *i, uint32_t id, uint32_t now, uint32_t duration);
+
+/* -- pursuit: where the target was last seen and whether the chase gets
+ *    anywhere -- */
+
+/* Start chasing target, seen at x, y, z, distance away. */
+int32_t sx_pursuit_begin(sx_pursuit *p, uint32_t target, int32_t x, int32_t y, int32_t z,
+                         int32_t distance, uint32_t now);
+/* The target is in sight at x, y, z: remember it, unseen time starts over. */
+int32_t sx_pursuit_seen(sx_pursuit *p, int32_t x, int32_t y, int32_t z);
+/* The target was out of sight for another step of time (adds to unseen). */
+int32_t sx_pursuit_missed(sx_pursuit *p, uint32_t step);
+/* Measure progress from distance at now. */
+int32_t sx_pursuit_reset_progress(sx_pursuit *p, int32_t distance, uint32_t now);
+/* Return 1 if the target has been out of sight for at least limit. */
+int32_t sx_pursuit_lost(sx_pursuit *p, uint32_t limit);
+/* Call with the current distance. Getting at least min_gain closer than the
+ * best so far counts as progress and restarts the check (returns 0). Return 1
+ * if there has been no progress for at least limit ticks. */
+int32_t sx_pursuit_stalled(sx_pursuit *p, int32_t distance, uint32_t now, int32_t min_gain,
+                           uint32_t limit);
+/* Forget the chase. */
+int32_t sx_pursuit_clear(sx_pursuit *p);
+
+/* -- radio: a call for help, delivered after a delay, with a cooldown -- */
+
+/* Start a call at x, y, z. Return 1, or 0 if one is pending or the last one
+ * was less than cooldown ago (the first call never waits). */
+int32_t sx_radio_start(sx_radio *r, int32_t x, int32_t y, int32_t z, uint32_t now,
+                       uint32_t cooldown);
+/* Return 1 if a call is pending and at least delay has passed. */
+int32_t sx_radio_due(sx_radio *r, uint32_t now, uint32_t delay);
+/* Take the pending call: its place goes to xyz (3 integers). Return 1, or 0
+ * if none is pending. */
+int32_t sx_radio_take(sx_radio *r, int32_t *xyz);
+/* Drop the pending call (the cooldown still counts). */
+int32_t sx_radio_cancel(sx_radio *r);
+
+/* -- interval: "every N ticks" -- */
+
+/* Return 1 if never marked, or at least every has passed since the mark. */
+int32_t sx_interval_due(sx_interval *i, uint32_t now, uint32_t every);
+int32_t sx_interval_mark(sx_interval *i, uint32_t now);
+/* Back to never marked. */
+int32_t sx_interval_reset(sx_interval *i);
+
+/* -- nearest and searching -- */
+
+/* The ids of the k candidates nearest to px, py, nearest first, into out
+ * (room for k). Distance is (dx/divisor)^2 + (dy/divisor)^2 with truncating
+ * division; a divisor <= 0 counts as 1; ties keep the earlier candidate
+ * first. Returns how many were written (<= min(k, n)). */
+int32_t sx_nearest(const sx_nearby *candidates, uint32_t n, int32_t px, int32_t py,
+                   uint32_t k, int32_t divisor, uint32_t *out);
+/* Sine of a heading (256 = full turn), scaled by 256: -256 .. 256. */
+int32_t sx_sin256(int32_t heading);
+/* Search point `step` of `agent` around cx, cy, cz, without random numbers:
+ * each agent has its own heading (agent * heading_step); step 0 is
+ * first_distance away along it, step n (1-based) turns by offsets[n-1] and
+ * goes distances[n-1] out. z is kept; x and y are clamped. pattern null: the
+ * default (three points at 5, 9 and 12 times 256). out: 3 integers. Returns
+ * 1, or 0 if step is past the last point; -1 if pattern->count > 8. */
+int32_t sx_search_point(uint32_t agent, uint32_t step, int32_t cx, int32_t cy, int32_t cz,
+                        const sx_search_pattern *pattern, int32_t *out);
+/* Heading elapsed ticks into looking around from base: plus
+ * offsets[elapsed / step_ticks], or plus nothing once past the end; result
+ * 0 .. 255. offsets null: look to one side, back, to the other side and back
+ * (0, 32, 64, 32, 0, -32, -64, -32). A step_ticks of 0 counts as 1. */
+int32_t sx_look_heading(int32_t base, uint32_t elapsed, uint32_t step_ticks,
+                        const int32_t *offsets, uint32_t count);
 
 #ifdef __cplusplus
 }
