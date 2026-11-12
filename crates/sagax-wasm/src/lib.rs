@@ -790,7 +790,7 @@ pub unsafe extern "C" fn sx_trace_dropped(g: *mut WasmGrid) -> i32 {
 // ---- decisions -------------------------------------------------------------
 
 use sagax_core::CallbackSink;
-use sagax_decide::{Candidate, Consideration, Curve, DecideEvent, Decider, Pick};
+use sagax_decide::{Apply, Candidate, Combine, Consideration, Curve, DecideEvent, Decider, Pick};
 
 /// Numbers per decision trace event: kind (1 factor, 2 scored, 3 chosen),
 /// candidate, consideration (-1 if none), input, value, score.
@@ -878,6 +878,94 @@ pub unsafe extern "C" fn sx_decider_add_consideration(
     } else {
         ERROR_ARGUMENT
     }
+}
+
+/// Adds a consideration with `pull` (65535 as it is) and `apply` (0 into
+/// the combine, 1 multiplied afterwards).
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sx_decider_add_weighted(
+    d: *mut WasmDecider,
+    option: u32,
+    input: u32,
+    curve: u32,
+    min: i32,
+    max: i32,
+    pull: u32,
+    apply: u32,
+) -> i32 {
+    let w = decider!(d, ERROR_ARGUMENT);
+    let (Some(curve), Some(apply)) = (Curve::from_u32(curve), Apply::from_u32(apply)) else {
+        return ERROR_ARGUMENT;
+    };
+    let c = Consideration::new(input, curve, min, max);
+    if w.decider.add_weighted(option, c, pull, apply) {
+        0
+    } else {
+        ERROR_ARGUMENT
+    }
+}
+
+/// Combine 0..4 for every option (`option` -1) or one option (`combine` -1:
+/// follow the decider).
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_set_combine(
+    d: *mut WasmDecider,
+    option: i32,
+    combine: i32,
+) -> i32 {
+    let w = decider!(d, ERROR_ARGUMENT);
+    let how = u32::try_from(combine).ok().and_then(Combine::from_u32);
+    match (u32::try_from(option), how) {
+        (Err(_), Some(how)) => {
+            w.decider.set_combine(how);
+            0
+        }
+        (Ok(option), how)
+            if (how.is_some() || combine == -1) && w.decider.set_option_combine(option, how) =>
+        {
+            0
+        }
+        _ => ERROR_ARGUMENT,
+    }
+}
+
+/// Rank of an option (the highest rank that still scores is chosen from).
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_set_rank(d: *mut WasmDecider, option: u32, rank: u32) -> i32 {
+    if decider!(d, ERROR_ARGUMENT).decider.set_rank(option, rank) {
+        0
+    } else {
+        ERROR_ARGUMENT
+    }
+}
+
+/// The action going on now (`has` 0: none) gets `bonus` (65535 = +100 %).
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_set_current(
+    d: *mut WasmDecider,
+    has: i32,
+    option: u32,
+    target: u32,
+    bonus: u32,
+) -> i32 {
+    let current = (has != 0).then(|| Candidate::new(option, target));
+    decider!(d, ERROR_ARGUMENT)
+        .decider
+        .set_current(current, bonus);
+    0
 }
 
 /// The input buffer, resized to `count` `i32`s: per candidate option,

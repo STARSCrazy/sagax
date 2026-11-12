@@ -20,7 +20,7 @@ use sagax_nav::topology::Topology;
 use sagax_nav::trace::{TraceEvent, TraceSink, Tracer};
 
 /// Version of the C interface (`SX_API_VERSION`).
-pub const API_VERSION: u32 = 4;
+pub const API_VERSION: u32 = 5;
 
 const ERROR_ARGUMENT: i32 = -1;
 const ERROR_INTERNAL: i32 = -2;

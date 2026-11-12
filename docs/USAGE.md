@@ -274,8 +274,10 @@ factors so options with many considerations are not punished, times the
 weight.
 
 - **Curves:** `t = (input - min) / (max - min)`, clamped to 0..1. `linear` t,
-  `inverse` 1 - t, `quadratic` t², `inverseQuadratic` (1 - t)², `step` 1 if
-  input >= min, `inverseStep` 1 if input < min.
+  `inverse` 1 - t, `quadratic` t², `inverseQuadratic` (1 - t)², `cubic` t³
+  (only the top counts), `root` √t (early values already count), `sCurve`
+  3t² - 2t³ (a soft threshold), `inverseSCurve`, `step` 1 if input >= min,
+  `inverseStep` 1 if input < min.
 - **Choice:** `best` (equal scores: the smaller index wins), `weighted`
   (by chance in proportion to the score) or `uniform` (each equally likely),
   both among the `top` best (0: all).
@@ -323,6 +325,83 @@ sx_decider_free(d);
 
 Rust: `sagax_decide::Decider` with `add_option`, `add_consideration`,
 `decide` / `decide_traced` (any `sagax_core::Sink<DecideEvent>`).
+
+### Putting factors together
+
+Multiplying is the default, and it has a known weakness: many good but not
+perfect factors drag a score down. Five factors of 0.9 give 0.59 plainly,
+0.78 with the compensation; a single factor of 0.8 then wins. So the way
+factors are put together can be chosen, for the whole decider
+(`setCombine('geometricMean')`) and per option (`addOption(w, list,
+{ combine: 'minimum' })`, which wins over the decider's).
+
+What each one does with typical situations
+(`cargo run -p sagax-decide --example compare`):
+
+| Situation | product | geometricMean | minimum | average | median |
+|---|---|---|---|---|---|
+| five times 0.9 | 0.784 | 0.900 | 0.900 | 0.900 | 0.900 |
+| one 0.8 | 0.800 | 0.800 | 0.800 | 0.800 | 0.800 |
+| 1, 1, 1, 0.1 | 0.167 | 0.562 | 0.100 | 0.775 | 1.000 |
+| 1, 1, 0 (no line of sight) | 0 | 0 | 0 | 0.667 | 1.000 |
+| 0.9, 0.9, 0.9, 0.05 | 0.063 | 0.437 | 0.050 | 0.687 | 0.900 |
+
+Which to take:
+
+- **geometricMean as the everyday choice.** The number of factors no longer
+  matters (three times 0.95 stays 0.95), a 0 still rules out, a weak factor
+  still hurts clearly. Good for most actions.
+- **product** when every extra doubt should cost: risky actions (a charge,
+  a spell with many conditions), where several "almost fine" mean "rather
+  not".
+- **minimum** for "everything has to fit": the weakest point decides, e.g.
+  a position that must be covered *and* reachable *and* in range.
+- **average** for preferences that make up for each other: choosing a cell
+  to stand on, a weapon by taste. A 0 does **not** rule out.
+- **median** against noisy inputs: a single outlier is ignored. A 0 does not
+  rule out either, so never use it alone for hard rules.
+
+Two tools work with every combine:
+
+- **`apply: 'multiply'`** puts a factor outside the combine: it is
+  multiplied onto the result afterwards, a true factor. Use it for hard
+  rules ("no ammunition", "target not visible": a step to 0) and for one
+  thing that must always count fully, even if the option averages the rest.
+- **`pull`** sets how much a factor counts. The factor v becomes
+  1 - pull · (1 - v). For a factor of 0.4: pull 0 → 1 (off), 0.25 → 0.85,
+  0.5 → 0.7 (gentle, never below 0.5), 1 → 0.4 (as it is), 1.5 → 0.1,
+  2 → 0 (strict). Gentle for side matters ("prefers cover a bit"), strict
+  for what should bite early.
+
+Two more for steady behaviour:
+
+- **Rank** (`{ rank: 2 }` or `setRank`): only the highest rank that still
+  scores above 0 is chosen from. 2 emergency (flee, heal), 1 combat, 0
+  idle. Easier to tune than ever larger weights.
+- **Current action** (`setCurrent({ option, target }, 0.1)`): the action
+  going on now scores 10 % more, so a character does not flip between two
+  nearly equal actions every turn.
+
+A recipe for a melee fighter:
+
+```js
+const d = lib.decider();
+d.setCombine('geometricMean');
+const attack = d.addOption(1, [
+  { input: 0, curve: 'inverse', min: 1, max: 8 },            // walking cost to the target
+  { input: 1, curve: 'root', min: 0, max: 100 },             // own health: only low health hurts much
+  { input: 2, curve: 'linear', min: 0, max: 100, pull: 0.3 },// target already hurt: a gentle bonus
+  { input: 3, curve: 'step', min: 1, apply: 'multiply' },    // reachable this turn: a hard rule
+]);
+const flee = d.addOption(1, [
+  { input: 1, curve: 'inverseSCurve', min: 15, max: 40 },    // health below about 30 %: switches softly
+], { rank: 1 });
+```
+
+C: `sx_decider_add_weighted` (pull, `SX_APPLY_*`), `sx_decider_set_combine`
+(`SX_COMBINE_*`, option -1 for all), `sx_decider_set_rank`,
+`sx_decider_set_current`. Rust: `add_weighted`, `set_combine`,
+`set_option_combine`, `set_rank`, `set_current`.
 
 ## 7. Debugging and logging
 

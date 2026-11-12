@@ -387,7 +387,22 @@ export class Grid {
 
 /** 1.0 in the fixed point of scores (0..1 = 0..ONE). */
 export const ONE = 65535;
-const CURVE = { linear: 0, inverse: 1, quadratic: 2, inverseQuadratic: 3, step: 4, inverseStep: 5 };
+const CURVE = {
+  linear: 0, inverse: 1, quadratic: 2, inverseQuadratic: 3, step: 4, inverseStep: 5,
+  sCurve: 6, inverseSCurve: 7, root: 8, cubic: 9,
+};
+const COMBINE = { product: 0, geometricMean: 1, minimum: 2, average: 3, median: 4 };
+const APPLY = { combine: 0, multiply: 1 };
+const fixed = (v, what) => {
+  const n = Math.round(v * ONE);
+  if (!(n >= 0 && n <= 0xffffffff)) throw new RangeError(`Sagax: bad ${what} ${v}`);
+  return n;
+};
+const combineOf = (name) => {
+  const c = COMBINE[name];
+  if (c === undefined) throw new RangeError(`Sagax: unknown combine ${name}`);
+  return c;
+};
 const PICK = { best: 0, weighted: 1, uniform: 2 };
 const DECIDE_TRACE = [null, 'factor', 'scored', 'chosen'];
 
@@ -413,22 +428,54 @@ export class Decider {
    * quadratic, inverseQuadratic, step, inverseStep. t = (input - min) / (max - min)
    * clamped; the factors are multiplied (0 rules out), compensated for their number.
    */
-  addOption(weight = 1, considerations = []) {
-    const w = Math.round(weight * ONE);
-    if (!(w >= 0 && w <= 0xffffffff)) throw new RangeError(`Sagax: bad weight ${weight}`);
-    const option = this.x.sx_decider_add_option(this.handle, w);
+  addOption(weight = 1, considerations = [], { combine, rank } = {}) {
+    const option = this.x.sx_decider_add_option(this.handle, fixed(weight, 'weight'));
     for (const c of considerations) this.addConsideration(option, c);
+    if (combine !== undefined) this.setCombine(combine, option);
+    if (rank !== undefined) this.setRank(option, rank);
     return option;
   }
 
-  /** Adds one consideration {input, curve, min, max} to an option. */
-  addConsideration(option, { input, curve = 'linear', min = 0, max = ONE }) {
+  /**
+   * Adds one consideration {input, curve, min, max, pull, apply} to an option.
+   * pull (default 1): how much it counts; the factor v becomes 1 - pull * (1 - v),
+   * so 0.5 is gentle (never below 0.5), 2 strict, 0 off. apply: 'combine'
+   * (default, goes into the option's combine) or 'multiply' (multiplied onto the
+   * result afterwards: a true factor, e.g. a hard rule).
+   */
+  addConsideration(option, { input, curve = 'linear', min = 0, max = ONE, pull = 1, apply = 'combine' }) {
     const k = CURVE[curve];
     if (k === undefined) throw new RangeError(`Sagax: unknown curve ${curve}`);
-    if (this.x.sx_decider_add_consideration(this.handle, option, input, k, min | 0, max | 0) !== 0) {
+    const a = APPLY[apply];
+    if (a === undefined) throw new RangeError(`Sagax: apply must be combine or multiply, not ${apply}`);
+    const r = this.x.sx_decider_add_weighted(this.handle, option, input, k, min | 0, max | 0, fixed(pull, 'pull'), a);
+    if (r !== 0) throw new RangeError(`Sagax: no option ${option}`);
+    this.inputCount = Math.max(this.inputCount, input + 1);
+  }
+
+  /**
+   * How factors are put together: 'product' (default), 'geometricMean',
+   * 'minimum', 'average' or 'median'. Without option: for every option;
+   * with option: that one only (null: follow the decider again).
+   */
+  setCombine(combine, option) {
+    const c = combine === null ? -1 : combineOf(combine);
+    if (this.x.sx_decider_set_combine(this.handle, option ?? -1, c) !== 0) {
+      throw new RangeError('Sagax: bad combine or option');
+    }
+  }
+
+  /** Rank of an option: only the highest rank that still scores is chosen from. */
+  setRank(option, rank) {
+    if (this.x.sx_decider_set_rank(this.handle, option, rank >>> 0) !== 0) {
       throw new RangeError(`Sagax: no option ${option}`);
     }
-    this.inputCount = Math.max(this.inputCount, input + 1);
+  }
+
+  /** The action going on now ({option, target} or null) scores times (1 + bonus). */
+  setCurrent(current, bonus = 0.1) {
+    const has = current ? 1 : 0;
+    this.x.sx_decider_set_current(this.handle, has, current?.option ?? 0, current?.target ?? 0, fixed(bonus, 'bonus'));
   }
 
   /**

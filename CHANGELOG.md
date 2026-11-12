@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0
+
+- Decisions, finer control: how factors are put together is chosen per
+  decider and per option (product, geometric mean, minimum, average,
+  median); a factor can stay outside as a true multiplier; a pull per
+  factor makes it gentle or strict; options get ranks (emergency before
+  combat); the current action can get a bonus against flipping. New curves:
+  s-curve, inverse s-curve, root, cubic. Example `compare` and recipes in
+  the guide. C API version 5 (additive: `sx_decider_add_weighted`,
+  `sx_decider_set_combine`, `sx_decider_set_rank`, `sx_decider_set_current`).
+  Rust: new `Curve` variants (breaking for exhaustive matches).
+
 ## 0.4.1
 
 - Ways split their cost: JavaScript results carry `steps` (walking and

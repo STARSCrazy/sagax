@@ -306,4 +306,33 @@ test('decide: utility scores, ties, seeded chance, trace', () => {
   d.free();
 });
 
+test('decide: combine, pull, multiply, rank, current', () => {
+  const d = lib.decider();
+  // three factors of 0.95 (input 95 of 0..100)
+  const f = (input) => ({ input, curve: 'linear', min: 0, max: 100 });
+  const many = d.addOption(1, [f(0), f(1), f(2)], { combine: 'geometricMean' });
+  const one = d.addOption(1, [f(0)]);
+  const c = d.decide([{ option: many, inputs: [95, 95, 95] }, { option: one, inputs: [94, 0, 0] }]);
+  assert.equal(c.index, 0);
+  assert.ok(Math.abs(c.score - 0.95 * ONE) < 3);
+  // a true factor: average would let it through, multiply does not
+  const shoot = d.addOption(1, [f(0), { input: 3, curve: 'step', min: 1, apply: 'multiply' }], { combine: 'average' });
+  assert.equal(d.decide([{ option: shoot, inputs: [100, 0, 0, 0] }]), null);
+  // gentle pull: a factor of 0 only halves
+  const soft = d.addOption(1, [{ ...f(0), pull: 0.5 }]);
+  assert.equal(d.decide([{ option: soft, inputs: [0] }]).score, ONE - Math.round(0.5 * ONE));
+  // rank: emergency first
+  const flee = d.addOption(0.1, [{ input: 0, curve: 'step', min: 1 }], { rank: 1 });
+  assert.equal(d.decide([{ option: one, inputs: [100] }, { option: flee, inputs: [5] }]).option, flee);
+  // current action keeps the tie
+  d.setCurrent({ option: one, target: 2 }, 0.1);
+  assert.equal(d.decide([{ option: one, target: 1, inputs: [50] }, { option: one, target: 2, inputs: [50] }]).target, 2);
+  d.setCurrent(null);
+  d.setCombine('minimum');
+  d.setCombine(null, many);
+  assert.throws(() => d.setCombine('nope'));
+  assert.throws(() => d.addConsideration(one, { input: 0, apply: 'nope' }));
+  d.free();
+});
+
 console.log(`${passed} tests passed`);

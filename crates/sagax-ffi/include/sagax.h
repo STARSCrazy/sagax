@@ -29,7 +29,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 4
+#define SX_API_VERSION 5
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -281,6 +281,10 @@ int32_t sx_dstar_set_trace(sx_dstar *dstar, sx_trace_fn trace, void *context);
 #define SX_CURVE_INVERSE_QUADRATIC 3   /* (1 - t) * (1 - t) */
 #define SX_CURVE_STEP              4   /* 1 if input >= min */
 #define SX_CURVE_INVERSE_STEP      5   /* 1 if input < min */
+#define SX_CURVE_S_CURVE           6   /* 3t^2 - 2t^3: soft threshold (since 5) */
+#define SX_CURVE_INVERSE_S_CURVE   7   /* 1 - s-curve */
+#define SX_CURVE_ROOT              8   /* sqrt(t): early values already count */
+#define SX_CURVE_CUBIC             9   /* t^3: only the top counts */
 
 #define SX_PICK_BEST     0   /* highest score */
 #define SX_PICK_WEIGHTED 1   /* among the top best, by chance in proportion to score */
@@ -333,6 +337,32 @@ typedef struct sx_decide_event {
 	uint32_t value;             /* factor, or product */
 	uint32_t score;
 } sx_decide_event;
+
+/* ---- decisions, finer control (since version 5) ----------------------- */
+
+/* How the factors of an option are put together. */
+#define SX_COMBINE_PRODUCT        0   /* default: multiply, compensated for their number */
+#define SX_COMBINE_GEOMETRIC_MEAN 1   /* 3 x 0.95 stays 0.95; a 0 still rules out */
+#define SX_COMBINE_MINIMUM        2   /* the weakest factor decides */
+#define SX_COMBINE_AVERAGE        3   /* factors make up for each other; 0 does not rule out */
+#define SX_COMBINE_MEDIAN         4   /* single outliers do not count */
+
+#define SX_APPLY_COMBINE  0   /* goes into the combine */
+#define SX_APPLY_MULTIPLY 1   /* multiplied onto the result afterwards: a true factor */
+
+/* pull: how much the factor counts; v becomes 1 - pull * (1 - v), at least 0.
+ * SX_ONE as it is, less gentle, more strict, 0 off. */
+int32_t sx_decider_add_weighted(sx_decider *decider, uint32_t option,
+                                const sx_consideration *consideration,
+                                uint32_t pull, uint32_t apply);
+/* option -1: for every option (default SX_COMBINE_PRODUCT); otherwise that
+ * option only, combine -1 to follow the decider again. */
+int32_t sx_decider_set_combine(sx_decider *decider, int32_t option, int32_t combine);
+/* Only candidates of the highest rank that still scores above 0 are chosen
+ * from (e.g. 2 emergency, 1 combat, 0 idle). Default 0. */
+int32_t sx_decider_set_rank(sx_decider *decider, uint32_t option, uint32_t rank);
+/* The action going on now scores times (1 + bonus / SX_ONE); null for none. */
+int32_t sx_decider_set_current(sx_decider *decider, const sx_candidate *current, uint32_t bonus);
 
 typedef void (*sx_decide_trace_fn)(void *context, const sx_decide_event *event);
 int32_t sx_decider_set_trace(sx_decider *decider, sx_decide_trace_fn trace, void *context);

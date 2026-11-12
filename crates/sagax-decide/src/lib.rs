@@ -4,12 +4,16 @@
 //! (attack, flee, heal, ...). Each option has a weight and a list of
 //! [`Consideration`]s. A consideration reads one raw number the game measured
 //! for a candidate (distance, own health, enemies near, ...) and turns it
-//! into a factor between 0 and 1 through a [`Curve`]. The factors are
-//! multiplied, so a single 0 rules the candidate out.
+//! into a factor between 0 and 1 through a [`Curve`]. A [`pull`] sets how
+//! much the factor counts. The factors of an option are put together by a
+//! [`Combine`] (product by default); factors marked [`Apply::Multiply`] are
+//! multiplied onto the result afterwards.
 //!
 //! A [`Candidate`] is one pair of option and target. The game fills one row
 //! of raw inputs per candidate; [`Decider::decide`] scores all rows and
-//! chooses one by [`Pick`].
+//! chooses one by [`Pick`]. Options can have a rank (emergency before
+//! combat before idle), and the action going on now can get a bonus so a
+//! character does not flip between two nearly equal actions.
 //!
 //! Everything is integer arithmetic: 0..1 is 0..[`ONE`] (65535). The same
 //! inputs, options and seed give the same choice on every machine and in
@@ -19,6 +23,8 @@
 //!
 //! What happened can be followed factor by factor through a
 //! [`sagax_core::Sink`] of [`DecideEvent`]s.
+
+use std::cell::RefCell;
 
 use sagax_core::{NoopSink, Sink};
 
@@ -45,6 +51,15 @@ pub enum Curve {
     Step = 4,
     /// 1 if `input < min`, else 0 (`max` unused).
     InverseStep = 5,
+    /// S-curve `3t² - 2t³`: flat near both ends, steep in the middle; a
+    /// threshold that switches softly.
+    SCurve = 6,
+    /// `1 - SCurve`.
+    InverseSCurve = 7,
+    /// `√t`: rises fast, then flattens; early values already count.
+    Root = 8,
+    /// `t³`: only values near the top count.
+    Cubic = 9,
 }
 
 impl Curve {
@@ -57,6 +72,10 @@ impl Curve {
             3 => Self::InverseQuadratic,
             4 => Self::Step,
             5 => Self::InverseStep,
+            6 => Self::SCurve,
+            7 => Self::InverseSCurve,
+            8 => Self::Root,
+            9 => Self::Cubic,
             _ => return None,
         })
     }
@@ -74,6 +93,10 @@ impl Curve {
             Self::Inverse => ONE - t,
             Self::Quadratic => mul(t, t),
             Self::InverseQuadratic => mul(ONE - t, ONE - t),
+            Self::SCurve => smooth(t),
+            Self::InverseSCurve => ONE - smooth(t),
+            Self::Root => sqrt_fixed(t),
+            Self::Cubic => mul(mul(t, t), t),
             Self::Step | Self::InverseStep => unreachable!(),
         }
     }
@@ -101,6 +124,28 @@ fn mul(a: u32, b: u32) -> u32 {
     (u64::from(a) * u64::from(b) / u64::from(ONE)) as u32
 }
 
+/// `3t² - 2t³` in fixed point.
+fn smooth(t: u32) -> u32 {
+    let t2 = mul(t, t);
+    let t3 = mul(t2, t);
+    3 * t2 - 2 * t3
+}
+
+/// `√t` in fixed point, rounded down: the largest `x` with `x² <= t * ONE`.
+fn sqrt_fixed(t: u32) -> u32 {
+    let target = u64::from(t) * u64::from(ONE);
+    let (mut lo, mut hi) = (0u64, u64::from(ONE));
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if mid * mid <= target {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo as u32
+}
+
 /// One factor of an option: which input, which curve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Consideration {
@@ -122,6 +167,127 @@ impl Consideration {
             curve,
             min,
             max,
+        }
+    }
+}
+
+/// How the factors of an option are put together.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Combine {
+    /// Multiply, compensated for the number of factors. Any 0 rules out;
+    /// many good-but-not-perfect factors still pull the score down.
+    #[default]
+    Product = 0,
+    /// Geometric mean (the n-th root of the product). Any 0 rules out, but
+    /// three times 0.95 stays 0.95: the number of factors does not matter.
+    GeometricMean = 1,
+    /// The weakest factor decides.
+    Minimum = 2,
+    /// Arithmetic mean: factors make up for each other; a 0 does not rule out.
+    Average = 3,
+    /// The middle factor: single outliers, high or low, do not count.
+    Median = 4,
+}
+
+impl Combine {
+    /// The combine for its number (as in C and JavaScript), or `None`.
+    pub const fn from_u32(n: u32) -> Option<Self> {
+        Some(match n {
+            0 => Self::Product,
+            1 => Self::GeometricMean,
+            2 => Self::Minimum,
+            3 => Self::Average,
+            4 => Self::Median,
+            _ => return None,
+        })
+    }
+}
+
+/// Where a factor goes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Apply {
+    /// Into the option's [`Combine`] with the other factors.
+    #[default]
+    Combine = 0,
+    /// Multiplied onto the result afterwards, whatever the combine is: a
+    /// true factor. For hard rules ("no ammunition": a step to 0) or one
+    /// thing that must always count fully.
+    Multiply = 1,
+}
+
+impl Apply {
+    /// The apply for its number (0 combine, 1 multiply), or `None`.
+    pub const fn from_u32(n: u32) -> Option<Self> {
+        Some(match n {
+            0 => Self::Combine,
+            1 => Self::Multiply,
+            _ => return None,
+        })
+    }
+}
+
+/// How much a factor counts, applied after its curve: the factor `v`
+/// becomes `1 - pull * (1 - v)`, at least 0. `pull` [`ONE`] keeps it; less
+/// makes it gentle (with 0.5 it never drops below 0.5); more makes it strict
+/// (with 2 it is 0 from `v` = 0.5 down); 0 switches it off.
+pub fn pull(value: u32, pull: u32) -> u32 {
+    if pull == ONE {
+        return value;
+    }
+    let drop = u64::from(ONE - value.min(ONE)) * u64::from(pull) / u64::from(ONE);
+    ONE - drop.min(u64::from(ONE)) as u32
+}
+
+/// The geometric mean of `values` in fixed point, rounded down.
+pub fn geometric_mean(values: &[u32]) -> u32 {
+    if values.is_empty() {
+        return ONE;
+    }
+    if values.contains(&0) {
+        return 0;
+    }
+    // Products in Q32 (32 fraction bits).
+    const Q: u64 = 1 << 32;
+    let to_q = |v: u32| u64::from(v) * Q / u64::from(ONE);
+    let times = |p: u64, q: u64| ((u128::from(p) * u128::from(q)) >> 32) as u64;
+    let product = values.iter().fold(Q, |p, &v| times(p, to_q(v)));
+    let power = |x: u32| {
+        let q = to_q(x);
+        values.iter().fold(Q, |p, _| times(p, q))
+    };
+    // The largest x with x^n <= product.
+    let (mut lo, mut hi) = (0u32, ONE);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if power(mid) <= product {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
+/// Puts `values` together by `how`; `values` may be reordered. No values: 1.
+pub fn combine(how: Combine, values: &mut [u32]) -> u32 {
+    let n = values.len();
+    if n == 0 {
+        return ONE;
+    }
+    match how {
+        Combine::Product => compensate(values.iter().fold(ONE, |p, &v| mul(p, v)), n),
+        Combine::GeometricMean => geometric_mean(values),
+        Combine::Minimum => values.iter().copied().min().unwrap_or(ONE),
+        Combine::Average => (values.iter().map(|&v| u64::from(v)).sum::<u64>() / n as u64) as u32,
+        Combine::Median => {
+            values.sort_unstable();
+            if n % 2 == 1 {
+                values[n / 2]
+            } else {
+                ((u64::from(values[n / 2 - 1]) + u64::from(values[n / 2])) / 2) as u32
+            }
         }
     }
 }
@@ -227,16 +393,17 @@ pub enum DecideEvent {
         consideration: usize,
         /// The raw input.
         input: i32,
-        /// The factor the curve made of it.
+        /// The factor the curve made of it, after its pull.
         value: u32,
     },
     /// The final score of one candidate.
     Scored {
+        /// The factors put together (see [`Combine`] and [`Apply`]), before
+        /// the weight.
+        product: u32,
         /// Index of the candidate.
         candidate: usize,
-        /// Product of the factors with compensation, before the weight.
-        product: u32,
-        /// Score after the weight.
+        /// Score after the weight and the bonus for the current action.
         score: u32,
     },
     /// The chosen candidate.
@@ -248,17 +415,30 @@ pub enum DecideEvent {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Factor {
+    consideration: Consideration,
+    pull: u32,
+    apply: Apply,
+}
+
 #[derive(Clone, Debug)]
 struct OptionDef {
     weight: u32,
-    considerations: Vec<Consideration>,
+    rank: u32,
+    combine: Option<Combine>,
+    factors: Vec<Factor>,
 }
 
 /// Options with their considerations; scores candidates and chooses one.
 #[derive(Clone, Debug, Default)]
 pub struct Decider {
     options: Vec<OptionDef>,
+    combine: Combine,
+    current: Option<(Candidate, u32)>,
     order: Vec<usize>,
+    values: RefCell<Vec<u32>>,
+    ranked: Vec<u32>,
 }
 
 impl Decider {
@@ -272,20 +452,71 @@ impl Decider {
     pub fn add_option(&mut self, weight: u32) -> u32 {
         self.options.push(OptionDef {
             weight,
-            considerations: Vec::new(),
+            rank: 0,
+            combine: None,
+            factors: Vec::new(),
         });
         (self.options.len() - 1) as u32
     }
 
-    /// Adds a consideration to `option`. `false` if the option does not exist.
+    /// Adds a consideration to `option` (pull [`ONE`], [`Apply::Combine`]).
+    /// `false` if the option does not exist.
     pub fn add_consideration(&mut self, option: u32, consideration: Consideration) -> bool {
+        self.add_weighted(option, consideration, ONE, Apply::Combine)
+    }
+
+    /// Adds a consideration with its [`pull`] and where it goes. `false` if
+    /// the option does not exist.
+    pub fn add_weighted(
+        &mut self,
+        option: u32,
+        consideration: Consideration,
+        pull: u32,
+        apply: Apply,
+    ) -> bool {
         match self.options.get_mut(option as usize) {
             Some(o) => {
-                o.considerations.push(consideration);
+                o.factors.push(Factor {
+                    consideration,
+                    pull,
+                    apply,
+                });
                 true
             }
             None => false,
         }
+    }
+
+    /// How factors are put together, for every option without its own
+    /// (default [`Combine::Product`]).
+    pub fn set_combine(&mut self, combine: Combine) {
+        self.combine = combine;
+    }
+
+    /// `option` puts its factors together its own way; `None` follows the
+    /// decider. `false` if the option does not exist.
+    pub fn set_option_combine(&mut self, option: u32, combine: Option<Combine>) -> bool {
+        self.options
+            .get_mut(option as usize)
+            .map(|o| o.combine = combine)
+            .is_some()
+    }
+
+    /// Priority of `option` (default 0). Only candidates of the highest rank
+    /// that still scores above 0 take part in the choice: e.g. 2 emergency,
+    /// 1 combat, 0 idle. `false` if the option does not exist.
+    pub fn set_rank(&mut self, option: u32, rank: u32) -> bool {
+        self.options
+            .get_mut(option as usize)
+            .map(|o| o.rank = rank)
+            .is_some()
+    }
+
+    /// The action going on now gets `bonus` on top (score times
+    /// `1 + bonus`, [`ONE`] = 1.0), so a character does not flip between
+    /// two nearly equal actions. `None` for none.
+    pub fn set_current(&mut self, current: Option<Candidate>, bonus: u32) {
+        self.current = current.map(|c| (c, bonus));
     }
 
     /// Number of options.
@@ -309,15 +540,18 @@ impl Decider {
             .options
             .get(candidate.option as usize)
             .ok_or(DecideError::UnknownOption { candidate: index })?;
-        let mut product = ONE;
-        for (i, c) in option.considerations.iter().enumerate() {
+        let mut values = self.values.borrow_mut();
+        values.clear();
+        let mut multiply = ONE;
+        for (i, f) in option.factors.iter().enumerate() {
+            let c = &f.consideration;
             let input = *row
                 .get(c.input as usize)
                 .ok_or(DecideError::InputOutOfRange {
                     candidate: index,
                     input: c.input,
                 })?;
-            let value = c.curve.apply(input, c.min, c.max);
+            let value = pull(c.curve.apply(input, c.min, c.max), f.pull);
             if sink.enabled() {
                 sink.emit(DecideEvent::Factor {
                     candidate: index,
@@ -326,11 +560,20 @@ impl Decider {
                     value,
                 });
             }
-            product = mul(product, value);
+            match f.apply {
+                Apply::Combine => values.push(value),
+                Apply::Multiply => multiply = mul(multiply, value),
+            }
         }
-        let product = compensate(product, option.considerations.len());
-        let score = (u64::from(product) * u64::from(option.weight) / u64::from(ONE))
-            .min(u64::from(u32::MAX)) as u32;
+        let how = option.combine.unwrap_or(self.combine);
+        let product = mul(combine(how, &mut values), multiply);
+        let mut score = u64::from(product) * u64::from(option.weight) / u64::from(ONE);
+        if let Some((current, bonus)) = self.current
+            && current == candidate
+        {
+            score += score * u64::from(bonus) / u64::from(ONE);
+        }
+        let score = score.min(u64::from(u32::MAX)) as u32;
         if sink.enabled() {
             sink.emit(DecideEvent::Scored {
                 candidate: index,
@@ -391,7 +634,27 @@ impl Decider {
             let row = &inputs[i * stride..(i + 1) * stride];
             scores.push(self.score_traced(i, c, row, sink)?);
         }
-        let choice = choose(scores, pick, seed, &mut self.order);
+        // Only the highest rank that still scores takes part.
+        let rank_of = |c: &Candidate| self.options[c.option as usize].rank;
+        let top_rank = candidates
+            .iter()
+            .zip(scores.iter())
+            .filter(|&(_, &s)| s > 0)
+            .map(|(c, _)| rank_of(c))
+            .max();
+        let mixed = top_rank.is_some_and(|r| candidates.iter().any(|c| rank_of(c) != r));
+        let choice = if let (true, Some(rank)) = (mixed, top_rank) {
+            self.ranked.clear();
+            self.ranked.extend(
+                candidates
+                    .iter()
+                    .zip(scores.iter())
+                    .map(|(c, &s)| if rank_of(c) == rank { s } else { 0 }),
+            );
+            choose(&self.ranked, pick, seed, &mut self.order)
+        } else {
+            choose(scores, pick, seed, &mut self.order)
+        };
         if let Some(c) = choice
             && sink.enabled()
         {

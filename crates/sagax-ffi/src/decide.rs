@@ -3,7 +3,7 @@
 use std::ffi::c_void;
 
 use sagax_core::CallbackSink;
-use sagax_decide::{Candidate, Consideration, Curve, DecideEvent, Decider, Pick};
+use sagax_decide::{Apply, Candidate, Combine, Consideration, Curve, DecideEvent, Decider, Pick};
 
 use super::{ERROR_ARGUMENT, create, destroy, guarded, slice_of, to_i32};
 
@@ -175,6 +175,112 @@ pub unsafe extern "C" fn sx_decider_add_consideration(
             .add_consideration(option, Consideration::new(c.input, curve, c.min, c.max));
         if added { 0 } else { ERROR_ARGUMENT }
     })
+}
+
+/// `sx_decider_add_weighted`.
+///
+/// # Safety
+/// As [`sx_decider_add_consideration`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_add_weighted(
+    decider: *mut SxDecider,
+    option: u32,
+    consideration: *const SxConsideration,
+    pull: u32,
+    apply: u32,
+) -> i32 {
+    // SAFETY: see above.
+    let (Some(d), Some(c)) = (unsafe { decider.as_mut() }, unsafe {
+        consideration.as_ref()
+    }) else {
+        return ERROR_ARGUMENT;
+    };
+    let (Some(curve), Some(apply)) = (Curve::from_u32(c.curve), Apply::from_u32(apply)) else {
+        return ERROR_ARGUMENT;
+    };
+    guarded(|| {
+        let c = Consideration::new(c.input, curve, c.min, c.max);
+        if d.decider.add_weighted(option, c, pull, apply) {
+            0
+        } else {
+            ERROR_ARGUMENT
+        }
+    })
+}
+
+/// Shared by C and WebAssembly: option -1 for all, combine -1 to follow.
+pub(crate) fn set_combine(decider: &mut Decider, option: i32, combine: i32) -> i32 {
+    let how = u32::try_from(combine).ok().and_then(Combine::from_u32);
+    match (u32::try_from(option), how) {
+        (Err(_), Some(how)) => {
+            decider.set_combine(how);
+            0
+        }
+        (Ok(option), how)
+            if (how.is_some() || combine == -1) && decider.set_option_combine(option, how) =>
+        {
+            0
+        }
+        _ => ERROR_ARGUMENT,
+    }
+}
+
+/// `sx_decider_set_combine`.
+///
+/// # Safety
+/// `decider` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_set_combine(
+    decider: *mut SxDecider,
+    option: i32,
+    combine: i32,
+) -> i32 {
+    // SAFETY: see above.
+    let Some(d) = (unsafe { decider.as_mut() }) else {
+        return ERROR_ARGUMENT;
+    };
+    set_combine(&mut d.decider, option, combine)
+}
+
+/// `sx_decider_set_rank`.
+///
+/// # Safety
+/// `decider` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_set_rank(
+    decider: *mut SxDecider,
+    option: u32,
+    rank: u32,
+) -> i32 {
+    // SAFETY: see above.
+    let Some(d) = (unsafe { decider.as_mut() }) else {
+        return ERROR_ARGUMENT;
+    };
+    if d.decider.set_rank(option, rank) {
+        0
+    } else {
+        ERROR_ARGUMENT
+    }
+}
+
+/// `sx_decider_set_current`.
+///
+/// # Safety
+/// `decider` is null or valid; `current` is null or points to one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_decider_set_current(
+    decider: *mut SxDecider,
+    current: *const SxCandidate,
+    bonus: u32,
+) -> i32 {
+    // SAFETY: see above.
+    let Some(d) = (unsafe { decider.as_mut() }) else {
+        return ERROR_ARGUMENT;
+    };
+    // SAFETY: see above.
+    let current = unsafe { current.as_ref() }.map(|c| Candidate::new(c.option, c.target));
+    d.decider.set_current(current, bonus);
+    0
 }
 
 /// `sx_decider_decide`.
@@ -377,6 +483,52 @@ mod tests {
                 sx_decider_add_option(std::ptr::null_mut(), 1),
                 ERROR_ARGUMENT
             );
+
+            // Stage 1b: a true factor, own combine, rank, current action.
+            sx_decider_set_trace(d, None, std::ptr::null_mut());
+            let gate = SxConsideration {
+                input: 0,
+                curve: 4,
+                min: 5,
+                max: 0,
+            };
+            assert_eq!(sx_decider_add_weighted(d, 1, &gate, 65535, 1), 0);
+            assert_eq!(
+                sx_decider_add_weighted(d, 1, &gate, 65535, 7),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(sx_decider_set_combine(d, -1, 1), 0);
+            assert_eq!(sx_decider_set_combine(d, 0, 2), 0);
+            assert_eq!(sx_decider_set_combine(d, 0, -1), 0);
+            assert_eq!(sx_decider_set_combine(d, 0, 9), ERROR_ARGUMENT);
+            assert_eq!(sx_decider_set_rank(d, 1, 1), 0);
+            assert_eq!(sx_decider_set_rank(d, 5, 1), ERROR_ARGUMENT);
+            let both = [
+                SxCandidate {
+                    option: 0,
+                    target: 0,
+                },
+                SxCandidate {
+                    option: 1,
+                    target: 0,
+                },
+            ];
+            // input 9: option 1 passes its gate and wins by rank
+            let r = sx_decider_decide(
+                d,
+                both.as_ptr(),
+                2,
+                [9, 9].as_ptr(),
+                1,
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+                &mut choice,
+            );
+            assert_eq!((r, choice.candidate), (1, 1));
+            assert_eq!(sx_decider_set_current(d, &both[1], 6553), 0);
+            assert_eq!(sx_decider_set_current(d, std::ptr::null(), 0), 0);
             sx_decider_free(d);
         }
     }
