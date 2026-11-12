@@ -14,11 +14,17 @@
 //!   and [`crate::memory::Areas`]); [`Squad::plan`] scores every
 //!   (tactic, target) pair, picks one by skill ([`SkillTable`]) and assigns
 //!   members to slots as [`Goal`]s.
+//! - Running a plan: it becomes active after the skill's think time and
+//!   reaches the members as [`Order`]s over their [`Channel`];
+//!   [`Squad::check`] replans on aborts or a clearly better plan and fires
+//!   the trigger, [`Squad::signal`] starts the "on signal" goals, and
+//!   members [`Squad::report`] back through the leader's inbox.
 //!
 //! Everything is integer only and deterministic. On equal distance the
 //! lower id (or index) wins.
 
 mod members;
+mod orders;
 mod skill;
 mod spots;
 mod squad;
@@ -28,6 +34,7 @@ mod tactic;
 mod tests;
 
 pub use members::{Group, Member, MemberState, Nearby, gather};
+pub use orders::{Channel, Order, REPORT_DANGER, REPORT_ENEMY, REPORT_GOAL_BROKEN, Status};
 pub use skill::SkillTable;
 pub use spots::{Spot, SpotPick, heading, pick_spot, wish_point};
 pub use squad::{

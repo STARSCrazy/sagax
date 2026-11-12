@@ -16,7 +16,9 @@ pub struct SkillTable {
     /// Most ticks a member starts late (picked by seed per member).
     pub timing_spread: [u32; 4],
     /// Bonus of the active plan over a new one, and the members' discipline
-    /// ([`ONE`] = 1.0).
+    /// ([`ONE`] = 1.0): [`Squad::check`](super::Squad::check) replans only
+    /// for a candidate scoring more than the active one times
+    /// `1 + hold_bonus`.
     pub hold_bonus: [u32; 4],
     /// Ticks a member may postpone its goal before it reports it broken.
     pub give_up_ticks: [u32; 4],
@@ -32,7 +34,9 @@ impl SkillTable {
 impl Default for SkillTable {
     /// Weak squads pick by chance among the top 3, think 2 s, miss spots by
     /// up to 2 ranks and start up to 1 s apart; elite squads pick the best,
-    /// think 5 ticks, take the best spot and start together.
+    /// think 5 ticks, take the best spot and start together. A new plan must
+    /// beat the active one by 12.5 % (weak) up to 50 % (elite); members
+    /// give a goal up after 1 s (weak) up to 4 s (elite) of postponing it.
     fn default() -> Self {
         Self {
             pick: [

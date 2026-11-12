@@ -916,3 +916,502 @@ fn gather_slot_has_then_pos() {
     sq.plan(0, &[], &[], 0).unwrap().unwrap();
     assert_eq!(sq.pending_plan().unwrap().goals[0].1.then_pos, None);
 }
+
+// --- Squad running: orders, check, leader loss, signal ---
+
+use crate::memory::{Message, SOURCE_OWN, SOURCE_TOLD};
+
+/// The member ids of `orders`, sorted.
+fn members_of(orders: &[Order]) -> Vec<u32> {
+    let mut ids: Vec<u32> = orders.iter().map(|o| o.member).collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// An elite squad of [`four`] with rush and a 2-side flank, enemy 10 at
+/// (20, 0); `check(0)` makes the flank, `check(5)` activates it.
+fn active_flank() -> (Squad, PlanId) {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::rush());
+    sq.add_tactic(tactics::flank(2, 4));
+    sq.set_skill(255);
+    see(&mut sq, 10, 20, 0, 0);
+    let Ok(Status::Replan(id)) = sq.check(0, &[], &[], 0) else {
+        panic!("first check makes a plan");
+    };
+    assert_eq!(sq.pending_plan().unwrap().tactic, 1);
+    assert_eq!(sq.check(5, &[], &[], 0), Ok(Status::Keep));
+    assert_eq!(sq.active_plan().unwrap().id, id);
+    (sq, id)
+}
+
+fn broken(member: u32, plan: PlanId) -> Message {
+    Message {
+        kind: REPORT_GOAL_BROKEN,
+        sender: member,
+        data: plan,
+        ..Message::default()
+    }
+}
+
+#[test]
+fn plan_waits_think_ticks() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::rush());
+    sq.set_skill(255);
+    see(&mut sq, 10, 20, 0, 0);
+    let id = sq.plan(100, &[], &[], 0).unwrap().unwrap();
+    let think = sq.skill_table().think_ticks[3];
+    assert_eq!(sq.pending_plan().unwrap().active_at, 100 + think);
+    let mut out = Vec::new();
+    sq.orders_due(100 + think - 1, &mut out);
+    assert!(out.is_empty());
+    assert!(sq.active_plan().is_none());
+    assert_eq!(sq.pending_plan().unwrap().id, id);
+    sq.orders_due(100 + think, &mut out);
+    assert!(sq.pending_plan().is_none());
+    assert_eq!(sq.active_plan().unwrap().id, id);
+    assert_eq!(members_of(&out), [1, 2, 3, 4]);
+    assert!(out.iter().all(|o| o.goal.plan == id));
+    // A weak squad thinks longer.
+    sq.set_skill(0);
+    sq.plan(200, &[], &[], 0).unwrap().unwrap();
+    assert_eq!(
+        sq.pending_plan().unwrap().active_at,
+        200 + sq.skill_table().think_ticks[0]
+    );
+    assert!(sq.skill_table().think_ticks[0] > think);
+}
+
+#[test]
+fn think_time_wraps() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::rush());
+    sq.set_skill(255);
+    see(&mut sq, 10, 20, 0, u32::MAX - 1);
+    let think = sq.skill_table().think_ticks[3];
+    sq.plan(u32::MAX - 1, &[], &[], 0).unwrap().unwrap();
+    let at = (u32::MAX - 1).wrapping_add(think);
+    assert_eq!(sq.pending_plan().unwrap().active_at, at);
+    let mut out = Vec::new();
+    sq.orders_due(u32::MAX, &mut out);
+    sq.orders_due(at.wrapping_sub(1), &mut out);
+    assert!(out.is_empty() && sq.active_plan().is_none());
+    sq.orders_due(at, &mut out);
+    assert_eq!(out.len(), 4);
+    assert!(sq.active_plan().is_some());
+}
+
+#[test]
+fn radio_delay_by_distance() {
+    let mut sq = squad_of(Metric::Euclid, &[(1, 0, 0, 0), (2, 6, 8, 0)]);
+    sq.add_tactic(tactics::rush());
+    sq.set_skill(255);
+    see(&mut sq, 10, 20, 0, 0);
+    assert!(sq.set_channel(
+        2,
+        Channel::Radio {
+            base: 3,
+            per_unit: 2
+        }
+    ));
+    assert!(!sq.set_channel(99, Channel::None));
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
+    let at = sq.pending_plan().unwrap().active_at;
+    let mut out = Vec::new();
+    // The leader has its own order at once.
+    sq.orders_due(at, &mut out);
+    assert_eq!(members_of(&out), [1]);
+    // Distance 10 from the leader: 3 + 10 * 2 ticks.
+    out.clear();
+    sq.orders_due(at + 22, &mut out);
+    assert!(out.is_empty());
+    sq.orders_due(at + 23, &mut out);
+    assert_eq!(members_of(&out), [2]);
+}
+
+#[test]
+fn shout_out_of_range_not_delivered() {
+    let mut sq = squad_of(
+        Metric::Euclid,
+        &[(1, 0, 0, 0), (2, 3, 0, 0), (3, 9, 0, 0), (4, 1, 1, 0)],
+    );
+    sq.add_tactic(tactics::rush());
+    sq.set_skill(255);
+    see(&mut sq, 10, 20, 0, 0);
+    sq.set_channel(2, Channel::Shout { range: 5 });
+    sq.set_channel(3, Channel::Shout { range: 5 });
+    sq.set_channel(4, Channel::None);
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
+    let at = sq.pending_plan().unwrap().active_at;
+    let mut out = Vec::new();
+    sq.orders_due(at + 2, &mut out);
+    assert_eq!(members_of(&out), [1]);
+    // Shout: one tick per unit of distance.
+    sq.orders_due(at + 3, &mut out);
+    assert_eq!(members_of(&out), [1, 2]);
+    // 9 is beyond the shout range, 4 has no channel.
+    sq.orders_due(at + 1000, &mut out);
+    assert_eq!(members_of(&out), [1, 2]);
+}
+
+#[test]
+fn hold_bonus_prevents_flicker() {
+    let build = |table: SkillTable| {
+        let mut sq = squad_of(Metric::Euclid, &four());
+        sq.add_tactic(Tactic {
+            weight: ONE / 2,
+            ..tactics::rush()
+        });
+        sq.add_tactic(Tactic {
+            considerations: vec![Consideration::new(IN_EXTRA as u32, Curve::Linear, 0, 100)],
+            weight: ONE,
+            ..tactics::rush()
+        });
+        sq.set_extra_columns(1);
+        sq.set_skill_table(table);
+        sq.set_skill(255);
+        see(&mut sq, 10, 20, 0, 0);
+        assert!(matches!(
+            sq.check(0, &[0, 40], &[], 0),
+            Ok(Status::Replan(_))
+        ));
+        assert_eq!(sq.pending_plan().unwrap().tactic, 0);
+        assert_eq!(sq.check(5, &[0, 40], &[], 0), Ok(Status::Keep));
+        assert_eq!(sq.active_plan().unwrap().tactic, 0);
+        sq
+    };
+    // 0.6 does not beat 0.5 by more than the elite bonus (half).
+    let mut sq = build(SkillTable::default());
+    assert_eq!(sq.check(6, &[0, 60], &[], 0), Ok(Status::Keep));
+    assert_eq!(sq.check(7, &[0, 70], &[], 0), Ok(Status::Keep));
+    assert!(matches!(
+        sq.check(8, &[0, 90], &[], 0),
+        Ok(Status::Replan(_))
+    ));
+    assert_eq!(sq.pending_plan().unwrap().tactic, 1);
+    // While the new plan is thought out, no further replan.
+    assert_eq!(sq.check(9, &[0, 100], &[], 0), Ok(Status::Keep));
+    // Without a bonus, 0.6 is enough.
+    let mut sq = build(SkillTable {
+        hold_bonus: [0; 4],
+        ..SkillTable::default()
+    });
+    assert!(matches!(
+        sq.check(6, &[0, 60], &[], 0),
+        Ok(Status::Replan(_))
+    ));
+}
+
+#[test]
+fn abort_rule_replans() {
+    let (mut sq, id) = active_flank();
+    assert!(sq.report(broken(2, id), 10));
+    assert!(sq.report(broken(3, id), 12));
+    // A report for another plan does not count.
+    assert!(sq.report(broken(4, id + 7), 10));
+    assert_eq!(sq.check(9, &[], &[], 0), Ok(Status::Keep));
+    assert_eq!(sq.check(10, &[], &[], 0), Ok(Status::Keep));
+    let Ok(Status::Replan(next)) = sq.check(12, &[], &[], 0) else {
+        panic!("two members off plan abort the flank");
+    };
+    assert_ne!(next, id);
+    // The aborted flank is no candidate any more: rush.
+    assert_eq!(sq.pending_plan().unwrap().tactic, 0);
+    // The flank stays active until the new plan is ready.
+    assert_eq!(sq.active_plan().unwrap().id, id);
+    assert_eq!(sq.check(13, &[], &[], 0), Ok(Status::Keep));
+}
+
+#[test]
+fn leader_death_keeps_plan() {
+    let (mut sq, id) = active_flank();
+    let mut out = Vec::new();
+    sq.orders_due(5, &mut out);
+    assert_eq!(out.len(), 4);
+    let goals = sq.active_plan().unwrap().goals.clone();
+    assert_eq!(sq.leader(), Some(1));
+    assert!(sq.set_gone(1));
+    // Next active member in slot order: the first one of slot 0.
+    let first_of_slot0 = goals.iter().find(|(_, g)| g.slot == 0).unwrap().0;
+    assert_eq!(sq.leader(), Some(first_of_slot0));
+    assert_eq!(sq.check(6, &[], &[], 0), Ok(Status::Keep));
+    let p = sq.active_plan().unwrap();
+    assert_eq!((p.id, &p.goals), (id, &goals));
+    assert!(sq.pending_plan().is_none());
+    out.clear();
+    sq.orders_due(1000, &mut out);
+    assert!(out.is_empty());
+    // Marking the new leader gone on the group directly works the same way.
+    sq.group_mut().set_gone(first_of_slot0);
+    let next = goals
+        .iter()
+        .filter(|(m, g)| g.slot == 0 && *m != first_of_slot0)
+        .map(|(m, _)| *m)
+        .next()
+        .unwrap();
+    assert_eq!(sq.leader(), Some(next));
+}
+
+#[test]
+fn report_only_after_arrival() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::fall_back());
+    sq.set_skill(255);
+    assert!(sq.set_gone(3) && sq.set_gone(4));
+    let danger = Message {
+        kind: REPORT_DANGER,
+        subject: 77,
+        pos: [20, 0, 0],
+        // The shooter stood at (25, -2).
+        strength: 25,
+        data: (-2i32) as u32,
+        sender: 2,
+        ..Message::default()
+    };
+    assert!(sq.report(danger, 50));
+    sq.plan(49, &[], &[], 0).unwrap().unwrap();
+    assert!(sq.areas().is_empty());
+    assert!(
+        sq.pending_plan()
+            .unwrap()
+            .goals
+            .iter()
+            .all(|(_, g)| g.pos == Some([0, 0, 0]))
+    );
+    sq.plan(50, &[], &[], 0).unwrap().unwrap();
+    let a = *sq.areas().iter().next().unwrap();
+    assert_eq!(
+        (a.pos, a.source, a.has_source, a.data),
+        ([20, 0, 0], [25, -2, 0], 1, 77)
+    );
+    assert_eq!(a.radius, sq.danger_area().radius);
+    let g = sq.pending_plan().unwrap().goals[0].1;
+    assert_eq!(g.pos, Some([-tactics::FALL_BACK_DIST, 0, 0]));
+    // An enemy report becomes a target only when it has arrived.
+    let enemy = Message {
+        kind: REPORT_ENEMY,
+        subject: 10,
+        pos: [0, 5, 0],
+        seen_at: 55,
+        sender: 2,
+        ..Message::default()
+    };
+    sq.report(enemy, 60);
+    sq.plan(59, &[], &[], 0).unwrap().unwrap();
+    assert_eq!(sq.targets().count(), 0);
+    sq.plan(60, &[], &[], 0).unwrap().unwrap();
+    let f = *sq.targets().next().unwrap();
+    assert_eq!((f.subject, f.pos, f.source), (10, [0, 5, 0], SOURCE_TOLD));
+    // The leader's own sight counts as its own.
+    sq.observe(
+        Fact {
+            subject: 11,
+            kind: ENEMY,
+            pos: [3, 3, 0],
+            seen_at: 61,
+            ..Fact::default()
+        },
+        61,
+    );
+    assert_eq!(
+        sq.knowledge().get(11, ENEMY).map(|f| f.source),
+        Some(SOURCE_OWN)
+    );
+}
+
+#[test]
+fn flank_gather_then_simultaneous_attack() {
+    let (mut sq, id) = active_flank();
+    let mut first = Vec::new();
+    sq.orders_due(5, &mut first);
+    assert_eq!(first.len(), 4);
+    assert!(first.iter().all(|o| o.goal.start == Start::OnSignal));
+    assert!(first.iter().all(|o| o.goal.then_pos.is_some()));
+    for (m, t) in [(4, 6), (2, 7), (3, 8)] {
+        assert!(sq.arrived(m, t));
+        assert_eq!(sq.check(t, &[], &[], 0), Ok(Status::Keep));
+    }
+    assert!(!sq.arrived(99, 8));
+    assert!(sq.arrived(1, 9));
+    assert_eq!(sq.check(9, &[], &[], 0), Ok(Status::Signal));
+    assert!(sq.signal_given());
+    // Once per plan.
+    assert_eq!(sq.check(10, &[], &[], 0), Ok(Status::Keep));
+    assert!(!sq.signal(10));
+    // Every member gets its attack order, all due at the same tick.
+    let mut attack = Vec::new();
+    sq.orders_due(9, &mut attack);
+    assert_eq!(members_of(&attack), [1, 2, 3, 4]);
+    for o in &attack {
+        let before = first.iter().find(|f| f.member == o.member).unwrap();
+        assert_eq!(o.goal.pos, before.goal.then_pos);
+        assert_eq!(o.goal.unchecked, before.goal.then_unchecked);
+        assert_eq!(
+            (o.goal.start, o.goal.plan, o.goal.issued_at),
+            (Start::Now, id, 9)
+        );
+        assert_eq!(o.goal.start_delay, 0);
+    }
+    sq.orders_due(1000, &mut attack);
+    assert_eq!(attack.len(), 4);
+}
+
+#[test]
+fn flank_max_wait_fires_signal() {
+    let (mut sq, _) = active_flank();
+    for m in [4, 2, 3] {
+        sq.arrived(m, 6);
+    }
+    let wait = tactics::FLANK_MAX_WAIT;
+    assert_eq!(sq.check(5 + wait - 1, &[], &[], 0), Ok(Status::Keep));
+    assert_eq!(sq.check(5 + wait, &[], &[], 0), Ok(Status::Signal));
+}
+
+#[test]
+fn suspended_member_gets_no_order() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::rush());
+    sq.add_tactic(tactics::flank(2, 4));
+    sq.set_skill(255);
+    see(&mut sq, 10, 20, 0, 0);
+    let Ok(Status::Replan(id)) = sq.check(0, &[], &[], 0) else {
+        panic!("plan");
+    };
+    // Suspended while the plan is thought out.
+    sq.group_mut().suspend(3);
+    let mut out = Vec::new();
+    sq.orders_due(5, &mut out);
+    assert_eq!(members_of(&out), [1, 2, 4]);
+    // Its broken report does not count as off plan.
+    sq.report(broken(3, id), 6);
+    sq.report(broken(2, id), 6);
+    assert_eq!(sq.check(6, &[], &[], 0), Ok(Status::Keep));
+    // All active members arrived: the signal, nothing for 3.
+    for m in [1, 2, 4] {
+        sq.arrived(m, 7);
+    }
+    assert_eq!(sq.check(7, &[], &[], 0), Ok(Status::Signal));
+    out.clear();
+    sq.orders_due(7, &mut out);
+    assert_eq!(members_of(&out), [1, 2, 4]);
+}
+
+#[test]
+fn weak_timing_spread_seeded() {
+    let delays = |skill: u8, seed: u64| {
+        let mut sq = squad_of(Metric::Euclid, &four());
+        sq.add_tactic(tactics::rush());
+        sq.set_skill(skill);
+        see(&mut sq, 10, 20, 0, 0);
+        sq.check(0, &[], &[], seed).unwrap();
+        let mut out = Vec::new();
+        sq.orders_due(1000, &mut out);
+        out.sort_by_key(|o| o.member);
+        out.iter().map(|o| o.goal.start_delay).collect::<Vec<u32>>()
+    };
+    let spread = SkillTable::default().timing_spread[0];
+    let mut seen = vec![false; spread as usize + 1];
+    for seed in 0..64 {
+        assert_eq!(delays(255, seed), [0, 0, 0, 0]);
+        let d = delays(0, seed);
+        assert_eq!(d, delays(0, seed));
+        assert_eq!(d.len(), 4);
+        for &x in &d {
+            seen[x as usize] = true;
+        }
+    }
+    assert!(seen.iter().filter(|&&s| s).count() > spread as usize / 2);
+}
+
+#[test]
+fn target_in_radius_signals_ambush() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::ambush());
+    sq.set_skill(255);
+    see(&mut sq, 10, 30, 0, 0);
+    assert!(matches!(sq.check(0, &[], &[], 0), Ok(Status::Replan(_))));
+    assert_eq!(sq.check(5, &[], &[], 0), Ok(Status::Keep));
+    let mut first = Vec::new();
+    sq.orders_due(5, &mut first);
+    assert_eq!(first.len(), 4);
+    let at = |x: i64, t: u32| Fact {
+        subject: 10,
+        kind: ENEMY,
+        pos: [x as i32, 0, 0],
+        seen_at: t,
+        ..Fact::default()
+    };
+    sq.observe(at(tactics::AMBUSH_RADIUS + 1, 6), 6);
+    assert_eq!(sq.check(6, &[], &[], 0), Ok(Status::Keep));
+    sq.observe(at(tactics::AMBUSH_RADIUS, 7), 7);
+    assert_eq!(sq.check(7, &[], &[], 0), Ok(Status::Signal));
+    // On-signal goals without a second place get a "go" at the same spot.
+    let mut go = Vec::new();
+    sq.orders_due(7, &mut go);
+    assert_eq!(members_of(&go), [1, 2, 3, 4]);
+    for o in &go {
+        let before = first.iter().find(|f| f.member == o.member).unwrap();
+        assert_eq!((o.goal.pos, o.goal.start), (before.goal.pos, Start::Now));
+    }
+}
+
+#[test]
+fn manual_signal_once() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::rush());
+    sq.set_skill(255);
+    see(&mut sq, 10, 20, 0, 0);
+    assert!(!sq.signal(0));
+    sq.check(0, &[], &[], 0).unwrap();
+    assert!(sq.signal(5));
+    assert!(!sq.signal(6));
+    // Rush goals start at once: no further orders.
+    let mut out = Vec::new();
+    sq.orders_due(1000, &mut out);
+    assert_eq!(out.len(), 4);
+}
+
+#[test]
+fn role_feasibility_is_joint() {
+    let slot = |roles| Slot {
+        roles,
+        min: 1,
+        max: 1,
+        gather: None,
+        place: Place::Here,
+        kind: GoalKind::Hold,
+        start: Start::Now,
+        want_tags: 0,
+        dist: 1,
+    };
+    let t = |slots| Tactic {
+        slots,
+        considerations: Vec::new(),
+        weight: ONE,
+        aborts: Vec::new(),
+        trigger: Trigger::None,
+        min_skill: 0,
+        needs_target: false,
+    };
+    // Two slots each need a ranged member; only one is ranged.
+    let mut sq = squad_of(Metric::Euclid, &[(1, 0, 0, ROLE_RANGED), (2, 1, 0, 0)]);
+    sq.add_tactic(t(vec![slot(ROLE_RANGED), slot(ROLE_RANGED)]));
+    assert_eq!(sq.plan(0, &[], &[], 0), Ok(None));
+    let mut sq = squad_of(
+        Metric::Euclid,
+        &[(1, 0, 0, ROLE_RANGED), (2, 1, 0, ROLE_RANGED)],
+    );
+    sq.add_tactic(t(vec![slot(ROLE_RANGED), slot(ROLE_RANGED)]));
+    assert!(sq.plan(0, &[], &[], 0).unwrap().is_some());
+    // Nested needs: member 1 can do both, member 2 only ranged. Slot 0
+    // (ranged) would take the nearer member 1 and leave slot 1 empty;
+    // the pick keeps every minimum reachable.
+    let both = ROLE_RANGED | ROLE_AREA;
+    let mut sq = squad_of(Metric::Euclid, &[(1, 0, 0, both), (2, 5, 0, ROLE_RANGED)]);
+    sq.add_tactic(t(vec![slot(ROLE_RANGED), slot(both)]));
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
+    let mut got: Vec<(u32, u8)> = slots_of(&sq).iter().map(|g| (g.0, g.1)).collect();
+    got.sort_unstable();
+    assert_eq!(got, [(1, 1), (2, 0)]);
+}
