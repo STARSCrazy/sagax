@@ -663,3 +663,385 @@ export class Machine {
     this.handle = 0;
   }
 }
+
+// ---- world memory -----------------------------------------------------------
+
+const u32 = (v) => v >>> 0;
+const i32 = (v) => v | 0;
+
+/**
+ * What a character has seen: the last place and time of things, by id, for at
+ * most `capacity` ids (the oldest is dropped when full). Times are the game's
+ * own u32 count; ages wrap around.
+ *
+ *   const s = lib.sightings(8);
+ *   s.seen(42, [x, y, z], now);   // null, or the id that was dropped
+ *   s.get(42);                    // {id, pos, lastSeen, data} or null
+ */
+export class Sightings {
+  constructor(x, capacity) {
+    this.x = x;
+    this.handle = x.sx_sightings_new(u32(capacity));
+    if (!this.handle) throw new RangeError('Sagax: capacity must be at least 1');
+  }
+
+  record() {
+    const r = new Uint32Array(this.x.memory.buffer, this.x.sx_sightings_record(this.handle), 6);
+    return { id: r[0], pos: [i32(r[1]), i32(r[2]), i32(r[3])], lastSeen: r[4], data: r[5] };
+  }
+
+  ids(n) {
+    return Array.from(new Uint32Array(this.x.memory.buffer, this.x.sx_sightings_out(this.handle), n));
+  }
+
+  /** id seen at pos at now. Returns the evicted id, or null. */
+  seen(id, [px, py, pz], now) {
+    return this.x.sx_sightings_seen(this.handle, u32(id), i32(px), i32(py), i32(pz), u32(now)) === 1
+      ? this.ids(1)[0]
+      : null;
+  }
+
+  /** Renews the time of id. False if unknown. */
+  touch(id, now) {
+    return this.x.sx_sightings_touch(this.handle, u32(id), u32(now)) === 1;
+  }
+
+  /** Sets the place of id. False if unknown. */
+  setPos(id, [px, py, pz]) {
+    return this.x.sx_sightings_set_pos(this.handle, u32(id), i32(px), i32(py), i32(pz)) === 1;
+  }
+
+  /** Sets the number attached to id. False if unknown. */
+  setData(id, data) {
+    return this.x.sx_sightings_set_data(this.handle, u32(id), u32(data)) === 1;
+  }
+
+  /** Forgets id. False if unknown. */
+  remove(id) {
+    return this.x.sx_sightings_remove(this.handle, u32(id)) === 1;
+  }
+
+  /** {id, pos, lastSeen, data} or null. */
+  get(id) {
+    return this.x.sx_sightings_get(this.handle, u32(id)) === 1 ? this.record() : null;
+  }
+
+  /** All sightings in slot order. */
+  list() {
+    const n = this.x.sx_sightings_count(this.handle);
+    const all = [];
+    for (let i = 0; i < n; i++) {
+      this.x.sx_sightings_at(this.handle, i);
+      all.push(this.record());
+    }
+    return all;
+  }
+
+  /** Forgets sightings at least maxAge old. Returns their ids. */
+  expire(now, maxAge) {
+    return this.ids(this.x.sx_sightings_expire(this.handle, u32(now), u32(maxAge)));
+  }
+
+  clear() {
+    this.x.sx_sightings_clear(this.handle);
+  }
+
+  free() {
+    if (this.handle) this.x.sx_sightings_free(this.handle);
+    this.handle = 0;
+  }
+}
+
+/**
+ * Areas to stay out of: round zones of one radius that fade after lifetime.
+ *
+ *   const z = lib.zones(4, 600, 3000);
+ *   z.add([x, y, 0], now, data, [sx, sy, sz]);  // source is optional
+ *   z.blocks(cell, start, goal);               // for a path finder
+ */
+export class Zones {
+  constructor(x, capacity, radius, lifetime) {
+    this.x = x;
+    this.handle = x.sx_zones_new(u32(capacity), i32(radius), u32(lifetime));
+    if (!this.handle) throw new RangeError('Sagax: capacity must be at least 1');
+  }
+
+  /** Adds or renews a zone at pos; returns its index. */
+  add([px, py, pz], now, data = 0, source = null) {
+    const [sx, sy, sz] = source ?? [0, 0, 0];
+    return this.x.sx_zones_add(this.handle, i32(px), i32(py), i32(pz), u32(now), u32(data), source ? 1 : 0, i32(sx), i32(sy), i32(sz));
+  }
+
+  /** Removes zones whose age is at least the lifetime. Returns how many. */
+  expire(now) {
+    return this.x.sx_zones_expire(this.handle, u32(now));
+  }
+
+  /** Index of the first zone containing pos, or null. */
+  contains([px, py, pz]) {
+    const i = this.x.sx_zones_contains(this.handle, i32(px), i32(py), i32(pz));
+    return i >= 0 ? i : null;
+  }
+
+  /** True if cell is in a zone that holds neither start nor goal. */
+  blocks(cell, start, goal) {
+    const p = scratch(this.x, 9, [...cell, ...start, ...goal]);
+    return this.x.sx_zones_blocks(this.handle, p.byteOffset) === 1;
+  }
+
+  /** All zones in slot order: {pos, since, data, source (or null)}. */
+  list() {
+    const n = this.x.sx_zones_count(this.handle);
+    const all = [];
+    for (let i = 0; i < n; i++) {
+      this.x.sx_zones_at(this.handle, i);
+      const r = new Int32Array(this.x.memory.buffer, this.x.sx_zones_record(this.handle), 9);
+      all.push({
+        pos: [r[0], r[1], r[2]],
+        since: u32(r[3]),
+        data: u32(r[4]),
+        source: r[8] ? [r[5], r[6], r[7]] : null,
+      });
+    }
+    return all;
+  }
+
+  free() {
+    if (this.handle) this.x.sx_zones_free(this.handle);
+    this.handle = 0;
+  }
+}
+
+/** Ids to leave alone for a while; the oldest is replaced when full. */
+export class Ignore {
+  constructor(x, capacity) {
+    this.x = x;
+    this.handle = x.sx_ignore_new(u32(capacity));
+    if (!this.handle) throw new RangeError('Sagax: capacity must be at least 1');
+  }
+
+  /** Ignore id from now (renews a present id). */
+  add(id, now) {
+    this.x.sx_ignore_add(this.handle, u32(id), u32(now));
+  }
+
+  /** True if id was added less than duration ago. */
+  ignores(id, now, duration) {
+    return this.x.sx_ignore_ignores(this.handle, u32(id), u32(now), u32(duration)) === 1;
+  }
+
+  free() {
+    if (this.handle) this.x.sx_ignore_free(this.handle);
+    this.handle = 0;
+  }
+}
+
+/** Chasing one target; same integer rules as the Rust and C versions. */
+export class Pursuit {
+  constructor() {
+    this.clear();
+  }
+
+  /** Starts chasing target, seen at pos, distance away, at now. */
+  begin(target, pos, distance, now) {
+    this.target = u32(target);
+    this.lastPos = pos.map(i32);
+    this.unseen = 0;
+    this.best = i32(distance);
+    this.since = u32(now);
+  }
+
+  /** The target is in sight at pos. */
+  seen(pos) {
+    this.lastPos = pos.map(i32);
+    this.unseen = 0;
+  }
+
+  /** Another step of time without seeing the target (saturating). */
+  missed(step) {
+    this.unseen = Math.min(this.unseen + u32(step), 0xffffffff);
+  }
+
+  /** Restarts the progress check from distance at now. */
+  resetProgress(distance, now) {
+    this.best = i32(distance);
+    this.since = u32(now);
+  }
+
+  /** True if the target has been out of sight for at least limit. */
+  lost(limit) {
+    return this.unseen >= u32(limit);
+  }
+
+  /** True if no progress was made for at least limit; getting minGain closer restarts the check. */
+  stalled(distance, now, minGain, limit) {
+    if (this.best - i32(distance) >= i32(minGain)) {
+      this.best = i32(distance);
+      this.since = u32(now);
+      return false;
+    }
+    return u32(now - this.since) >= u32(limit);
+  }
+
+  /** Forgets the chase. */
+  clear() {
+    this.target = 0;
+    this.lastPos = [0, 0, 0];
+    this.unseen = 0;
+    this.best = 0;
+    this.since = 0;
+  }
+}
+
+/** A call for help: delivered after a delay, not repeated before a cooldown. */
+export class Radio {
+  constructor() {
+    this.pos = [0, 0, 0];
+    this.started = 0;
+    this.lastStart = 0;
+    this.pending = false;
+    this.hasSent = false;
+  }
+
+  /** Starts a call at pos. Refused (false) while one is pending or within the cooldown. */
+  start(pos, now, cooldown) {
+    if (this.pending) return false;
+    if (this.hasSent && u32(now - this.lastStart) < u32(cooldown)) return false;
+    this.pos = pos.map(i32);
+    this.started = u32(now);
+    this.lastStart = u32(now);
+    this.pending = true;
+    this.hasSent = true;
+    return true;
+  }
+
+  /** True if a call is pending and at least delay has passed. */
+  due(now, delay) {
+    return this.pending && u32(now - this.started) >= u32(delay);
+  }
+
+  /** Takes the place of the pending call (or null), ending the call. */
+  take() {
+    if (!this.pending) return null;
+    this.pending = false;
+    return this.pos;
+  }
+
+  /** Drops a pending call; the cooldown keeps running. */
+  cancel() {
+    this.pending = false;
+  }
+}
+
+/** A timer for "every N ticks"; never started counts as due. */
+export class Interval {
+  constructor() {
+    this.reset();
+  }
+
+  /** True if never marked, or at least every has passed since the mark. */
+  due(now, every) {
+    return !this.started || u32(now - this.last) >= u32(every);
+  }
+
+  /** Records that it ran at now. */
+  mark(now) {
+    this.last = u32(now);
+    this.started = true;
+  }
+
+  /** Back to never started. */
+  reset() {
+    this.last = 0;
+    this.started = false;
+  }
+}
+
+const PATTERN_DEFAULT = {
+  headingStep: 0x62,
+  firstDistance: 0x100,
+  offsets: [0, 0x20, -0x20],
+  distances: [5 * 256, 9 * 256, 12 * 256],
+  min: [0, 0],
+  max: [32767, 32767],
+};
+
+/** The scratch buffer of the module, `count` integers long, filled from values. */
+function scratch(x, count, values = []) {
+  const view = new Int32Array(x.memory.buffer, x.sx_scratch(count), Math.max(count, 1));
+  view.set(values.map(i32));
+  return view;
+}
+
+/** The ids of the k candidates {id, x, y} nearest to [px, py], nearest first. */
+function nearestOf(x, candidates, [px, py], k, divisor = 1) {
+  const n = candidates.length;
+  const view = scratch(x, Math.max(n * 3, k, 1), candidates.flatMap((c) => [c.id, c.x, c.y]));
+  const count = x.sx_nearest(n, i32(px), i32(py), u32(k), i32(divisor));
+  if (count < 0) throw new RangeError('Sagax: bad candidates');
+  return Array.from(new Uint32Array(x.memory.buffer, view.byteOffset, count));
+}
+
+/** Search point of an agent: [x, y, z] or null past the last step. */
+function searchPointOf(x, agent, step, [cx, cy, cz], pattern) {
+  let custom = 0;
+  let at;
+  if (pattern) {
+    const p = { ...PATTERN_DEFAULT, ...pattern };
+    if (p.offsets.length > 8 || p.distances.length < p.offsets.length) {
+      throw new RangeError('Sagax: a search pattern has at most 8 steps, one distance each');
+    }
+    const fill = (list) => [...list, ...new Array(8 - list.length).fill(0)];
+    const offsets = fill(p.offsets);
+    const distances = fill(p.distances.slice(0, p.offsets.length));
+    at = scratch(x, 23, [p.headingStep, p.firstDistance, p.offsets.length, ...offsets, ...distances, ...p.min, ...p.max]);
+    custom = 1;
+  } else {
+    at = scratch(x, 3);
+  }
+  const r = x.sx_search_point(u32(agent), u32(step), i32(cx), i32(cy), i32(cz), custom);
+  if (r < 0) throw new RangeError('Sagax: bad search pattern');
+  if (r === 0) return null;
+  return Array.from(new Int32Array(x.memory.buffer, at.byteOffset, 3));
+}
+
+/** Heading while looking around; offsets default to a quarter turn each way. */
+function lookHeadingOf(x, base, elapsed, stepTicks, offsets) {
+  if (!offsets) return x.sx_look_heading(i32(base), u32(elapsed), u32(stepTicks), -1);
+  scratch(x, offsets.length, offsets);
+  return x.sx_look_heading(i32(base), u32(elapsed), u32(stepTicks), offsets.length);
+}
+
+Object.assign(Sagax.prototype, {
+  /** Sightings for at most capacity ids; see Sightings. */
+  sightings(capacity) {
+    return new Sightings(this.x, capacity);
+  },
+  /** Zones to stay out of; see Zones. */
+  zones(capacity, radius, lifetime) {
+    return new Zones(this.x, capacity, radius, lifetime);
+  },
+  /** An ignore list for at most capacity ids; see Ignore. */
+  ignore(capacity) {
+    return new Ignore(this.x, capacity);
+  },
+  /** nearest([{id, x, y}], [px, py], k, divisor = 1): ids of the k nearest, nearest first. */
+  nearest(candidates, point, k, divisor = 1) {
+    return nearestOf(this.x, candidates, point, k, divisor);
+  },
+  /** Sine of a heading (256 = full turn), times 256. */
+  sin256(heading) {
+    return this.x.sx_sin256(i32(heading));
+  },
+  /**
+   * Point where an agent searches: searchPoint(agent, step, [x, y, z], pattern?).
+   * pattern: {headingStep, firstDistance, offsets, distances, min: [x, y], max: [x, y]}.
+   */
+  searchPoint(agent, step, centre, pattern) {
+    return searchPointOf(this.x, agent, step, centre, pattern);
+  },
+  /** lookHeading(base, elapsed, stepTicks, offsets?): heading 0..255 while looking around. */
+  lookHeading(base, elapsed, stepTicks, offsets) {
+    return lookHeadingOf(this.x, base, elapsed, stepTicks, offsets);
+  },
+});

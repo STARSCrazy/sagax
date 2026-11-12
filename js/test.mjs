@@ -3,7 +3,7 @@
 
 import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
-import { MEMORY, ONE, loadSagax, HEX, FORMATION } from './sagax.mjs';
+import { MEMORY, ONE, loadSagax, HEX, FORMATION, Pursuit, Radio, Interval } from './sagax.mjs';
 
 const wasm = await readFile(new URL('../target/wasm32-unknown-unknown/release/sagax_wasm.wasm', import.meta.url));
 console.log(`wasm size ${(wasm.length / 1024).toFixed(0)} KB`);
@@ -377,6 +377,206 @@ test('state machine: patrol, chase, search, abort', () => {
   assert.throws(() => m.update(201, { nope: true }));
   assert.throws(() => m.transition({ to: 'nowhere' }));
   m.free();
+});
+
+
+// ---- world memory ----
+
+test('sightings: seen, evict oldest, data kept, expire, wrap', () => {
+  assert.throws(() => lib.sightings(0));
+  const s = lib.sightings(2);
+  assert.equal(s.seen(1, [10, 20, 0], 5), null);
+  assert.equal(s.seen(2, [11, 21, 0], 6), null);
+  assert.equal(s.seen(3, [12, 22, 0], 7), 1);
+  assert.equal(s.list().length, 2);
+  assert.equal(s.setData(3, 9), true);
+  assert.equal(s.setData(99, 9), false);
+  assert.equal(s.seen(3, [1, 2, 3], 8), null); // update keeps data
+  assert.deepEqual(s.get(3), { id: 3, pos: [1, 2, 3], lastSeen: 8, data: 9 });
+  assert.equal(s.get(1), null);
+  assert.equal(s.setPos(3, [-4, 5, -6]), true);
+  assert.deepEqual(s.get(3).pos, [-4, 5, -6]);
+  assert.equal(s.touch(2, 20), true);
+  assert.equal(s.touch(1, 20), false);
+  assert.deepEqual(s.list().map((e) => e.id), [2, 3]);
+  assert.deepEqual(s.expire(20, 10), [3]);
+  assert.equal(s.remove(2), true);
+  assert.equal(s.remove(2), false);
+  s.seen(4, [0, 0, 0], 1);
+  s.clear();
+  assert.deepEqual(s.list(), []);
+  // time wraps around 2^32
+  s.seen(7, [0, 0, 0], 4294967290);
+  assert.equal(s.get(7).lastSeen, 4294967290);
+  assert.deepEqual(s.expire(4, 10), [7]); // age 10 across the wrap
+  s.free();
+});
+
+test('zones: add, renew, contains, blocks, expire', () => {
+  assert.throws(() => lib.zones(0, 10, 10));
+  const z = lib.zones(2, 10, 50);
+  assert.equal(z.add([100, 100, 0], 5, 7, [1, 2, 3]), 0);
+  assert.equal(z.add([103, 100, 0], 8, 7), 0); // renews, drops the source
+  assert.deepEqual(z.list(), [{ pos: [103, 100, 0], since: 8, data: 7, source: null }]);
+  z.add([100, 100, 0], 9, 1, [1, 2, 3]);
+  assert.deepEqual(z.list()[0].source, [1, 2, 3]);
+  assert.equal(z.contains([100, 105, 0]), 0);
+  assert.equal(z.contains([500, 0, 0]), null);
+  assert.equal(z.blocks([100, 100, 0], [900, 900, 0], [900, 900, 0]), true);
+  assert.equal(z.blocks([100, 100, 0], [100, 100, 0], [900, 900, 0]), false);
+  assert.equal(z.add([500, 500, 0], 20, 2), 1);
+  assert.equal(z.add([900, 900, 0], 30, 3), 1); // full: oldest goes, new one last
+  assert.deepEqual(z.list().map((e) => e.data), [2, 3]);
+  assert.equal(z.expire(100), 2);
+  assert.deepEqual(z.list(), []);
+  z.add([0, 0, 0], 4294967290, 1);
+  assert.equal(z.expire(4), 0); // age 10 < 50 across the wrap
+  assert.equal(z.expire(43), 0);
+  assert.equal(z.expire(44), 1);
+  z.free();
+});
+
+test('ignore: duration, renew, evict oldest', () => {
+  assert.throws(() => lib.ignore(0));
+  const i = lib.ignore(2);
+  i.add(4, 10);
+  assert.equal(i.ignores(4, 15, 10), true);
+  assert.equal(i.ignores(4, 25, 10), false);
+  assert.equal(i.ignores(5, 15, 10), false);
+  i.add(5, 12);
+  i.add(6, 14); // evicts 4 (oldest)
+  assert.equal(i.ignores(4, 15, 10), false);
+  assert.equal(i.ignores(6, 15, 10), true);
+  i.free();
+});
+
+test('pursuit: lost, stalled, progress, wrap', () => {
+  const p = new Pursuit();
+  p.begin(7, [1, 2, 3], 50, 100);
+  p.missed(5);
+  assert.equal(p.lost(5), true);
+  p.seen([4, 5, 6]);
+  assert.deepEqual(p.lastPos, [4, 5, 6]);
+  assert.equal(p.lost(5), false);
+  assert.equal(p.stalled(50, 110, 5, 10), true);
+  assert.equal(p.stalled(44, 111, 5, 10), false); // gain 6 restarts
+  assert.equal(p.stalled(44, 120, 5, 10), false);
+  assert.equal(p.stalled(44, 121, 5, 10), true);
+  p.resetProgress(40, 130);
+  assert.equal(p.stalled(40, 139, 5, 10), false);
+  p.missed(4294967295);
+  p.missed(5); // saturates
+  assert.equal(p.unseen, 4294967295);
+  p.clear();
+  assert.equal(p.target, 0);
+  const w = new Pursuit();
+  w.begin(1, [0, 0, 0], 10, 4294967290);
+  assert.equal(w.stalled(10, 4, 5, 10), true); // age 10 across the wrap
+  assert.equal(w.stalled(10, 3, 5, 10), false);
+});
+
+test('radio: start, delay, take, cooldown, wrap', () => {
+  const r = new Radio();
+  assert.equal(r.start([1, 2, 3], 10, 100), true);
+  assert.equal(r.start([1, 2, 3], 11, 100), false); // pending
+  assert.equal(r.due(12, 5), false);
+  assert.equal(r.due(15, 5), true);
+  assert.deepEqual(r.take(), [1, 2, 3]);
+  assert.equal(r.take(), null);
+  assert.equal(r.start([1, 2, 3], 50, 100), false); // cooldown
+  assert.equal(r.start([4, 5, 6], 110, 100), true);
+  r.cancel();
+  assert.equal(r.due(500, 0), false);
+  assert.equal(r.start([4, 5, 6], 150, 100), false); // cooldown keeps running
+  const w = new Radio();
+  w.start([0, 0, 0], 4294967290, 10);
+  w.take();
+  assert.equal(w.start([0, 0, 0], 3, 10), false); // age 9
+  assert.equal(w.start([0, 0, 0], 4, 10), true); // age 10
+  assert.equal(w.due(8, 5), false);
+  assert.equal(w.due(9, 5), true);
+});
+
+test('interval: never started is due, wrap', () => {
+  const i = new Interval();
+  assert.equal(i.due(0, 10), true);
+  i.mark(5);
+  assert.equal(i.due(10, 10), false);
+  assert.equal(i.due(15, 10), true);
+  i.reset();
+  assert.equal(i.due(5, 10), true);
+  i.mark(4294967290);
+  assert.equal(i.due(3, 10), false); // age 9
+  assert.equal(i.due(4, 10), true); // age 10
+});
+
+test('nearest: truncating division toward zero', () => {
+  const c = [{ id: 1, x: -40, y: 3 }, { id: 2, x: -31, y: -31 }, { id: 3, x: 20, y: 0 }, { id: 4, x: -100, y: -17 }];
+  assert.deepEqual(lib.nearest(c, [10, 5], 3, 16), [3, 2, 1]);
+  assert.deepEqual(lib.nearest([], [0, 0], 3, 1), []);
+  assert.deepEqual(lib.nearest(c, [0, 0], 0, 1), []);
+  assert.deepEqual(lib.nearest([{ id: 5, x: 1, y: 1 }, { id: 6, x: -1, y: -1 }], [0, 0], 2, 1), [5, 6]); // ties keep order
+});
+
+test('sin256 matches the reference', () => {
+  const want = [
+    -226, -198, -162, -142, -98, -50, 0, 25, 74, 121, 162, 181, 213, 237, 251, 255, 255, 245,
+    226, 213, 181, 142, 98, 74, 25, -25, -74, -98, -142, -181, -213, -226, -245, -255, -255,
+    -251, -237, -213, -181, -162, -121, -74, -25, 0, 50, 98, 142, 162, 198, 226, 245, 251, 256,
+    251, 237, 226, 198, 162, 121, 98, 50, 0, -50, -74, -121, -162, -198, -213, -237, -251,
+    -256, -255, -245, -226, -198, -181, -142, -98, -50, -25, 25, 74, 121, 142, 181, 213,
+  ];
+  const got = [];
+  for (let h = -300; h <= 300; h += 7) got.push(lib.sin256(h));
+  assert.deepEqual(got, want);
+});
+
+test('searchPoint matches the reference', () => {
+  const want = [
+    [[0, 0], 0, [[0, 256], [0, 1280], [1629, 1629], [0, 2172]]],
+    [[0, 0], 1, [[162, 0], [810, 0], [0, 0], [3060, 0]]],
+    [[0, 0], 2, [[0, 25], [0, 125], [0, 1782], [0, 0]]],
+    [[0, 0], 5, [[0, 226], [0, 1130], [666, 2205], [0, 888]]],
+    [[0, 0], 17, [[0, 0], [0, 0], [0, 0], [1944, 0]]],
+    [[0, 0], 255, [[0, 0], [0, 0], [0, 0], [0, 0]]],
+    [[5000, 5000], 0, [[5000, 5256], [5000, 6280], [6629, 6629], [2828, 7172]]],
+    [[5000, 5000], 1, [[5162, 4802], [5810, 4010], [4775, 2705], [8060, 4700]]],
+    [[5000, 5000], 2, [[4745, 5025], [3725, 5125], [3542, 6782], [2624, 3056]]],
+    [[5000, 5000], 5, [[4879, 5226], [4395, 6130], [5666, 7205], [2060, 5888]]],
+    [[5000, 5000], 17, [[4975, 4745], [4875, 3725], [3218, 3542], [6944, 2624]]],
+    [[5000, 5000], 255, [[4819, 4819], [4095, 4095], [2696, 5000], [5000, 1928]]],
+    [[32700, 100], 0, [[32700, 356], [32700, 1380], [32767, 1729], [30528, 2272]]],
+    [[32700, 100], 1, [[32767, 0], [32767, 0], [32475, 0], [32767, 0]]],
+    [[32700, 100], 2, [[32445, 125], [31425, 225], [31242, 1882], [30324, 0]]],
+    [[32700, 100], 5, [[32579, 326], [32095, 1230], [32767, 2305], [29760, 988]]],
+    [[32700, 100], 17, [[32675, 0], [32575, 0], [30918, 0], [32767, 0]]],
+    [[32700, 100], 255, [[32519, 0], [31795, 0], [30396, 100], [32700, 0]]],
+  ];
+  for (const [c, agent, pts] of want) {
+    pts.forEach(([x, y], step) => {
+      assert.deepEqual(lib.searchPoint(agent, step, [c[0], c[1], 7]), [x, y, 7], `agent ${agent} step ${step} centre ${c}`);
+    });
+  }
+  assert.equal(lib.searchPoint(0, 4, [0, 0, 0]), null);
+  const p = { min: [100, 200], max: [1000, 300] };
+  assert.deepEqual(lib.searchPoint(0, 1, [500, 250, 0], p), [500, 300, 0]);
+  assert.deepEqual(lib.searchPoint(255, 3, [50, 250, 0], p), [100, 200, 0]);
+  const own = { headingStep: 0, firstDistance: 256, offsets: [0], distances: [512], min: [0, 0], max: [32767, 32767] };
+  assert.deepEqual(lib.searchPoint(0, 0, [1000, 1000, 0], own), [1000, 1256, 0]);
+  assert.deepEqual(lib.searchPoint(0, 1, [1000, 1000, 0], own), [1000, 1512, 0]);
+  assert.equal(lib.searchPoint(0, 2, [1000, 1000, 0], own), null);
+  assert.throws(() => lib.searchPoint(0, 0, [0, 0, 0], { offsets: new Array(9).fill(0), distances: new Array(9).fill(0) }));
+});
+
+test('lookHeading matches the reference', () => {
+  const want = [10, 10, 42, 42, 74, 74, 42, 42, 10, 10, 234, 234, 202, 202, 234, 234, 10, 10, 10];
+  const got = [];
+  for (let e = 0; e <= 180; e += 10) got.push(lib.lookHeading(10, e, 20));
+  assert.deepEqual(got, want);
+  assert.equal(lib.lookHeading(10, 25, 10, [0, 5, 7]), 17);
+  assert.equal(lib.lookHeading(10, 35, 10, [0, 5, 7]), 10);
+  assert.equal(lib.lookHeading(250, 0, 10, [10]), 4);
+  assert.equal(lib.lookHeading(10, 1, 0, [1, 2]), 12); // step 0 counts as 1
 });
 
 console.log(`${passed} tests passed`);

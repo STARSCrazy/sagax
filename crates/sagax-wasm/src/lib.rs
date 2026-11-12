@@ -1339,3 +1339,531 @@ pub unsafe extern "C" fn sx_machine_set_state(m: *mut WasmMachine, state: u32, n
         Err(_) => ERROR_ARGUMENT,
     }
 }
+
+// ---- world memory ----------------------------------------------------------
+
+use sagax_decide::memory::{
+    Ignore, LOOK_OFFSETS, SearchPattern, Sighting, Sightings, Zones, look_heading, nearest,
+    search_point, sin256,
+};
+
+/// Sightings with the buffers JS reads: one record (id, x, y, z, last seen,
+/// data) and the ids removed by the last expiry.
+pub struct WasmSightings {
+    sightings: Sightings,
+    record: [u32; 6],
+    out: Vec<u32>,
+}
+
+macro_rules! sightings {
+    ($s:expr) => {
+        // SAFETY: JS passes a handle from sx_sightings_new (wrapper guarantees it).
+        match unsafe { $s.as_mut() } {
+            Some(s) => s,
+            None => return ERROR_ARGUMENT,
+        }
+    };
+}
+
+/// Sightings for at most `capacity` ids; null if `capacity` is 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_sightings_new(capacity: u32) -> *mut WasmSightings {
+    match Sightings::new(capacity as usize) {
+        Ok(sightings) => Box::into_raw(Box::new(WasmSightings {
+            sightings,
+            record: [0; 6],
+            out: Vec::new(),
+        })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Frees sightings.
+///
+/// # Safety
+/// `s` is null or from [`sx_sightings_new`] and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_sightings_free(s: *mut WasmSightings) {
+    if !s.is_null() {
+        // SAFETY: see above.
+        drop(unsafe { Box::from_raw(s) });
+    }
+}
+
+/// `id` seen at a place. Returns 1 if another id was evicted (it is in the
+/// first slot of [`sx_sightings_out`]), else 0.
+///
+/// # Safety
+/// `s` from [`sx_sightings_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_sightings_seen(
+    s: *mut WasmSightings,
+    id: u32,
+    x: i32,
+    y: i32,
+    z: i32,
+    now: u32,
+) -> i32 {
+    let w = sightings!(s);
+    match w.sightings.seen(id, [x, y, z], now) {
+        Some(gone) => {
+            w.out.clear();
+            w.out.push(gone);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Renews the time of `id`; 1 if known.
+///
+/// # Safety
+/// `s` from [`sx_sightings_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_sightings_touch(s: *mut WasmSightings, id: u32, now: u32) -> i32 {
+    i32::from(sightings!(s).sightings.touch(id, now))
+}
+
+/// Sets the place of `id`; 1 if known.
+///
+/// # Safety
+/// `s` from [`sx_sightings_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_sightings_set_pos(
+    s: *mut WasmSightings,
+    id: u32,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> i32 {
+    i32::from(sightings!(s).sightings.set_pos(id, [x, y, z]))
+}
+
+/// Sets the attached number of `id`; 1 if known.
+///
+/// # Safety
+/// `s` from [`sx_sightings_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_sightings_set_data(s: *mut WasmSightings, id: u32, data: u32) -> i32 {
+    i32::from(sightings!(s).sightings.set_data(id, data))
+}
+
+/// Forgets `id`; 1 if known.
+///
+/// # Safety
+/// `s` from [`sx_sightings_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_sightings_remove(s: *mut WasmSightings, id: u32) -> i32 {
+    i32::from(sightings!(s).sightings.remove(id))
+}
+
+fn record_of(s: &Sighting) -> [u32; 6] {
+    [
+        s.id,
+        s.pos[0] as u32,
+        s.pos[1] as u32,
+        s.pos[2] as u32,
+        s.last_seen,
+        s.data,
+    ]
+}
+
+/// Loads the sighting of `id` into the record buffer; 1 if known.
+///
+/// # Safety
+/// `s` from [`sx_sightings_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_sightings_get(s: *mut WasmSightings, id: u32) -> i32 {
+    let w = sightings!(s);
+    match w.sightings.get(id) {
+        Some(f) => {
+            w.record = record_of(f);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Loads the sighting in slot `index` into the record buffer; 1 if present.
+///
+/// # Safety
+/// `s` from [`sx_sightings_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_sightings_at(s: *mut WasmSightings, index: u32) -> i32 {
+    let w = sightings!(s);
+    match w.sightings.iter().nth(index as usize) {
+        Some(f) => {
+            w.record = record_of(f);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Number of sightings.
+///
+/// # Safety
+/// `s` from [`sx_sightings_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_sightings_count(s: *mut WasmSightings) -> i32 {
+    to_i32(sightings!(s).sightings.len())
+}
+
+/// Forgets everything.
+///
+/// # Safety
+/// `s` from [`sx_sightings_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_sightings_clear(s: *mut WasmSightings) -> i32 {
+    sightings!(s).sightings.clear();
+    0
+}
+
+/// Forgets sightings of age at least `max_age`; returns how many. Their ids
+/// are in [`sx_sightings_out`].
+///
+/// # Safety
+/// `s` from [`sx_sightings_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_sightings_expire(s: *mut WasmSightings, now: u32, max_age: u32) -> i32 {
+    let w = sightings!(s);
+    w.out.clear();
+    let out = &mut w.out;
+    w.sightings.expire(now, max_age, |id| out.push(id));
+    to_i32(w.out.len())
+}
+
+/// The record buffer: id, x, y, z, last seen, data (6 `u32`).
+///
+/// # Safety
+/// `s` from [`sx_sightings_new`]. Valid until memory grows.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_sightings_record(s: *mut WasmSightings) -> *const u32 {
+    // SAFETY: see above.
+    unsafe { s.as_ref() }.map_or(std::ptr::null(), |w| w.record.as_ptr())
+}
+
+/// The id buffer: the evicted id or the expired ids.
+///
+/// # Safety
+/// `s` from [`sx_sightings_new`]. Valid until memory grows.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_sightings_out(s: *mut WasmSightings) -> *const u32 {
+    // SAFETY: see above.
+    unsafe { s.as_ref() }.map_or(std::ptr::null(), |w| w.out.as_ptr())
+}
+
+/// Zones with the record buffer JS reads: x, y, z, since, data, source x,
+/// y, z, has source (9 values).
+pub struct WasmZones {
+    zones: Zones,
+    record: [i32; 9],
+}
+
+macro_rules! zones {
+    ($z:expr) => {
+        // SAFETY: JS passes a handle from sx_zones_new (wrapper guarantees it).
+        match unsafe { $z.as_mut() } {
+            Some(z) => z,
+            None => return ERROR_ARGUMENT,
+        }
+    };
+}
+
+/// Zones for at most `capacity`; null if `capacity` is 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_zones_new(capacity: u32, radius: i32, lifetime: u32) -> *mut WasmZones {
+    match Zones::new(capacity as usize, radius, lifetime) {
+        Ok(zones) => Box::into_raw(Box::new(WasmZones {
+            zones,
+            record: [0; 9],
+        })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Frees zones.
+///
+/// # Safety
+/// `z` is null or from [`sx_zones_new`] and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_zones_free(z: *mut WasmZones) {
+    if !z.is_null() {
+        // SAFETY: see above.
+        drop(unsafe { Box::from_raw(z) });
+    }
+}
+
+/// Adds a zone (source only if `has_source` is not 0); returns its index.
+///
+/// # Safety
+/// `z` from [`sx_zones_new`].
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sx_zones_add(
+    z: *mut WasmZones,
+    x: i32,
+    y: i32,
+    pz: i32,
+    now: u32,
+    data: u32,
+    has_source: i32,
+    sx: i32,
+    sy: i32,
+    sz: i32,
+) -> i32 {
+    let source = (has_source != 0).then_some([sx, sy, sz]);
+    to_i32(zones!(z).zones.add([x, y, pz], now, data, source))
+}
+
+/// Removes expired zones; returns how many.
+///
+/// # Safety
+/// `z` from [`sx_zones_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_zones_expire(z: *mut WasmZones, now: u32) -> i32 {
+    to_i32(zones!(z).zones.expire(now))
+}
+
+/// Index of the first zone containing the place, or -2 if none.
+///
+/// # Safety
+/// `z` from [`sx_zones_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_zones_contains(z: *mut WasmZones, x: i32, y: i32, pz: i32) -> i32 {
+    zones!(z).zones.contains([x, y, pz]).map_or(-2, to_i32)
+}
+
+/// 1 if `cell` is in a zone that holds neither `start` nor `goal`; reads 9
+/// integers (cell, start, goal).
+///
+/// # Safety
+/// `z` from [`sx_zones_new`]; `cell` null or points to 9 integers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_zones_blocks(z: *mut WasmZones, cell: *const i32) -> i32 {
+    let w = zones!(z);
+    if cell.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: see above.
+    let p = unsafe { std::slice::from_raw_parts(cell, 9) };
+    i32::from(
+        w.zones
+            .blocks([p[0], p[1], p[2]], [p[3], p[4], p[5]], [p[6], p[7], p[8]]),
+    )
+}
+
+/// Number of zones.
+///
+/// # Safety
+/// `z` from [`sx_zones_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_zones_count(z: *mut WasmZones) -> i32 {
+    to_i32(zones!(z).zones.len())
+}
+
+/// Loads zone `index` into the record buffer; 1 if present.
+///
+/// # Safety
+/// `z` from [`sx_zones_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_zones_at(z: *mut WasmZones, index: u32) -> i32 {
+    let w = zones!(z);
+    match w.zones.iter().nth(index as usize) {
+        Some(f) => {
+            w.record = [
+                f.pos[0],
+                f.pos[1],
+                f.pos[2],
+                f.since as i32,
+                f.data as i32,
+                f.source[0],
+                f.source[1],
+                f.source[2],
+                i32::from(f.has_source),
+            ];
+            1
+        }
+        None => 0,
+    }
+}
+
+/// The record buffer (9 `i32`).
+///
+/// # Safety
+/// `z` from [`sx_zones_new`]. Valid until memory grows.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_zones_record(z: *mut WasmZones) -> *const i32 {
+    // SAFETY: see above.
+    unsafe { z.as_ref() }.map_or(std::ptr::null(), |w| w.record.as_ptr())
+}
+
+/// Ids to leave alone for a while.
+pub struct WasmIgnore(Ignore);
+
+/// An ignore list for at most `capacity` ids; null if `capacity` is 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_ignore_new(capacity: u32) -> *mut WasmIgnore {
+    match Ignore::new(capacity as usize) {
+        Ok(i) => Box::into_raw(Box::new(WasmIgnore(i))),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Frees an ignore list.
+///
+/// # Safety
+/// `i` is null or from [`sx_ignore_new`] and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_ignore_free(i: *mut WasmIgnore) {
+    if !i.is_null() {
+        // SAFETY: see above.
+        drop(unsafe { Box::from_raw(i) });
+    }
+}
+
+/// Ignores `id` from `now`.
+///
+/// # Safety
+/// `i` from [`sx_ignore_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_ignore_add(i: *mut WasmIgnore, id: u32, now: u32) -> i32 {
+    // SAFETY: see above.
+    match unsafe { i.as_mut() } {
+        Some(w) => {
+            w.0.add(id, now);
+            0
+        }
+        None => ERROR_ARGUMENT,
+    }
+}
+
+/// 1 if `id` was added less than `duration` ago.
+///
+/// # Safety
+/// `i` from [`sx_ignore_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_ignore_ignores(
+    i: *mut WasmIgnore,
+    id: u32,
+    now: u32,
+    duration: u32,
+) -> i32 {
+    // SAFETY: see above.
+    match unsafe { i.as_ref() } {
+        Some(w) => i32::from(w.0.ignores(id, now, duration)),
+        None => ERROR_ARGUMENT,
+    }
+}
+
+thread_local! {
+    static SCRATCH: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A shared buffer of `count` integers for the helper functions below
+/// ([`sx_nearest`], [`sx_search_point`], [`sx_look_heading`]). Valid until
+/// memory grows or the buffer is asked for again.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_scratch(count: i32) -> *mut i32 {
+    SCRATCH.with(|s| {
+        let mut s = s.borrow_mut();
+        s.clear();
+        s.resize(usize::try_from(count).unwrap_or(0).max(1), 0);
+        s.as_mut_ptr()
+    })
+}
+
+/// The `k` candidates nearest to a point. Scratch in: `n` triples (id, x,
+/// y); scratch out: the ids, nearest first. Returns how many.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_nearest(n: u32, px: i32, py: i32, k: u32, divisor: i32) -> i32 {
+    SCRATCH.with(|s| {
+        let mut s = s.borrow_mut();
+        let n = n as usize;
+        if s.len() < n * 3 {
+            return ERROR_ARGUMENT;
+        }
+        let list: Vec<(u32, i32, i32)> = s[..n * 3]
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|c| (c[0] as u32, c[1], c[2]))
+            .collect();
+        let mut ids = Vec::new();
+        nearest(&list, (px, py), k as usize, divisor, &mut ids);
+        let count = ids.len();
+        for (i, id) in ids.into_iter().enumerate() {
+            s[i] = id as i32;
+        }
+        to_i32(count)
+    })
+}
+
+/// The sine of a heading, times 256.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_sin256(heading: i32) -> i32 {
+    sin256(heading)
+}
+
+/// Number of integers a search pattern takes in the scratch buffer.
+const PATTERN_SIZE: usize = 23;
+
+/// A search point. With `custom` not 0 the scratch buffer holds the pattern
+/// (heading step, first distance, count at most 8, 8 offsets, 8 distances,
+/// min x, min y, max x, max y); otherwise the default pattern is used.
+/// Returns 1 and puts x, y, z in the scratch buffer (at least 3 integers
+/// long), 0 past the last step, -1 on bad arguments.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_search_point(
+    agent: u32,
+    step: u32,
+    cx: i32,
+    cy: i32,
+    cz: i32,
+    custom: i32,
+) -> i32 {
+    SCRATCH.with(|s| {
+        let mut s = s.borrow_mut();
+        let pattern = if custom != 0 {
+            if s.len() < PATTERN_SIZE || !(0..=8).contains(&s[2]) {
+                return ERROR_ARGUMENT;
+            }
+            let n = s[2] as usize;
+            SearchPattern {
+                heading_step: s[0],
+                first_distance: s[1],
+                offsets: s[3..3 + n].to_vec(),
+                distances: s[11..11 + n].to_vec(),
+                min: (s[19], s[20]),
+                max: (s[21], s[22]),
+            }
+        } else {
+            SearchPattern::default()
+        };
+        match search_point(agent, step as usize, [cx, cy, cz], &pattern) {
+            Some(p) => {
+                if s.len() < 3 {
+                    s.resize(3, 0);
+                }
+                s[..3].copy_from_slice(&p);
+                1
+            }
+            None => 0,
+        }
+    })
+}
+
+/// The heading while looking around. With `count` below 0 the default
+/// offsets are used, otherwise `count` offsets are read from the scratch
+/// buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_look_heading(base: i32, elapsed: u32, step_ticks: u32, count: i32) -> i32 {
+    if count < 0 {
+        return look_heading(base, elapsed, step_ticks, &LOOK_OFFSETS);
+    }
+    SCRATCH.with(|s| {
+        let s = s.borrow();
+        let n = (count as usize).min(s.len());
+        look_heading(base, elapsed, step_ticks, &s[..n])
+    })
+}
