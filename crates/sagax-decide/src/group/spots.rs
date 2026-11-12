@@ -2,8 +2,9 @@ use super::tactic::{Place, Side};
 use crate::memory::{Metric, Pos, distance};
 
 /// A candidate position with tag bits (cover, high, hidden, choke, ... as
-/// the game defines them).
+/// the game defines them). Laid out as C's `sx_spot`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(C)]
 pub struct Spot {
     /// Where the spot is.
     pub pos: Pos,

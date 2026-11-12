@@ -74,8 +74,8 @@ fn wall_line() -> Walls {
 }
 
 #[test]
-fn version_is_7() {
-    assert_eq!(sx_api_version(), 7);
+fn version_is_8() {
+    assert_eq!(sx_api_version(), 8);
 }
 
 #[test]
@@ -769,5 +769,849 @@ mod areas_cost {
         assert_eq!(unsafe { sx_areas_move_cost(c, 59, 50, 0, 60, 50, 0) }, -1);
         assert_eq!(unsafe { sx_areas_move_cost(c, 9, 9, 0, 10, 10, 0) }, 0);
         unsafe { sx_areas_free(areas) };
+    }
+}
+
+mod squad {
+    //! `sx_squad_*`, `sx_tactic_*`, `sx_keeper_*`, `sx_gather` (C API 8).
+
+    use crate::decide::SxConsideration;
+    use crate::group::*;
+    use crate::memory::{
+        SxArea, SxFact, SxMessage, sx_areas_at, sx_areas_count, sx_knowledge_count,
+    };
+    use crate::{ERROR_ARGUMENT, ERROR_PLAN};
+    use sagax_decide::group::{
+        IN_AREA, IN_EXTRA, IN_LOSSES, IN_OFF_PLAN, IN_PLAN_AGE, IN_RANGED, IN_TARGET_AGE,
+        IN_TARGET_DIST, REPORT_DANGER, REPORT_ENEMY, REPORT_GOAL_BROKEN, ROLE_AREA, ROLE_RANGED,
+        TAG_CHOKE, TAG_COVER, TAG_HIDDEN, TAG_HIGH,
+    };
+    use std::mem::size_of;
+    use std::ptr::{null, null_mut};
+
+    const HEADER: &str = include_str!("../include/sagax.h");
+    const ENEMY: u32 = 1;
+    const E1: u32 = 10;
+    const E2: u32 = 11;
+    const SEED: u64 = 7;
+    /// Ticks per cell the scripted members walk.
+    const STEP: u32 = 2;
+    /// 1.0 as a tactic weight.
+    const ONE_WEIGHT: u32 = 65535;
+    const EUCLID: i32 = 0;
+    const CHEBYSHEV: i32 = 2;
+
+    /// The value of `#define name value` in `sagax.h`.
+    fn define(name: &str) -> i64 {
+        let line = HEADER
+            .lines()
+            .find(|l| l.split_whitespace().take(2).eq(["#define", name]))
+            .unwrap_or_else(|| panic!("{name} missing in sagax.h"));
+        let value = line.split_whitespace().nth(2).unwrap();
+        let value = value
+            .trim_matches(|c| c == '(' || c == ')')
+            .trim_end_matches('u');
+        match value.strip_prefix("0x") {
+            Some(hex) => i64::from_str_radix(hex, 16).unwrap(),
+            None => value.parse().unwrap(),
+        }
+    }
+
+    fn member(id: u32, x: i32, y: i32, roles: u32) -> SxMember {
+        SxMember {
+            id,
+            pos: [x, y, 0],
+            roles,
+            ..SxMember::default()
+        }
+    }
+
+    fn spot(x: i32, y: i32, tags: u32) -> SxSpot {
+        SxSpot {
+            pos: [x, y, 0],
+            tags,
+        }
+    }
+
+    fn enemy(subject: u32, x: i32, y: i32) -> SxFact {
+        SxFact {
+            subject,
+            kind: ENEMY,
+            pos: [x, y, 0],
+            ..SxFact::default()
+        }
+    }
+
+    fn candidate(id: u32, faction: u32, x: i32, y: i32, free: u8) -> SxGatherCandidate {
+        SxGatherCandidate {
+            id,
+            faction,
+            pos: [x, y, 0],
+            free,
+        }
+    }
+
+    /// A squad of `members` (the first leads) that sees enemies of kind
+    /// [`ENEMY`]; the others hear by radio (2 ticks plus 1 per cell).
+    fn squad_of(metric: i32, members: &[(u32, i32, i32)]) -> *mut SxSquad {
+        let sq = sx_squad_new(8, 8, 4, 8, metric);
+        assert!(!sq.is_null());
+        unsafe {
+            for (i, &(id, x, y)) in members.iter().enumerate() {
+                assert_eq!(sx_squad_add_member(sq, &member(id, x, y, 0)), i as i32);
+            }
+            assert_eq!(sx_squad_set_leader(sq, members[0].0), 1);
+            for &(id, ..) in &members[1..] {
+                assert_eq!(sx_squad_set_channel(sq, id, CHANNEL_RADIO, 2, 1), 1);
+            }
+            assert_eq!(sx_squad_set_target_kind(sq, ENEMY), 0);
+        }
+        sq
+    }
+
+    /// `sx_squad_check` without extra columns or spots.
+    unsafe fn check(sq: *mut SxSquad, now: u32, id: &mut u32) -> i32 {
+        unsafe { sx_squad_check(sq, now, null(), 0, null(), 0, 0, id) }
+    }
+
+    #[test]
+    fn layouts_and_numbers_match_header() {
+        assert_eq!(size_of::<SxMember>(), 24);
+        assert_eq!(size_of::<SxSpot>(), 16);
+        assert_eq!(size_of::<SxGatherCandidate>(), 24);
+        assert_eq!(size_of::<SxPlace>(), 20);
+        assert_eq!(size_of::<SxSlot>(), 72);
+        assert_eq!(size_of::<SxGoal>(), 68);
+        assert_eq!(size_of::<SxOrder>(), 72);
+        assert_eq!(size_of::<SxPlan>(), 28);
+        assert_eq!(size_of::<SxSkillTable>(), 100);
+        assert_eq!(define("SX_API_VERSION"), 8);
+        assert_eq!(define("SX_ERROR_PLAN"), i64::from(ERROR_PLAN));
+        let core = [
+            ("SX_IN_LOSSES", IN_LOSSES as i64),
+            ("SX_IN_OFF_PLAN", IN_OFF_PLAN as i64),
+            ("SX_IN_TARGET_AGE", IN_TARGET_AGE as i64),
+            ("SX_IN_TARGET_DIST", IN_TARGET_DIST as i64),
+            ("SX_IN_RANGED", IN_RANGED as i64),
+            ("SX_IN_AREA", IN_AREA as i64),
+            ("SX_IN_PLAN_AGE", IN_PLAN_AGE as i64),
+            ("SX_IN_EXTRA", IN_EXTRA as i64),
+            ("SX_ROLE_RANGED", i64::from(ROLE_RANGED)),
+            ("SX_ROLE_AREA", i64::from(ROLE_AREA)),
+            ("SX_TAG_COVER", i64::from(TAG_COVER)),
+            ("SX_TAG_HIGH", i64::from(TAG_HIGH)),
+            ("SX_TAG_HIDDEN", i64::from(TAG_HIDDEN)),
+            ("SX_TAG_CHOKE", i64::from(TAG_CHOKE)),
+            ("SX_REPORT_GOAL_BROKEN", i64::from(REPORT_GOAL_BROKEN)),
+            ("SX_REPORT_ENEMY", i64::from(REPORT_ENEMY)),
+            ("SX_REPORT_DANGER", i64::from(REPORT_DANGER)),
+        ];
+        let ffi = [
+            ("SX_MEMBER_ACTIVE", 0),
+            ("SX_MEMBER_SUSPENDED", 1),
+            ("SX_MEMBER_GONE", 2),
+            ("SX_CHANNEL_NONE", i64::from(CHANNEL_NONE)),
+            ("SX_CHANNEL_SHOUT", i64::from(CHANNEL_SHOUT)),
+            ("SX_CHANNEL_RADIO", i64::from(CHANNEL_RADIO)),
+            ("SX_PLACE_NONE", i64::from(PLACE_NONE)),
+            ("SX_PLACE_OFFSET", i64::from(PLACE_OFFSET)),
+            ("SX_PLACE_SIDE", i64::from(PLACE_SIDE)),
+            ("SX_PLACE_BETWEEN", i64::from(PLACE_BETWEEN)),
+            ("SX_PLACE_TAGGED", i64::from(PLACE_TAGGED)),
+            ("SX_PLACE_HERE", i64::from(PLACE_HERE)),
+            ("SX_SIDE_FRONT", 0),
+            ("SX_SIDE_LEFT", 1),
+            ("SX_SIDE_RIGHT", 2),
+            ("SX_SIDE_REAR", 3),
+            ("SX_GOAL_MOVE", i64::from(GOAL_MOVE)),
+            ("SX_GOAL_HOLD", i64::from(GOAL_HOLD)),
+            ("SX_GOAL_ATTACK", i64::from(GOAL_ATTACK)),
+            ("SX_GOAL_WAIT", i64::from(GOAL_WAIT)),
+            ("SX_GOAL_RETREAT", i64::from(GOAL_RETREAT)),
+            ("SX_GOAL_CUSTOM", i64::from(GOAL_CUSTOM)),
+            ("SX_START_NOW", i64::from(START_NOW)),
+            ("SX_START_AFTER_TICKS", i64::from(START_AFTER_TICKS)),
+            ("SX_START_ON_SIGNAL", i64::from(START_ON_SIGNAL)),
+            ("SX_TRIGGER_NONE", i64::from(TRIGGER_NONE)),
+            ("SX_TRIGGER_ALL_ARRIVED", i64::from(TRIGGER_ALL_ARRIVED)),
+            (
+                "SX_TRIGGER_TARGET_IN_RADIUS",
+                i64::from(TRIGGER_TARGET_IN_RADIUS),
+            ),
+            ("SX_TRIGGER_MANUAL", i64::from(TRIGGER_MANUAL)),
+            ("SX_TACTIC_RUSH", i64::from(TACTIC_RUSH)),
+            ("SX_TACTIC_LINE", i64::from(TACTIC_LINE)),
+            ("SX_TACTIC_WEDGE", i64::from(TACTIC_WEDGE)),
+            ("SX_TACTIC_COLUMN", i64::from(TACTIC_COLUMN)),
+            ("SX_TACTIC_FLANK", i64::from(TACTIC_FLANK)),
+            ("SX_TACTIC_FLANK_FRONT", i64::from(TACTIC_FLANK_FRONT)),
+            ("SX_TACTIC_AMBUSH", i64::from(TACTIC_AMBUSH)),
+            ("SX_TACTIC_FOCUS", i64::from(TACTIC_FOCUS)),
+            ("SX_TACTIC_ISOLATE", i64::from(TACTIC_ISOLATE)),
+            ("SX_TACTIC_FALL_BACK", i64::from(TACTIC_FALL_BACK)),
+            ("SX_SQUAD_KEEP", i64::from(SQUAD_KEEP)),
+            ("SX_SQUAD_REPLAN", i64::from(SQUAD_REPLAN)),
+            ("SX_SQUAD_SIGNAL", i64::from(SQUAD_SIGNAL)),
+            ("SX_SQUAD_NO_PLAN", i64::from(SQUAD_NO_PLAN)),
+        ];
+        for (name, value) in core.iter().chain(ffi.iter()) {
+            assert_eq!(define(name), *value, "{name}");
+        }
+    }
+
+    #[test]
+    fn members_through_c() {
+        unsafe {
+            assert!(sx_squad_new(0, 8, 4, 8, EUCLID).is_null());
+            assert!(sx_squad_new(8, 0, 4, 8, EUCLID).is_null());
+            assert!(sx_squad_new(8, 8, 0, 8, EUCLID).is_null());
+            assert!(sx_squad_new(8, 8, 4, 0, EUCLID).is_null());
+            assert!(sx_squad_new(8, 8, 4, 8, 4).is_null(), "no such metric");
+            let sq = sx_squad_new(2, 4, 4, 4, CHEBYSHEV);
+            assert_eq!(sx_squad_add_member(sq, &member(1, 0, 0, 0)), 0);
+            assert_eq!(sx_squad_add_member(sq, &member(1, 5, 5, 0)), -1, "same id");
+            let bad = SxMember {
+                state: 3,
+                ..member(2, 0, 0, 0)
+            };
+            assert_eq!(sx_squad_add_member(sq, &bad), -1, "no such state");
+            assert_eq!(sx_squad_add_member(sq, &member(2, 1, 0, 4)), 1);
+            assert_eq!(sx_squad_add_member(sq, &member(3, 0, 0, 0)), -1, "full");
+            assert_eq!(sx_squad_member_count(sq), 2);
+            assert_eq!(sx_squad_set_pos(sq, 2, 7, 8, 9), 1);
+            assert_eq!(sx_squad_set_pos(sq, 9, 7, 8, 9), 0);
+            let mut m = SxMember::default();
+            assert_eq!(sx_squad_member_at(sq, 1, &mut m), 1);
+            assert_eq!((m.id, m.pos, m.roles, m.state), (2, [7, 8, 9], 4, 0));
+            assert_eq!(sx_squad_member_at(sq, 2, &mut m), 0);
+            assert_eq!(sx_squad_suspend(sq, 2), 1);
+            assert_eq!(sx_squad_member_at(sq, 1, &mut m), 1);
+            assert_eq!(m.state, 1);
+            assert_eq!(sx_squad_resume(sq, 2), 1);
+            assert_eq!(sx_squad_suspend(sq, 9), 0);
+            // Leader: the set one while active, else the next active member.
+            let mut id = 0;
+            assert_eq!(sx_squad_set_leader(sq, 9), 0);
+            assert_eq!(sx_squad_set_leader(sq, 1), 1);
+            assert_eq!(sx_squad_leader(sq, &mut id), 1);
+            assert_eq!(id, 1);
+            assert_eq!(sx_squad_set_gone(sq, 1), 1);
+            assert_eq!(sx_squad_set_gone(sq, 9), 0);
+            assert_eq!(sx_squad_member_at(sq, 0, &mut m), 1);
+            assert_eq!(m.state, 2);
+            assert_eq!(sx_squad_leader(sq, &mut id), 1);
+            assert_eq!(id, 2);
+            assert_eq!(sx_squad_remove_member(sq, 2), 1);
+            assert_eq!(sx_squad_remove_member(sq, 2), 0);
+            assert_eq!(sx_squad_leader(sq, null_mut()), 0);
+            assert_eq!(sx_squad_set_skill(sq, 256), ERROR_ARGUMENT);
+            assert_eq!(sx_squad_set_skill(sq, 200), 0);
+            assert_eq!(sx_squad_skill(sq), 200);
+            sx_squad_free(sq);
+        }
+    }
+
+    #[test]
+    fn gather_through_c() {
+        let list = [
+            candidate(7, 1, 30, 0, 1),
+            candidate(4, 1, -3, 0, 1),
+            candidate(3, 1, 0, -2, 1),
+            candidate(6, 1, 1, 1, 0),
+            candidate(5, 2, 1, 0, 1),
+            candidate(2, 1, 0, 2, 1),
+        ];
+        let c = list.as_ptr();
+        let mut out = [0u32; 6];
+        let o = out.as_mut_ptr();
+        unsafe {
+            // Nearest first, ties to the lower id; the other faction, the
+            // busy and the far candidate are left out.
+            assert_eq!(sx_gather(0, 0, 1, 10, CHEBYSHEV, 1, c, 6, o, 3), 3);
+            assert_eq!(out[..3], [2, 3, 4]);
+            let n = sx_gather(0, 0, 1, 10, CHEBYSHEV, 0, c, 6, o, 6);
+            assert_eq!(out[..n as usize], [6, 2, 3, 4]);
+            assert_eq!(sx_gather(0, 0, 1, 10, 9, 0, c, 6, o, 6), ERROR_ARGUMENT);
+            assert_eq!(
+                sx_gather(0, 0, 1, 10, 2, 0, null(), 6, o, 6),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_gather(0, 0, 1, 10, 2, 0, c, 6, null_mut(), 6),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(sx_gather(0, 0, 1, 10, 2, 0, null(), 0, null_mut(), 0), 0);
+        }
+    }
+
+    #[test]
+    fn tactics_through_c() {
+        unsafe {
+            let sq = squad_of(EUCLID, &[(1, 0, 0), (2, 1, 0)]);
+            for which in 0..10 {
+                assert_eq!(sx_squad_add_shipped(sq, which, 2), which as i32);
+            }
+            assert_eq!(sx_squad_add_shipped(sq, 10, 2), -1);
+            assert_eq!(sx_squad_add_shipped(null_mut(), 0, 2), -1);
+
+            // A custom tactic: a slot that gathers at the leader, then holds
+            // a choke spot; scored on the first extra column.
+            assert!(sx_tactic_new(ONE_WEIGHT, 256, 1).is_null());
+            let t = sx_tactic_new(ONE_WEIGHT, 0, 1);
+            assert!(!t.is_null());
+            let mut slot = SxSlot {
+                min: 1,
+                max: 2,
+                place: SxPlace {
+                    kind: PLACE_TAGGED,
+                    value: TAG_CHOKE,
+                    ..SxPlace::default()
+                },
+                gather: SxPlace {
+                    kind: PLACE_HERE,
+                    ..SxPlace::default()
+                },
+                kind: GOAL_HOLD,
+                start: START_AFTER_TICKS,
+                start_ticks: 3,
+                dist: 1,
+                ..SxSlot::default()
+            };
+            assert_eq!(sx_tactic_add_slot(t, &slot), 0);
+            slot.place.kind = PLACE_NONE;
+            assert_eq!(sx_tactic_add_slot(t, &slot), -1, "a place is needed");
+            slot.place = SxPlace {
+                kind: PLACE_SIDE,
+                value: 4,
+                ..SxPlace::default()
+            };
+            assert_eq!(sx_tactic_add_slot(t, &slot), -1, "no such side");
+            slot.place.value = 3;
+            slot.kind = 6;
+            assert_eq!(sx_tactic_add_slot(t, &slot), -1, "no such goal kind");
+            slot.kind = GOAL_CUSTOM;
+            slot.custom = 77;
+            slot.start = 3;
+            assert_eq!(sx_tactic_add_slot(t, &slot), -1, "no such start");
+            slot.start = START_ON_SIGNAL;
+            assert_eq!(sx_tactic_add_slot(t, &slot), 1);
+            let c = SxConsideration {
+                input: IN_EXTRA as u32,
+                curve: 0,
+                min: 0,
+                max: 10,
+            };
+            assert_eq!(sx_tactic_add_consideration(t, &c), 0);
+            let bad = SxConsideration { curve: 99, ..c };
+            assert_eq!(sx_tactic_add_consideration(t, &bad), ERROR_ARGUMENT);
+            assert_eq!(sx_tactic_add_abort(t, IN_LOSSES as u32, 1), 0);
+            assert_eq!(sx_tactic_set_trigger(t, TRIGGER_ALL_ARRIVED, 9), 0);
+            assert_eq!(
+                sx_tactic_set_trigger(t, TRIGGER_ALL_ARRIVED, -1),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(sx_tactic_set_trigger(t, 4, 0), ERROR_ARGUMENT);
+            assert_eq!(sx_squad_add_tactic(sq, t), 10);
+            assert_eq!(sx_squad_add_tactic(sq, null_mut()), -1);
+            // Null squad: the tactic is freed all the same.
+            assert_eq!(sx_squad_add_tactic(null_mut(), sx_tactic_new(1, 0, 0)), -1);
+            sx_tactic_free(sx_tactic_new(1, 0, 0));
+            sx_tactic_free(null_mut());
+
+            // The custom tactic reads column IN_EXTRA, beyond a row without
+            // extra columns.
+            let (mut tactic, mut input) = (0, 0);
+            assert_eq!(sx_squad_validate(sq, &mut tactic, &mut input), ERROR_PLAN);
+            assert_eq!((tactic, input), (10, IN_EXTRA as u32));
+            let mut id = 0;
+            let made = sx_squad_plan(sq, 0, null(), 0, null(), 0, 0, &mut id);
+            assert_eq!(made, ERROR_PLAN);
+            assert_eq!(check(sq, 0, &mut id), ERROR_PLAN);
+            assert_eq!(sx_squad_set_extra_columns(sq, 1), 0);
+            assert_eq!(sx_squad_validate(sq, null_mut(), null_mut()), 0);
+            sx_squad_free(sq);
+        }
+    }
+
+    #[test]
+    fn plan_check_and_orders_through_c() {
+        unsafe {
+            // Elite, rush and a 2-side flank, enemy 10 at (20, 0); everyone
+            // hears at once.
+            let sq = squad_of(EUCLID, &[(1, 0, 0), (2, 1, 0), (3, 0, 1), (4, 1, 1)]);
+            for id in 2..=4 {
+                assert_eq!(sx_squad_set_channel(sq, id, CHANNEL_RADIO, 0, 0), 1);
+            }
+            assert_eq!(sx_squad_add_shipped(sq, TACTIC_RUSH, 0), 0);
+            assert_eq!(sx_squad_add_shipped(sq, TACTIC_FLANK, 4), 1);
+            assert_eq!(sx_squad_set_skill(sq, 255), 0);
+            let mut id = 0;
+            let made = sx_squad_plan(sq, 0, null(), 0, null(), 0, 0, &mut id);
+            assert_eq!(made, 0, "nothing known yet");
+            assert_eq!(sx_squad_observe(sq, &enemy(E1, 20, 0), 0, null_mut()), 0);
+            let mut targets = [SxFact::default(); 2];
+            assert_eq!(sx_squad_targets(sq, targets.as_mut_ptr(), 2), 1);
+            assert_eq!((targets[0].subject, targets[0].source), (E1, 0));
+            assert_eq!(sx_squad_targets(sq, null_mut(), 0), 1);
+            assert_eq!(sx_knowledge_count(sx_squad_knowledge(sq)), 1);
+
+            assert_eq!(check(sq, 0, &mut id), SQUAD_REPLAN);
+            let mut plan = SxPlan::default();
+            let mut goals = [SxOrder::default(); 4];
+            assert_eq!(
+                sx_squad_pending_plan(sq, &mut plan, goals.as_mut_ptr(), 4),
+                1
+            );
+            assert_eq!((plan.id, plan.tactic, plan.has_target), (id, 1, 1));
+            assert_eq!((plan.target, plan.made_at, plan.active_at), (E1, 0, 5));
+            assert_eq!(plan.goal_count, 4);
+            let mut assigned: Vec<u32> = goals.iter().map(|g| g.member).collect();
+            assigned.sort_unstable();
+            assert_eq!(assigned, [1, 2, 3, 4]);
+            assert!(goals.iter().all(|g| g.goal.plan == id));
+            assert_eq!(sx_squad_active_plan(sq, &mut plan, null_mut(), 0), 0);
+            assert_eq!(check(sq, 5, &mut id), SQUAD_KEEP);
+            assert_eq!(sx_squad_active_plan(sq, &mut plan, null_mut(), 0), 1);
+            assert_eq!(sx_squad_pending_plan(sq, &mut plan, null_mut(), 0), 0);
+
+            // Four gather orders; a buffer of 3 leaves one for the next call.
+            let mut out = [SxOrder::default(); 4];
+            assert_eq!(sx_squad_orders_due(sq, 5, out.as_mut_ptr(), 3), 3);
+            assert_eq!(sx_squad_orders_due(sq, 5, out[3..].as_mut_ptr(), 1), 1);
+            assert_eq!(sx_squad_orders_due(sq, 5, null_mut(), 0), 0);
+            let mut members: Vec<u32> = out.iter().map(|o| o.member).collect();
+            members.sort_unstable();
+            assert_eq!(members, [1, 2, 3, 4]);
+            for o in &out {
+                let g = &o.goal;
+                assert_eq!(
+                    (g.kind, g.start, g.plan),
+                    (GOAL_ATTACK, START_ON_SIGNAL, id)
+                );
+                assert_eq!((g.has_pos, g.has_then_pos, g.has_target), (1, 1, 1));
+                assert_eq!(g.target, E1);
+            }
+
+            // Arrivals fire the signal; once per plan.
+            for (m, t) in [(4, 6), (2, 7), (3, 8)] {
+                assert_eq!(sx_squad_arrived(sq, m, t), 1);
+                assert_eq!(check(sq, t, &mut id), SQUAD_KEEP);
+            }
+            assert_eq!(sx_squad_arrived(sq, 99, 8), 0);
+            assert_eq!(sx_squad_signal_given(sq), 0);
+            assert_eq!(sx_squad_arrived(sq, 1, 9), 1);
+            assert_eq!(check(sq, 9, &mut id), SQUAD_SIGNAL);
+            assert_eq!(sx_squad_signal_given(sq), 1);
+            assert_eq!(sx_squad_signal(sq, 10), 0);
+            let mut attack = [SxOrder::default(); 8];
+            assert_eq!(sx_squad_orders_due(sq, 9, attack.as_mut_ptr(), 8), 4);
+            for o in &attack[..4] {
+                let before = out.iter().find(|f| f.member == o.member).unwrap();
+                assert_eq!(o.goal.pos, before.goal.then_pos);
+                assert_eq!((o.goal.start, o.goal.issued_at), (START_NOW, 9));
+            }
+
+            // Two members report their goal broken: the flank's abort rule
+            // fires once the reports are in and rush is planned.
+            let broken = |sender| SxMessage {
+                kind: REPORT_GOAL_BROKEN,
+                sender,
+                data: id,
+                ..SxMessage::default()
+            };
+            assert_eq!(sx_squad_report(sq, &broken(2), 11), 1);
+            assert_eq!(sx_squad_report(sq, &broken(3), 11), 1);
+            assert_eq!(check(sq, 10, &mut id), SQUAD_KEEP);
+            let mut next = 0;
+            assert_eq!(check(sq, 11, &mut next), SQUAD_REPLAN);
+            assert!(next > id);
+            assert_eq!(sx_squad_pending_plan(sq, &mut plan, null_mut(), 0), 1);
+            assert_eq!(plan.tactic, 0);
+            sx_squad_free(sq);
+        }
+    }
+
+    #[test]
+    fn channels_and_reports_through_c() {
+        unsafe {
+            let sq = squad_of(CHEBYSHEV, &[(1, 0, 0), (2, 3, 0), (3, 9, 0)]);
+            assert_eq!(sx_squad_set_channel(sq, 2, CHANNEL_SHOUT, 5, 0), 1);
+            assert_eq!(sx_squad_set_channel(sq, 3, CHANNEL_SHOUT, 5, 0), 1);
+            assert_eq!(sx_squad_set_channel(sq, 9, CHANNEL_SHOUT, 5, 0), 0);
+            assert_eq!(sx_squad_set_channel(sq, 2, 3, 5, 0), ERROR_ARGUMENT);
+            let too_far = sx_squad_set_channel(sq, 2, CHANNEL_RADIO, 1 << 32, 0);
+            assert_eq!(too_far, ERROR_ARGUMENT);
+            assert_eq!(sx_squad_add_shipped(sq, TACTIC_RUSH, 0), 0);
+
+            // An enemy report: a target known by being told.
+            let seen = SxMessage {
+                kind: REPORT_ENEMY,
+                subject: E1,
+                pos: [20, 0, 0],
+                sender: 2,
+                ..SxMessage::default()
+            };
+            assert_eq!(sx_squad_report(sq, &seen, 0), 1);
+            // A danger report: the shooter stood at (30, 4, 1).
+            let shot = SxMessage {
+                kind: REPORT_DANGER,
+                subject: E2,
+                pos: [3, 0, 1],
+                strength: 30,
+                data: 4,
+                sender: 2,
+                ..SxMessage::default()
+            };
+            assert_eq!(sx_squad_report(sq, &shot, 0), 1);
+            let mut danger = SxArea::default();
+            assert_eq!(sx_squad_danger_area(sq, &mut danger), 0);
+            assert_eq!((danger.radius, danger.lifetime), (2, 255));
+            danger.radius = 3;
+            danger.strength = 9;
+            assert_eq!(sx_squad_set_danger_area(sq, &danger), 0);
+            let mut back = SxArea::default();
+            assert_eq!(sx_squad_danger_area(sq, &mut back), 0);
+            assert_eq!((back.radius, back.strength), (3, 9));
+
+            let mut id = 0;
+            assert_eq!(check(sq, 0, &mut id), SQUAD_REPLAN);
+            let mut fact = SxFact::default();
+            assert_eq!(sx_squad_targets(sq, &mut fact, 1), 1);
+            assert_eq!((fact.subject, fact.pos, fact.source), (E1, [20, 0, 0], 2));
+            let areas = sx_squad_areas(sq);
+            assert_eq!(sx_areas_count(areas), 1);
+            let mut area = SxArea::default();
+            assert_eq!(sx_areas_at(areas, 0, &mut area), 1);
+            assert_eq!(
+                (area.pos, area.source, area.has_source),
+                ([3, 0, 1], [30, 4, 1], 1)
+            );
+            assert_eq!((area.radius, area.data), (3, E2));
+
+            // Weak: active after 34 ticks. Shout: one tick per cell within
+            // range; 3 (9 away) gets nothing.
+            let mut out = [SxOrder::default(); 4];
+            let mut got = Vec::new();
+            for t in 0..=50 {
+                let n = sx_squad_orders_due(sq, t, out.as_mut_ptr(), 4);
+                got.extend(out[..n as usize].iter().map(|o| (t, o.member)));
+            }
+            assert_eq!(got, [(34, 1), (37, 2)]);
+            sx_squad_free(sq);
+        }
+    }
+
+    #[test]
+    fn skill_table_through_c() {
+        unsafe {
+            let mut table = SxSkillTable::default();
+            assert_eq!(sx_skill_table_default(&mut table), 0);
+            assert_eq!(table.think_ticks, [34, 20, 10, 5]);
+            assert_eq!(table.pick, [1, 1, 1, 0]);
+            assert_eq!(table.pick_top, [3, 2, 2, 0]);
+            assert_eq!(table.spot_rank_error, [2, 1, 1, 0]);
+            assert_eq!(sx_discipline(0, &table), i32::from(u16::MAX) / 8);
+            assert_eq!(sx_discipline(255, null()), i32::from(u16::MAX) / 2);
+            assert_eq!(sx_discipline(256, null()), ERROR_ARGUMENT);
+
+            let sq = squad_of(CHEBYSHEV, &[(1, 0, 0), (2, 1, 0)]);
+            table.think_ticks = [1, 2, 3, 4];
+            assert_eq!(sx_squad_set_skill_table(sq, &table), 0);
+            let mut back = SxSkillTable::default();
+            assert_eq!(sx_squad_skill_table(sq, &mut back), 0);
+            assert_eq!(back.think_ticks, [1, 2, 3, 4]);
+            table.pick[2] = 3;
+            assert_eq!(sx_squad_set_skill_table(sq, &table), ERROR_ARGUMENT);
+            assert_eq!(sx_squad_skill_table(sq, &mut back), 0);
+            assert_eq!(back.pick[2], 1, "a refused table changes nothing");
+            sx_squad_free(sq);
+        }
+    }
+
+    #[test]
+    fn keeper_through_c() {
+        unsafe {
+            let k = sx_keeper_new();
+            assert!(!k.is_null());
+            let mut g = SxGoal::default();
+            let mut inputs = [0i32; 5];
+            let i = inputs.as_mut_ptr();
+            assert_eq!(sx_keeper_goal(k, &mut g), 0);
+            assert_eq!(sx_keeper_inputs(k, 0, 0, 0, 0, CHEBYSHEV, 0, 9, i), 0);
+            assert_eq!(inputs, [0, -1, 0, 0, 9]);
+            let goal = SxGoal {
+                kind: GOAL_MOVE,
+                has_pos: 1,
+                pos: [4, 0, 0],
+                issued_at: 10,
+                start: START_AFTER_TICKS,
+                start_ticks: 2,
+                ..SxGoal::default()
+            };
+            assert_eq!(sx_keeper_set(k, &goal, 10), 0);
+            let bad = SxGoal { start: 7, ..goal };
+            assert_eq!(sx_keeper_set(k, &bad, 10), ERROR_ARGUMENT);
+            assert_eq!(sx_keeper_goal(k, &mut g), 1);
+            assert_eq!(g, goal);
+            assert_eq!(sx_keeper_inputs(k, 15, 1, 0, 0, CHEBYSHEV, 1, 9, i), 0);
+            assert_eq!(inputs, [1, 3, 5, 1, 9]);
+            assert_eq!(sx_keeper_inputs(k, 15, 1, 0, 0, 7, 1, 9, i), ERROR_ARGUMENT);
+            assert_eq!(sx_keeper_postpone(k, 20), 0);
+            assert_eq!(sx_keeper_broken(k, 29, 10), 0);
+            assert_eq!(sx_keeper_broken(k, 30, 10), 1);
+            assert_eq!(sx_keeper_suspend(k), 0);
+            assert_eq!(sx_keeper_broken(k, 40, 10), 0);
+            assert_eq!(sx_keeper_unsuspend(k, 40), 0);
+            assert_eq!(sx_keeper_broken(k, 49, 10), 0);
+            assert_eq!(sx_keeper_broken(k, 50, 10), 1);
+            assert_eq!(sx_keeper_resume(k, 50), 0);
+            assert_eq!(sx_keeper_broken(k, 99, 10), 0);
+            assert_eq!(sx_keeper_clear(k), 0);
+            assert_eq!(sx_keeper_goal(k, &mut g), 0);
+            sx_keeper_free(k);
+        }
+    }
+
+    #[test]
+    fn null_arguments_are_refused() {
+        let n = null_mut::<SxSquad>();
+        let k = null_mut::<SxKeeper>();
+        let t = null_mut::<SxTactic>();
+        let e = ERROR_ARGUMENT;
+        unsafe {
+            let sq = squad_of(CHEBYSHEV, &[(1, 0, 0)]);
+            let mut id = 0;
+            let mut m = SxMember::default();
+            assert_eq!(sx_squad_add_member(n, &member(1, 0, 0, 0)), -1);
+            assert_eq!(sx_squad_add_member(sq, null()), -1);
+            assert_eq!(sx_squad_member_at(sq, 0, null_mut()), e);
+            assert_eq!(sx_squad_member_at(n, 0, &mut m), e);
+            assert_eq!(sx_squad_member_count(n), e);
+            assert_eq!(sx_squad_remove_member(n, 1), e);
+            assert_eq!(sx_squad_set_pos(n, 1, 0, 0, 0), e);
+            assert_eq!(sx_squad_suspend(n, 1), e);
+            assert_eq!(sx_squad_resume(n, 1), e);
+            assert_eq!(sx_squad_set_gone(n, 1), e);
+            assert_eq!(sx_squad_set_leader(n, 1), e);
+            assert_eq!(sx_squad_leader(n, &mut id), e);
+            assert_eq!(sx_squad_set_skill(n, 1), e);
+            assert_eq!(sx_squad_skill(n), e);
+            assert_eq!(sx_squad_set_skill_table(sq, null()), e);
+            assert_eq!(sx_squad_skill_table(sq, null_mut()), e);
+            assert_eq!(sx_skill_table_default(null_mut()), e);
+            assert_eq!(sx_squad_set_channel(n, 1, 0, 0, 0), e);
+            assert_eq!(sx_squad_set_danger_area(sq, null()), e);
+            assert_eq!(sx_squad_danger_area(sq, null_mut()), e);
+            assert_eq!(sx_squad_set_target_kind(n, 1), e);
+            assert_eq!(sx_squad_set_extra_columns(n, 1), e);
+            assert!(sx_squad_knowledge(n).is_null());
+            assert!(sx_squad_areas(n).is_null());
+            assert_eq!(sx_squad_observe(sq, null(), 0, null_mut()), e);
+            assert_eq!(sx_squad_report(sq, null(), 0), e);
+            assert_eq!(sx_squad_targets(sq, null_mut(), 1), e);
+            assert_eq!(sx_squad_validate(n, null_mut(), null_mut()), e);
+            assert_eq!(sx_squad_plan(n, 0, null(), 0, null(), 0, 0, &mut id), e);
+            assert_eq!(sx_squad_plan(sq, 0, null(), 1, null(), 0, 0, &mut id), e);
+            assert_eq!(sx_squad_check(sq, 0, null(), 0, null(), 1, 0, &mut id), e);
+            assert_eq!(sx_squad_orders_due(sq, 0, null_mut(), 1), e);
+            assert_eq!(sx_squad_signal(n, 0), e);
+            assert_eq!(sx_squad_arrived(n, 1, 0), e);
+            assert_eq!(sx_squad_signal_given(n), e);
+            assert_eq!(sx_squad_pending_plan(sq, null_mut(), null_mut(), 1), e);
+            assert_eq!(sx_squad_active_plan(n, null_mut(), null_mut(), 0), e);
+            assert_eq!(sx_tactic_add_slot(t, &SxSlot::default()), -1);
+            let real = sx_tactic_new(1, 0, 1);
+            assert_eq!(sx_tactic_add_slot(real, null()), -1);
+            assert_eq!(sx_tactic_add_consideration(real, null()), e);
+            assert_eq!(sx_tactic_add_abort(t, 0, 0), e);
+            assert_eq!(sx_tactic_set_trigger(t, 0, 0), e);
+            sx_tactic_free(real);
+            assert_eq!(sx_keeper_set(k, &SxGoal::default(), 0), e);
+            let real = sx_keeper_new();
+            assert_eq!(sx_keeper_set(real, null(), 0), e);
+            assert_eq!(sx_keeper_goal(real, null_mut()), e);
+            assert_eq!(sx_keeper_inputs(real, 0, 0, 0, 0, 0, 0, 0, null_mut()), e);
+            assert_eq!(sx_keeper_clear(k), e);
+            assert_eq!(sx_keeper_postpone(k, 0), e);
+            assert_eq!(sx_keeper_resume(k, 0), e);
+            assert_eq!(sx_keeper_suspend(k), e);
+            assert_eq!(sx_keeper_unsuspend(k, 0), e);
+            assert_eq!(sx_keeper_broken(k, 0, 0), e);
+            sx_keeper_free(real);
+            sx_keeper_free(k);
+            sx_squad_free(n);
+            sx_squad_free(sq);
+        }
+    }
+
+    /// One cell from `from` toward `to` on Chebyshev: the neighbour nearest
+    /// to `to`, ties to the first in the list (as in the Rust scene).
+    fn step_toward(from: [i32; 3], to: [i32; 3]) -> [i32; 3] {
+        const DIRS: [(i32, i32); 8] = [
+            (1, 0),
+            (1, 1),
+            (0, 1),
+            (-1, 1),
+            (-1, 0),
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+        ];
+        if from[..2] == to[..2] {
+            return from;
+        }
+        let left = |p: [i32; 3]| (to[0] - p[0]).abs().max((to[1] - p[1]).abs());
+        DIRS.iter()
+            .map(|&(dx, dy)| [from[0] + dx, from[1] + dy, from[2]])
+            .min_by_key(|&p| left(p))
+            .unwrap()
+    }
+
+    /// A scripted member: its id, goal, start tick and whether it reached
+    /// its gather spot.
+    struct Walker {
+        id: u32,
+        goal: Option<SxGoal>,
+        start_at: u32,
+        gathered: bool,
+    }
+
+    /// The `three_levels` flank scene at skill 192, driven only through the
+    /// C calls: the leader gathers its three nearest free members, the
+    /// flank is planned once, gathers, fires one signal, and every attack
+    /// starts at the same tick.
+    #[test]
+    fn three_levels_flank_in_c() {
+        const FLANK: u32 = 2;
+        let around = [
+            candidate(7, 1, 30, 0, 1),
+            candidate(4, 1, -3, 0, 1),
+            candidate(3, 1, 0, -2, 1),
+            candidate(6, 1, 1, 1, 0),
+            candidate(2, 1, 0, 2, 1),
+        ];
+        let mut called = [0u32; 3];
+        let n = unsafe {
+            sx_gather(
+                0,
+                0,
+                1,
+                10,
+                CHEBYSHEV,
+                1,
+                around.as_ptr(),
+                5,
+                called.as_mut_ptr(),
+                3,
+            )
+        };
+        assert_eq!((n, called), (3, [2, 3, 4]));
+        let mut members = vec![(1, 0, 0)];
+        for id in called {
+            let c = around.iter().find(|c| c.id == id).unwrap();
+            members.push((id, c.pos[0], c.pos[1]));
+        }
+        let sq = squad_of(CHEBYSHEV, &members);
+        let spots = [
+            spot(16, 0, TAG_COVER),
+            spot(16, 2, 0),
+            spot(20, 4, TAG_HIGH),
+            spot(20, -4, 0),
+            spot(12, 8, TAG_COVER),
+        ];
+        unsafe {
+            assert_eq!(sx_squad_set_skill(sq, 192), 0);
+            assert_eq!(sx_squad_add_shipped(sq, TACTIC_RUSH, 0), 0);
+            assert_eq!(sx_squad_add_shipped(sq, TACTIC_LINE, 2), 1);
+            assert_eq!(sx_squad_add_shipped(sq, TACTIC_FLANK_FRONT, 4), 2);
+            assert_eq!(sx_squad_observe(sq, &enemy(E1, 20, 0), 0, null_mut()), 0);
+            let told = SxMessage {
+                kind: REPORT_ENEMY,
+                subject: E2,
+                pos: [24, 10, 0],
+                sender: 2,
+                ..SxMessage::default()
+            };
+            assert_eq!(sx_squad_report(sq, &told, 0), 1);
+        }
+
+        let mut walkers: Vec<Walker> = members
+            .iter()
+            .map(|&(id, ..)| Walker {
+                id,
+                goal: None,
+                start_at: 0,
+                gathered: false,
+            })
+            .collect();
+        let mut plans = Vec::new();
+        let mut signals = Vec::new();
+        let mut orders = Vec::new();
+        let mut arrivals = Vec::new();
+        let mut attacks = Vec::new();
+        let mut out = [SxOrder::default(); 8];
+        for t in 0..=60u32 {
+            for (i, w) in walkers.iter_mut().enumerate() {
+                let Some(goal) = w.goal else { continue };
+                let mut m = SxMember::default();
+                assert_eq!(unsafe { sx_squad_member_at(sq, i as u32, &mut m) }, 1);
+                let mut at = m.pos;
+                if t > w.start_at && (t - w.start_at).is_multiple_of(STEP) {
+                    at = step_toward(at, goal.pos);
+                    let [x, y, z] = at;
+                    assert_eq!(unsafe { sx_squad_set_pos(sq, w.id, x, y, z) }, 1);
+                }
+                let gathers = goal.has_then_pos != 0 || goal.start == START_ON_SIGNAL;
+                if gathers && !w.gathered && at[..2] == goal.pos[..2] {
+                    w.gathered = true;
+                    assert_eq!(unsafe { sx_squad_arrived(sq, w.id, t) }, 1);
+                    arrivals.push((t, w.id));
+                }
+            }
+            let mut id = 0;
+            let status =
+                unsafe { sx_squad_check(sq, t, null(), 0, spots.as_ptr(), 5, SEED, &mut id) };
+            match status {
+                SQUAD_REPLAN => {
+                    let mut p = SxPlan::default();
+                    let pending = unsafe { sx_squad_pending_plan(sq, &mut p, null_mut(), 0) };
+                    assert_eq!((pending, p.id), (1, id));
+                    plans.push((t, p.tactic, p.target));
+                }
+                SQUAD_SIGNAL => signals.push(t),
+                SQUAD_KEEP | SQUAD_NO_PLAN => {}
+                other => panic!("check failed: {other}"),
+            }
+            let n = unsafe { sx_squad_orders_due(sq, t, out.as_mut_ptr(), 8) };
+            for o in &out[..n as usize] {
+                let w = walkers.iter_mut().find(|w| w.id == o.member).unwrap();
+                let after = if o.goal.start == START_AFTER_TICKS {
+                    o.goal.start_ticks
+                } else {
+                    0
+                };
+                w.goal = Some(o.goal);
+                w.start_at = t + o.goal.start_delay + after;
+                w.gathered = false;
+                orders.push((t, o.member));
+            }
+            for w in &walkers {
+                if let Some(g) = w.goal
+                    && g.kind == GOAL_ATTACK
+                    && g.start != START_ON_SIGNAL
+                    && w.start_at == t
+                {
+                    attacks.push((t, w.id));
+                }
+            }
+        }
+        unsafe { sx_squad_free(sq) };
+
+        assert_eq!(plans, [(0, FLANK, E1)], "one plan, no replan");
+        assert_eq!(orders[..4], [(5, 1), (9, 2), (9, 3), (10, 4)]);
+        assert_eq!(arrivals, [(37, 1), (48, 4), (49, 2), (49, 3)]);
+        assert_eq!(signals, [49], "one signal");
+        attacks.sort_unstable_by_key(|&(_, m)| m);
+        assert_eq!(attacks, [(55, 1), (55, 2), (55, 3), (55, 4)], "all aligned");
     }
 }

@@ -20,10 +20,12 @@ use sagax_nav::topology::Topology;
 use sagax_nav::trace::{TraceEvent, TraceSink, Tracer};
 
 /// Version of the C interface (`SX_API_VERSION`).
-pub const API_VERSION: u32 = 7;
+pub const API_VERSION: u32 = 8;
 
 const ERROR_ARGUMENT: i32 = -1;
 const ERROR_INTERNAL: i32 = -2;
+/// `SX_ERROR_PLAN`: a tactic reads a column beyond the scoring row.
+const ERROR_PLAN: i32 = -3;
 
 const FOUR_WAYS: u32 = 1;
 const CUT_CORNERS: u32 = 2;
@@ -1194,4 +1196,6 @@ mod tests;
 
 pub mod decide;
 pub mod machine;
+#[macro_use]
 pub mod memory;
+pub mod group;

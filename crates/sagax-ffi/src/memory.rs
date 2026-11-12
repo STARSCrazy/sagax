@@ -69,6 +69,17 @@ fn flag(b: bool) -> i32 {
     i32::from(b)
 }
 
+/// The metric for its number (`SX_METRIC_*`).
+pub(crate) fn metric_of(code: i32) -> Option<Metric> {
+    Some(match code {
+        0 => Metric::Euclid,
+        1 => Metric::Manhattan,
+        2 => Metric::Chebyshev,
+        3 => Metric::Hex,
+        _ => return None,
+    })
+}
+
 fn sine_of(code: i32) -> Option<Sine> {
     match code {
         0 => Some(Sine::Fine),
@@ -103,7 +114,7 @@ macro_rules! input {
 ///
 /// # Safety
 /// `out` is null or writable.
-unsafe fn put<T>(out: *mut T, value: T) {
+pub(crate) unsafe fn put<T>(out: *mut T, value: T) {
     if !out.is_null() {
         // SAFETY: non-null and writable (see above); `write` does not read
         // or drop the old, possibly uninitialised, value.
@@ -135,6 +146,7 @@ unsafe fn write_messages(moved: &[Message], out: *mut Message, out_cap: u32) -> 
 // ---- knowledge --------------------------------------------------------------
 
 /// `sx_knowledge`.
+#[repr(transparent)]
 pub struct SxKnowledge(Knowledge);
 
 /// `sx_knowledge_new`.
@@ -646,12 +658,8 @@ pub unsafe extern "C" fn sx_route(
     if (c.is_null() && n > 0) || (out.is_null() && n > 0) {
         return ERROR_ARGUMENT;
     }
-    let metric = match metric {
-        0 => Metric::Euclid,
-        1 => Metric::Manhattan,
-        2 => Metric::Chebyshev,
-        3 => Metric::Hex,
-        _ => return ERROR_ARGUMENT,
+    let Some(metric) = metric_of(metric) else {
+        return ERROR_ARGUMENT;
     };
     let rule = match rule {
         0 => match usize::try_from(arg) {
@@ -683,6 +691,7 @@ pub unsafe extern "C" fn sx_route(
 // ---- areas ------------------------------------------------------------------
 
 /// `sx_areas`.
+#[repr(transparent)]
 pub struct SxAreas(Areas);
 
 /// `sx_areas_new`.

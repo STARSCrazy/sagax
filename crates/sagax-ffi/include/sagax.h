@@ -29,7 +29,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 7
+#define SX_API_VERSION 8
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -117,6 +117,7 @@ typedef struct sx_result {
 
 #define SX_ERROR_ARGUMENT  (-1) /* a pointer is 0 or a number is out of range */
 #define SX_ERROR_INTERNAL  (-2) /* a bug in the library; please report */
+#define SX_ERROR_PLAN      (-3) /* a tactic reads a column beyond the row (since 8) */
 
 /* budget everywhere: cells to expand at most in this call; 0: no limit. */
 
@@ -795,6 +796,450 @@ int32_t sx_points_around(uint32_t agent, uint32_t step, int32_t cx, int32_t cy, 
  * 0 counts as 1. */
 int32_t sx_sweep_heading(int32_t base, uint32_t elapsed, uint32_t step_ticks,
                          const int32_t *offsets, uint32_t count);
+
+/* ---- group tactics (since version 8) ------------------------------------ */
+
+/* A squad leader with its own memory plans for a group: tactics as data
+ * (slots, scoring, abort rules, a trigger) are scored per known target and
+ * picked by skill; members get goals as orders that arrive over their
+ * channel; the leader watches the plan, gives the signal and reads the
+ * members' reports. Targets come only from the leader's own knowledge (what
+ * it saw itself and what members reported), never from the game directly.
+ * Integer only and deterministic; seeds come from the game. Ties: the lower
+ * index or id wins. Time is the game's own count; ages wrap safely.
+ *
+ * Return values as for world memory: questions return 1 or 0, the others 0
+ * or a count; errors are negative (SX_ERROR_*). Handles (sx_squad,
+ * sx_tactic, sx_keeper) are made once and reused; a capacity of 0 gives
+ * null. The value structs (sx_member, sx_spot, sx_slot, sx_goal, sx_order,
+ * sx_plan, sx_skill_table, ...) are plain data owned by the game: start
+ * them zeroed (= {0}). Flags in them are 0 or 1 (any non-zero counts as 1
+ * when read). */
+
+typedef struct sx_squad sx_squad;
+typedef struct sx_tactic sx_tactic;
+typedef struct sx_keeper sx_keeper;
+
+/* sx_member.state. */
+#define SX_MEMBER_ACTIVE    0   /* takes part */
+#define SX_MEMBER_SUSPENDED 1   /* out for now (the game's orders first); stays in the group */
+#define SX_MEMBER_GONE      2   /* dead or lost; counts in SX_IN_LOSSES */
+
+/* Columns of the scoring row every tactic is scored on (put them in
+ * sx_consideration.input or sx_tactic_add_abort). The game's own columns
+ * follow from SX_IN_EXTRA on (see sx_squad_set_extra_columns). */
+#define SX_IN_LOSSES      0   /* members marked gone */
+#define SX_IN_OFF_PLAN    1   /* active members whose goal of the active plan broke */
+#define SX_IN_TARGET_AGE  2   /* ticks since the target was seen; no target: INT32_MAX */
+#define SX_IN_TARGET_DIST 3   /* group centre to target (Euclid: the root); no target: INT32_MAX */
+#define SX_IN_RANGED      4   /* active members with SX_ROLE_RANGED */
+#define SX_IN_AREA        5   /* active members with SX_ROLE_AREA */
+#define SX_IN_PLAN_AGE    6   /* ticks since the active plan became active (its own row only) */
+#define SX_IN_EXTRA       7   /* first column of the game's own */
+
+/* Role bits the built-in columns count; the others are the game's. */
+#define SX_ROLE_RANGED 1
+#define SX_ROLE_AREA   2
+
+/* Spot tag bits the shipped tactics ask for; the others are the game's. */
+#define SX_TAG_COVER  1
+#define SX_TAG_HIGH   2
+#define SX_TAG_HIDDEN 4
+#define SX_TAG_CHOKE  8
+
+/* How orders reach a member (sx_squad_set_channel). Distances are taken
+ * from the leader in the squad's metric (Euclid: the root). */
+#define SX_CHANNEL_NONE  0   /* never arrives */
+#define SX_CHANNEL_SHOUT 1   /* 1 tick per unit, only within range a (inclusive) */
+#define SX_CHANNEL_RADIO 2   /* base a + distance * b ticks, at any distance (default 0, 0) */
+
+/* Reports from members (sx_message.kind for sx_squad_report). */
+#define SX_REPORT_GOAL_BROKEN 1   /* sender: the member; data: the plan id of its goal */
+#define SX_REPORT_ENEMY       2   /* subject, pos, seen_at, strength, data: a target
+                                   * (merged into the leader's knowledge as SX_SOURCE_TOLD) */
+#define SX_REPORT_DANGER      3   /* pos: the danger area's centre; the shooter stood at
+                                   * x = strength, y = data (both read as int32_t),
+                                   * z = pos[2] (the area's source); subject: who shot */
+
+/* A member of a group. */
+typedef struct sx_member {
+	uint32_t id;                /* the game's id */
+	int32_t pos[3];
+	uint32_t roles;             /* role bits (the game's, plus SX_ROLE_*) */
+	uint8_t skill;              /* the member's own skill, for sx_discipline */
+	uint8_t state;              /* SX_MEMBER_* */
+} sx_member;
+
+/* A candidate place with tag bits (SX_TAG_* and the game's own). Spots are
+ * always picked from the game's list, never invented. */
+typedef struct sx_spot {
+	int32_t pos[3];
+	uint32_t tags;
+} sx_spot;
+
+/* A character that could join a group (see sx_gather). */
+typedef struct sx_gather_candidate {
+	uint32_t id;
+	uint32_t faction;
+	int32_t pos[3];
+	uint8_t free;               /* 1: not in a group yet */
+} sx_gather_candidate;
+
+/* Pick up to max candidates of faction within radius of x, y (inclusive, in
+ * metric SX_METRIC_*; for Euclid the squared distance is compared with
+ * radius * radius), nearest first, ties to the lower id. free_only 1 skips
+ * the candidates that are not free; a negative radius reaches nobody. Only
+ * x and y count. The ids go to out (room for max). Returns how many; -1 for
+ * an unknown metric or a null list with a count. */
+int32_t sx_gather(int32_t x, int32_t y, uint32_t faction, int64_t radius, int32_t metric,
+                  uint32_t free_only, const sx_gather_candidate *candidates, uint32_t n,
+                  uint32_t *out, uint32_t max);
+
+/* -- tactics: a plan as data -- */
+
+/* Shipped tactics (sx_squad_add_shipped). Their numbers (weights,
+ * thresholds, skills) are defaults to tune. The rows they read are the
+ * built-in columns. Skill: what a squad needs to know the tactic. */
+#define SX_TACTIC_RUSH        0   /* all attack the target's front; skill 0, low weight */
+#define SX_TACTIC_LINE        1   /* advance side by side, param apart (2 suits cells); skill 64 */
+#define SX_TACTIC_WEDGE       2   /* advance as a wedge, param apart; skill 64 */
+#define SX_TACTIC_COLUMN      3   /* advance one behind the other, param apart; skill 64 */
+#define SX_TACTIC_FLANK       4   /* gather left and right, param from the target (4 suits
+                                   * cells), all attack on the signal (when all arrived,
+                                   * at most 170 ticks); skill 128 */
+#define SX_TACTIC_FLANK_FRONT 5   /* as SX_TACTIC_FLANK, from front, left and right */
+#define SX_TACTIC_AMBUSH      6   /* hold hidden spots, attack when the target comes within 6;
+                                   * skill 128 */
+#define SX_TACTIC_FOCUS       7   /* all attack one target, nearer ones score higher; skill 64 */
+#define SX_TACTIC_ISOLATE     8   /* 1-2 hold between the target and its nearest friend, the rest
+                                   * attack it; skill 192 */
+#define SX_TACTIC_FALL_BACK   9   /* all retreat 8 behind the leader, preferring cover, away from
+                                   * the nearest target or danger area; scores by losses (0 none,
+                                   * full at 4); needs no target; skill 0 */
+
+/* Where a slot's members go (sx_place.kind). Wish points face the target:
+ * the heading runs from the group centre to the target. */
+#define SX_PLACE_NONE    0   /* no place (only for sx_slot.gather: no gather phase) */
+#define SX_PLACE_OFFSET  1   /* x, y, z from the leader in the group's frame (+x toward the
+                              * target, +y to its left), turned by the heading; z unturned */
+#define SX_PLACE_SIDE    2   /* value SX_SIDE_* of the target, sx_slot.dist away from it */
+#define SX_PLACE_BETWEEN 3   /* halfway between the target and its nearest other target;
+                              * alone: like SX_SIDE_FRONT */
+#define SX_PLACE_TAGGED  4   /* a spot with the tag bits value, near the group centre */
+#define SX_PLACE_HERE    5   /* the leader's position */
+
+/* Sides of the target, seen from the group (left with +y pointing up). */
+#define SX_SIDE_FRONT 0
+#define SX_SIDE_LEFT  1
+#define SX_SIDE_RIGHT 2
+#define SX_SIDE_REAR  3
+
+/* What a member is told to do (sx_slot.kind, sx_goal.kind). */
+#define SX_GOAL_MOVE    0
+#define SX_GOAL_HOLD    1   /* go there and stay */
+#define SX_GOAL_ATTACK  2   /* attack the target, from the spot if any */
+#define SX_GOAL_WAIT    3
+#define SX_GOAL_RETREAT 4
+#define SX_GOAL_CUSTOM  5   /* the game's own kind, in custom */
+
+/* When a goal starts (sx_slot.start, sx_goal.start). */
+#define SX_START_NOW         0
+#define SX_START_AFTER_TICKS 1   /* start_ticks after the order arrives */
+#define SX_START_ON_SIGNAL   2   /* when the group signal is given */
+
+/* When the signal fires by itself (sx_tactic_set_trigger). Once the signal
+ * was given, only the tactic's abort rules end the plan. */
+#define SX_TRIGGER_NONE             0   /* never (default) */
+#define SX_TRIGGER_ALL_ARRIVED      1   /* every assigned active member arrived at its gather
+                                         * spot, or value ticks (max_wait) after activation */
+#define SX_TRIGGER_TARGET_IN_RADIUS 2   /* the target within value of the group centre (Euclid:
+                                         * squared distance against value * value) */
+#define SX_TRIGGER_MANUAL           3   /* only by sx_squad_signal */
+
+typedef struct sx_place {
+	uint32_t kind;              /* SX_PLACE_* */
+	int32_t x, y, z;            /* SX_PLACE_OFFSET */
+	uint32_t value;             /* SX_SIDE_* for SX_PLACE_SIDE, tag bits for SX_PLACE_TAGGED */
+} sx_place;
+
+/* One role in a tactic, filled by min .. max members. */
+typedef struct sx_slot {
+	uint32_t roles;             /* bits a member must all have; 0 takes anyone */
+	uint8_t min, max;
+	sx_place place;             /* where they go for their goal */
+	sx_place gather;            /* where they gather first, or SX_PLACE_NONE */
+	uint32_t kind;              /* SX_GOAL_* */
+	uint32_t custom;            /* SX_GOAL_CUSTOM: the game's kind */
+	uint32_t start;             /* SX_START_* */
+	uint32_t start_ticks;       /* SX_START_AFTER_TICKS */
+	uint32_t want_tags;         /* tag bits a spot should have; 0 takes any */
+	int32_t dist;               /* from the target, for SX_PLACE_SIDE and SX_PLACE_BETWEEN */
+} sx_slot;
+
+/* A new, empty tactic: weight SX_ONE = 1.0; squads below min_skill (0 ..
+ * 255) do not know it; needs_target 1: scored once per known target, 0:
+ * once without one. Trigger SX_TRIGGER_NONE. Null if min_skill > 255. */
+sx_tactic *sx_tactic_new(uint32_t weight, uint32_t min_skill, uint32_t needs_target);
+/* Only for a tactic not given to sx_squad_add_tactic. */
+void sx_tactic_free(sx_tactic *tactic);
+/* Slots are filled in the order added. Returns the slot's index; -1 for an
+ * unknown place, side, kind or start, or a place of SX_PLACE_NONE. */
+int32_t sx_tactic_add_slot(sx_tactic *tactic, const sx_slot *slot);
+/* A factor over the scoring row (see SX_IN_*); the factors are multiplied.
+ * Returns 0; -1 for an unknown curve. */
+int32_t sx_tactic_add_consideration(sx_tactic *tactic, const sx_consideration *consideration);
+/* The plan ends (a replan) when row[input] >= at_least; a column beyond the
+ * row never fires. Returns 0. */
+int32_t sx_tactic_add_abort(sx_tactic *tactic, uint32_t input, int32_t at_least);
+/* kind SX_TRIGGER_*, value as given there. Returns 0; -1 for an unknown
+ * kind or a max_wait outside 0 .. 2^32 - 1. */
+int32_t sx_tactic_set_trigger(sx_tactic *tactic, uint32_t kind, int64_t value);
+
+/* -- skill: how well a squad plans and acts -- */
+
+/* What a squad's skill changes, in four levels: skill / 64 (0 weak ..
+ * 3 elite). Times in the game's ticks. */
+typedef struct sx_skill_table {
+	uint32_t pick[4];           /* SX_PICK_*: how the tactic is chosen */
+	uint32_t pick_top[4];       /* how many of the best take part (0 all) */
+	uint32_t think_ticks[4];    /* from making a plan until it is active */
+	uint32_t timing_spread[4];  /* most ticks a member starts late (by seed) */
+	uint32_t hold_bonus[4];     /* SX_ONE = 1.0: a new plan must score more than the active
+	                             * one times 1 + bonus; also the members' discipline */
+	uint32_t give_up_ticks[4];  /* how long a member may postpone its goal */
+	uint8_t spot_rank_error[4]; /* most ranks a spot may be off the best (by seed) */
+} sx_skill_table;
+
+/* The default table: weak squads pick by chance among the top 3, think 34
+ * ticks, miss spots by up to 2 ranks and start up to 17 ticks apart; elite
+ * squads pick the best, think 5 ticks and start together. Returns 0. */
+int32_t sx_skill_table_default(sx_skill_table *out);
+/* A member's discipline: hold_bonus at the level of its own skill (0 ..
+ * 255); table null: the default. Returns it, or -1. */
+int32_t sx_discipline(uint32_t skill, const sx_skill_table *table);
+
+/* -- squad: the leader, its group, memory and plans -- */
+
+/* What sx_squad_check found. */
+#define SX_SQUAD_KEEP    0   /* go on (also while a new plan is being thought out) */
+#define SX_SQUAD_REPLAN  1   /* a new plan was made (pending); its id goes to *plan */
+#define SX_SQUAD_SIGNAL  2   /* the active plan's trigger gave the signal just now */
+#define SX_SQUAD_NO_PLAN 3   /* no plan is active and none could be made */
+
+/* A goal for one member: in sx_squad_orders_due, and the goals of a plan. */
+typedef struct sx_goal {
+	uint32_t kind;              /* SX_GOAL_* */
+	uint32_t custom;            /* SX_GOAL_CUSTOM: the game's kind */
+	int32_t pos[3];             /* where; valid if has_pos (plans always set it) */
+	int32_t then_pos[3];        /* after the gather spot pos, on the signal; valid if has_then_pos */
+	uint32_t target;            /* the target's id; valid if has_target */
+	uint32_t start;             /* SX_START_* */
+	uint32_t start_ticks;       /* SX_START_AFTER_TICKS */
+	uint32_t slot;              /* index of the slot in the tactic */
+	uint32_t plan;              /* the plan's id */
+	uint32_t issued_at;
+	uint32_t start_delay;       /* ticks the member starts late (skill and seed) */
+	uint8_t has_pos;
+	uint8_t unchecked;          /* 1: no free spot, pos is the plain wish point */
+	uint8_t has_then_pos;
+	uint8_t then_unchecked;     /* like unchecked, for then_pos */
+	uint8_t has_target;
+} sx_goal;
+
+typedef struct sx_order {
+	uint32_t member;            /* the member's id */
+	sx_goal goal;
+} sx_order;
+
+typedef struct sx_plan {
+	uint32_t id;                /* each new plan gets a higher one (wrapping) */
+	uint32_t tactic;            /* index from sx_squad_add_shipped / sx_squad_add_tactic */
+	uint32_t target;            /* valid if has_target */
+	uint32_t made_at;
+	uint32_t active_at;         /* made_at + think_ticks of the skill */
+	uint32_t goal_count;        /* goals in the plan, also when fewer were written */
+	uint8_t has_target;
+} sx_plan;
+
+/* A squad for at most group_cap members, memory_cap facts (the oldest goes
+ * when full), area_cap danger areas and inbox_cap waiting reports, measuring
+ * in metric (SX_METRIC_*). Skill 0, the default skill table, target kind 0,
+ * no tactics. Null if a capacity is 0 or the metric is unknown. */
+sx_squad *sx_squad_new(uint32_t group_cap, uint32_t memory_cap, uint32_t area_cap,
+                       uint32_t inbox_cap, int32_t metric);
+void sx_squad_free(sx_squad *squad);
+
+/* Add a member at the end. Returns its index; -1 if the group is full, the
+ * id is already there or the state is unknown. */
+int32_t sx_squad_add_member(sx_squad *squad, const sx_member *member);
+/* Each of these returns 1, or 0 if the id is unknown. remove keeps the
+ * order of the others; suspend takes a member out of play for now (no
+ * goal, not off plan; slot assignment skips it) and resume puts it back;
+ * set_gone marks it dead or lost (when it led, the next active member in
+ * slot order takes over; the plan stays and the loss counts in
+ * SX_IN_LOSSES). */
+int32_t sx_squad_remove_member(sx_squad *squad, uint32_t id);
+int32_t sx_squad_set_pos(sx_squad *squad, uint32_t id, int32_t x, int32_t y, int32_t z);
+int32_t sx_squad_suspend(sx_squad *squad, uint32_t id);
+int32_t sx_squad_resume(sx_squad *squad, uint32_t id);
+int32_t sx_squad_set_gone(sx_squad *squad, uint32_t id);
+int32_t sx_squad_member_count(sx_squad *squad);
+/* Fill *out with the member at index. Return 1, or 0 if there is none. */
+int32_t sx_squad_member_at(sx_squad *squad, uint32_t index, sx_member *out);
+/* Returns 1, or 0 if the id is not in the group. */
+int32_t sx_squad_set_leader(sx_squad *squad, uint32_t id);
+/* The acting leader goes to *id (may be null): the set one while active,
+ * else the first active member of the active plan in slot order, else the
+ * first active member. Returns 1, or 0 if there is none. Orders are timed
+ * from its position. */
+int32_t sx_squad_leader(sx_squad *squad, uint32_t *id);
+/* 0 weak .. 255 elite (default 0). Returns 0; -1 if skill > 255. */
+int32_t sx_squad_set_skill(sx_squad *squad, uint32_t skill);
+int32_t sx_squad_skill(sx_squad *squad);
+/* Returns 0; -1 for an unknown pick (the table is then not changed). */
+int32_t sx_squad_set_skill_table(sx_squad *squad, const sx_skill_table *table);
+int32_t sx_squad_skill_table(sx_squad *squad, sx_skill_table *out);
+/* How orders reach the member: kind SX_CHANNEL_*, a and b as given there
+ * (default: radio 0, 0, at once). The leader always has its own orders at
+ * once. Returns 1, or 0 if the id is not in the group; -1 for an unknown
+ * kind or a radio base outside 0 .. 2^32 - 1. */
+int32_t sx_squad_set_channel(sx_squad *squad, uint32_t id, uint32_t kind, int64_t a, uint32_t b);
+/* The area an SX_REPORT_DANGER adds: its kind, radius, strength, lifetime
+ * and blocking are used; centre, source and data come from the report.
+ * Default: kind 0, radius 2, strength 1, lifetime 255, not blocking.
+ * Return 0. */
+int32_t sx_squad_set_danger_area(sx_squad *squad, const sx_area *area);
+int32_t sx_squad_danger_area(sx_squad *squad, sx_area *out);
+/* The fact kind in the leader's knowledge that counts as a target (default
+ * 0). Returns 0. */
+int32_t sx_squad_set_target_kind(sx_squad *squad, uint32_t kind);
+/* How many of the game's own columns each scoring row has from SX_IN_EXTRA
+ * on (default 0). Returns 0. */
+int32_t sx_squad_set_extra_columns(sx_squad *squad, uint32_t count);
+
+/* The leader's own knowledge and danger areas, for every sx_knowledge_* and
+ * sx_areas_* call (sx_areas_move_cost too). They belong to the squad: do
+ * not free them; they are valid until sx_squad_free. Null for a null
+ * squad. */
+sx_knowledge *sx_squad_knowledge(sx_squad *squad);
+sx_areas *sx_squad_areas(sx_squad *squad);
+/* The leader's own sighting: merged into its knowledge with source
+ * SX_SOURCE_OWN. Returns 1 if a fact was dropped to make room (it goes to
+ * *evicted, which may be null), else 0. */
+int32_t sx_squad_observe(sx_squad *squad, const sx_fact *fact, uint32_t now, sx_fact *evicted);
+/* A member's report (SX_REPORT_*) on its way to the leader, read from
+ * arrive_at on by sx_squad_check and sx_squad_plan; other kinds are dropped
+ * when read. Returns 1, or 0 if the inbox refused it (as sx_inbox_push). */
+int32_t sx_squad_report(sx_squad *squad, const sx_message *msg, uint32_t arrive_at);
+/* The known targets (facts of the target kind, in knowledge order; the
+ * game's extra blocks follow this order): the first cap go to out (may be
+ * null if cap is 0). Returns how many there are. */
+int32_t sx_squad_targets(sx_squad *squad, sx_fact *out, uint32_t cap);
+
+/* Add a shipped tactic (SX_TACTIC_*; param as given there, else ignored).
+ * Returns its index (0, 1, ... in the order added); -1 for an unknown one. */
+int32_t sx_squad_add_shipped(sx_squad *squad, uint32_t which, int32_t param);
+/* Add a tactic from sx_tactic_new. The squad takes it over in any case
+ * (also on an error): do not use or free it again. Returns its index. */
+int32_t sx_squad_add_tactic(sx_squad *squad, sx_tactic *tactic);
+/* Check that every consideration reads a column the rows have (SX_IN_EXTRA
+ * + extra columns, or a decider memory input). Returns 0, or SX_ERROR_PLAN
+ * with the tactic's index and the column to *tactic and *input (each may be
+ * null). plan and check run this first. */
+int32_t sx_squad_validate(sx_squad *squad, uint32_t *tactic, uint32_t *input);
+
+/* Make a new plan and keep it pending; it becomes active think_ticks (from
+ * skill) after now, until then the old one stays active. First a pending
+ * plan whose time has come becomes active, and the reports that have
+ * arrived are read.
+ * Candidates: every tactic the skill knows whose slots can all reach their
+ * minimum at once with the active members (role bits are hard), once per
+ * known target (or once without one). Ties: the earlier tactic, then
+ * target. A candidate whose own abort rule fires on its row scores 0.
+ * extra: extra_count numbers, one block of sx_squad_set_extra_columns
+ * values for the candidates without a target, then one block per known
+ * target in sx_squad_targets order; missing values read 0. spots:
+ * spot_count candidate places (each taken once per phase). seed: the
+ * game's, for the skill's pick, spot errors and timing spread.
+ * Returns 1 (the id goes to *plan, which may be null), 0 if nothing scores
+ * above 0 or no member is active (the pending plan stays), SX_ERROR_PLAN
+ * (see sx_squad_validate), or -1. */
+int32_t sx_squad_plan(sx_squad *squad, uint32_t now, const int32_t *extra,
+                      uint32_t extra_count, const sx_spot *spots, uint32_t spot_count,
+                      uint64_t seed, uint32_t *plan);
+/* Watch the plans at now; call it regularly with the same extra and spots
+ * as for sx_squad_plan (which it calls to replan, with seed). After the
+ * first steps of sx_squad_plan, in this order: a plan is pending: KEEP. No
+ * plan is active: it plans (REPLAN or NO_PLAN). An abort rule of the active
+ * tactic fires: it plans anew (REPLAN; if nothing scores the active plan
+ * and its orders are dropped: NO_PLAN). Another candidate scores more than
+ * the active one times 1 + hold_bonus (not after the signal): REPLAN among
+ * the others. The trigger fires: the signal is given (SIGNAL). Else KEEP.
+ * Returns SX_SQUAD_* (a new plan's id to *plan, which may be null),
+ * SX_ERROR_PLAN, or -1. */
+int32_t sx_squad_check(sx_squad *squad, uint32_t now, const int32_t *extra,
+                       uint32_t extra_count, const sx_spot *spots, uint32_t spot_count,
+                       uint64_t seed, uint32_t *plan);
+/* Move the orders whose arrival time has come into out, in the order they
+ * were sent, at most cap of them (out may be null if cap is 0); the rest
+ * wait for the next call. Orders for members that are no longer active
+ * when they arrive are dropped. When a plan becomes active (in this call or
+ * any other squad call), each of its active members gets its goal: the
+ * leader at once, the others by their channel, measured from where everyone
+ * is then; orders of the old plan still on their way are dropped. Returns
+ * how many were moved. */
+int32_t sx_squad_orders_due(sx_squad *squad, uint32_t now, sx_order *out, uint32_t cap);
+/* Give the signal of the active plan at now, once per plan: every active
+ * member whose goal has a then_pos or starts on signal gets a second order
+ * (pos = then_pos). Their start is lined up: SX_START_AFTER_TICKS of the
+ * time until the slowest of these orders arrives, so all start at the same
+ * tick (start_delay still comes on top). Returns 1, or 0 if no plan is
+ * active or the signal was given. */
+int32_t sx_squad_signal(sx_squad *squad, uint32_t now);
+/* The member reached its first spot (for SX_TRIGGER_ALL_ARRIVED). Returns
+ * 1, or 0 if it has no goal in the active plan. */
+int32_t sx_squad_arrived(sx_squad *squad, uint32_t id, uint32_t now);
+/* Return 1 if the signal of the active plan was given. */
+int32_t sx_squad_signal_given(sx_squad *squad);
+/* The plan made last while it waits, and the plan being carried out: the
+ * plan goes to *out (may be null), its first cap goals as (member, goal)
+ * to goals (may be null if cap is 0), in assignment order. Return 1, or 0
+ * if there is none. */
+int32_t sx_squad_pending_plan(sx_squad *squad, sx_plan *out, sx_order *goals, uint32_t cap);
+int32_t sx_squad_active_plan(sx_squad *squad, sx_plan *out, sx_order *goals, uint32_t cap);
+
+/* -- keeper: one member's goal -- */
+
+/* A member's current goal with its postpone state: once the goal stays
+ * postponed for give_up_ticks it counts as broken (report it with
+ * SX_REPORT_GOAL_BROKEN). While suspended the clock does not run. */
+sx_keeper *sx_keeper_new(void);
+void sx_keeper_free(sx_keeper *keeper);
+/* Take goal (from an order), replacing the old one and the postpone state.
+ * Returns 0; -1 for an unknown kind or start or a slot > 255. */
+int32_t sx_keeper_set(sx_keeper *keeper, const sx_goal *goal, uint32_t now);
+/* Fill *out. Return 1, or 0 without a goal. */
+int32_t sx_keeper_goal(sx_keeper *keeper, sx_goal *out);
+/* Drop the goal and the postpone state. */
+int32_t sx_keeper_clear(sx_keeper *keeper);
+/* The member turns to something else for now (the first time stays). */
+int32_t sx_keeper_postpone(sx_keeper *keeper, uint32_t now);
+/* Back on the goal: the postpone clock is reset. */
+int32_t sx_keeper_resume(sx_keeper *keeper, uint32_t now);
+/* Out of play: never broken. unsuspend restarts a postponed goal's clock at
+ * now. */
+int32_t sx_keeper_suspend(sx_keeper *keeper);
+int32_t sx_keeper_unsuspend(sx_keeper *keeper, uint32_t now);
+/* Return 1 once the goal has been postponed for at least give_up_ticks
+ * (give_up_ticks of the member's skill level), never while suspended. */
+int32_t sx_keeper_broken(sx_keeper *keeper, uint32_t now, uint32_t give_up_ticks);
+/* The member's decider inputs at x, y, z to out (room for 5): has_goal,
+ * dist_to_goal (in metric SX_METRIC_*, Euclid the root; -1 without a goal
+ * or pos), goal_age (saturated), signal_given (0 or 1), discipline (see
+ * sx_discipline). Returns 0; -1 for an unknown metric. */
+int32_t sx_keeper_inputs(sx_keeper *keeper, uint32_t now, int32_t x, int32_t y, int32_t z,
+                         int32_t metric, uint32_t signal_given, uint32_t discipline,
+                         int32_t *out);
 
 #ifdef __cplusplus
 }
