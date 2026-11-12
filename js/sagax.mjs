@@ -753,22 +753,36 @@ function messagesOf(all, n) {
   return list;
 }
 
-/** A handle to a table in the module; every call checks that it is not freed (a freed handle would write to address 0). */
+/** A table a squad lends out (its own knowledge or areas): it lives and dies with the squad. */
+class Lent {
+  constructor(handle, owner) {
+    this.handle = handle;
+    this.owner = owner;
+  }
+}
+
+/**
+ * A handle to a table in the module; every call checks that it is not freed
+ * (a freed handle would write to address 0). A lent table (owner set) is
+ * freed by its owner.
+ */
 class Table {
-  constructor(x, prefix, handle) {
+  constructor(x, prefix, handle, owner = null) {
     if (!handle) throw new RangeError('Sagax: capacity must be at least 1');
     this.x = x;
     this.prefix = prefix;
     this.handle = handle;
+    this.owner = owner;
   }
 
   get h() {
-    if (!this.handle) throw new Error('Sagax: used after free()');
+    if (!this.handle || (this.owner && !this.owner.handle)) throw new Error('Sagax: used after free()');
     return this.handle;
   }
 
-  /** Frees the table. Using it afterwards throws. */
+  /** Frees the table. Using it afterwards throws. A squad's own table is freed with the squad (this does nothing). */
   free() {
+    if (this.owner) return;
     if (this.handle) this.x[`${this.prefix}_free`](this.handle);
     this.handle = 0;
   }
@@ -786,6 +800,10 @@ class Table {
  */
 export class Knowledge extends Table {
   constructor(x, capacity, evict = 'oldest') {
+    if (capacity instanceof Lent) {
+      super(x, 'sx_knowledge', capacity.handle, capacity.owner);
+      return;
+    }
     const e = choice(EVICT, evict, 'evict');
     super(x, 'sx_knowledge', x.sx_knowledge_new(capacityOf(capacity), e));
   }
@@ -1009,6 +1027,10 @@ function cellsScratch(x, cell, start, goal) {
  */
 export class Areas extends Table {
   constructor(x, capacity) {
+    if (capacity instanceof Lent) {
+      super(x, 'sx_areas', capacity.handle, capacity.owner);
+      return;
+    }
     super(x, 'sx_areas', x.sx_areas_new(capacityOf(capacity)));
   }
 
@@ -1387,5 +1409,715 @@ Object.assign(Sagax.prototype, {
     const ptr = this.x.sx_scratch(offsets.length);
     new Int32Array(this.x.memory.buffer, ptr, Math.max(offsets.length, 1)).set(offsets.map(i32));
     return this.x.sx_sweep_heading(i32(base), u32(elapsed), u32(stepTicks), offsets.length);
+  },
+});
+
+// ---- group tactics ------------------------------------------------------------
+//
+// A squad leader with its own memory plans for a group (Squad); a member
+// keeps its goal (Keeper); gather picks who joins; tactics are data (Tactic,
+// lib.tactics). Same rules as the Rust and C versions: integer only,
+// deterministic, seeds from the game, ties to the lower index or id. Times
+// are the game's own u32 count (0 .. 2^32 - 1, checked); ages wrap.
+//
+// A goal (in orders and plans; member is null in a Keeper):
+//   {member, kind, custom, pos, unchecked, thenPos, thenUnchecked, target,
+//    start: {kind: 'now'|'after'|'signal', ticks}, slot, plan, issuedAt, startDelay}
+// kind: 'move', 'hold', 'attack', 'wait', 'retreat' or 'custom' (the game's
+// kind in custom); pos, thenPos and target may be null.
+
+/** Columns of the scoring row, role bits, spot tags and report kinds. */
+export const SQUAD = {
+  inLosses: 0, // members marked gone
+  inOffPlan: 1, // active members whose goal of the active plan broke
+  inTargetAge: 2, // ticks since the target was seen
+  inTargetDist: 3, // group centre to target
+  inRanged: 4, // active members with roleRanged
+  inArea: 5, // active members with roleArea
+  inPlanAge: 6, // ticks since the active plan became active (its own row only)
+  inExtra: 7, // first column of the game's own (setExtraColumns)
+  roleRanged: 1,
+  roleArea: 2,
+  tagCover: 1,
+  tagHigh: 2,
+  tagHidden: 4,
+  tagChoke: 8,
+  reportGoalBroken: 1, // sender: the member; data: the plan id of its goal
+  reportEnemy: 2, // subject, pos, seenAt, strength, data: a target (told)
+  reportDanger: 3, // pos: the danger's centre; the shooter at x = strength, y = data
+};
+
+const ERROR_PLAN = -3;
+const MEMBER_STATE = { active: 0, suspended: 1, gone: 2 };
+const MEMBER_STATES = Object.keys(MEMBER_STATE);
+const GOAL_KIND = { move: 0, hold: 1, attack: 2, wait: 3, retreat: 4, custom: 5 };
+const GOAL_KINDS = Object.keys(GOAL_KIND);
+const START = { now: 0, after: 1, signal: 2 };
+const STARTS = Object.keys(START);
+const PLACE = { none: 0, offset: 1, side: 2, between: 3, tagged: 4, here: 5 };
+const SIDE = { front: 0, left: 1, right: 2, rear: 3 };
+const TRIGGER = { none: 0, allArrived: 1, targetInRadius: 2, manual: 3 };
+const CHANNEL = { none: 0, shout: 1, radio: 2 };
+const SHAPE = { line: 1, wedge: 2, column: 3 };
+const PICKS = Object.keys(PICK);
+const SQUAD_STATUS = ['keep', 'replan', 'signal', 'noPlan'];
+const MEMBER_SIZE = 7;
+const GOAL_SIZE = 20;
+const ORDER_SIZE = 21;
+const PLAN_SIZE = 7;
+const SKILL_SIZE = 28;
+const I32_MIN = -0x80000000;
+const I32_MAX = 0x7fffffff;
+
+/** A tactic reads a column the scoring rows do not have (see Squad.validate). */
+export class PlanError extends RangeError {
+  constructor(tactic, input) {
+    super(`Sagax: tactic ${tactic} reads column ${input}, beyond the row`);
+    this.tactic = tactic;
+    this.input = input;
+  }
+}
+
+/** An integer from lo to hi, else RangeError. */
+function intIn(v, lo, hi, what) {
+  if (!Number.isInteger(v) || v < lo || v > hi) throw new RangeError(`Sagax: ${what} must be an integer from ${lo} to ${hi}, not ${String(v)}`);
+  return v;
+}
+const u32Of = (v, what) => intIn(v, 0, ALL, what);
+const i32Of = (v, what) => intIn(v, I32_MIN, I32_MAX, what);
+const u8Of = (v, what) => intIn(v, 0, 255, what);
+const timeOf = (v) => u32Of(v, 'time');
+const safeOf = (v, what) => intIn(v, Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, what);
+
+/** [x, y, z] as checked i32s. */
+function posOf(p, what = 'pos') {
+  if (!Array.isArray(p) || p.length !== 3) throw new RangeError(`Sagax: ${what} must be [x, y, z]`);
+  return p.map((c) => i32Of(c, what));
+}
+
+/** Four numbers of a skill table row, checked. */
+function levels(list, check, what) {
+  if (!Array.isArray(list) || list.length !== 4) throw new RangeError(`Sagax: ${what} must have 4 levels`);
+  return list.map((v) => check(v, what));
+}
+
+/** Writes integers (u32 as their bit pattern) to the scratch buffer. */
+function putScratch(x, values) {
+  const ptr = x.sx_scratch(values.length);
+  new Int32Array(x.memory.buffer, ptr, values.length).set(values);
+  return ptr;
+}
+
+/** Reads count integers at ptr (a view dies when the memory grows). */
+function takeInts(x, ptr, count) {
+  return Array.from(new Int32Array(x.memory.buffer, ptr, count));
+}
+
+function memberValues(m) {
+  return [u32Of(m.id, 'id'), ...posOf(m.pos), u32Of(m.roles ?? 0, 'roles'), u8Of(m.skill ?? 0, 'skill'), choice(MEMBER_STATE, m.state ?? 'active', 'state')];
+}
+
+function memberOf(r) {
+  return { id: u32(r[0]), pos: [r[1], r[2], r[3]], roles: u32(r[4]), skill: r[5], state: MEMBER_STATES[r[6]] };
+}
+
+function startValues(start = { kind: 'now' }) {
+  const kind = choice(START, start?.kind, 'start');
+  return [kind, kind === START.after ? u32Of(start.ticks ?? 0, 'start ticks') : 0];
+}
+
+function startOf(code, ticks) {
+  return { kind: STARTS[code], ticks: u32(ticks) };
+}
+
+function goalValues(g) {
+  const pos = g.pos == null ? null : posOf(g.pos);
+  const then = g.thenPos == null ? null : posOf(g.thenPos, 'thenPos');
+  const kind = choice(GOAL_KIND, g.kind, 'goal kind');
+  return [
+    kind, kind === GOAL_KIND.custom ? u32Of(g.custom ?? 0, 'custom') : 0,
+    ...(pos ?? [0, 0, 0]), ...(then ?? [0, 0, 0]),
+    g.target == null ? 0 : u32Of(g.target, 'target'),
+    ...startValues(g.start),
+    u8Of(g.slot ?? 0, 'slot'), u32Of(g.plan ?? 0, 'plan'), timeOf(g.issuedAt ?? 0), u32Of(g.startDelay ?? 0, 'startDelay'),
+    pos ? 1 : 0, g.unchecked ? 1 : 0, then ? 1 : 0, g.thenUnchecked ? 1 : 0, g.target == null ? 0 : 1,
+  ].map(i32);
+}
+
+function goalOf(r, member = null) {
+  return {
+    member,
+    kind: GOAL_KINDS[r[0]],
+    custom: u32(r[1]),
+    pos: r[15] ? [r[2], r[3], r[4]] : null,
+    unchecked: r[16] !== 0,
+    thenPos: r[17] ? [r[5], r[6], r[7]] : null,
+    thenUnchecked: r[18] !== 0,
+    target: r[19] ? u32(r[8]) : null,
+    start: startOf(r[9], r[10]),
+    slot: r[11],
+    plan: u32(r[12]),
+    issuedAt: u32(r[13]),
+    startDelay: u32(r[14]),
+  };
+}
+
+/** Orders out of a list of records (member, then a goal). */
+function ordersOf(all, n, from = 0) {
+  const list = [];
+  for (let i = 0; i < n; i++) {
+    const at = from + i * ORDER_SIZE;
+    list.push(goalOf(all.slice(at + 1, at + ORDER_SIZE), u32(all[at])));
+  }
+  return list;
+}
+
+function skillValues(t) {
+  const pick = levels(t.pick, (p, what) => choice(PICK, p, what), 'pick');
+  return [
+    ...pick,
+    ...levels(t.pickTop, u32Of, 'pickTop'),
+    ...levels(t.thinkTicks, u32Of, 'thinkTicks'),
+    ...levels(t.timingSpread, u32Of, 'timingSpread'),
+    ...levels(t.holdBonus, u32Of, 'holdBonus'),
+    ...levels(t.giveUpTicks, u32Of, 'giveUpTicks'),
+    ...levels(t.spotRankError, u8Of, 'spotRankError'),
+  ].map(i32);
+}
+
+function skillOf(r) {
+  const row = (i) => r.slice(i * 4, i * 4 + 4).map(u32);
+  return {
+    pick: row(0).map((p) => PICKS[p]),
+    pickTop: row(1),
+    thinkTicks: row(2),
+    timingSpread: row(3),
+    holdBonus: row(4),
+    giveUpTicks: row(5),
+    spotRankError: row(6),
+  };
+}
+
+/** A place {kind, pos | side | tags} as 5 numbers; 'none' only where allowed. */
+function placeValues(p, allowNone) {
+  const kind = choice(PLACE, p?.kind, 'place');
+  if (kind === PLACE.none && !allowNone) throw new RangeError('Sagax: a slot needs a place');
+  const pos = kind === PLACE.offset ? posOf(p.pos, 'offset') : [0, 0, 0];
+  let value = 0;
+  if (kind === PLACE.side) value = choice(SIDE, p.side, 'side');
+  if (kind === PLACE.tagged) value = u32Of(p.tags, 'tags');
+  return [kind, ...pos, value];
+}
+
+function slotValues(s) {
+  const kind = choice(GOAL_KIND, s.kind ?? 'move', 'goal kind');
+  return [
+    u32Of(s.roles ?? 0, 'roles'), u8Of(s.min ?? 1, 'min'), u8Of(s.max ?? 1, 'max'),
+    ...placeValues(s.place, false), ...placeValues(s.gather ?? { kind: 'none' }, true),
+    kind, kind === GOAL_KIND.custom ? u32Of(s.custom ?? 0, 'custom') : 0,
+    ...startValues(s.start), u32Of(s.wantTags ?? 0, 'wantTags'), i32Of(s.dist ?? 0, 'dist'),
+  ].map(i32);
+}
+
+/** The seed as two u32 halves. */
+function seedOf(seed) {
+  if (!Number.isSafeInteger(seed) || seed < 0) throw new RangeError('Sagax: seed must be a safe integer, 0 or more');
+  return [seed % 0x100000000, Math.floor(seed / 0x100000000)];
+}
+
+/**
+ * A tactic as data: slots, considerations over the scoring row, abort rules
+ * and a trigger. Made by lib.tactic(...) or lib.tactics.*(); a squad takes
+ * it over in addTactic (the tactic cannot be used afterwards).
+ *
+ *   const t = lib.tactic({ weight: 0.5, minSkill: 64 });
+ *   t.addSlot({ min: 1, max: 3, place: { kind: 'side', side: 'left' }, dist: 4, kind: 'attack' });
+ *   t.addConsideration({ input: SQUAD.inTargetDist, curve: 'inverse', min: 0, max: 50 });
+ *   t.addAbort(SQUAD.inLosses, 2);
+ *   t.setTrigger({ kind: 'allArrived', maxWait: 170 });
+ */
+export class Tactic extends Table {
+  constructor(x, handle) {
+    super(x, 'sx_tactic', handle);
+  }
+
+  /**
+   * Adds a slot and returns its index. A slot: {roles = 0, min = 1, max = 1,
+   * place, gather = {kind: 'none'}, kind = 'move', custom = 0,
+   * start = {kind: 'now'}, wantTags = 0, dist = 0}. A place: {kind: 'offset',
+   * pos: [x, y, z]} (from the leader, +x toward the target, +y to its left),
+   * {kind: 'side', side: 'front'|'left'|'right'|'rear'}, {kind: 'between'},
+   * {kind: 'tagged', tags}, {kind: 'here'}; gather may also be {kind: 'none'}.
+   */
+  addSlot(slot) {
+    const values = slotValues(slot);
+    const h = this.h;
+    putScratch(this.x, values);
+    const r = this.x.sx_tactic_add_slot(h);
+    if (r < 0) throw new RangeError('Sagax: bad slot');
+    return r;
+  }
+
+  /** A factor {input (a SQUAD.in* column), curve, min, max} over the scoring row; the factors are multiplied. */
+  addConsideration({ input, curve = 'linear', min = 0, max = ONE }) {
+    const k = choice(CURVE, curve, 'curve');
+    this.x.sx_tactic_add_consideration(this.h, u32Of(input, 'input'), k, i32Of(min, 'min'), i32Of(max, 'max'));
+  }
+
+  /** The plan ends (a replan) when row[input] >= atLeast. */
+  addAbort(input, atLeast) {
+    this.x.sx_tactic_add_abort(this.h, u32Of(input, 'input'), i32Of(atLeast, 'atLeast'));
+  }
+
+  /**
+   * When the signal fires by itself: {kind: 'none'} (default), {kind:
+   * 'allArrived', maxWait} (every assigned active member at its gather spot,
+   * or maxWait ticks after activation), {kind: 'targetInRadius', radius} or
+   * {kind: 'manual'} (only by Squad.signal).
+   */
+  setTrigger(trigger) {
+    const kind = choice(TRIGGER, trigger?.kind, 'trigger');
+    let value = 0;
+    if (kind === TRIGGER.allArrived) value = u32Of(trigger.maxWait, 'maxWait');
+    if (kind === TRIGGER.targetInRadius) value = safeOf(trigger.radius, 'radius');
+    this.x.sx_tactic_set_trigger(this.h, kind, value);
+  }
+}
+
+/**
+ * A squad leader with its own memory, planning for a group.
+ *
+ *   const sq = lib.squad({ groupCap: 8, memoryCap: 16, areaCap: 4, inboxCap: 8, metric: 'chebyshev' });
+ *   sq.addMember({ id: 1, pos: [0, 0, 0] }); sq.setLeader(1); sq.setTargetKind(ENEMY);
+ *   sq.addTactic(lib.tactics.flank(3, 4)); sq.setSkill(192);
+ *   sq.observe({ subject: 9, kind: ENEMY, pos: [20, 0, 0], seenAt: now }, now);
+ *   const { status, plan } = sq.check(now, { spots, seed });   // every tick
+ *   for (const order of sq.ordersDue(now)) give(order);        // goals, see above
+ *
+ * Targets come only from the squad's own knowledge (observe, enemy reports).
+ */
+export class Squad extends Table {
+  #knowledge = null;
+  #areas = null;
+
+  constructor(x, { groupCap, memoryCap, areaCap, inboxCap, metric = 'euclid' }) {
+    const caps = [groupCap, memoryCap, areaCap, inboxCap].map(capacityOf);
+    const m = choice(METRIC, metric, 'metric');
+    super(x, 'sx_squad', x.sx_squad_new(...caps, m));
+  }
+
+  #out(count) {
+    return takeInts(this.x, this.x.sx_squad_out(this.h), count);
+  }
+
+  /** Throws PlanError for ERROR_PLAN, RangeError for other errors. */
+  #checked(r) {
+    if (r === ERROR_PLAN) {
+      const [tactic, input] = this.#out(2);
+      throw new PlanError(tactic, u32(input));
+    }
+    if (r < 0) throw new RangeError('Sagax: bad squad arguments');
+    return r;
+  }
+
+  /** Adds a member {id, pos, roles = 0, skill = 0, state = 'active'|'suspended'|'gone'} at the end. Returns its index, or null if the group is full or the id is there. */
+  addMember(member) {
+    const values = memberValues(member);
+    const h = this.h;
+    putScratch(this.x, values);
+    const r = this.x.sx_squad_add_member(h);
+    if (r === -1) throw new RangeError('Sagax: bad member');
+    return r >= 0 ? r : null;
+  }
+
+  /** Removes a member (the order of the others stays). False if unknown. */
+  removeMember(id) {
+    return this.x.sx_squad_remove_member(this.h, u32Of(id, 'id')) === 1;
+  }
+
+  /** Sets a member's position. False if unknown. */
+  setPos(id, pos) {
+    const [px, py, pz] = posOf(pos);
+    return this.x.sx_squad_set_pos(this.h, u32Of(id, 'id'), px, py, pz) === 1;
+  }
+
+  /** Takes a member out of play for now (no goal, not off plan). False if unknown. */
+  suspend(id) {
+    return this.x.sx_squad_suspend(this.h, u32Of(id, 'id')) === 1;
+  }
+
+  /** Puts a suspended member back. False if unknown. */
+  resume(id) {
+    return this.x.sx_squad_resume(this.h, u32Of(id, 'id')) === 1;
+  }
+
+  /** Marks a member dead or lost (counts in SQUAD.inLosses). False if unknown. */
+  setGone(id) {
+    return this.x.sx_squad_set_gone(this.h, u32Of(id, 'id')) === 1;
+  }
+
+  /** The members [{id, pos, roles, skill, state}] in order. */
+  members() {
+    const n = this.x.sx_squad_members(this.h);
+    const all = this.#out(n * MEMBER_SIZE);
+    const list = [];
+    for (let i = 0; i < n; i++) list.push(memberOf(all.slice(i * MEMBER_SIZE, (i + 1) * MEMBER_SIZE)));
+    return list;
+  }
+
+  /** Sets the leader. False if the id is not in the group. */
+  setLeader(id) {
+    return this.x.sx_squad_set_leader(this.h, u32Of(id, 'id')) === 1;
+  }
+
+  /** The acting leader's id (the set one while active, else the first active member of the plan, else the first active member), or null. */
+  leader() {
+    return this.x.sx_squad_leader(this.h) === 1 ? u32(this.#out(1)[0]) : null;
+  }
+
+  /** 0 weak .. 255 elite (default 0). */
+  setSkill(skill) {
+    this.x.sx_squad_set_skill(this.h, u8Of(skill, 'skill'));
+  }
+
+  skill() {
+    return this.x.sx_squad_skill(this.h);
+  }
+
+  /** Sets the skill table (see lib.skillTable for its shape). */
+  setSkillTable(table) {
+    const values = skillValues(table);
+    const h = this.h;
+    putScratch(this.x, values);
+    this.#checked(this.x.sx_squad_set_skill_table(h));
+  }
+
+  skillTable() {
+    this.x.sx_squad_skill_table(this.h);
+    return skillOf(this.#out(SKILL_SIZE));
+  }
+
+  /**
+   * How orders reach a member: {kind: 'none'}, {kind: 'shout', range} (1 tick
+   * per unit, within range) or {kind: 'radio', base = 0, perUnit = 0}
+   * (default: radio at once). False if the id is not in the group.
+   */
+  setChannel(id, channel) {
+    const kind = choice(CHANNEL, channel?.kind, 'channel');
+    let a = 0;
+    let b = 0;
+    if (kind === CHANNEL.shout) a = safeOf(channel.range, 'range');
+    if (kind === CHANNEL.radio) {
+      a = u32Of(channel.base ?? 0, 'base');
+      b = u32Of(channel.perUnit ?? 0, 'perUnit');
+    }
+    return this.#checked(this.x.sx_squad_set_channel(this.h, u32Of(id, 'id'), kind, a, b)) === 1;
+  }
+
+  /** The area a danger report adds (kind, radius, strength, lifetime, blocking are used). */
+  setDangerArea(area) {
+    const h = this.h;
+    putScratch(this.x, areaValues(area));
+    this.x.sx_squad_set_danger_area(h);
+  }
+
+  dangerArea() {
+    this.x.sx_squad_danger_area(this.h);
+    return areaOf(this.#out(AREA_SIZE).map(u32));
+  }
+
+  /** The fact kind in the squad's knowledge that counts as a target (default 0). */
+  setTargetKind(kind) {
+    this.x.sx_squad_set_target_kind(this.h, u32Of(kind, 'kind'));
+  }
+
+  /** How many of the game's own columns each scoring row has from SQUAD.inExtra on (default 0). */
+  setExtraColumns(count) {
+    this.x.sx_squad_set_extra_columns(this.h, u32Of(count, 'count'));
+  }
+
+  /** The squad's own knowledge (a Knowledge; it is freed with the squad). */
+  knowledge() {
+    this.#knowledge ??= new Knowledge(this.x, new Lent(this.x.sx_squad_knowledge(this.h), this));
+    return this.#knowledge;
+  }
+
+  /** The squad's own danger areas (an Areas; freed with the squad). */
+  areas() {
+    this.#areas ??= new Areas(this.x, new Lent(this.x.sx_squad_areas(this.h), this));
+    return this.#areas;
+  }
+
+  /** The leader's own sighting, merged with source 0 (own). Returns the evicted fact, or null. */
+  observe(fact, now) {
+    const t = timeOf(now);
+    const h = this.h;
+    putScratch(this.x, factValues(fact));
+    return this.x.sx_squad_observe(h, t) === 1 ? factOf(this.#out(FACT_SIZE).map(u32)) : null;
+  }
+
+  /** A member's report (a message, kind SQUAD.report*), read from arriveAt on. False if the inbox refused it. */
+  report(message, arriveAt) {
+    const t = timeOf(arriveAt);
+    const h = this.h;
+    putScratch(this.x, messageValues(message));
+    return this.x.sx_squad_report(h, t) === 1;
+  }
+
+  /** The known targets (facts of the target kind, in knowledge order). */
+  targets() {
+    const n = this.x.sx_squad_targets(this.h);
+    const all = this.#out(n * FACT_SIZE).map(u32);
+    const list = [];
+    for (let i = 0; i < n; i++) list.push(factOf(all.slice(i * FACT_SIZE, (i + 1) * FACT_SIZE)));
+    return list;
+  }
+
+  /** Takes a tactic over (it cannot be used afterwards). Returns its index. */
+  addTactic(tactic) {
+    if (!(tactic instanceof Tactic)) throw new TypeError('Sagax: addTactic takes a Tactic');
+    const t = tactic.h;
+    const r = this.x.sx_squad_add_tactic(this.h, t);
+    tactic.handle = 0;
+    return this.#checked(r);
+  }
+
+  /** null if every consideration reads a column the rows have, else {tactic, input}. */
+  validate() {
+    if (this.x.sx_squad_validate(this.h) === 0) return null;
+    const [tactic, input] = this.#out(2);
+    return { tactic, input: u32(input) };
+  }
+
+  #run(call, now, { extra = [], spots = [], seed = 0 } = {}) {
+    const t = timeOf(now);
+    const [low, high] = seedOf(seed);
+    const values = [
+      ...extra.map((v) => i32Of(v, 'extra')),
+      ...spots.flatMap((s) => [...posOf(s.pos, 'spot'), i32(u32Of(s.tags ?? 0, 'tags'))]),
+    ];
+    const h = this.h;
+    putScratch(this.x, values);
+    return this.#checked(this.x[call](h, t, extra.length, spots.length, low, high));
+  }
+
+  /**
+   * Makes a new plan, pending until the skill's think time is over. extra:
+   * the game's columns (one block for the candidates without a target, then
+   * one per target in targets() order); spots: [{pos, tags}] to pick from;
+   * seed: the game's. Returns the plan's id, or null if nothing scores.
+   * Throws PlanError if a tactic reads a column the rows do not have.
+   */
+  plan(now, options) {
+    return this.#run('sx_squad_plan', now, options) === 1 ? u32(this.#out(1)[0]) : null;
+  }
+
+  /**
+   * Watches the plans; call it regularly with the same options as plan.
+   * Returns {status: 'keep'|'replan'|'signal'|'noPlan', plan: the new id or null}.
+   */
+  check(now, options) {
+    const r = this.#run('sx_squad_check', now, options);
+    return { status: SQUAD_STATUS[r], plan: r === 1 ? u32(this.#out(1)[0]) : null };
+  }
+
+  /** Takes (at most max of) the orders whose arrival time has come, in the order they were sent. */
+  ordersDue(now, max = ALL) {
+    const n = this.x.sx_squad_orders_due(this.h, timeOf(now), u32Of(max, 'max'));
+    return ordersOf(this.#out(n * ORDER_SIZE), n);
+  }
+
+  /** Gives the signal of the active plan, once per plan. False if no plan is active or it was given. */
+  signal(now) {
+    return this.x.sx_squad_signal(this.h, timeOf(now)) === 1;
+  }
+
+  /** True if the signal of the active plan was given. */
+  signalGiven() {
+    return this.x.sx_squad_signal_given(this.h) === 1;
+  }
+
+  /** The member reached its first spot (for the 'allArrived' trigger). False if it has no goal in the active plan. */
+  arrived(id, now) {
+    return this.x.sx_squad_arrived(this.h, u32Of(id, 'id'), timeOf(now)) === 1;
+  }
+
+  #plan(call) {
+    if (this.x[call](this.h) === 0) return null;
+    const head = this.#out(PLAN_SIZE);
+    const all = this.#out(PLAN_SIZE + head[5] * ORDER_SIZE);
+    return {
+      id: u32(head[0]),
+      tactic: head[1],
+      target: head[6] ? u32(head[2]) : null,
+      madeAt: u32(head[3]),
+      activeAt: u32(head[4]),
+      goals: ordersOf(all, head[5], PLAN_SIZE),
+    };
+  }
+
+  /** The plan made last while it waits: {id, tactic, target, madeAt, activeAt, goals}, or null. */
+  pendingPlan() {
+    return this.#plan('sx_squad_pending_plan');
+  }
+
+  /** The plan being carried out, or null. */
+  activePlan() {
+    return this.#plan('sx_squad_active_plan');
+  }
+}
+
+/**
+ * One member's goal with its postpone state: once the goal stays postponed
+ * for giveUpTicks it counts as broken (report it with SQUAD.reportGoalBroken).
+ * While suspended the clock does not run.
+ */
+export class Keeper extends Table {
+  constructor(x) {
+    super(x, 'sx_keeper', x.sx_keeper_new());
+  }
+
+  #out(count) {
+    return takeInts(this.x, this.x.sx_keeper_out(this.h), count);
+  }
+
+  /** Takes a goal (from an order), replacing the old one and the postpone state. */
+  set(goal, now) {
+    const values = goalValues(goal);
+    const t = timeOf(now);
+    const h = this.h;
+    putScratch(this.x, values);
+    if (this.x.sx_keeper_set(h, t) !== 0) throw new RangeError('Sagax: bad goal');
+  }
+
+  /** The goal (member null), or null. */
+  goal() {
+    return this.x.sx_keeper_goal(this.h) === 1 ? goalOf(this.#out(GOAL_SIZE)) : null;
+  }
+
+  /** Drops the goal and the postpone state. */
+  clear() {
+    this.x.sx_keeper_clear(this.h);
+  }
+
+  /** The member turns to something else for now (the first time stays). */
+  postpone(now) {
+    this.x.sx_keeper_postpone(this.h, timeOf(now));
+  }
+
+  /** Back on the goal: the postpone clock is reset. */
+  resume(now) {
+    this.x.sx_keeper_resume(this.h, timeOf(now));
+  }
+
+  /** Out of play: never broken. */
+  suspend() {
+    this.x.sx_keeper_suspend(this.h);
+  }
+
+  /** Back in play; a postponed goal's clock restarts at now. */
+  unsuspend(now) {
+    this.x.sx_keeper_unsuspend(this.h, timeOf(now));
+  }
+
+  /** True once the goal has been postponed for at least giveUpTicks (wrap-safe), never while suspended. */
+  broken(now, giveUpTicks) {
+    return this.x.sx_keeper_broken(this.h, timeOf(now), u32Of(giveUpTicks, 'giveUpTicks')) === 1;
+  }
+
+  /**
+   * The member's decider inputs at pos: [hasGoal, distToGoal (-1 without a
+   * goal or pos; Euclid: the root), goalAge, signalGiven, discipline].
+   */
+  inputs(now, pos, metric, signalGiven, discipline) {
+    const [px, py, pz] = posOf(pos);
+    const m = choice(METRIC, metric, 'metric');
+    this.x.sx_keeper_inputs(this.h, timeOf(now), px, py, pz, m, signalGiven ? 1 : 0, u32Of(discipline, 'discipline'));
+    return this.#out(5);
+  }
+}
+
+/** A shipped tactic as a Tactic. */
+function shipped(x, which, param = 0) {
+  return new Tactic(x, x.sx_tactic_shipped(which, i32Of(param, 'param')));
+}
+
+Object.assign(Sagax.prototype, {
+  /** A squad {groupCap, memoryCap, areaCap, inboxCap, metric = 'euclid'}; see Squad. */
+  squad(options) {
+    return new Squad(this.x, options);
+  },
+  /** A member's goal keeper; see Keeper. */
+  keeper() {
+    return new Keeper(this.x);
+  },
+  /** An empty tactic {weight = 1 (1.0), minSkill = 0 (0 .. 255), needsTarget = true}; see Tactic. */
+  tactic({ weight = 1, minSkill = 0, needsTarget = true } = {}) {
+    return new Tactic(this.x, this.x.sx_tactic_new(fixed(weight, 'weight'), u8Of(minSkill, 'minSkill'), needsTarget ? 1 : 0));
+  },
+  /** The default skill table {pick, pickTop, thinkTicks, timingSpread, holdBonus, giveUpTicks, spotRankError}, four levels each (skill / 64). */
+  skillTable() {
+    const ptr = this.x.sx_scratch(SKILL_SIZE);
+    this.x.sx_skill_table_default();
+    return skillOf(takeInts(this.x, ptr, SKILL_SIZE));
+  },
+  /** A member's discipline: holdBonus at the level of its own skill (table: the default). */
+  discipline(skill, table) {
+    const s = u8Of(skill, 'skill');
+    if (!table) return this.x.sx_discipline(s, 0);
+    putScratch(this.x, skillValues(table));
+    const r = this.x.sx_discipline(s, 1);
+    if (r < 0) throw new RangeError('Sagax: bad skill table');
+    return u32(r);
+  },
+  /**
+   * Picks who joins: gather([x, y], faction, radius, candidates, {metric = 'euclid', freeOnly = false, max}).
+   * candidates: [{id, faction, pos, free}]. Within radius (inclusive; Euclid: squared
+   * compare), nearest first, ties to the lower id; a negative radius reaches nobody.
+   * Only x and y count. Returns the ids.
+   */
+  gather(origin, faction, radius, candidates, { metric = 'euclid', freeOnly = false, max = candidates.length } = {}) {
+    const [ox, oy] = posOf([...origin.slice(0, 2), 0], 'origin');
+    const m = choice(METRIC, metric, 'metric');
+    const values = candidates.flatMap((c) => [u32Of(c.id, 'id'), u32Of(c.faction, 'faction'), ...posOf(c.pos), c.free ? 1 : 0].map(i32));
+    const r = safeOf(radius, 'radius');
+    const ptr = putScratch(this.x, values);
+    const n = this.x.sx_gather(ox, oy, u32Of(faction, 'faction'), r, m, freeOnly ? 1 : 0, candidates.length, u32Of(max, 'max'));
+    if (n < 0) throw new RangeError('Sagax: bad gather arguments');
+    return takeInts(this.x, ptr, n).map(u32);
+  },
+  /**
+   * The extra cost of the move from -> to for a path search (only the cell
+   * moved to counts): null if a blocking area holds it but neither start nor
+   * goal, else the cost as for Areas.cost.
+   */
+  areasMoveCost(areas, from, to, start, goal) {
+    if (!(areas instanceof Areas)) throw new TypeError('Sagax: areasMoveCost takes an Areas');
+    const cells = [from, to, start, goal].flatMap((c) => posOf(c, 'cell'));
+    const h = areas.h;
+    const ptr = putScratch(this.x, cells);
+    const r = this.x.sx_areas_move_cost(h);
+    if (r < 0) throw new RangeError('Sagax: bad areas');
+    return r === 1 ? u32(takeInts(this.x, ptr, 1)[0]) : null;
+  },
+});
+
+Object.defineProperty(Sagax.prototype, 'tactics', {
+  /**
+   * The shipped tactics as Tactic objects (numbers are defaults to tune):
+   * rush(), formation('line'|'wedge'|'column', spacing), flank(sides 2|3,
+   * dist), ambush(), focus(), isolate(), fallBack().
+   */
+  get() {
+    const x = this.x;
+    return {
+      rush: () => shipped(x, 0),
+      formation: (shape, spacing) => shipped(x, choice(SHAPE, shape, 'shape'), spacing),
+      flank: (sides, dist) => shipped(x, u8Of(sides, 'sides') >= 3 ? 5 : 4, dist),
+      ambush: () => shipped(x, 6),
+      focus: () => shipped(x, 7),
+      isolate: () => shipped(x, 8),
+      fallBack: () => shipped(x, 9),
+    };
   },
 });

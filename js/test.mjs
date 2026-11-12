@@ -3,7 +3,7 @@
 
 import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
-import { MEMORY, ONE, loadSagax, HEX, FORMATION, Progress, Interval, Alertness } from './sagax.mjs';
+import { MEMORY, ONE, SQUAD, loadSagax, HEX, FORMATION, Progress, Interval, Alertness } from './sagax.mjs';
 
 const wasm = await readFile(new URL('../target/wasm32-unknown-unknown/release/sagax_wasm.wasm', import.meta.url));
 console.log(`wasm size ${(wasm.length / 1024).toFixed(0)} KB`);
@@ -1104,6 +1104,361 @@ test('records and lists are copies; a freed table cannot be used', () => {
   }
   assert.throws(() => o.pending(), /free/);
   assert.throws(() => k.learn(fact(1, 1, 0), 0), /free/);
+});
+
+// ---- group tactics ------------------------------------------------------------
+
+const ENEMY = 1;
+const enemy = (subject, x, y, seenAt = 0) => ({ subject, kind: ENEMY, pos: [x, y, 0], seenAt });
+
+/** A squad of members [id, x, y, roles?] (the first leads) that sees enemies of kind ENEMY; the others hear by radio (2 ticks plus 1 per unit). */
+function squadOf(metric, members, { radio = true } = {}) {
+  const sq = lib.squad({ groupCap: 8, memoryCap: 8, areaCap: 4, inboxCap: 8, metric });
+  members.forEach(([id, x, y, roles = 0], i) => assert.equal(sq.addMember({ id, pos: [x, y, 0], roles }), i));
+  assert.equal(sq.setLeader(members[0][0]), true);
+  if (radio) for (const [id] of members.slice(1)) assert.equal(sq.setChannel(id, { kind: 'radio', base: 2, perUnit: 1 }), true);
+  sq.setTargetKind(ENEMY);
+  return sq;
+}
+
+test('gather: nearest free of the faction, ties to the lower id, validated', () => {
+  const near = (id, faction, x, y, free = true) => ({ id, faction, pos: [x, y, 0], free });
+  const around = [near(7, 1, 30, 0), near(4, 1, -3, 0), near(3, 1, 0, -2), near(6, 1, 1, 1, false), near(2, 1, 0, 2), near(9, 2, 1, 0)];
+  assert.deepEqual(lib.gather([0, 0], 1, 10, around, { metric: 'chebyshev', freeOnly: true, max: 3 }), [2, 3, 4]);
+  assert.deepEqual(lib.gather([0, 0], 1, 10, around, { metric: 'chebyshev' }), [6, 2, 3, 4]);
+  assert.deepEqual(lib.gather([0, 0], 1, 2, around, { metric: 'euclid' }), [6, 2, 3]); // squared: 2 <= 4, 4 <= 4
+  assert.deepEqual(lib.gather([0, 0], 1, -1, around), []);
+  assert.deepEqual(lib.gather([0, 0], 1, 10, []), []);
+  assert.throws(() => lib.gather([0, 0], 1, 10, around, { metric: 'taxi' }), RangeError);
+  assert.throws(() => lib.gather([0, 0], 1, 1.5, around), RangeError);
+  assert.throws(() => lib.gather([0, 0], 1, 10, [{ id: -1, faction: 1, pos: [0, 0, 0], free: true }]), RangeError);
+});
+
+test('tactics: shipped ones and the custom builder, taken over by a squad', () => {
+  const sq = squadOf('euclid', [[1, 0, 0], [2, 1, 0]]);
+  const t = lib.tactics;
+  const all = [t.rush(), t.formation('line', 2), t.formation('wedge', 2), t.formation('column', 2), t.flank(2, 4), t.flank(3, 4), t.ambush(), t.focus(), t.isolate(), t.fallBack()];
+  all.forEach((tactic, i) => assert.equal(sq.addTactic(tactic), i));
+  assert.throws(() => sq.addTactic(all[0]), /free/, 'a tactic is taken over once');
+  assert.throws(() => t.formation('ring', 2), RangeError);
+  // custom: one slot that holds a tagged spot, scored by distance, ends on losses
+  const c = lib.tactic({ weight: 0.5, minSkill: 0, needsTarget: true });
+  assert.equal(c.addSlot({ min: 1, max: 2, place: { kind: 'tagged', tags: SQUAD.tagCover }, kind: 'hold', start: { kind: 'after', ticks: 3 } }), 0);
+  assert.equal(c.addSlot({ place: { kind: 'side', side: 'rear' }, gather: { kind: 'offset', pos: [1, 2, 0] }, kind: 'custom', custom: 77, start: { kind: 'signal' }, dist: 3 }), 1);
+  c.addConsideration({ input: SQUAD.inTargetDist, curve: 'inverse', min: 0, max: 50 });
+  c.addAbort(SQUAD.inLosses, 1);
+  c.setTrigger({ kind: 'targetInRadius', radius: 6 });
+  c.setTrigger({ kind: 'allArrived', maxWait: 100 });
+  c.setTrigger({ kind: 'manual' });
+  assert.throws(() => c.addSlot({ place: { kind: 'none' } }), RangeError);
+  assert.throws(() => c.addSlot({ place: { kind: 'side', side: 'up' } }), RangeError);
+  assert.throws(() => c.addSlot({ place: { kind: 'here' }, kind: 'dance' }), RangeError);
+  assert.throws(() => c.addSlot({ place: { kind: 'here' }, start: { kind: 'later' } }), RangeError);
+  assert.throws(() => c.addSlot({ place: { kind: 'here' }, max: 256 }), RangeError);
+  assert.throws(() => c.addConsideration({ input: 0, curve: 'wobbly' }), RangeError);
+  assert.throws(() => c.setTrigger({ kind: 'allArrived', maxWait: -1 }), RangeError);
+  assert.throws(() => c.setTrigger({ kind: 'sometimes' }), RangeError);
+  assert.throws(() => lib.tactic({ minSkill: 256 }), RangeError);
+  assert.equal(sq.addTactic(c), 10);
+  c.free(); // already taken over: nothing to free
+  sq.free();
+  sq.free(); // twice is fine
+  assert.throws(() => sq.skill(), /free/);
+  const lone = lib.tactics.rush();
+  lone.free(); // a tactic never given to a squad
+});
+
+test('squad: members, leader, skill, skill table, channels, validated', () => {
+  for (const caps of [{ groupCap: 0 }, { memoryCap: 0 }, { areaCap: 0 }, { inboxCap: 0 }]) {
+    assert.throws(() => lib.squad({ groupCap: 2, memoryCap: 2, areaCap: 2, inboxCap: 2, ...caps }), RangeError);
+  }
+  assert.throws(() => lib.squad({ groupCap: 2, memoryCap: 2, areaCap: 2, inboxCap: 2, metric: 'taxi' }), RangeError);
+  const sq = lib.squad({ groupCap: 3, memoryCap: 4, areaCap: 4, inboxCap: 4, metric: 'chebyshev' });
+  assert.equal(sq.leader(), null);
+  assert.equal(sq.addMember({ id: 1, pos: [0, 0, 0] }), 0);
+  assert.equal(sq.addMember({ id: 1, pos: [5, 5, 0] }), null, 'same id');
+  assert.equal(sq.addMember({ id: 2, pos: [1, 0, 0], roles: SQUAD.roleRanged, skill: 200, state: 'suspended' }), 1);
+  assert.equal(sq.addMember({ id: 3, pos: [2, 0, 0] }), 2);
+  assert.equal(sq.addMember({ id: 4, pos: [3, 0, 0] }), null, 'full');
+  assert.throws(() => sq.addMember({ id: 5, pos: [0, 0, 0], state: 'sleeping' }), RangeError);
+  assert.throws(() => sq.addMember({ id: 5, pos: [0, 0, 0], skill: 256 }), RangeError);
+  assert.throws(() => sq.addMember({ id: 5, pos: [2 ** 31, 0, 0] }), RangeError);
+  assert.deepEqual(sq.members()[1], { id: 2, pos: [1, 0, 0], roles: 1, skill: 200, state: 'suspended' });
+  assert.equal(sq.leader(), 1, 'the first active member');
+  assert.equal(sq.setLeader(3), true);
+  assert.equal(sq.setLeader(9), false);
+  assert.equal(sq.leader(), 3);
+  assert.equal(sq.setPos(3, [7, -8, 1]), true);
+  assert.equal(sq.setPos(9, [0, 0, 0]), false);
+  assert.deepEqual(sq.members()[2].pos, [7, -8, 1]);
+  assert.equal(sq.resume(2), true);
+  assert.equal(sq.suspend(3), true);
+  assert.equal(sq.leader(), 1, 'a suspended leader does not act');
+  assert.equal(sq.setGone(1), true);
+  assert.equal(sq.members()[0].state, 'gone');
+  assert.equal(sq.leader(), 2);
+  assert.equal(sq.removeMember(1), true);
+  assert.equal(sq.removeMember(1), false);
+  assert.deepEqual(sq.members().map((m) => m.id), [2, 3]);
+  assert.equal(sq.suspend(9), false);
+  // skill and its table
+  assert.equal(sq.skill(), 0);
+  sq.setSkill(255);
+  assert.equal(sq.skill(), 255);
+  assert.throws(() => sq.setSkill(256), RangeError);
+  const table = sq.skillTable();
+  assert.deepEqual(table, lib.skillTable());
+  assert.deepEqual(table.pick, ['weighted', 'weighted', 'weighted', 'best']);
+  assert.deepEqual(table.pickTop, [3, 2, 2, 0]);
+  assert.deepEqual(table.thinkTicks, [34, 20, 10, 5]);
+  assert.equal(lib.discipline(200), table.holdBonus[3]);
+  sq.setSkillTable({ ...table, thinkTicks: [1, 2, 3, 4], pick: ['uniform', 'best', 'best', 'best'] });
+  assert.deepEqual(sq.skillTable().thinkTicks, [1, 2, 3, 4]);
+  assert.equal(sq.skillTable().pick[0], 'uniform');
+  assert.equal(lib.discipline(0, { ...table, holdBonus: [9, 9, 9, 9] }), 9);
+  assert.throws(() => sq.setSkillTable({ ...table, pick: ['lucky', 'best', 'best', 'best'] }), RangeError);
+  assert.throws(() => sq.setSkillTable({ ...table, spotRankError: [256, 0, 0, 0] }), RangeError);
+  assert.throws(() => sq.setSkillTable({ ...table, thinkTicks: [1, 2, 3] }), RangeError);
+  // channels
+  assert.equal(sq.setChannel(2, { kind: 'shout', range: 5 }), true);
+  assert.equal(sq.setChannel(2, { kind: 'none' }), true);
+  assert.equal(sq.setChannel(9, { kind: 'none' }), false);
+  assert.throws(() => sq.setChannel(2, { kind: 'radio', base: -1, perUnit: 0 }), RangeError);
+  assert.throws(() => sq.setChannel(2, { kind: 'pigeon' }), RangeError);
+  sq.setExtraColumns(2);
+  assert.throws(() => sq.setExtraColumns(-1), RangeError);
+  sq.free();
+});
+
+test('squad memory: observe, report, targets, own knowledge and areas', () => {
+  const sq = squadOf('euclid', [[1, 0, 0], [2, 3, 0]]);
+  const k = sq.knowledge();
+  assert.equal(k, sq.knowledge(), 'the same wrapper every time');
+  assert.equal(sq.observe(enemy(10, 20, 0, 5), 5), null);
+  assert.deepEqual(k.get(10, ENEMY), { subject: 10, kind: ENEMY, pos: [20, 0, 0], seenAt: 5, source: 0, strength: 0, data: 0 });
+  k.learn({ subject: 50, kind: 9, pos: [0, 0, 0], seenAt: 5 }, 5); // not a target
+  assert.equal(sq.report({ kind: SQUAD.reportEnemy, subject: 11, pos: [24, 10, 0], seenAt: 6, sender: 2 }, 8), true);
+  assert.deepEqual(sq.targets().map((f) => f.subject), [10], 'the report is not read yet');
+  sq.addTactic(lib.tactics.rush());
+  assert.equal(typeof sq.plan(8), 'number');
+  assert.deepEqual(sq.targets().map((f) => [f.subject, f.source]), [[10, 0], [11, 2]], 'told');
+  // a danger report adds an area to the squad's own areas
+  const a = sq.areas();
+  assert.equal(a.count(), 0);
+  sq.setDangerArea({ kind: 3, radius: 4, strength: 9, lifetime: 100, blocking: true });
+  assert.equal(sq.dangerArea().radius, 4);
+  sq.report({ kind: SQUAD.reportDanger, subject: 11, pos: [5, 5, 0], seenAt: 9, strength: 30, data: 1, sender: 2 }, 9);
+  sq.check(9);
+  assert.equal(a.count(), 1);
+  assert.deepEqual(a.list()[0].pos, [5, 5, 0]);
+  assert.equal(lib.areasMoveCost(a, [0, 0, 0], [5, 5, 0], [0, 0, 0], [20, 0, 0]), null);
+  // lent memory cannot be freed on its own and dies with the squad
+  k.free();
+  assert.equal(k.count(), 3);
+  sq.free();
+  assert.throws(() => k.count(), /free/);
+  assert.throws(() => a.count(), /free/);
+});
+
+test('areasMoveCost: blocked is null, else the cost of the cell moved to', () => {
+  const z = lib.areas(4);
+  z.add({ kind: 1, pos: [0, 0, 0], radius: 100, lifetime: 255, blocking: true }, 0);
+  z.add({ kind: 2, pos: [500, 0, 0], radius: 100, lifetime: 255, strength: 7 }, 0);
+  const start = [1000, 0, 0];
+  const goal = [2000, 0, 0];
+  assert.equal(lib.areasMoveCost(z, [900, 0, 0], [10, 0, 0], start, goal), null);
+  assert.equal(lib.areasMoveCost(z, [10, 0, 0], [20, 0, 0], start, goal), null);
+  assert.equal(lib.areasMoveCost(z, [900, 0, 0], [500, 0, 0], start, goal), 7);
+  assert.equal(lib.areasMoveCost(z, [10, 0, 0], [800, 0, 0], start, goal), 0, 'leaving is free');
+  assert.equal(lib.areasMoveCost(z, [900, 0, 0], [10, 0, 0], [20, 0, 0], goal), 0, 'start inside');
+  const s = lib.areas(2);
+  s.add({ kind: 1, pos: [0, 0, 0], radius: 100, lifetime: 255, strength: 4294967295 }, 0);
+  s.add({ kind: 2, pos: [0, 0, 0], radius: 100, lifetime: 255, strength: 9 }, 0);
+  assert.equal(lib.areasMoveCost(s, [0, 0, 0], [10, 0, 0], start, goal), 4294967295, 'saturates, unsigned');
+  z.free();
+  assert.throws(() => lib.areasMoveCost(z, [0, 0, 0], [0, 0, 0], start, goal), /free/);
+});
+
+test('plans: goals, orders by channel, signal lines up the start, errors', () => {
+  const sq = squadOf('euclid', [[1, 0, 0], [2, 6, 8]], { radio: false });
+  assert.equal(sq.setChannel(2, { kind: 'radio', base: 3, perUnit: 2 }), true);
+  assert.equal(sq.plan(0), null, 'no tactic');
+  assert.equal(sq.addTactic(lib.tactics.rush()), 0);
+  assert.equal(sq.plan(0), null, 'no target');
+  assert.deepEqual(sq.check(0), { status: 'noPlan', plan: null });
+  sq.setSkill(255);
+  sq.observe(enemy(10, 20, 0), 0);
+  const id = sq.plan(0, { seed: 3 });
+  assert.equal(typeof id, 'number');
+  const p = sq.pendingPlan();
+  assert.equal(p.id, id);
+  assert.deepEqual([p.tactic, p.target, p.madeAt, p.activeAt], [0, 10, 0, 5]);
+  assert.equal(p.goals.length, 2);
+  const g = p.goals.find((goal) => goal.member === 1);
+  assert.deepEqual(Object.keys(g).sort(), ['custom', 'issuedAt', 'kind', 'member', 'plan', 'pos', 'slot', 'start', 'startDelay', 'target', 'thenPos', 'thenUnchecked', 'unchecked'].sort());
+  assert.deepEqual([g.member, g.kind, g.target, g.start.kind, g.slot, g.plan, g.thenPos], [1, 'attack', 10, 'now', 0, id, null]);
+  assert.equal(sq.activePlan(), null);
+  assert.deepEqual(sq.check(1), { status: 'keep', plan: null });
+  assert.deepEqual(sq.ordersDue(4), []);
+  assert.deepEqual(sq.ordersDue(5).map((o) => o.member), [1], 'the leader at once');
+  assert.equal(sq.activePlan().id, id);
+  assert.deepEqual(sq.ordersDue(27), [], 'radio: 3 + 10 * 2');
+  assert.deepEqual(sq.ordersDue(28).map((o) => o.member), [2]);
+  assert.equal(sq.signal(28), true);
+  assert.equal(sq.signalGiven(), true);
+  assert.equal(sq.signal(29), false, 'once per plan');
+  assert.equal(sq.arrived(2, 29), true);
+  assert.equal(sq.arrived(9, 29), false);
+  // a column the rows do not have is a plan error
+  const bad = lib.tactic({ weight: 1 });
+  bad.addSlot({ place: { kind: 'here' } });
+  bad.addConsideration({ input: SQUAD.inExtra + 1, curve: 'linear', min: 0, max: 10 });
+  sq.addTactic(bad);
+  assert.deepEqual(sq.validate(), { tactic: 1, input: SQUAD.inExtra + 1 });
+  assert.throws(() => sq.plan(30), /tactic 1 reads column 8/);
+  assert.throws(() => sq.check(30), /tactic 1 reads column 8/);
+  sq.setExtraColumns(2);
+  assert.equal(sq.validate(), null);
+  assert.equal(typeof sq.plan(30, { extra: [0, 0, 1, 1], spots: [{ pos: [1, 1, 0], tags: 0 }], seed: 2 ** 40 }), 'number');
+  // times and seeds are validated
+  for (const bad of [-1, 2 ** 32, 1.5, NaN, '5']) assert.throws(() => sq.ordersDue(bad), RangeError, String(bad));
+  assert.throws(() => sq.plan(0, { seed: -1 }), RangeError);
+  assert.throws(() => sq.plan(0, { spots: [{ pos: [0, 0, 0], tags: -1 }] }), RangeError);
+  assert.throws(() => sq.plan(0, { extra: [2 ** 31] }), RangeError);
+  sq.free();
+});
+
+test('plan activation wraps around 2^32', () => {
+  const sq = squadOf('euclid', [[1, 0, 0], [2, 1, 0], [3, 0, 1], [4, 1, 1]], { radio: false });
+  sq.addTactic(lib.tactics.rush());
+  sq.setSkill(255);
+  const before = 4294967294;
+  sq.observe(enemy(10, 20, 0, before), before);
+  const think = sq.skillTable().thinkTicks[3];
+  sq.plan(before);
+  const at = (before + think) >>> 0;
+  assert.equal(sq.pendingPlan().activeAt, at);
+  assert.deepEqual(sq.ordersDue(4294967295), []);
+  assert.deepEqual(sq.ordersDue(at - 1), []);
+  assert.equal(sq.activePlan(), null);
+  assert.equal(sq.ordersDue(at).length, 4);
+  assert.equal(sq.activePlan().activeAt, at);
+  sq.free();
+});
+
+test('keeper: postpone, broken, suspend never breaks, inputs', () => {
+  const k = lib.keeper();
+  assert.equal(k.goal(), null);
+  k.postpone(0); // without a goal: nothing
+  assert.equal(k.broken(100, 10), false);
+  const goal = { kind: 'hold', pos: [3, 4, 0], target: 7, start: { kind: 'after', ticks: 2 }, slot: 1, plan: 5, issuedAt: 4294967290, startDelay: 1 };
+  k.set(goal, 4294967290);
+  assert.deepEqual(k.goal(), { member: null, kind: 'hold', custom: 0, pos: [3, 4, 0], unchecked: false, thenPos: null, thenUnchecked: false, target: 7, start: { kind: 'after', ticks: 2 }, slot: 1, plan: 5, issuedAt: 4294967290, startDelay: 1 });
+  k.postpone(4294967295);
+  k.postpone(3); // the first time stays
+  assert.equal(k.broken(8, 10), false);
+  assert.equal(k.broken(9, 10), true, 'wraps: 10 ticks since 2^32 - 1');
+  k.suspend();
+  for (const now of [9, 100, 4294967295, 0]) assert.equal(k.broken(now, 0), false, 'suspended: never broken');
+  k.unsuspend(200);
+  assert.equal(k.broken(209, 10), false, 'the clock restarts');
+  assert.equal(k.broken(210, 10), true);
+  k.resume(211);
+  assert.equal(k.broken(500, 10), false);
+  // inputs: has goal, distance, age, signal, discipline
+  assert.deepEqual(k.inputs(4294967295, [0, 0, 0], 'euclid', true, 9), [1, 5, 5, 1, 9]);
+  assert.deepEqual(k.inputs(0, [0, 0, 0], 'chebyshev', false, 0), [1, 4, 6, 0, 0]);
+  k.clear();
+  assert.deepEqual(k.inputs(0, [0, 0, 0], 'euclid', false, 0), [0, -1, 0, 0, 0]);
+  assert.throws(() => k.set({ ...goal, kind: 'dance' }, 0), RangeError);
+  assert.throws(() => k.set({ ...goal, slot: 256 }, 0), RangeError);
+  assert.throws(() => k.set({ ...goal, start: { kind: 'after', ticks: -1 } }, 0), RangeError);
+  assert.throws(() => k.inputs(0, [0, 0, 0], 'taxi', false, 0), RangeError);
+  assert.throws(() => k.broken(-1, 0), RangeError);
+  k.set({ kind: 'custom', custom: 42, pos: null }, 0);
+  assert.deepEqual([k.goal().kind, k.goal().custom, k.goal().pos, k.goal().start], ['custom', 42, null, { kind: 'now', ticks: 0 }]);
+  k.free();
+  k.free();
+  assert.throws(() => k.goal(), /free/);
+});
+
+test('three levels: flank gathers, one signal at 49, all attack at 55', () => {
+  const near = (id, x, y, free = true) => ({ id, faction: 1, pos: [x, y, 0], free });
+  const around = [near(7, 30, 0), near(4, -3, 0), near(3, 0, -2), near(6, 1, 1, false), near(2, 0, 2)];
+  const called = lib.gather([0, 0], 1, 10, around, { metric: 'chebyshev', freeOnly: true, max: 3 });
+  assert.deepEqual(called, [2, 3, 4]);
+  const members = [[1, 0, 0], ...called.map((id) => { const c = around.find((a) => a.id === id); return [id, c.pos[0], c.pos[1]]; })];
+  const sq = squadOf('chebyshev', members);
+  const spots = [[16, 0, SQUAD.tagCover], [16, 2, 0], [20, 4, SQUAD.tagHigh], [20, -4, 0], [12, 8, SQUAD.tagCover]].map(([x, y, tags]) => ({ pos: [x, y, 0], tags }));
+  sq.setSkill(192);
+  assert.equal(sq.addTactic(lib.tactics.rush()), 0);
+  assert.equal(sq.addTactic(lib.tactics.formation('line', 2)), 1);
+  assert.equal(sq.addTactic(lib.tactics.flank(3, 4)), 2);
+  assert.equal(sq.observe(enemy(10, 20, 0), 0), null);
+  assert.equal(sq.report({ kind: SQUAD.reportEnemy, subject: 11, pos: [24, 10, 0], seenAt: 0, sender: 2 }, 0), true);
+
+  // One cell toward a place on Chebyshev: the nearest neighbour, ties to the first.
+  const DIRS = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
+  const stepToward = (from, to) => {
+    if (from[0] === to[0] && from[1] === to[1]) return from;
+    let best = null;
+    let bestLeft = Infinity;
+    for (const [dx, dy] of DIRS) {
+      const p = [from[0] + dx, from[1] + dy, from[2]];
+      const left = Math.max(Math.abs(to[0] - p[0]), Math.abs(to[1] - p[1]));
+      if (left < bestLeft) [best, bestLeft] = [p, left];
+    }
+    return best;
+  };
+  const STEP = 2;
+  const walkers = members.map(([id]) => ({ id, goal: null, startAt: 0, gathered: false }));
+  const plans = [];
+  const signals = [];
+  const orders = [];
+  const arrivals = [];
+  const attacks = [];
+  for (let t = 0; t <= 60; t++) {
+    walkers.forEach((w, i) => {
+      if (!w.goal) return;
+      let at = sq.members()[i].pos;
+      if (t > w.startAt && (t - w.startAt) % STEP === 0) {
+        at = stepToward(at, w.goal.pos);
+        assert.equal(sq.setPos(w.id, at), true);
+      }
+      const gathers = w.goal.thenPos !== null || w.goal.start.kind === 'signal';
+      if (gathers && !w.gathered && at[0] === w.goal.pos[0] && at[1] === w.goal.pos[1]) {
+        w.gathered = true;
+        assert.equal(sq.arrived(w.id, t), true);
+        arrivals.push([t, w.id]);
+      }
+    });
+    const { status, plan } = sq.check(t, { spots, seed: 7 });
+    if (status === 'replan') {
+      const p = sq.pendingPlan();
+      assert.equal(p.id, plan);
+      plans.push([t, p.tactic, p.target]);
+    } else if (status === 'signal') {
+      signals.push(t);
+    }
+    for (const o of sq.ordersDue(t, 8)) {
+      const w = walkers.find((w) => w.id === o.member);
+      const after = o.start.kind === 'after' ? o.start.ticks : 0;
+      w.goal = o;
+      w.startAt = t + o.startDelay + after;
+      w.gathered = false;
+      orders.push([t, o.member]);
+    }
+    for (const w of walkers) {
+      if (w.goal && w.goal.kind === 'attack' && w.goal.start.kind !== 'signal' && w.startAt === t) attacks.push([t, w.id]);
+    }
+  }
+  sq.free();
+  assert.deepEqual(plans, [[0, 2, 10]], 'one plan, no replan');
+  assert.deepEqual(orders.slice(0, 4), [[5, 1], [9, 2], [9, 3], [10, 4]]);
+  assert.deepEqual(arrivals, [[37, 1], [48, 4], [49, 2], [49, 3]]);
+  assert.deepEqual(signals, [49], 'one signal');
+  attacks.sort((a, b) => a[1] - b[1]);
+  assert.deepEqual(attacks, [[55, 1], [55, 2], [55, 3], [55, 4]], 'all aligned');
 });
 
 console.log(`${passed} tests passed`);

@@ -1450,10 +1450,41 @@ fn area_of(r: &[u32; AREA_SIZE]) -> Area {
     }
 }
 
+/// Where a memory handle keeps its table: its own, or one lent by a squad
+/// (the squad's own memory, see [`sx_squad_knowledge`]).
+enum Held<T> {
+    Own(T),
+    /// Points into a [`WasmSquad`], which outlives the handle (it frees it).
+    Lent(*mut T),
+}
+
+impl<T> std::ops::Deref for Held<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        match self {
+            Self::Own(t) => t,
+            // SAFETY: a lent pointer is valid while its squad lives, and the
+            // squad frees the handle with itself.
+            Self::Lent(p) => unsafe { &**p },
+        }
+    }
+}
+
+impl<T> std::ops::DerefMut for Held<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        match self {
+            Self::Own(t) => t,
+            // SAFETY: as in `deref`; JS is single threaded, so no other
+            // reference into the squad is alive during a call.
+            Self::Lent(p) => unsafe { &mut **p },
+        }
+    }
+}
+
 /// Knowledge with a fact record (in and out) and the facts handed out by the
 /// last call that removed or evicted some.
 pub struct WasmKnowledge {
-    knowledge: Knowledge,
+    knowledge: Held<Knowledge>,
     record: [u32; FACT_SIZE],
     out: Vec<u32>,
 }
@@ -1479,7 +1510,7 @@ pub extern "C" fn sx_knowledge_new(capacity: u32, evict: u32) -> *mut WasmKnowle
     };
     match Knowledge::new(capacity as usize, evict) {
         Ok(knowledge) => Box::into_raw(Box::new(WasmKnowledge {
-            knowledge,
+            knowledge: Held::Own(knowledge),
             record: [0; FACT_SIZE],
             out: Vec::new(),
         })),
@@ -1493,9 +1524,16 @@ pub extern "C" fn sx_knowledge_new(capacity: u32, evict: u32) -> *mut WasmKnowle
 /// `k` is null or from [`sx_knowledge_new`] and not used again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_free(k: *mut WasmKnowledge) {
-    if !k.is_null() {
+    // SAFETY: see above.
+    match unsafe { k.as_ref() } {
+        // A squad's own memory is freed with the squad.
+        None
+        | Some(WasmKnowledge {
+            knowledge: Held::Lent(_),
+            ..
+        }) => {}
         // SAFETY: see above.
-        drop(unsafe { Box::from_raw(k) });
+        Some(_) => drop(unsafe { Box::from_raw(k) }),
     }
 }
 
@@ -1966,7 +2004,7 @@ pub unsafe extern "C" fn sx_inbox_clear(i: *mut WasmInbox) -> i32 {
 
 /// Areas with an area record (in and out).
 pub struct WasmAreas {
-    areas: Areas,
+    areas: Held<Areas>,
     record: [u32; AREA_SIZE],
 }
 
@@ -1985,7 +2023,7 @@ macro_rules! areas {
 pub extern "C" fn sx_areas_new(capacity: u32) -> *mut WasmAreas {
     match Areas::new(capacity as usize) {
         Ok(areas) => Box::into_raw(Box::new(WasmAreas {
-            areas,
+            areas: Held::Own(areas),
             record: [0; AREA_SIZE],
         })),
         Err(_) => std::ptr::null_mut(),
@@ -1998,9 +2036,16 @@ pub extern "C" fn sx_areas_new(capacity: u32) -> *mut WasmAreas {
 /// `a` is null or from [`sx_areas_new`] and not used again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_areas_free(a: *mut WasmAreas) {
-    if !a.is_null() {
+    // SAFETY: see above.
+    match unsafe { a.as_ref() } {
+        // A squad's own memory is freed with the squad.
+        None
+        | Some(WasmAreas {
+            areas: Held::Lent(_),
+            ..
+        }) => {}
         // SAFETY: see above.
-        drop(unsafe { Box::from_raw(a) });
+        Some(_) => drop(unsafe { Box::from_raw(a) }),
     }
 }
 
@@ -2382,4 +2427,1273 @@ pub extern "C" fn sx_sweep_heading(base: i32, elapsed: u32, step_ticks: u32, cou
         let n = (count as usize).min(s.len());
         sweep_heading(base, elapsed, step_ticks, &s[..n])
     })
+}
+
+// ---- group tactics -----------------------------------------------------------
+//
+// Same blocks as the C interface (`sx_squad_*`, `sx_tactic_*`, `sx_keeper_*`,
+// `sx_gather`, `sx_areas_move_cost`), but without structs: records go in
+// through the scratch buffer ([`sx_scratch`]) and come out of the handle's
+// out buffer (`i32`s; `u32` values as their bit pattern). Numbers as in
+// `sagax.h` (`SX_PLACE_*`, `SX_GOAL_*`, `SX_START_*`, ...). Values beyond
+// 32 bits (radii, ranges) come as `f64`, like the route argument.
+
+use sagax_decide::group::{
+    Abort, Channel, Goal, GoalKeeper, GoalKind, Member, MemberState, Nearby, Order, Place, Plan,
+    PlanError, Shape, Side, SkillTable, Slot, Spot, Squad, Start, Status as SquadStatus, Tactic,
+    Trigger, discipline, gather, tactics,
+};
+
+/// A tactic reads a column beyond the row (`SX_ERROR_PLAN`).
+const ERROR_PLAN: i32 = -3;
+
+/// Numbers per member record: id, x, y, z, roles, skill, state.
+const MEMBER_SIZE: usize = 7;
+/// Numbers per spot record: x, y, z, tags.
+const SPOT_SIZE: usize = 4;
+/// Numbers per gather candidate: id, faction, x, y, z, free.
+const CANDIDATE_SIZE: usize = 6;
+/// Numbers per slot record: roles, min, max, place (kind, x, y, z, value),
+/// gather (the same five), kind, custom, start, start ticks, want tags, dist.
+const SLOT_SIZE: usize = 19;
+/// Numbers per goal record: kind, custom, x, y, z, then x, y, z, target,
+/// start, start ticks, slot, plan, issued at, start delay, has pos,
+/// unchecked, has then pos, then unchecked, has target.
+const GOAL_SIZE: usize = 20;
+// An order record is the member's id and a goal record (21 numbers); a
+// plan record is id, tactic, target, made at, active at, goal count, has
+// target (7 numbers), then one order record per goal.
+/// Numbers per skill table: pick, pick top, think ticks, timing spread, hold
+/// bonus, give up ticks, spot rank error; four levels each.
+const SKILL_SIZE: usize = 28;
+
+/// The first `count` numbers of the scratch buffer, copied.
+fn scratch_copy(count: usize) -> Option<Vec<i32>> {
+    SCRATCH.with(|s| s.borrow().get(..count).map(<[i32]>::to_vec))
+}
+
+/// Writes `values` to the start of the scratch buffer (it has room).
+fn scratch_put(values: &[i32]) {
+    SCRATCH.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.len() < values.len() {
+            s.resize(values.len(), 0);
+        }
+        s[..values.len()].copy_from_slice(values);
+    });
+}
+
+fn metric_of(code: i32) -> Option<Metric> {
+    Some(match code {
+        0 => Metric::Euclid,
+        1 => Metric::Manhattan,
+        2 => Metric::Chebyshev,
+        3 => Metric::Hex,
+        _ => return None,
+    })
+}
+
+fn member_of(r: &[i32]) -> Option<Member> {
+    Some(Member {
+        id: r[0] as u32,
+        pos: [r[1], r[2], r[3]],
+        roles: r[4] as u32,
+        skill: u8::try_from(r[5]).ok()?,
+        state: match r[6] {
+            0 => MemberState::Active,
+            1 => MemberState::Suspended,
+            2 => MemberState::Gone,
+            _ => return None,
+        },
+    })
+}
+
+fn member_record(m: &Member) -> [i32; MEMBER_SIZE] {
+    let p = m.pos;
+    let state = m.state as i32;
+    [
+        m.id as i32,
+        p[0],
+        p[1],
+        p[2],
+        m.roles as i32,
+        i32::from(m.skill),
+        state,
+    ]
+}
+
+/// `Some(None)` for no place (kind 0), `None` if invalid.
+fn place_of(r: &[i32]) -> Option<Option<Place>> {
+    Some(Some(match r[0] {
+        0 => return Some(None),
+        1 => Place::Offset([r[1], r[2], r[3]]),
+        2 => Place::Side(match r[4] {
+            0 => Side::Front,
+            1 => Side::Left,
+            2 => Side::Right,
+            3 => Side::Rear,
+            _ => return None,
+        }),
+        3 => Place::Between,
+        4 => Place::Tagged(r[4] as u32),
+        5 => Place::Here,
+        _ => return None,
+    }))
+}
+
+fn kind_of(code: i32, custom: i32) -> Option<GoalKind> {
+    Some(match code {
+        0 => GoalKind::Move,
+        1 => GoalKind::Hold,
+        2 => GoalKind::Attack,
+        3 => GoalKind::Wait,
+        4 => GoalKind::Retreat,
+        5 => GoalKind::Custom(custom as u32),
+        _ => return None,
+    })
+}
+
+fn kind_code(kind: GoalKind) -> (i32, i32) {
+    match kind {
+        GoalKind::Move => (0, 0),
+        GoalKind::Hold => (1, 0),
+        GoalKind::Attack => (2, 0),
+        GoalKind::Wait => (3, 0),
+        GoalKind::Retreat => (4, 0),
+        GoalKind::Custom(c) => (5, c as i32),
+    }
+}
+
+fn start_of(code: i32, ticks: i32) -> Option<Start> {
+    Some(match code {
+        0 => Start::Now,
+        1 => Start::AfterTicks(ticks as u32),
+        2 => Start::OnSignal,
+        _ => return None,
+    })
+}
+
+fn start_code(start: Start) -> (i32, i32) {
+    match start {
+        Start::Now => (0, 0),
+        Start::AfterTicks(n) => (1, n as i32),
+        Start::OnSignal => (2, 0),
+    }
+}
+
+fn slot_of(r: &[i32]) -> Option<Slot> {
+    Some(Slot {
+        roles: r[0] as u32,
+        min: u8::try_from(r[1]).ok()?,
+        max: u8::try_from(r[2]).ok()?,
+        place: place_of(&r[3..8])??,
+        gather: place_of(&r[8..13])?,
+        kind: kind_of(r[13], r[14])?,
+        start: start_of(r[15], r[16])?,
+        want_tags: r[17] as u32,
+        dist: r[18],
+    })
+}
+
+fn goal_record(g: &Goal) -> [i32; GOAL_SIZE] {
+    let (kind, custom) = kind_code(g.kind);
+    let (start, ticks) = start_code(g.start);
+    let p = g.pos.unwrap_or_default();
+    let t = g.then_pos.unwrap_or_default();
+    [
+        kind,
+        custom,
+        p[0],
+        p[1],
+        p[2],
+        t[0],
+        t[1],
+        t[2],
+        g.target.unwrap_or(0) as i32,
+        start,
+        ticks,
+        i32::from(g.slot),
+        g.plan as i32,
+        g.issued_at as i32,
+        g.start_delay as i32,
+        i32::from(g.pos.is_some()),
+        i32::from(g.unchecked),
+        i32::from(g.then_pos.is_some()),
+        i32::from(g.then_unchecked),
+        i32::from(g.target.is_some()),
+    ]
+}
+
+fn goal_of(r: &[i32]) -> Option<Goal> {
+    Some(Goal {
+        kind: kind_of(r[0], r[1])?,
+        pos: (r[15] != 0).then_some([r[2], r[3], r[4]]),
+        unchecked: r[16] != 0,
+        then_pos: (r[17] != 0).then_some([r[5], r[6], r[7]]),
+        then_unchecked: r[18] != 0,
+        target: (r[19] != 0).then_some(r[8] as u32),
+        start: start_of(r[9], r[10])?,
+        slot: u8::try_from(r[11]).ok()?,
+        plan: r[12] as u32,
+        issued_at: r[13] as u32,
+        start_delay: r[14] as u32,
+    })
+}
+
+fn put_order(out: &mut Vec<i32>, member: u32, goal: &Goal) {
+    out.push(member as i32);
+    out.extend_from_slice(&goal_record(goal));
+}
+
+fn skill_record(t: &SkillTable) -> [i32; SKILL_SIZE] {
+    let mut r = [0; SKILL_SIZE];
+    for i in 0..4 {
+        let (pick, top) = match t.pick[i] {
+            Pick::Best => (0, 0),
+            Pick::Weighted { top } => (1, top),
+            Pick::Uniform { top } => (2, top),
+        };
+        r[i] = pick;
+        r[4 + i] = top as i32;
+        r[8 + i] = t.think_ticks[i] as i32;
+        r[12 + i] = t.timing_spread[i] as i32;
+        r[16 + i] = t.hold_bonus[i] as i32;
+        r[20 + i] = t.give_up_ticks[i] as i32;
+        r[24 + i] = i32::from(t.spot_rank_error[i]);
+    }
+    r
+}
+
+fn skill_of(r: &[i32]) -> Option<SkillTable> {
+    let mut t = SkillTable::default();
+    for i in 0..4 {
+        t.pick[i] = Pick::from_u32(r[i] as u32, r[4 + i] as u32)?;
+        t.think_ticks[i] = r[8 + i] as u32;
+        t.timing_spread[i] = r[12 + i] as u32;
+        t.hold_bonus[i] = r[16 + i] as u32;
+        t.give_up_ticks[i] = r[20 + i] as u32;
+        t.spot_rank_error[i] = u8::try_from(r[24 + i]).ok()?;
+    }
+    Some(t)
+}
+
+/// Picks up to `max` of the `n` candidates in the scratch buffer (6 numbers
+/// each: id, faction, x, y, z, free) of `faction` within `radius` of `x, y`,
+/// nearest first (see `sx_gather`). The ids go to the scratch buffer;
+/// returns how many, or -1 on bad arguments.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn sx_gather(
+    x: i32,
+    y: i32,
+    faction: u32,
+    radius: f64,
+    metric: i32,
+    free_only: u32,
+    n: u32,
+    max: u32,
+) -> i32 {
+    let Some(metric) = metric_of(metric) else {
+        return ERROR_ARGUMENT;
+    };
+    let Some(r) = (n as usize)
+        .checked_mul(CANDIDATE_SIZE)
+        .and_then(scratch_copy)
+    else {
+        return ERROR_ARGUMENT;
+    };
+    let list: Vec<Nearby> = r
+        .as_chunks::<CANDIDATE_SIZE>()
+        .0
+        .iter()
+        .map(|c| Nearby {
+            id: c[0] as u32,
+            faction: c[1] as u32,
+            pos: [c[2], c[3], c[4]],
+            free: c[5] != 0,
+        })
+        .collect();
+    let mut ids = Vec::new();
+    gather(
+        [x, y, 0],
+        faction,
+        radius as i64,
+        metric,
+        free_only != 0,
+        &list,
+        &mut ids,
+        max as usize,
+    );
+    let ids: Vec<i32> = ids.iter().map(|&id| id as i32).collect();
+    scratch_put(&ids);
+    to_i32(ids.len())
+}
+
+/// The extra cost of the move from cell to cell (see `Areas::move_cost`);
+/// reads 12 integers from the scratch buffer (from, to, start, goal).
+/// Returns 0 if blocked, else 1 with the cost (a `u32`) in the first
+/// number of the scratch buffer; -1 on bad arguments.
+///
+/// # Safety
+/// `a` from [`sx_areas_new`] or [`sx_squad_areas`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_areas_move_cost(a: *mut WasmAreas) -> i32 {
+    let w = areas!(a);
+    let Some(p) = scratch_copy(12) else {
+        return ERROR_ARGUMENT;
+    };
+    let cell = |i: usize| [p[i], p[i + 1], p[i + 2]];
+    match w.areas.move_cost(cell(0), cell(3), cell(6), cell(9)) {
+        Some(cost) => {
+            scratch_put(&[cost as i32]);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// A tactic being built (`sx_tactic_*`).
+pub struct WasmTactic(Tactic);
+
+macro_rules! tactic {
+    ($t:expr) => {
+        // SAFETY: JS passes a handle from sx_tactic_new (wrapper guarantees it).
+        match unsafe { $t.as_mut() } {
+            Some(t) => &mut t.0,
+            None => return ERROR_ARGUMENT,
+        }
+    };
+}
+
+/// A new, empty tactic (see `sx_tactic_new`). Null if `min_skill > 255`.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_tactic_new(weight: u32, min_skill: u32, needs_target: u32) -> *mut WasmTactic {
+    let Ok(min_skill) = u8::try_from(min_skill) else {
+        return std::ptr::null_mut();
+    };
+    Box::into_raw(Box::new(WasmTactic(Tactic {
+        slots: Vec::new(),
+        considerations: Vec::new(),
+        weight,
+        aborts: Vec::new(),
+        trigger: Trigger::None,
+        min_skill,
+        needs_target: needs_target != 0,
+    })))
+}
+
+/// A shipped tactic (`which` as `SX_TACTIC_*`, `param` as given there).
+/// Null for an unknown one.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_tactic_shipped(which: u32, param: i32) -> *mut WasmTactic {
+    let t = match which {
+        0 => tactics::rush(),
+        1 => tactics::formation(Shape::Line, param),
+        2 => tactics::formation(Shape::Wedge, param),
+        3 => tactics::formation(Shape::Column, param),
+        4 => tactics::flank(2, param),
+        5 => tactics::flank(3, param),
+        6 => tactics::ambush(),
+        7 => tactics::focus(),
+        8 => tactics::isolate(),
+        9 => tactics::fall_back(),
+        _ => return std::ptr::null_mut(),
+    };
+    Box::into_raw(Box::new(WasmTactic(t)))
+}
+
+/// Frees a tactic not given to a squad.
+///
+/// # Safety
+/// `t` is null or from [`sx_tactic_new`] and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_free(t: *mut WasmTactic) {
+    if !t.is_null() {
+        // SAFETY: see above.
+        drop(unsafe { Box::from_raw(t) });
+    }
+}
+
+/// Adds the slot record (19 numbers) in the scratch buffer; returns its
+/// index, or -1 for an unknown place, side, kind or start, a goal place of
+/// none, or a min or max above 255.
+///
+/// # Safety
+/// `t` from [`sx_tactic_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_add_slot(t: *mut WasmTactic) -> i32 {
+    let t = tactic!(t);
+    let Some(slot) = scratch_copy(SLOT_SIZE).as_deref().and_then(slot_of) else {
+        return ERROR_ARGUMENT;
+    };
+    t.slots.push(slot);
+    to_i32(t.slots.len() - 1)
+}
+
+/// Adds a factor over the scoring row: input column, curve 0..9, min, max.
+/// Returns 0; -1 for an unknown curve.
+///
+/// # Safety
+/// `t` from [`sx_tactic_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_add_consideration(
+    t: *mut WasmTactic,
+    input: u32,
+    curve: u32,
+    min: i32,
+    max: i32,
+) -> i32 {
+    let t = tactic!(t);
+    let Some(curve) = Curve::from_u32(curve) else {
+        return ERROR_ARGUMENT;
+    };
+    t.considerations
+        .push(Consideration::new(input, curve, min, max));
+    0
+}
+
+/// The plan ends when `row[input] >= at_least`. Returns 0.
+///
+/// # Safety
+/// `t` from [`sx_tactic_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_add_abort(t: *mut WasmTactic, input: u32, at_least: i32) -> i32 {
+    tactic!(t).aborts.push(Abort {
+        input: input as usize,
+        at_least,
+    });
+    0
+}
+
+/// When the signal fires by itself: `kind` 0 never, 1 all arrived (`value`
+/// the most ticks to wait, 0 .. 2^32 - 1), 2 target within `value`, 3 only
+/// by hand. Returns 0; -1 for an unknown kind or a bad wait.
+///
+/// # Safety
+/// `t` from [`sx_tactic_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_set_trigger(t: *mut WasmTactic, kind: u32, value: f64) -> i32 {
+    let t = tactic!(t);
+    t.trigger = match kind {
+        0 => Trigger::None,
+        1 if (0.0..=f64::from(u32::MAX)).contains(&value) => Trigger::AllArrived {
+            max_wait: value as u32,
+        },
+        2 => Trigger::TargetInRadius(value as i64),
+        3 => Trigger::Manual,
+        _ => return ERROR_ARGUMENT,
+    };
+    0
+}
+
+/// The default skill table (28 numbers) in the scratch buffer. Returns 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_skill_table_default() -> i32 {
+    scratch_put(&skill_record(&SkillTable::default()));
+    0
+}
+
+/// A member's discipline at `skill` (0 .. 255); with `custom` not 0 the
+/// skill table is read from the scratch buffer, else the default. Returns
+/// it, or -1.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_discipline(skill: u32, custom: u32) -> i32 {
+    let Ok(skill) = u8::try_from(skill) else {
+        return ERROR_ARGUMENT;
+    };
+    let table = if custom == 0 {
+        SkillTable::default()
+    } else {
+        match scratch_copy(SKILL_SIZE).as_deref().and_then(skill_of) {
+            Some(t) => t,
+            None => return ERROR_ARGUMENT,
+        }
+    };
+    to_i32(discipline(skill, &table))
+}
+
+/// A squad with its own memory, an out buffer and the orders that are due
+/// but not taken yet.
+pub struct WasmSquad {
+    squad: Squad,
+    out: Vec<i32>,
+    due: Vec<Order>,
+    /// Handles onto the squad's own knowledge and areas, freed with it.
+    knowledge: *mut WasmKnowledge,
+    areas: *mut WasmAreas,
+}
+
+macro_rules! squad {
+    ($s:expr) => {
+        // SAFETY: JS passes a handle from sx_squad_new (wrapper guarantees it).
+        match unsafe { $s.as_mut() } {
+            Some(s) => s,
+            None => return ERROR_ARGUMENT,
+        }
+    };
+}
+
+/// A squad (see `sx_squad_new`). Null if a capacity is 0 or the metric is
+/// unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_squad_new(
+    group_cap: u32,
+    memory_cap: u32,
+    area_cap: u32,
+    inbox_cap: u32,
+    metric: i32,
+) -> *mut WasmSquad {
+    let Some(metric) = metric_of(metric) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(squad) = Squad::new(
+        group_cap as usize,
+        memory_cap as usize,
+        area_cap as usize,
+        inbox_cap as usize,
+        metric,
+    ) else {
+        return std::ptr::null_mut();
+    };
+    let s = Box::into_raw(Box::new(WasmSquad {
+        squad,
+        out: Vec::new(),
+        due: Vec::new(),
+        knowledge: std::ptr::null_mut(),
+        areas: std::ptr::null_mut(),
+    }));
+    // SAFETY: `s` was just made; the squad stays at this address until
+    // sx_squad_free, which frees the two handles first.
+    unsafe {
+        let squad = &raw mut (*s).squad;
+        (*s).knowledge = Box::into_raw(Box::new(WasmKnowledge {
+            knowledge: Held::Lent(std::ptr::from_mut((*squad).knowledge_mut())),
+            record: [0; FACT_SIZE],
+            out: Vec::new(),
+        }));
+        (*s).areas = Box::into_raw(Box::new(WasmAreas {
+            areas: Held::Lent(std::ptr::from_mut((*squad).areas_mut())),
+            record: [0; AREA_SIZE],
+        }));
+    }
+    s
+}
+
+/// Frees a squad with its own knowledge and areas.
+///
+/// # Safety
+/// `s` is null or from [`sx_squad_new`] and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_free(s: *mut WasmSquad) {
+    if !s.is_null() {
+        // SAFETY: see above; the two handles were made by sx_squad_new.
+        unsafe {
+            let w = Box::from_raw(s);
+            drop(Box::from_raw(w.knowledge));
+            drop(Box::from_raw(w.areas));
+        }
+    }
+}
+
+/// The out buffer of the last call that wrote records.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`]. Valid until memory grows.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_out(s: *mut WasmSquad) -> *const i32 {
+    // SAFETY: see above.
+    unsafe { s.as_ref() }.map_or(std::ptr::null(), |w| w.out.as_ptr())
+}
+
+/// The squad's own knowledge, for every `sx_knowledge_*` call. It belongs
+/// to the squad (sx_knowledge_free does nothing to it).
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_knowledge(s: *mut WasmSquad) -> *mut WasmKnowledge {
+    // SAFETY: see above.
+    unsafe { s.as_ref() }.map_or(std::ptr::null_mut(), |w| w.knowledge)
+}
+
+/// The squad's own danger areas, for every `sx_areas_*` call. They belong
+/// to the squad.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_areas(s: *mut WasmSquad) -> *mut WasmAreas {
+    // SAFETY: see above.
+    unsafe { s.as_ref() }.map_or(std::ptr::null_mut(), |w| w.areas)
+}
+
+/// Adds the member record (7 numbers) in the scratch buffer at the end.
+/// Returns its index; -2 if the group is full or the id is there; -1 for a
+/// bad state or skill.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_add_member(s: *mut WasmSquad) -> i32 {
+    let w = squad!(s);
+    let Some(m) = scratch_copy(MEMBER_SIZE).as_deref().and_then(member_of) else {
+        return ERROR_ARGUMENT;
+    };
+    w.squad.group_mut().add(m).map_or(-2, to_i32)
+}
+
+/// Removes a member (the order of the others stays); 1, or 0 if unknown.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_remove_member(s: *mut WasmSquad, id: u32) -> i32 {
+    i32::from(squad!(s).squad.group_mut().remove(id))
+}
+
+/// Sets a member's position; 1, or 0 if unknown.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_pos(
+    s: *mut WasmSquad,
+    id: u32,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> i32 {
+    i32::from(squad!(s).squad.group_mut().set_pos(id, [x, y, z]))
+}
+
+/// Takes a member out of play for now; 1, or 0 if unknown.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_suspend(s: *mut WasmSquad, id: u32) -> i32 {
+    i32::from(squad!(s).squad.group_mut().suspend(id))
+}
+
+/// Puts a suspended member back; 1, or 0 if unknown.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_resume(s: *mut WasmSquad, id: u32) -> i32 {
+    i32::from(squad!(s).squad.group_mut().resume(id))
+}
+
+/// Marks a member dead or lost; 1, or 0 if unknown.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_gone(s: *mut WasmSquad, id: u32) -> i32 {
+    i32::from(squad!(s).squad.set_gone(id))
+}
+
+/// Writes every member record (7 numbers each) to the out buffer; returns
+/// how many.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_members(s: *mut WasmSquad) -> i32 {
+    let w = squad!(s);
+    w.out.clear();
+    for m in w.squad.group().iter() {
+        w.out.extend_from_slice(&member_record(m));
+    }
+    to_i32(w.squad.group().len())
+}
+
+/// Sets the leader; 1, or 0 if the id is not in the group.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_leader(s: *mut WasmSquad, id: u32) -> i32 {
+    i32::from(squad!(s).squad.set_leader(id))
+}
+
+/// The acting leader's id to the first number of the out buffer; 1, or 0
+/// if there is none.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_leader(s: *mut WasmSquad) -> i32 {
+    let w = squad!(s);
+    w.out.clear();
+    match w.squad.leader() {
+        Some(id) => {
+            w.out.push(id as i32);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Sets the skill (0 .. 255). Returns 0; -1 if above 255.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_skill(s: *mut WasmSquad, skill: u32) -> i32 {
+    let w = squad!(s);
+    let Ok(skill) = u8::try_from(skill) else {
+        return ERROR_ARGUMENT;
+    };
+    w.squad.set_skill(skill);
+    0
+}
+
+/// The skill.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_skill(s: *mut WasmSquad) -> i32 {
+    i32::from(squad!(s).squad.skill())
+}
+
+/// Sets the skill table from the scratch buffer (28 numbers). Returns 0;
+/// -1 for an unknown pick or a spot rank error above 255.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_skill_table(s: *mut WasmSquad) -> i32 {
+    let w = squad!(s);
+    let Some(table) = scratch_copy(SKILL_SIZE).as_deref().and_then(skill_of) else {
+        return ERROR_ARGUMENT;
+    };
+    w.squad.set_skill_table(table);
+    0
+}
+
+/// The skill table (28 numbers) to the out buffer. Returns 0.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_skill_table(s: *mut WasmSquad) -> i32 {
+    let w = squad!(s);
+    w.out.clear();
+    w.out
+        .extend_from_slice(&skill_record(w.squad.skill_table()));
+    0
+}
+
+/// How orders reach a member: `kind` 0 never, 1 shout within `a`, 2 radio
+/// with base `a` (0 .. 2^32 - 1) plus `b` per unit. Returns 1, or 0 if the
+/// id is not in the group; -1 for an unknown kind or a bad base.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_channel(
+    s: *mut WasmSquad,
+    id: u32,
+    kind: u32,
+    a: f64,
+    b: u32,
+) -> i32 {
+    let w = squad!(s);
+    let channel = match kind {
+        0 => Channel::None,
+        1 => Channel::Shout { range: a as i64 },
+        2 if (0.0..=f64::from(u32::MAX)).contains(&a) => Channel::Radio {
+            base: a as u32,
+            per_unit: b,
+        },
+        _ => return ERROR_ARGUMENT,
+    };
+    i32::from(w.squad.set_channel(id, channel))
+}
+
+/// Sets the area a danger report adds from the area record in the scratch
+/// buffer (14 numbers, as for areas). Returns 0.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_danger_area(s: *mut WasmSquad) -> i32 {
+    let w = squad!(s);
+    let Some(r) = scratch_copy(AREA_SIZE) else {
+        return ERROR_ARGUMENT;
+    };
+    let r: [u32; AREA_SIZE] = std::array::from_fn(|i| r[i] as u32);
+    w.squad.set_danger_area(area_of(&r));
+    0
+}
+
+/// The danger area record (14 numbers) to the out buffer. Returns 0.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_danger_area(s: *mut WasmSquad) -> i32 {
+    let w = squad!(s);
+    w.out.clear();
+    w.out
+        .extend(area_record(&w.squad.danger_area()).map(|v| v as i32));
+    0
+}
+
+/// The fact kind that counts as a target. Returns 0.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_target_kind(s: *mut WasmSquad, kind: u32) -> i32 {
+    squad!(s).squad.set_target_kind(kind);
+    0
+}
+
+/// How many of the game's own columns each scoring row has. Returns 0.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_extra_columns(s: *mut WasmSquad, count: u32) -> i32 {
+    squad!(s).squad.set_extra_columns(count as usize);
+    0
+}
+
+/// The leader's own sighting: the fact record (9 numbers) in the scratch
+/// buffer. Returns 1 if a fact was dropped (its record is in the out
+/// buffer), else 0.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_observe(s: *mut WasmSquad, now: u32) -> i32 {
+    let w = squad!(s);
+    let Some(r) = scratch_copy(FACT_SIZE) else {
+        return ERROR_ARGUMENT;
+    };
+    let r: [u32; FACT_SIZE] = std::array::from_fn(|i| r[i] as u32);
+    w.out.clear();
+    match w.squad.observe(fact_of(&r), now) {
+        Some(gone) => {
+            w.out.extend(fact_record(&gone).map(|v| v as i32));
+            1
+        }
+        None => 0,
+    }
+}
+
+/// A member's report: the message record (10 numbers) in the scratch
+/// buffer, read from `arrive_at` on. Returns 1, or 0 if the inbox refused
+/// it.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_report(s: *mut WasmSquad, arrive_at: u32) -> i32 {
+    let w = squad!(s);
+    let Some(r) = scratch_copy(MESSAGE_SIZE) else {
+        return ERROR_ARGUMENT;
+    };
+    let r: [u32; MESSAGE_SIZE] = std::array::from_fn(|i| r[i] as u32);
+    i32::from(w.squad.report(message_of(&r), arrive_at))
+}
+
+/// The known targets as fact records (9 numbers each) to the out buffer;
+/// returns how many.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_targets(s: *mut WasmSquad) -> i32 {
+    let w = squad!(s);
+    w.out.clear();
+    let mut n = 0;
+    for f in w.squad.targets() {
+        w.out.extend(fact_record(f).map(|v| v as i32));
+        n += 1;
+    }
+    n
+}
+
+/// Adds a tactic from [`sx_tactic_new`] or [`sx_tactic_shipped`]; the squad
+/// takes it over (do not use or free it again). Returns its index.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`]; `t` from [`sx_tactic_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_add_tactic(s: *mut WasmSquad, t: *mut WasmTactic) -> i32 {
+    let w = squad!(s);
+    if t.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: see above; the box is taken back exactly once.
+    let t = unsafe { Box::from_raw(t) };
+    to_i32(w.squad.add_tactic(t.0))
+}
+
+/// [`ERROR_PLAN`] with the tactic and column in the out buffer.
+fn plan_error(w: &mut WasmSquad, e: PlanError) -> i32 {
+    let PlanError::InputOutOfRange { tactic, input } = e;
+    w.out.clear();
+    w.out.extend([to_i32(tactic), input as i32]);
+    ERROR_PLAN
+}
+
+/// Checks the tactics' columns. Returns 0, or [`ERROR_PLAN`] with the
+/// tactic's index and the column in the out buffer.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_validate(s: *mut WasmSquad) -> i32 {
+    let w = squad!(s);
+    match w.squad.validate() {
+        Ok(()) => 0,
+        Err(e) => plan_error(w, e),
+    }
+}
+
+/// The extra numbers and spots in the scratch buffer: `extra_count`
+/// numbers, then `spot_count` spot records (4 numbers each).
+fn plan_input(extra_count: u32, spot_count: u32) -> Option<(Vec<i32>, Vec<Spot>)> {
+    let extra = extra_count as usize;
+    let len = (spot_count as usize)
+        .checked_mul(SPOT_SIZE)?
+        .checked_add(extra)?;
+    let r = scratch_copy(len)?;
+    let spots = r[extra..]
+        .as_chunks::<SPOT_SIZE>()
+        .0
+        .iter()
+        .map(|c| Spot {
+            pos: [c[0], c[1], c[2]],
+            tags: c[3] as u32,
+        })
+        .collect();
+    Some((r[..extra].to_vec(), spots))
+}
+
+/// Makes a new plan (see `sx_squad_plan`) from the extra numbers and spots
+/// in the scratch buffer (see [`plan_input`]); the seed comes in two
+/// halves. Returns 1 with the plan's id in the out buffer, 0 if nothing
+/// scores, [`ERROR_PLAN`] (details in the out buffer) or -1.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_plan(
+    s: *mut WasmSquad,
+    now: u32,
+    extra_count: u32,
+    spot_count: u32,
+    seed_low: u32,
+    seed_high: u32,
+) -> i32 {
+    let w = squad!(s);
+    let Some((extra, spots)) = plan_input(extra_count, spot_count) else {
+        return ERROR_ARGUMENT;
+    };
+    let seed = u64::from(seed_low) | (u64::from(seed_high) << 32);
+    w.out.clear();
+    match w.squad.plan(now, &extra, &spots, seed) {
+        Ok(Some(id)) => {
+            w.out.push(id as i32);
+            1
+        }
+        Ok(None) => 0,
+        Err(e) => plan_error(w, e),
+    }
+}
+
+/// Watches the plans at `now` (see `sx_squad_check`), with the same
+/// inputs as [`sx_squad_plan`]. Returns 0 keep, 1 replan (the new plan's
+/// id in the out buffer), 2 signal, 3 no plan, [`ERROR_PLAN`] or -1.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_check(
+    s: *mut WasmSquad,
+    now: u32,
+    extra_count: u32,
+    spot_count: u32,
+    seed_low: u32,
+    seed_high: u32,
+) -> i32 {
+    let w = squad!(s);
+    let Some((extra, spots)) = plan_input(extra_count, spot_count) else {
+        return ERROR_ARGUMENT;
+    };
+    let seed = u64::from(seed_low) | (u64::from(seed_high) << 32);
+    w.out.clear();
+    match w.squad.check(now, &extra, &spots, seed) {
+        Ok(SquadStatus::Keep) => 0,
+        Ok(SquadStatus::Replan(id)) => {
+            w.out.push(id as i32);
+            1
+        }
+        Ok(SquadStatus::Signal) => 2,
+        Ok(SquadStatus::NoPlan) => 3,
+        Err(e) => plan_error(w, e),
+    }
+}
+
+/// Moves at most `max` of the orders whose time has come to the out buffer
+/// as order records (21 numbers each), in the order they were sent; the
+/// rest wait for the next call. Returns how many.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_orders_due(s: *mut WasmSquad, now: u32, max: u32) -> i32 {
+    let w = squad!(s);
+    w.squad.orders_due(now, &mut w.due);
+    let n = w.due.len().min(max as usize);
+    w.out.clear();
+    for o in w.due.drain(..n) {
+        put_order(&mut w.out, o.member, &o.goal);
+    }
+    to_i32(n)
+}
+
+/// Gives the signal of the active plan; 1, or 0 if there is no active plan
+/// or the signal was given.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_signal(s: *mut WasmSquad, now: u32) -> i32 {
+    i32::from(squad!(s).squad.signal(now))
+}
+
+/// The member reached its first spot; 1, or 0 if it has no goal in the
+/// active plan.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_arrived(s: *mut WasmSquad, id: u32, now: u32) -> i32 {
+    i32::from(squad!(s).squad.arrived(id, now))
+}
+
+/// 1 if the signal of the active plan was given.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_signal_given(s: *mut WasmSquad) -> i32 {
+    i32::from(squad!(s).squad.signal_given())
+}
+
+fn write_plan(out: &mut Vec<i32>, plan: Option<&Plan>) -> i32 {
+    out.clear();
+    let Some(p) = plan else {
+        return 0;
+    };
+    out.extend([
+        p.id as i32,
+        to_i32(p.tactic),
+        p.target.unwrap_or(0) as i32,
+        p.made_at as i32,
+        p.active_at as i32,
+        to_i32(p.goals.len()),
+        i32::from(p.target.is_some()),
+    ]);
+    for (member, goal) in &p.goals {
+        put_order(out, *member, goal);
+    }
+    1
+}
+
+/// The plan made last while it waits: a plan record (7 numbers) and its
+/// goals as order records to the out buffer. Returns 1, or 0 if none.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_pending_plan(s: *mut WasmSquad) -> i32 {
+    let w = squad!(s);
+    write_plan(&mut w.out, w.squad.pending_plan())
+}
+
+/// Like [`sx_squad_pending_plan`], for the plan being carried out.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_active_plan(s: *mut WasmSquad) -> i32 {
+    let w = squad!(s);
+    write_plan(&mut w.out, w.squad.active_plan())
+}
+
+/// One member's goal with its postpone state, and an out buffer.
+pub struct WasmKeeper {
+    keeper: GoalKeeper,
+    out: Vec<i32>,
+}
+
+macro_rules! keeper {
+    ($k:expr) => {
+        // SAFETY: JS passes a handle from sx_keeper_new (wrapper guarantees it).
+        match unsafe { $k.as_mut() } {
+            Some(k) => k,
+            None => return ERROR_ARGUMENT,
+        }
+    };
+}
+
+/// A keeper without a goal.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_keeper_new() -> *mut WasmKeeper {
+    Box::into_raw(Box::new(WasmKeeper {
+        keeper: GoalKeeper::new(),
+        out: Vec::new(),
+    }))
+}
+
+/// Frees a keeper.
+///
+/// # Safety
+/// `k` is null or from [`sx_keeper_new`] and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_free(k: *mut WasmKeeper) {
+    if !k.is_null() {
+        // SAFETY: see above.
+        drop(unsafe { Box::from_raw(k) });
+    }
+}
+
+/// The out buffer of the last call that wrote one.
+///
+/// # Safety
+/// `k` from [`sx_keeper_new`]. Valid until memory grows.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_out(k: *mut WasmKeeper) -> *const i32 {
+    // SAFETY: see above.
+    unsafe { k.as_ref() }.map_or(std::ptr::null(), |w| w.out.as_ptr())
+}
+
+/// Takes the goal record (20 numbers) in the scratch buffer. Returns 0; -1
+/// for an unknown kind or start or a slot above 255.
+///
+/// # Safety
+/// `k` from [`sx_keeper_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_set(k: *mut WasmKeeper, now: u32) -> i32 {
+    let w = keeper!(k);
+    let Some(goal) = scratch_copy(GOAL_SIZE).as_deref().and_then(goal_of) else {
+        return ERROR_ARGUMENT;
+    };
+    w.keeper.set(goal, now);
+    0
+}
+
+/// The goal record to the out buffer; 1, or 0 without a goal.
+///
+/// # Safety
+/// `k` from [`sx_keeper_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_goal(k: *mut WasmKeeper) -> i32 {
+    let w = keeper!(k);
+    w.out.clear();
+    match w.keeper.goal() {
+        Some(g) => {
+            w.out.extend_from_slice(&goal_record(g));
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Drops the goal and the postpone state.
+///
+/// # Safety
+/// `k` from [`sx_keeper_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_clear(k: *mut WasmKeeper) -> i32 {
+    keeper!(k).keeper.clear();
+    0
+}
+
+/// The member turns to something else for now (the first time stays).
+///
+/// # Safety
+/// `k` from [`sx_keeper_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_postpone(k: *mut WasmKeeper, now: u32) -> i32 {
+    keeper!(k).keeper.postpone(now);
+    0
+}
+
+/// Back on the goal: the postpone clock is reset.
+///
+/// # Safety
+/// `k` from [`sx_keeper_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_resume(k: *mut WasmKeeper, now: u32) -> i32 {
+    keeper!(k).keeper.resume(now);
+    0
+}
+
+/// Out of play: never broken.
+///
+/// # Safety
+/// `k` from [`sx_keeper_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_suspend(k: *mut WasmKeeper) -> i32 {
+    keeper!(k).keeper.suspend();
+    0
+}
+
+/// Back in play; a postponed goal's clock restarts at `now`.
+///
+/// # Safety
+/// `k` from [`sx_keeper_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_unsuspend(k: *mut WasmKeeper, now: u32) -> i32 {
+    keeper!(k).keeper.unsuspend(now);
+    0
+}
+
+/// 1 once the goal has been postponed for at least `give_up_ticks`, never
+/// while suspended.
+///
+/// # Safety
+/// `k` from [`sx_keeper_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_broken(k: *mut WasmKeeper, now: u32, give_up_ticks: u32) -> i32 {
+    i32::from(keeper!(k).keeper.broken(now, give_up_ticks))
+}
+
+/// The member's decider inputs at `x, y, z` (has goal, distance to goal,
+/// goal age, signal given, discipline) to the out buffer. Returns 0; -1 for
+/// an unknown metric.
+///
+/// # Safety
+/// `k` from [`sx_keeper_new`].
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sx_keeper_inputs(
+    k: *mut WasmKeeper,
+    now: u32,
+    x: i32,
+    y: i32,
+    z: i32,
+    metric: i32,
+    signal_given: u32,
+    discipline: u32,
+) -> i32 {
+    let w = keeper!(k);
+    let Some(metric) = metric_of(metric) else {
+        return ERROR_ARGUMENT;
+    };
+    let inputs = w
+        .keeper
+        .inputs(now, [x, y, z], metric, signal_given != 0, discipline);
+    w.out.clear();
+    w.out.extend_from_slice(&inputs);
+    0
 }
