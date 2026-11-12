@@ -120,3 +120,67 @@ fn interval_first_due_then_every() {
     t.reset();
     assert!(t.due(1, 255));
 }
+
+#[test]
+fn zone_renews_first_within_radius() {
+    let mut z = Zones::new(4, 0x200, 255).unwrap();
+    assert_eq!(z.add([0, 0, 0], 0, 1, None), 0);
+    assert_eq!(z.add([0x1ff, 0, 0], 10, 2, Some([5, 6, 7])), 0);
+    assert_eq!(z.len(), 1);
+    let zone = z.iter().next().unwrap();
+    assert_eq!(zone.pos, [0x1ff, 0, 0]);
+    assert_eq!(zone.data, 2);
+    assert_eq!(zone.since, 10);
+    assert_eq!(zone.source, [5, 6, 7]);
+    assert_eq!(zone.has_source, 1);
+}
+
+#[test]
+fn zone_at_exact_radius_is_new() {
+    let mut z = Zones::new(4, 0x200, 255).unwrap();
+    z.add([0, 0, 0], 0, 0, None);
+    assert_eq!(z.add([0x200, 0, 0], 1, 0, None), 1);
+    assert_eq!(z.len(), 2);
+}
+
+#[test]
+fn zone_full_drops_oldest() {
+    let mut z = Zones::new(2, 10, 255).unwrap();
+    z.add([0, 0, 0], 5, 1, None);
+    z.add([100, 0, 0], 2, 2, None);
+    assert_eq!(z.add([200, 0, 0], 6, 3, None), 1);
+    let d: Vec<u32> = z.iter().map(|x| x.data).collect();
+    assert_eq!(d, vec![1, 3]);
+}
+
+#[test]
+fn zone_expire_at_lifetime() {
+    let mut z = Zones::new(4, 10, 255).unwrap();
+    z.add([0, 0, 0], 0, 1, None);
+    z.add([100, 0, 0], 1, 2, None);
+    assert_eq!(z.expire(255), 1);
+    assert_eq!(z.len(), 1);
+    assert_eq!(z.iter().next().unwrap().data, 2);
+    assert_eq!(z.expire(255), 0);
+}
+
+#[test]
+fn zone_blocks_rule() {
+    let mut z = Zones::new(4, 100, 255).unwrap();
+    z.add([0, 0, 0], 0, 0, None);
+    let out = [1000, 0, 0];
+    assert!(z.blocks([10, 0, 0], out, [2000, 0, 0]));
+    assert!(!z.blocks([10, 0, 0], [20, 0, 0], out));
+    assert!(!z.blocks([10, 0, 0], out, [20, 0, 0]));
+    assert!(!z.blocks([500, 0, 0], out, [2000, 0, 0]));
+    // Overlapping zones: blocked if any zone qualifies.
+    z.add([150, 0, 0], 0, 0, None);
+    assert_eq!(z.len(), 2);
+    // cell in both; start in first only -> second still blocks.
+    assert!(z.blocks([90, 0, 0], [-50, 0, 0], out));
+    assert_eq!(z.contains([90, 0, 0]), Some(0));
+    // radius <= 0: nothing inside.
+    let mut n = Zones::new(1, 0, 10).unwrap();
+    n.add([0, 0, 0], 0, 0, None);
+    assert_eq!(n.contains([0, 0, 0]), None);
+}

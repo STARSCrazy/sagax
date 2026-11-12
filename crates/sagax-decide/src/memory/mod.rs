@@ -10,12 +10,14 @@
 
 mod ignore;
 mod sightings;
+mod zones;
 
 #[cfg(test)]
 mod tests;
 
 pub use ignore::{Ignore, Interval};
 pub use sightings::{Sighting, Sightings};
+pub use zones::{Zone, Zones};
 
 /// A place: three integer coordinates in the game's own units.
 pub type Pos = [i32; 3];
