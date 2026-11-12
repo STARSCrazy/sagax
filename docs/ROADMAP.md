@@ -12,6 +12,10 @@
   (0.8.0: squad leader, orders, signal, skill) are done. Next: a mission /
   intention planner that hands goals to groups the way groups hand goals to
   members.
+- **Group tactics, deferred from the 0.8.0 design:** a trace sink (every
+  tactic score, the pick, each slot assignment and abort check, like the
+  `Decider`'s trace) and a skill-driven chance that a member ignores its
+  slot. Neither is built yet.
 - **Perception** (sight lines, cover, flanks), on the same `sagax-core`.
   Later, with it: *indirect coordination*, where characters see allies
   attack or flee and join in, only when they actually saw it.

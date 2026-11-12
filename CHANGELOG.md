@@ -4,31 +4,49 @@
 
 - Group tactics, in `sagax-decide` (module `group`): a squad leader plans
   for a group, the members act on their goals with their own decisions.
-  Integer only, deterministic, wrap-safe time, seeds from the game, fixed
-  sizes.
+  Integer only, deterministic, wrap-safe time, seeds from the game,
+  capacities set once (after warm-up nothing allocates except one `Vec` per
+  new plan).
   - `Squad`: member list, leader (the next active member takes over when it
     is lost, the plan stays valid), its own `Knowledge`, `Areas` and inbox
     (the leader plans only with what it saw or was told), tactic scoring per
     (tactic, target), planning with think time from skill, `check` (keep,
-    replan, signal), `orders_due`, `signal`, `arrived`.
-  - Orders with a channel per member (shout with a range, radio, none) and
-    a delay from the leader's position. The signal lines up the starts
-    (`AfterTicks`), so all members attack at the same tick.
+    replan, signal), `orders_due`, `signal`, `arrived`, `resume` (a member
+    back in play gets its current goal again). A "Better" replan picks only
+    among candidates above the hold bar; the pick's seed is mixed with the
+    tick. A plan ends when its target is forgotten or not seen for 255
+    ticks. Danger areas expire inside the squad.
+  - Orders with a channel per member (shout with a range, radio, none; the
+    default radio 0, 0 is instant) and a delay from the leader's position.
+    An order's position is where to go now, its kind and start what to do
+    there and when; a member's later order replaces one still on its way
+    and never overtakes it. The signal lines up the starts (`AfterTicks`),
+    so all members attack at the same tick. Members report back with
+    `REPORT_GOAL_BROKEN`, `REPORT_ENEMY`, `REPORT_DANGER` and
+    `REPORT_ARRIVED` (arrival with delay; `arrived` is the instant
+    shortcut).
   - Tactics as data (slots, scoring, abort rules, trigger) and shipped ones:
-    rush, formation (line, wedge, column), flank (gather, then attack on
-    signal), ambush, focus, isolate, fall back. They work with few or no
-    spot tags (fall back to the nearest spot, then to the wish point).
+    rush, formation (line, wedge, column), flank (gather at twice the
+    attack distance, `Slot::gather_dist`, then attack on signal), ambush,
+    focus, isolate (scored by the built-in `IN_TARGET_FRIEND_DIST`), fall
+    back. They work with few or no spot tags (fall back to the nearest spot
+    within the spot radius, then to the wish point). Spots count only
+    within the spot radius of the wish point (default 3 times the slot's
+    `dist`, or `Squad::set_spot_radius`).
   - `SkillTable`: what skill changes (which plan, how fast, how well, how
     long a goal is held). `GoalKeeper` for the member side, `discipline`,
     `suspend` / `resume` (the game's orders come first), `gather` (free
     characters of a faction within a radius).
   - `Areas::move_cost`, an adapter that turns areas into path costs.
-- Rust `sagax_decide::group`; C `sx_squad_*`, `sx_keeper_*`, `sx_tactic_*`,
+- Rust `sagax_decide::group`; C `sx_squad_*` (including
+  `sx_squad_set_spot_radius`), `sx_keeper_*`, `sx_tactic_*`,
   `sx_gather`, `sx_discipline`, `sx_areas_move_cost`; JavaScript
   `lib.squad()`, `lib.keeper()`, `lib.tactic()`, `lib.tactics`,
   `lib.skillTable()`, `lib.discipline()`, `lib.gather()`,
   `lib.areasMoveCost()`. The JavaScript group wrappers throw on a time or
-  value out of range; the older wrappers still coerce.
+  value out of range; the older wrappers still coerce. Seeds may be a
+  BigInt for the full 64 bits. At most 1024 extra columns and 255 slots
+  per tactic.
 - Examples `squad` (a flank on a small grid: sighting, plan, radio orders,
   gather, signal, simultaneous attack) and `examples/c/squad.c`; section 8
   of the guide.

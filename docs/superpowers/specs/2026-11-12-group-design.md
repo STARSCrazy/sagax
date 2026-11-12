@@ -256,6 +256,10 @@ become requirements:
 Like the `Decider`: an optional sink gets every tactic score, the pick,
 each slot assignment and every abort check, for debugging and tuning.
 
+**Deferred (not in 0.8.0):** the trace sink and the skill's "chance a
+member ignores its slot" (section 5) are not built; both are listed in
+`docs/ROADMAP.md`.
+
 ## Game side (not in the repo)
 
 What a game decides itself and Sagax only enables: who forms a group
