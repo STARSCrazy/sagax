@@ -184,3 +184,115 @@ fn zone_blocks_rule() {
     n.add([0, 0, 0], 0, 0, None);
     assert_eq!(n.contains([0, 0, 0]), None);
 }
+
+#[test]
+fn stalled_resets_on_gain() {
+    let mut p = Pursuit::default();
+    p.begin(7, [0; 3], 1000, 0);
+    assert!(!p.stalled(900, 50, 0x80, 85));
+    assert!(!p.stalled(872, 60, 0x80, 85));
+    assert_eq!(p.best, 872);
+    assert_eq!(p.since, 60);
+    assert!(!p.stalled(872, 144, 0x80, 85));
+    assert!(p.stalled(872, 145, 0x80, 85));
+}
+
+#[test]
+fn lost_at_limit() {
+    let mut p = Pursuit::default();
+    p.begin(1, [1, 2, 3], 0, 0);
+    for _ in 0..8 {
+        p.missed(4);
+    }
+    assert_eq!(p.unseen, 32);
+    assert!(!p.lost(34));
+    for _ in 0..1 {
+        p.missed(4);
+    }
+    assert!(p.lost(34));
+    p.seen([4, 5, 6]);
+    assert_eq!(p.unseen, 0);
+    assert_eq!(p.last_pos, [4, 5, 6]);
+    p.missed(u32::MAX);
+    p.missed(5);
+    assert_eq!(p.unseen, u32::MAX);
+    p.reset_progress(50, 9);
+    assert_eq!((p.best, p.since), (50, 9));
+    p.clear();
+    assert_eq!(p.target, 0);
+}
+
+#[test]
+fn pursuit_time_wraps() {
+    let mut p = Pursuit::default();
+    p.begin(1, [0; 3], 1000, u32::MAX - 10);
+    assert!(!p.stalled(1000, 73, 0x80, 85));
+    assert!(p.stalled(1000, 74, 0x80, 85));
+}
+
+#[test]
+fn radio_cooldown_from_start() {
+    let mut r = Radio::default();
+    assert!(r.start([1, 2, 3], 0, 170));
+    assert_eq!(r.take(), Some([1, 2, 3]));
+    assert!(!r.start([0; 3], 169, 170));
+    assert!(r.start([0; 3], 170, 170));
+}
+
+#[test]
+fn radio_refuses_while_pending() {
+    let mut r = Radio::default();
+    assert!(r.start([0; 3], 0, 0));
+    assert!(r.pending());
+    assert!(!r.start([1; 3], 1000, 0));
+    r.cancel();
+    assert!(!r.pending());
+    assert!(r.start([1; 3], 1000, 0));
+}
+
+#[test]
+fn radio_due_after_delay() {
+    let mut r = Radio::default();
+    assert!(!r.due(1000, 0));
+    r.start([0; 3], 10, 170);
+    assert!(!r.due(111, 102));
+    assert!(r.due(112, 102));
+}
+
+#[test]
+fn radio_take_without_pending_is_none() {
+    let mut r = Radio::default();
+    assert_eq!(r.take(), None);
+}
+
+#[test]
+fn radio_first_start_ignores_cooldown() {
+    let mut r = Radio::default();
+    assert!(r.start([0; 3], 5, 170));
+}
+
+#[test]
+fn nearest_truncates_negative() {
+    let mut out = Vec::new();
+    // divisor 16: dx -15 -> 0 (distance 0), dx -17 -> -1 (distance 1).
+    nearest(&[(1, -17, 0), (2, -15, 0)], (0, 0), 2, 16, &mut out);
+    assert_eq!(out, vec![2, 1]);
+}
+
+#[test]
+fn nearest_tie_earlier_wins() {
+    let mut out = vec![99];
+    nearest(&[(1, 5, 0), (2, 0, 5), (3, 1, 0)], (0, 0), 2, 1, &mut out);
+    assert_eq!(out, vec![3, 1]);
+}
+
+#[test]
+fn nearest_fewer_than_k() {
+    let mut out = Vec::new();
+    nearest(&[(1, 5, 0)], (0, 0), 3, 0, &mut out);
+    assert_eq!(out, vec![1]);
+    nearest(&[], (0, 0), 3, 1, &mut out);
+    assert!(out.is_empty());
+    nearest(&[(1, 5, 0)], (0, 0), 0, 1, &mut out);
+    assert!(out.is_empty());
+}

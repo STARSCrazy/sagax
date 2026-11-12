@@ -9,6 +9,8 @@
 //! and deterministic.
 
 mod ignore;
+mod pursuit;
+mod radio;
 mod sightings;
 mod zones;
 
@@ -16,6 +18,8 @@ mod zones;
 mod tests;
 
 pub use ignore::{Ignore, Interval};
+pub use pursuit::{Pursuit, nearest};
+pub use radio::Radio;
 pub use sightings::{Sighting, Sightings};
 pub use zones::{Zone, Zones};
 
