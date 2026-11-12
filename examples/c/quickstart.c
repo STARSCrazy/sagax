@@ -85,12 +85,10 @@ int main(void)
 		sx_decider_add_consideration(d, (uint32_t)flee, &hurt);
 		if (sx_decider_decide(d, candidates, 3, inputs, 2, SX_PICK_BEST, 0, 0,
 		                      scores, &choice) != 1 || choice.candidate != 1) {
-			fprintf(stderr, "wrong decision
-");
+			fprintf(stderr, "wrong decision\n");
 			return 1;
 		}
-		printf("decision: option %u, target %u, score %u
-",
+		printf("decision: option %u, target %u, score %u\n",
 		       candidates[choice.candidate].option, candidates[choice.candidate].target,
 		       choice.score);
 		sx_decider_free(d);
