@@ -4,9 +4,8 @@
 //! [`Timers`] are ids that count as "on" for a while (ignore a target, no
 //! alarm again), [`Progress`] tells whether a chase still gets closer, and
 //! [`Interval`] is a small timer for "do this every N ticks". [`Zones`] are
-//! areas to stay out of, [`Outbox`] and [`Inbox`] carry messages (recipients are picked
-//! with [`route`]),
-//! [`search_point`] spreads search points around a place and [`look_heading`]
+//! areas to stay out of, [`Outbox`] and [`Inbox`] carry messages (recipients
+//! are picked with [`route`]), [`search_point`] spreads search points around a place and [`look_heading`]
 //! turns the view while looking around.
 //!
 //! Time is the game's own count (u32); ages are computed with wrapping

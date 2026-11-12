@@ -131,11 +131,9 @@ impl Outbox {
         self.items.len()
     }
 
-    /// Drops all messages and forgets the last post (the next post is a
-    /// first post again).
+    /// Drops all messages. The cooldown keeps running.
     pub fn clear(&mut self) {
         self.items.clear();
-        self.last_post = None;
     }
 }
 
@@ -170,17 +168,22 @@ impl Inbox {
     /// that arrives latest (a tie: the later slot) is dropped if the new one
     /// arrives strictly earlier, and the new one is appended (true);
     /// otherwise the new one is refused (false). Arrival times are compared
-    /// as plain numbers here, as there is no clock; keep them within one
-    /// clock epoch.
+    /// by their wrapping difference as a signed number, so a wrapped clock
+    /// works as long as the stored arrivals lie within 2^31 of each other
+    /// (the same assumption as [`Inbox::take_due`]).
     pub fn push(&mut self, msg: Message, arrive_at: u32) -> bool {
+        // True if `a` arrives strictly before `b`.
+        fn before(a: u32, b: u32) -> bool {
+            (a.wrapping_sub(b) as i32) < 0
+        }
         if self.items.len() >= self.capacity {
             let mut latest = 0;
             for (i, it) in self.items.iter().enumerate().skip(1) {
-                if it.1 >= self.items[latest].1 {
+                if !before(it.1, self.items[latest].1) {
                     latest = i;
                 }
             }
-            if arrive_at >= self.items[latest].1 {
+            if !before(arrive_at, self.items[latest].1) {
                 return false;
             }
             self.items.remove(latest);

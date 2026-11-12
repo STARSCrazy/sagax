@@ -582,7 +582,9 @@ fn outbox_sender_gone_keeps_marked() {
     o.post(msg(3, 1), 6, 5, 0).unwrap();
     o.clear();
     assert_eq!(o.pending(), 0);
-    assert_eq!(o.post(msg(4, 1), 7, 5, 100), Ok(()));
+    // The cooldown survives clear (last accepted post was at 6).
+    assert_eq!(o.post(msg(4, 1), 7, 5, 100), Err(Refused::Cooldown));
+    assert_eq!(o.post(msg(4, 1), 106, 5, 100), Ok(()));
 }
 
 #[test]
@@ -801,4 +803,53 @@ fn message_to_knowledge() {
     k.merge_message(&new, SOURCE_HEARD, 20);
     assert_eq!(k.get(5, 3).unwrap().data, 2);
     assert_eq!(k.get(5, 3).unwrap().source, SOURCE_HEARD);
+}
+
+#[test]
+fn inbox_full_orders_across_wrap() {
+    let mut b = Inbox::new(3).unwrap();
+    b.push(msg(1, 1), u32::MAX - 5);
+    b.push(msg(2, 1), 3);
+    b.push(msg(3, 1), u32::MAX);
+    // Latest is arrival 3 (after the wrap); MAX - 2 is earlier: replaces it.
+    assert!(b.push(msg(4, 1), u32::MAX - 2));
+    // Latest is now MAX; 1 (after the wrap) is later: refused.
+    assert!(!b.push(msg(5, 1), 1));
+    let mut out = Vec::new();
+    b.take_due(u32::MAX, &mut out);
+    let ids: Vec<u32> = out.iter().map(|m| m.subject).collect();
+    assert_eq!(ids, vec![1, 3, 4]);
+}
+
+#[test]
+fn route_nearest_other_metrics_and_three_way_tie() {
+    let mut out = Vec::new();
+    let c = [(1, 4, 4), (2, 0, 5), (3, 3, 0), (4, -2, -2)];
+    // Manhattan: 8, 5, 3, 4.
+    route(
+        Route::Nearest(3),
+        (0, 0),
+        &c,
+        Metric::Manhattan,
+        1,
+        &mut out,
+    );
+    assert_eq!(out, vec![3, 4, 2]);
+    // Chebyshev: 4, 5, 3, 2.
+    route(
+        Route::Nearest(3),
+        (0, 0),
+        &c,
+        Metric::Chebyshev,
+        1,
+        &mut out,
+    );
+    assert_eq!(out, vec![4, 3, 1]);
+    // Hex: (4,4)=8, (0,5)=5, (3,0)=3, (-2,-2)=4.
+    route(Route::Nearest(3), (0, 0), &c, Metric::Hex, 1, &mut out);
+    assert_eq!(out, vec![3, 4, 2]);
+    // Three-way tie at distance 5, k = 2: the earlier two win.
+    let t = [(7, 5, 0), (8, 0, 5), (9, -5, 0)];
+    route(Route::Nearest(2), (0, 0), &t, Metric::Euclid, 1, &mut out);
+    assert_eq!(out, vec![7, 8]);
 }
