@@ -477,7 +477,7 @@ memory against a long one and keep what plays best.
   ```rust
   let mut known = Sightings::new(8)?;
   let dropped = known.seen(7, [4000, 4000, 0], now);      // Option<u32>: evicted id
-  known.set_pos(7, [4100, 4000, 0]);                       // radio report: place only
+  known.set_pos(7, [4100, 4000, 0]);                       // radio report: place only; false if id unknown
   known.expire(now, 2040, |id| forget(id));
   if let Some(s) = known.get(7) { search_near(s.pos, now.wrapping_sub(s.last_seen)); }
   ```
@@ -570,6 +570,7 @@ move. Start and goal are exempt, so a way can always leave a zone and reach
 a goal inside one.
 
 ```rust
+// `self` is your map: it holds the zones and the start and goal positions.
 fn move_cost(&mut self, _from: Cell, to: Cell) -> Option<Cost> {
     let centre = [to.x * 256 + 128, to.y * 256 + 128, 0];     // your cell size
     if self.zones.blocks(centre, self.start, self.goal) { None } else { Some(0) }

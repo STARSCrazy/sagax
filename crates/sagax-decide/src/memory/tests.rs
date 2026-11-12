@@ -427,3 +427,51 @@ fn search_point_past_last_step_is_none() {
     assert_eq!(search_point(3, 4, [0; 3], &p), None);
     assert_eq!(search_point(3, usize::MAX, [0; 3], &p), None);
 }
+
+#[test]
+fn ignore_len_and_clear() {
+    let mut i = Ignore::new(2).unwrap();
+    assert!(i.is_empty());
+    i.add(1, 10);
+    i.add(2, 10);
+    assert_eq!(i.len(), 2);
+    assert!(!i.is_empty());
+    i.clear();
+    assert_eq!((i.len(), i.is_empty()), (0, true));
+    assert!(!i.ignores(1, 11, 10));
+    i.add(3, 20);
+    assert!(i.ignores(3, 21, 10));
+}
+
+#[test]
+fn zones_extreme_coordinates_do_not_overflow() {
+    let mut z = Zones::new(2, i32::MAX, 10).unwrap();
+    z.add([i32::MIN, i32::MIN, 0], 0, 0, None);
+    assert_eq!(z.contains([i32::MIN, i32::MIN, 0]), Some(0));
+    // dx and dy are 2^32 - 1: the squares do not fit in i64.
+    assert_eq!(z.contains([i32::MAX, i32::MAX, 0]), None);
+    let far = [i32::MAX, i32::MAX, 0];
+    let near = [i32::MIN, i32::MIN, 0];
+    assert!(z.blocks(near, far, far));
+    assert!(!z.blocks(near, near, far));
+}
+
+#[test]
+fn nearest_extreme_coordinates_do_not_overflow() {
+    let mut out = Vec::new();
+    let c = [(1, i32::MIN, i32::MIN), (2, i32::MAX, i32::MAX), (3, 0, 0)];
+    nearest(&c, (i32::MAX, i32::MAX), 3, 1, &mut out);
+    assert_eq!(out, vec![2, 3, 1]);
+    nearest(&c, (i32::MIN, i32::MIN), 3, 1, &mut out);
+    assert_eq!(out, vec![1, 3, 2]);
+}
+
+#[test]
+fn search_point_missing_distance_counts_as_zero() {
+    let p = SearchPattern {
+        offsets: vec![0, 0],
+        distances: vec![256],
+        ..SearchPattern::default()
+    };
+    assert_eq!(search_point(0, 2, [500, 600, 7], &p), Some([500, 600, 7]));
+}

@@ -498,7 +498,7 @@ typedef struct sx_search_pattern {
 
 /* -- sightings: a bounded list of last known places, in insertion order -- */
 
-/* Null if capacity is 0. */
+/* Null if capacity is 0. The whole capacity is reserved at once. */
 sx_sightings *sx_sightings_new(uint32_t capacity);
 void sx_sightings_free(sx_sightings *s);
 /* id was seen at x, y, z at now. A known id is updated in place (its data is
@@ -509,7 +509,9 @@ int32_t sx_sightings_seen(sx_sightings *s, uint32_t id, int32_t x, int32_t y, in
                           uint32_t now, uint32_t *evicted);
 /* Renew the time of id without changing its place. Return 1, or 0 if unknown. */
 int32_t sx_sightings_touch(sx_sightings *s, uint32_t id, uint32_t now);
+/* Set the place of id, keeping its time and data. Return 1, or 0 if unknown. */
 int32_t sx_sightings_set_pos(sx_sightings *s, uint32_t id, int32_t x, int32_t y, int32_t z);
+/* Set the data of id. Return 1, or 0 if unknown. */
 int32_t sx_sightings_set_data(sx_sightings *s, uint32_t id, uint32_t data);
 /* Return 1 if id was there. */
 int32_t sx_sightings_remove(sx_sightings *s, uint32_t id);
@@ -530,7 +532,8 @@ int32_t sx_sightings_clear(sx_sightings *s);
 /* -- zones: areas to stay out of -- */
 
 /* Zones are circles of the given radius (<= 0: nothing is ever inside) that
- * last lifetime ticks. Null if capacity is 0. */
+ * last lifetime ticks. Null if capacity is 0. The whole capacity is
+ * reserved at once. */
 sx_zones *sx_zones_new(uint32_t capacity, int32_t radius, uint32_t lifetime);
 void sx_zones_free(sx_zones *z);
 /* Add a zone at x, y, z. If that place is already inside a zone (the first in
@@ -549,12 +552,14 @@ int32_t sx_zones_contains(sx_zones *zones, int32_t x, int32_t y, int32_t z, uint
 int32_t sx_zones_blocks(sx_zones *z, const int32_t *cell, const int32_t *start,
                         const int32_t *goal);
 int32_t sx_zones_count(sx_zones *z);
+/* Remove all zones. Returns 0. */
+int32_t sx_zones_clear(sx_zones *z);
 /* Fill *out with the zone in slot index. Return 1, or 0 if there is none. */
 int32_t sx_zones_at(sx_zones *z, uint32_t index, sx_zone *out);
 
 /* -- ignore: ids to leave alone for a while -- */
 
-/* Null if capacity is 0. */
+/* Null if capacity is 0. The whole capacity is reserved at once. */
 sx_ignore *sx_ignore_new(uint32_t capacity);
 void sx_ignore_free(sx_ignore *i);
 /* Ignore id from now. A present id is renewed; when full, the oldest entry
@@ -562,6 +567,8 @@ void sx_ignore_free(sx_ignore *i);
 int32_t sx_ignore_add(sx_ignore *i, uint32_t id, uint32_t now);
 /* Return 1 if id was added less than duration ago. */
 int32_t sx_ignore_ignores(sx_ignore *i, uint32_t id, uint32_t now, uint32_t duration);
+/* Forget all ids. Returns 0. */
+int32_t sx_ignore_clear(sx_ignore *i);
 
 /* -- pursuit: where the target was last seen and whether the chase gets
  *    anywhere -- */
@@ -577,7 +584,8 @@ int32_t sx_pursuit_missed(sx_pursuit *p, uint32_t step);
 int32_t sx_pursuit_reset_progress(sx_pursuit *p, int32_t distance, uint32_t now);
 /* Return 1 if the target has been out of sight for at least limit. */
 int32_t sx_pursuit_lost(sx_pursuit *p, uint32_t limit);
-/* Call with the current distance. Getting at least min_gain closer than the
+/* Call with the current distance, once per check: it updates the progress
+ * mark. Getting at least min_gain closer than the
  * best so far counts as progress and restarts the check (returns 0). Return 1
  * if there has been no progress for at least limit ticks. */
 int32_t sx_pursuit_stalled(sx_pursuit *p, int32_t distance, uint32_t now, int32_t min_gain,
@@ -594,7 +602,7 @@ int32_t sx_radio_start(sx_radio *r, int32_t x, int32_t y, int32_t z, uint32_t no
 /* Return 1 if a call is pending and at least delay has passed. */
 int32_t sx_radio_due(sx_radio *r, uint32_t now, uint32_t delay);
 /* Take the pending call: its place goes to xyz (3 integers). Return 1, or 0
- * if none is pending. */
+ * if none is pending. Does not check the delay; pair it with sx_radio_due. */
 int32_t sx_radio_take(sx_radio *r, int32_t *xyz);
 /* Drop the pending call (the cooldown still counts). */
 int32_t sx_radio_cancel(sx_radio *r);
@@ -627,7 +635,7 @@ int32_t sx_search_point(uint32_t agent, uint32_t step, int32_t cx, int32_t cy, i
                         const sx_search_pattern *pattern, int32_t *out);
 /* Heading elapsed ticks into looking around from base: plus
  * offsets[elapsed / step_ticks], or plus nothing once past the end; result
- * 0 .. 255. offsets null: look to one side, back, to the other side and back
+ * 0 .. 255. offsets null (count is then ignored): look to one side, back, to the other side and back
  * (0, 32, 64, 32, 0, -32, -64, -32). A step_ticks of 0 counts as 1. */
 int32_t sx_look_heading(int32_t base, uint32_t elapsed, uint32_t step_ticks,
                         const int32_t *offsets, uint32_t count);

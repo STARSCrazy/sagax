@@ -748,6 +748,11 @@ export class Sightings {
     return this.ids(this.x.sx_sightings_expire(this.handle, u32(now), u32(maxAge)));
   }
 
+  /** Number of sightings. */
+  count() {
+    return this.x.sx_sightings_count(this.handle);
+  }
+
   clear() {
     this.x.sx_sightings_clear(this.handle);
   }
@@ -812,6 +817,16 @@ export class Zones {
     return all;
   }
 
+  /** Number of zones. */
+  count() {
+    return this.x.sx_zones_count(this.handle);
+  }
+
+  /** Removes all zones. */
+  clear() {
+    this.x.sx_zones_clear(this.handle);
+  }
+
   free() {
     if (this.handle) this.x.sx_zones_free(this.handle);
     this.handle = 0;
@@ -834,6 +849,11 @@ export class Ignore {
   /** True if id was added less than duration ago. */
   ignores(id, now, duration) {
     return this.x.sx_ignore_ignores(this.handle, u32(id), u32(now), u32(duration)) === 1;
+  }
+
+  /** Forgets all ids. */
+  clear() {
+    this.x.sx_ignore_clear(this.handle);
   }
 
   free() {
@@ -879,7 +899,10 @@ export class Pursuit {
     return this.unseen >= u32(limit);
   }
 
-  /** True if no progress was made for at least limit; getting minGain closer restarts the check. */
+  /**
+   * True if no progress was made for at least limit; getting minGain closer
+   * restarts the check. Updates the progress mark: call once per check.
+   */
   stalled(distance, now, minGain, limit) {
     if (this.best - i32(distance) >= i32(minGain)) {
       this.best = i32(distance);
@@ -926,7 +949,7 @@ export class Radio {
     return this.pending && u32(now - this.started) >= u32(delay);
   }
 
-  /** Takes the place of the pending call (or null), ending the call. */
+  /** Takes the place of the pending call (or null), ending the call. Does not check the delay; pair it with due. */
   take() {
     if (!this.pending) return null;
     this.pending = false;
@@ -995,11 +1018,12 @@ function searchPointOf(x, agent, step, [cx, cy, cz], pattern) {
   let at;
   if (pattern) {
     const p = { ...PATTERN_DEFAULT, ...pattern };
-    if (p.offsets.length > 8 || p.distances.length < p.offsets.length) {
+    if (p.offsets.length > 8 || p.distances.length > 8) {
       throw new RangeError('Sagax: a search pattern has at most 8 steps, one distance each');
     }
     const fill = (list) => [...list, ...new Array(8 - list.length).fill(0)];
     const offsets = fill(p.offsets);
+    // Like Rust: a missing distance counts as 0 (an extra one is ignored).
     const distances = fill(p.distances.slice(0, p.offsets.length));
     at = scratch(x, 23, [p.headingStep, p.firstDistance, p.offsets.length, ...offsets, ...distances, ...p.min, ...p.max]).byteOffset;
     custom = 1;

@@ -31,7 +31,8 @@ pub struct SearchPattern {
     pub first_distance: i32,
     /// Turn of each later step from the agent heading.
     pub offsets: Vec<i32>,
-    /// Distance of each later step from the centre (same length as `offsets`).
+    /// Distance of each later step from the centre (meant to be as long as
+    /// `offsets`; a missing entry counts as 0).
     pub distances: Vec<i32>,
     /// Smallest allowed `(x, y)`.
     pub min: (i32, i32),

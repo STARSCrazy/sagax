@@ -1662,6 +1662,16 @@ pub unsafe extern "C" fn sx_zones_count(z: *mut WasmZones) -> i32 {
     to_i32(zones!(z).zones.len())
 }
 
+/// Removes all zones.
+///
+/// # Safety
+/// `z` from [`sx_zones_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_zones_clear(z: *mut WasmZones) -> i32 {
+    zones!(z).zones.clear();
+    0
+}
+
 /// Loads zone `index` into the record buffer; 1 if present.
 ///
 /// # Safety
@@ -1732,6 +1742,22 @@ pub unsafe extern "C" fn sx_ignore_add(i: *mut WasmIgnore, id: u32, now: u32) ->
     match unsafe { i.as_mut() } {
         Some(w) => {
             w.0.add(id, now);
+            0
+        }
+        None => ERROR_ARGUMENT,
+    }
+}
+
+/// Forgets all ignored ids.
+///
+/// # Safety
+/// `i` from [`sx_ignore_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_ignore_clear(i: *mut WasmIgnore) -> i32 {
+    // SAFETY: see above.
+    match unsafe { i.as_mut() } {
+        Some(w) => {
+            w.0.clear();
             0
         }
         None => ERROR_ARGUMENT,

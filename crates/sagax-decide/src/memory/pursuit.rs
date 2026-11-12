@@ -53,7 +53,8 @@ impl Pursuit {
 
     /// True if no progress was made for at least `limit`. Getting at least
     /// `min_gain` closer than the best so far counts as progress and
-    /// restarts the check.
+    /// restarts the check. It updates the progress mark, so call it once
+    /// per check, not several times for the same moment.
     pub fn stalled(&mut self, distance: i32, now: u32, min_gain: i32, limit: u32) -> bool {
         if i64::from(self.best) - i64::from(distance) >= i64::from(min_gain) {
             self.best = distance;
@@ -70,8 +71,9 @@ impl Pursuit {
 }
 
 /// Distance measure for [`nearest`]: both axes divided (truncating toward
-/// zero) by `divisor`, then squared and added, in `i64`.
-fn scaled(dx: i64, dy: i64, divisor: i64) -> i64 {
+/// zero) by `divisor`, then squared and added, in `i128` (the square of an
+/// `i32` difference does not fit in `i64`).
+fn scaled(dx: i128, dy: i128, divisor: i128) -> i128 {
     let (x, y) = (dx / divisor, dy / divisor);
     x * x + y * y
 }
@@ -91,12 +93,12 @@ pub fn nearest(
     if k == 0 {
         return;
     }
-    let div = i64::from(divisor.max(1));
-    let mut best: Vec<(i64, u32)> = Vec::with_capacity(k.min(candidates.len()));
+    let div = i128::from(divisor.max(1));
+    let mut best: Vec<(i128, u32)> = Vec::with_capacity(k.min(candidates.len()));
     for &(id, x, y) in candidates {
         let d = scaled(
-            i64::from(x) - i64::from(point.0),
-            i64::from(y) - i64::from(point.1),
+            i128::from(x) - i128::from(point.0),
+            i128::from(y) - i128::from(point.1),
             div,
         );
         // First slot whose distance is strictly greater: equal ones stay ahead.

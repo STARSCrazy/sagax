@@ -174,10 +174,14 @@ pub unsafe extern "C" fn sx_sightings_get(
     out: *mut SxSighting,
 ) -> i32 {
     let s = get!(s);
-    let out = get!(out);
+    if out.is_null() {
+        return ERROR_ARGUMENT;
+    }
     match s.0.get(id) {
         Some(found) => {
-            *out = *found;
+            // SAFETY: `out` is non-null and writable (see above); `write`
+            // does not read or drop the old, possibly uninitialised, value.
+            unsafe { out.write(*found) };
             1
         }
         None => 0,
@@ -204,10 +208,14 @@ pub unsafe extern "C" fn sx_sightings_at(
     out: *mut SxSighting,
 ) -> i32 {
     let s = get!(s);
-    let out = get!(out);
+    if out.is_null() {
+        return ERROR_ARGUMENT;
+    }
     match s.0.iter().nth(index as usize) {
         Some(found) => {
-            *out = *found;
+            // SAFETY: `out` is non-null and writable (see above); `write`
+            // does not read or drop the old, possibly uninitialised, value.
+            unsafe { out.write(*found) };
             1
         }
         None => 0,
@@ -362,14 +370,28 @@ pub unsafe extern "C" fn sx_zones_count(z: *mut SxZones) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_zones_at(z: *mut SxZones, index: u32, out: *mut SxZone) -> i32 {
     let z = get!(z);
-    let out = get!(out);
+    if out.is_null() {
+        return ERROR_ARGUMENT;
+    }
     match z.0.iter().nth(index as usize) {
         Some(found) => {
-            *out = *found;
+            // SAFETY: `out` is non-null and writable (see above); `write`
+            // does not read or drop the old, possibly uninitialised, value.
+            unsafe { out.write(*found) };
             1
         }
         None => 0,
     }
+}
+
+/// `sx_zones_clear`.
+///
+/// # Safety
+/// `z` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_zones_clear(z: *mut SxZones) -> i32 {
+    get!(z).0.clear();
+    0
 }
 
 // ---- ignore -----------------------------------------------------------------
@@ -415,6 +437,16 @@ pub unsafe extern "C" fn sx_ignore_ignores(
     duration: u32,
 ) -> i32 {
     flag(get!(i).0.ignores(id, now, duration))
+}
+
+/// `sx_ignore_clear`.
+///
+/// # Safety
+/// `i` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_ignore_clear(i: *mut SxIgnore) -> i32 {
+    get!(i).0.clear();
+    0
 }
 
 // ---- pursuit ----------------------------------------------------------------
@@ -768,6 +800,7 @@ mod tests {
             assert_eq!(sx_sightings_count(s), 0);
             assert_eq!(sx_sightings_count(std::ptr::null_mut()), ERROR_ARGUMENT);
             assert_eq!(sx_sightings_get(s, 1, std::ptr::null_mut()), ERROR_ARGUMENT);
+            assert_eq!(sx_sightings_at(s, 0, std::ptr::null_mut()), ERROR_ARGUMENT);
             sx_sightings_free(s);
             sx_sightings_free(std::ptr::null_mut());
         }
@@ -812,6 +845,12 @@ mod tests {
             assert_eq!(sx_zones_expire(z, 100), 1);
             assert_eq!(sx_zones_count(z), 0);
             assert_eq!(sx_zones_expire(std::ptr::null_mut(), 1), ERROR_ARGUMENT);
+            assert_eq!(sx_zones_at(z, 0, std::ptr::null_mut()), ERROR_ARGUMENT);
+            assert_eq!(sx_zones_add(z, 1, 1, 0, 1, 0, std::ptr::null()), 0);
+            assert_eq!(sx_zones_count(z), 1);
+            assert_eq!(sx_zones_clear(z), 0);
+            assert_eq!(sx_zones_count(z), 0);
+            assert_eq!(sx_zones_clear(std::ptr::null_mut()), ERROR_ARGUMENT);
             sx_zones_free(z);
         }
     }
@@ -826,6 +865,9 @@ mod tests {
             assert_eq!(sx_ignore_ignores(i, 4, 25, 10), 0);
             assert_eq!(sx_ignore_ignores(i, 5, 15, 10), 0);
             assert_eq!(sx_ignore_add(std::ptr::null_mut(), 1, 1), ERROR_ARGUMENT);
+            assert_eq!(sx_ignore_clear(i), 0);
+            assert_eq!(sx_ignore_ignores(i, 4, 15, 10), 0);
+            assert_eq!(sx_ignore_clear(std::ptr::null_mut()), ERROR_ARGUMENT);
             sx_ignore_free(i);
         }
     }

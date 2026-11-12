@@ -12,7 +12,10 @@
   `sx_zones_*`, `sx_ignore_*`, `sx_pursuit_*`, `sx_radio_*`, `sx_interval_*`,
   `sx_nearest`, `sx_search_point`, `sx_look_heading`, JavaScript
   `lib.sightings()`, `lib.zones()`, `lib.ignore()`, `Pursuit`, `Radio`,
-  `Interval`, `lib.nearest()`, `lib.searchPoint()`.
+  `Interval`, `lib.nearest()`, `lib.searchPoint()`. Also `clear` and counts:
+  `Zones::clear`, `Ignore::clear`/`len`/`is_empty`, C `sx_zones_clear`,
+  `sx_ignore_clear`, JavaScript `Zones.count()`/`clear()`,
+  `Sightings.count()`, `Ignore.clear()`.
 - Example `officer` (Rust, with a reference test) and `examples/c/memory.c`;
   recipes in the guide (section 7).
 - C API version 7. `SX_API_VERSION` is now 7, so the version check of a game

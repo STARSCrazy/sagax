@@ -29,8 +29,9 @@ pub struct Zones {
 }
 
 impl Zones {
-    /// An empty set for at most `capacity` zones. A `radius` of 0 or less is
-    /// allowed; then nothing is ever inside a zone.
+    /// An empty set for at most `capacity` zones; the whole capacity is
+    /// reserved at once. A `radius` of 0 or less is allowed; then nothing is
+    /// ever inside a zone.
     pub fn new(capacity: usize, radius: i32, lifetime: u32) -> Result<Self, ZeroCapacity> {
         if capacity == 0 {
             return Err(ZeroCapacity);
@@ -44,9 +45,10 @@ impl Zones {
     }
 
     fn inside(&self, zone: &Zone, p: Pos) -> bool {
-        let dx = i64::from(zone.pos[0]) - i64::from(p[0]);
-        let dy = i64::from(zone.pos[1]) - i64::from(p[1]);
-        let r = i64::from(self.radius);
+        // i128: the square of a difference of two i32 does not fit in i64.
+        let dx = i128::from(zone.pos[0]) - i128::from(p[0]);
+        let dy = i128::from(zone.pos[1]) - i128::from(p[1]);
+        let r = i128::from(self.radius);
         r > 0 && dx * dx + dy * dy < r * r
     }
 

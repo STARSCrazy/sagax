@@ -10,7 +10,8 @@ pub struct Ignore {
 }
 
 impl Ignore {
-    /// An empty list for at most `capacity` ids.
+    /// An empty list for at most `capacity` ids; the whole capacity is
+    /// reserved at once.
     pub fn new(capacity: usize) -> Result<Self, ZeroCapacity> {
         if capacity == 0 {
             return Err(ZeroCapacity);
@@ -49,6 +50,21 @@ impl Ignore {
         self.items
             .iter()
             .any(|e| e.0 == id && now.wrapping_sub(e.1) < duration)
+    }
+
+    /// Number of ids in the list.
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// True if the list is empty.
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Forgets all ids.
+    pub fn clear(&mut self) {
+        self.items.clear();
     }
 }
 

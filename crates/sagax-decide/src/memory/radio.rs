@@ -42,7 +42,8 @@ impl Radio {
         self.pending != 0 && now.wrapping_sub(self.started) >= delay
     }
 
-    /// Takes the pending call's place, ending the call.
+    /// Takes the pending call's place, ending the call. It does not check
+    /// the delay; pair it with [`Radio::due`].
     pub fn take(&mut self) -> Option<Pos> {
         if self.pending == 0 {
             return None;

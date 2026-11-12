@@ -389,6 +389,7 @@ test('sightings: seen, evict oldest, data kept, expire, wrap', () => {
   assert.equal(s.seen(2, [11, 21, 0], 6), null);
   assert.equal(s.seen(3, [12, 22, 0], 7), 1);
   assert.equal(s.list().length, 2);
+  assert.equal(s.count(), 2);
   assert.equal(s.setData(3, 9), true);
   assert.equal(s.setData(99, 9), false);
   assert.equal(s.seen(3, [1, 2, 3], 8), null); // update keeps data
@@ -403,8 +404,10 @@ test('sightings: seen, evict oldest, data kept, expire, wrap', () => {
   assert.equal(s.remove(2), true);
   assert.equal(s.remove(2), false);
   s.seen(4, [0, 0, 0], 1);
+  assert.equal(s.count(), 1);
   s.clear();
   assert.deepEqual(s.list(), []);
+  assert.equal(s.count(), 0);
   // time wraps around 2^32
   s.seen(7, [0, 0, 0], 4294967290);
   assert.equal(s.get(7).lastSeen, 4294967290);
@@ -427,7 +430,14 @@ test('zones: add, renew, contains, blocks, expire', () => {
   assert.equal(z.add([500, 500, 0], 20, 2), 1);
   assert.equal(z.add([900, 900, 0], 30, 3), 1); // full: oldest goes, new one last
   assert.deepEqual(z.list().map((e) => e.data), [2, 3]);
+  assert.equal(z.count(), 2);
   assert.equal(z.expire(100), 2);
+  assert.deepEqual(z.list(), []);
+  assert.equal(z.count(), 0);
+  z.add([1, 1, 0], 1);
+  assert.equal(z.count(), 1);
+  z.clear();
+  assert.equal(z.count(), 0);
   assert.deepEqual(z.list(), []);
   z.add([0, 0, 0], 4294967290, 1);
   assert.equal(z.expire(4), 0); // age 10 < 50 across the wrap
@@ -447,6 +457,11 @@ test('ignore: duration, renew, evict oldest', () => {
   i.add(6, 14); // evicts 4 (oldest)
   assert.equal(i.ignores(4, 15, 10), false);
   assert.equal(i.ignores(6, 15, 10), true);
+  i.clear();
+  assert.equal(i.ignores(6, 15, 10), false);
+  assert.equal(i.ignores(5, 15, 10), false);
+  i.add(7, 20);
+  assert.equal(i.ignores(7, 21, 10), true);
   i.free();
 });
 
@@ -566,6 +581,11 @@ test('searchPoint matches the reference', () => {
   assert.deepEqual(lib.searchPoint(0, 1, [1000, 1000, 0], own), [1000, 1512, 0]);
   assert.equal(lib.searchPoint(0, 2, [1000, 1000, 0], own), null);
   assert.throws(() => lib.searchPoint(0, 0, [0, 0, 0], { offsets: new Array(9).fill(0), distances: new Array(9).fill(0) }));
+  // A missing distance counts as 0, like in Rust (no throw).
+  const short = { headingStep: 0, firstDistance: 256, offsets: [0, 0], distances: [512], min: [0, 0], max: [32767, 32767] };
+  assert.deepEqual(lib.searchPoint(0, 1, [1000, 1000, 0], short), [1000, 1512, 0]);
+  assert.deepEqual(lib.searchPoint(0, 2, [1000, 1000, 0], short), [1000, 1000, 0]);
+  assert.deepEqual(lib.searchPoint(0, 1, [1000, 1000, 0], { ...short, distances: [] }), [1000, 1000, 0]);
 });
 
 test('lookHeading matches the reference', () => {

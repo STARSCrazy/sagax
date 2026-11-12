@@ -25,7 +25,8 @@ pub struct Sightings {
 }
 
 impl Sightings {
-    /// An empty memory for at most `capacity` ids.
+    /// An empty memory for at most `capacity` ids; the whole capacity is
+    /// reserved at once.
     pub fn new(capacity: usize) -> Result<Self, ZeroCapacity> {
         if capacity == 0 {
             return Err(ZeroCapacity);
