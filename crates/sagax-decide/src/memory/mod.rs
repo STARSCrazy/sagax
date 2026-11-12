@@ -5,7 +5,8 @@
 //! for a while. [`Interval`] is a small timer for "do this every N ticks".
 //! [`Zones`] are areas to stay out of, [`Pursuit`] tracks a chase,
 //! [`Radio`] is a call for help with a cooldown, and [`nearest`] picks the
-//! closest candidates.
+//! closest candidates. [`search_point`] spreads search points around a place
+//! and [`look_heading`] turns the view while looking around.
 //!
 //! Time is the game's own count (u32); ages are computed with wrapping
 //! subtraction, so a wrapped clock still works. Everything is integer only
@@ -14,6 +15,7 @@
 mod ignore;
 mod pursuit;
 mod radio;
+mod search;
 mod sightings;
 mod zones;
 
@@ -23,6 +25,7 @@ mod tests;
 pub use ignore::{Ignore, Interval};
 pub use pursuit::{Pursuit, nearest};
 pub use radio::Radio;
+pub use search::{LOOK_OFFSETS, SearchPattern, look_heading, search_point, sin256};
 pub use sightings::{Sighting, Sightings};
 pub use zones::{Zone, Zones};
 
