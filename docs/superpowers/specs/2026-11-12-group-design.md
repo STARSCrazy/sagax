@@ -207,6 +207,50 @@ designer's call, not something the user decided.
    "target inside spot area" or "a member is discovered". `check()` fires
    it. The caller can also call `signal(now)` by hand.
 
+## Feedback from a game team
+
+A game with its own hand-written squad AI reviewed the draft. These points
+become requirements:
+
+1. **Minimum coverage.** That AI has three levels: 0 = everyone rushes,
+   1 = advance together, 2 = a front plus flanks that first **gather**
+   (with a maximum wait) and then **attack at the same moment**. It also
+   warns team mates within a radius, and it keeps danger zones that
+   remember where the shooter stood. Sagax must express all of this with
+   the shipped tactics, so the game can replace its levels 1–2. Skill
+   maps to that level, and rush / formation / flank map to 0 / 1 / 2.
+   - The flank tactic gets a **gather phase**: its slots first move to the
+     gather spots.
+   - The signal fires when all slots have arrived, or when `max_wait`
+     ticks have passed, whichever comes first.
+   - Both conditions are part of the trigger rule.
+   This is covered by a reference test.
+2. **The game's orders come first.** The game can take a member out for a
+   while with `suspend(member)` and put it back with `resume(member)`. While
+   a member is suspended, it gets no goal, it does not count as "off plan",
+   and its `GoalKeeper` stands still. Slot assignment skips it. Only
+   `report` produces "goal broken"; a suspension never does.
+3. **Time** stays a caller `u32`, compared wrap-safe. It can be frames,
+   rounds or anything else. All durations use the same unit.
+4. **Seeds** come from the caller, as planned.
+5. **The leader memory holds danger zones.** Besides `Knowledge`, the Squad
+   keeps an `Areas` block (stage 3) with the shooter position as `source`.
+   - Tactics can read it, for example "attack the shooter from the side".
+   - Sagax adds a ready `sx_move_cost_fn` adapter that turns an `sx_areas`
+     into extra path costs or blocks for `sx_nav_find_path`, with the same
+     in Rust and JS. The callback hook already exists; the adapter is new.
+6. **Kinds of groups** stay the game's business. The fixed member list
+   fits all of them: one faction per mission, the 3 nearest free members
+   called over the radio, guards called by shouting, followers of a player
+   leader. A "call the k nearest free members" step comes from
+   `nearest` / `gather` with a free-state filter.
+7. **Few spot tags.** The game may know only "free", "high" and "choke".
+   Every shipped tactic must still work when a wanted tag is missing:
+   - it falls back to the nearest free spot to the wish point;
+   - without any spots, it falls back to the wish point itself, flagged
+     as "unchecked".
+   This is covered by a test with tags = 0 everywhere.
+
 ## Trace
 
 Like the `Decider`: an optional sink gets every tactic score, the pick,
