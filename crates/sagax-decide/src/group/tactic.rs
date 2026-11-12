@@ -85,7 +85,8 @@ pub enum Start {
 /// One role in a tactic, filled by `min ..= max` members.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Slot {
-    /// Role bits a member must all have; 0 takes anyone.
+    /// Role bits a member should all have: members with them are chosen
+    /// first, others only when none is left; 0 takes anyone.
     pub roles: u32,
     /// Fewest members the slot needs.
     pub min: u8,
@@ -174,18 +175,18 @@ pub enum Shape {
 /// "everyone rushes", "advance together" and "front plus flanks that
 /// gather, then attack at once".
 ///
-/// The scoring row columns used here are the Squad's built-in inputs:
-/// 0 = own losses, 1 = members off plan, 3 = distance to the target.
+/// The scoring rows they read are the Squad's built-in inputs
+/// ([`IN_LOSSES`](crate::group::IN_LOSSES),
+/// [`IN_OFF_PLAN`](crate::group::IN_OFF_PLAN),
+/// [`IN_TARGET_DIST`](crate::group::IN_TARGET_DIST)).
+///
+/// Formation offsets are in the square frame (+x forward, +y left) also on
+/// a hex map, where they are read as axial coordinates; the shapes then
+/// look skewed, but members fill the same slots in the same order.
 pub mod tactics {
+    use super::super::squad::{IN_LOSSES, IN_OFF_PLAN, IN_TARGET_DIST};
     use super::*;
     use crate::{Curve, ONE};
-
-    /// Built-in row column: own losses.
-    const LOSSES: usize = 0;
-    /// Built-in row column: members off plan.
-    const OFF_PLAN: usize = 1;
-    /// Built-in row column: distance from the group to the target.
-    const TARGET_DIST: u32 = 3;
 
     /// Default `max_wait` of [`flank`]'s gather phase, in ticks.
     pub const FLANK_MAX_WAIT: u32 = 170;
@@ -212,11 +213,11 @@ pub mod tactics {
     fn usual_aborts() -> Vec<Abort> {
         vec![
             Abort {
-                input: LOSSES,
+                input: IN_LOSSES,
                 at_least: 2,
             },
             Abort {
-                input: OFF_PLAN,
+                input: IN_OFF_PLAN,
                 at_least: 2,
             },
         ]
@@ -310,7 +311,12 @@ pub mod tactics {
                 start: Start::OnSignal,
                 ..slot(Place::Tagged(TAG_HIDDEN), GoalKind::Attack)
             }],
-            considerations: vec![Consideration::new(TARGET_DIST, Curve::Linear, 0, 100)],
+            considerations: vec![Consideration::new(
+                IN_TARGET_DIST as u32,
+                Curve::Linear,
+                0,
+                100,
+            )],
             weight: ONE * 3 / 4,
             aborts: usual_aborts(),
             trigger: Trigger::TargetInRadius(AMBUSH_RADIUS),
@@ -324,7 +330,12 @@ pub mod tactics {
     pub fn focus() -> Tactic {
         Tactic {
             slots: vec![slot(Place::Side(Side::Front), GoalKind::Attack)],
-            considerations: vec![Consideration::new(TARGET_DIST, Curve::Inverse, 0, 100)],
+            considerations: vec![Consideration::new(
+                IN_TARGET_DIST as u32,
+                Curve::Inverse,
+                0,
+                100,
+            )],
             weight: ONE * 5 / 8,
             aborts: usual_aborts(),
             trigger: Trigger::None,
@@ -356,8 +367,10 @@ pub mod tactics {
         }
     }
 
-    /// Everyone retreats [`FALL_BACK_DIST`] behind the leader, away from the
-    /// target, preferring cover. Scores 0 without losses and full at 4.
+    /// Everyone retreats [`FALL_BACK_DIST`] behind the leader, preferring
+    /// cover. Needs no target: it is scored once and moves away from the
+    /// nearest known target, else the nearest danger area; with neither the
+    /// members stay at the leader. Scores 0 without losses and full at 4.
     /// Skill 0.
     pub fn fall_back() -> Tactic {
         Tactic {
@@ -365,12 +378,12 @@ pub mod tactics {
                 want_tags: TAG_COVER,
                 ..slot(Place::Offset([-FALL_BACK_DIST, 0, 0]), GoalKind::Retreat)
             }],
-            considerations: vec![Consideration::new(LOSSES as u32, Curve::Linear, 0, 4)],
+            considerations: vec![Consideration::new(IN_LOSSES as u32, Curve::Linear, 0, 4)],
             weight: ONE,
             aborts: Vec::new(),
             trigger: Trigger::None,
             min_skill: 0,
-            needs_target: true,
+            needs_target: false,
         }
     }
 }
