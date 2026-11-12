@@ -683,6 +683,19 @@ fn knowledge_expire_with_per_kind() {
 }
 
 #[test]
+fn knowledge_expire_kind_only_that_kind() {
+    let mut k = Knowledge::new(5, Evict::Oldest).unwrap();
+    k.learn(fact(1, 1, 0), 0);
+    k.learn(fact(2, 2, 0), 0);
+    k.learn(fact(3, 1, 0), 0);
+    k.learn(fact(4, 1, 8), 8);
+    let mut gone = Vec::new();
+    k.expire_kind(10, 1, 10, |f| gone.push(f.subject));
+    assert_eq!(gone, vec![1, 3]);
+    assert_eq!(keys(&k), vec![(2, 2), (4, 1)]);
+}
+
+#[test]
 fn fact_layout_is_stable() {
     assert_eq!(std::mem::offset_of!(Fact, subject), 0);
     assert_eq!(std::mem::offset_of!(Fact, kind), 4);

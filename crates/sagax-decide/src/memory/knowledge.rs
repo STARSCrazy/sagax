@@ -230,6 +230,24 @@ impl Knowledge {
         self.expire_with(now, |_| max_age, removed);
     }
 
+    /// Like [`expire`](Self::expire) for facts of one `kind` only; other
+    /// kinds stay. `removed` gets the facts in slot order.
+    pub fn expire_kind(
+        &mut self,
+        now: u32,
+        kind: u32,
+        max_age: u32,
+        mut removed: impl FnMut(Fact),
+    ) {
+        self.items.retain(|f| {
+            let gone = f.kind == kind && now.wrapping_sub(f.seen_at) >= max_age;
+            if gone {
+                removed(*f);
+            }
+            !gone
+        });
+    }
+
     /// Like [`Knowledge::expire`], but `max_age` is chosen per fact (for
     /// example per kind).
     pub fn expire_with(

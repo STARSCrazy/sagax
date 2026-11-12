@@ -434,15 +434,8 @@ pub unsafe extern "C" fn sx_knowledge_expire_kind(
     cap: u32,
 ) -> i32 {
     let k = get!(k);
-    // Facts are unique per (subject, kind), so removing by key is exact.
-    let gone: Vec<Fact> =
-        k.0.iter()
-            .filter(|f| f.kind == kind && now.wrapping_sub(f.seen_at) >= max_age)
-            .copied()
-            .collect();
-    for f in &gone {
-        k.0.remove(f.subject, f.kind);
-    }
+    let mut gone = Vec::new();
+    k.0.expire_kind(now, kind, max_age, |f| gone.push(f));
     // SAFETY: see above.
     unsafe { write_facts(&gone, removed, cap) };
     to_i32(gone.len())

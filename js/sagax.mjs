@@ -663,3 +663,718 @@ export class Machine {
     this.handle = 0;
   }
 }
+
+// ---- world memory -----------------------------------------------------------
+//
+// What a character knows and for how long (Knowledge), messages on their way
+// (Outbox, route, Inbox), places to avoid (Areas), id timers (Timers), and
+// three small value classes (Progress, Interval, Alertness). Same rules as
+// the Rust and C versions. Times are the game's own u32 count; ages wrap.
+
+const u32 = (v) => v >>> 0;
+const i32 = (v) => v | 0;
+
+/** A capacity: an integer from 1 to 2^31 - 1, else RangeError. */
+function capacityOf(c) {
+  if (!Number.isInteger(c) || c < 1 || c > 0x7fffffff) throw new RangeError("Sagax: capacity must be an integer from 1 to 2147483647");
+  return c;
+}
+
+/** A name from a table of choices, else RangeError. */
+function choice(table, name, what) {
+  if (typeof name !== 'string' || !Object.hasOwn(table, name)) {
+    throw new RangeError(`Sagax: ${what} must be ${Object.keys(table).join(', ')}, not ${String(name)}`);
+  }
+  return table[name];
+}
+
+const EVICT = { oldest: 0, weakest: 1 };
+const METRIC = { euclid: 0, manhattan: 1, chebyshev: 2, hex: 3 };
+const SINE = { fine: 0, coarse: 1 };
+const POST = ['ok', 'full', 'cooldown'];
+const ALL = 0xffffffff;
+
+/** Writes numbers into a record buffer; the pointer is asked for right before the view is made. */
+function putRecord(x, ptr, values) {
+  new Uint32Array(x.memory.buffer, ptr, values.length).set(values);
+}
+
+/** Reads numbers out of a buffer at once (a view dies when the memory grows). */
+function takeRecord(x, ptr, count) {
+  return Array.from(new Uint32Array(x.memory.buffer, ptr, count));
+}
+
+const FACT_SIZE = 9;
+const MESSAGE_SIZE = 10;
+const AREA_SIZE = 14;
+
+function factValues(f) {
+  const [px, py, pz] = f.pos ?? [0, 0, 0];
+  return [u32(f.subject), u32(f.kind), u32(px), u32(py), u32(pz), u32(f.seenAt), u32(f.strength ?? 0), u32(f.data ?? 0), u32(f.source ?? 0) & 0xff];
+}
+
+function factOf(r) {
+  return { subject: r[0], kind: r[1], pos: [i32(r[2]), i32(r[3]), i32(r[4])], seenAt: r[5], source: r[8], strength: r[6], data: r[7] };
+}
+
+function messageValues(m) {
+  const [px, py, pz] = m.pos ?? [0, 0, 0];
+  return [u32(m.kind), u32(m.subject), u32(px), u32(py), u32(pz), u32(m.seenAt), u32(m.strength ?? 0), u32(m.data ?? 0), u32(m.sender ?? 0), m.keepIfSenderGone ? 1 : 0];
+}
+
+function messageOf(r) {
+  return { kind: r[0], subject: r[1], pos: [i32(r[2]), i32(r[3]), i32(r[4])], seenAt: r[5], strength: r[6], data: r[7], sender: r[8], keepIfSenderGone: r[9] !== 0 };
+}
+
+function areaValues(a) {
+  const [px, py, pz] = a.pos ?? [0, 0, 0];
+  const [sx, sy, sz] = a.source ?? [0, 0, 0];
+  return [u32(a.kind ?? 0), u32(px), u32(py), u32(pz), u32(a.radius), u32(a.strength ?? 0), u32(a.since ?? 0), u32(a.lifetime), u32(a.data ?? 0), u32(sx), u32(sy), u32(sz), a.blocking ? 1 : 0, a.source ? 1 : 0];
+}
+
+function areaOf(r) {
+  return {
+    kind: r[0],
+    pos: [i32(r[1]), i32(r[2]), i32(r[3])],
+    radius: i32(r[4]),
+    strength: r[5],
+    since: r[6],
+    lifetime: r[7],
+    data: r[8],
+    source: r[13] !== 0 ? [i32(r[9]), i32(r[10]), i32(r[11])] : null,
+    blocking: r[12] !== 0,
+  };
+}
+
+/** Messages out of a list of records. */
+function messagesOf(all, n) {
+  const list = [];
+  for (let i = 0; i < n; i++) list.push(messageOf(all.slice(i * MESSAGE_SIZE, (i + 1) * MESSAGE_SIZE)));
+  return list;
+}
+
+/** A handle to a table in the module; every call checks that it is not freed (a freed handle would write to address 0). */
+class Table {
+  constructor(x, prefix, handle) {
+    if (!handle) throw new RangeError('Sagax: capacity must be at least 1');
+    this.x = x;
+    this.prefix = prefix;
+    this.handle = handle;
+  }
+
+  get h() {
+    if (!this.handle) throw new Error('Sagax: used after free()');
+    return this.handle;
+  }
+
+  /** Frees the table. Using it afterwards throws. */
+  free() {
+    if (this.handle) this.x[`${this.prefix}_free`](this.handle);
+    this.handle = 0;
+  }
+}
+
+/**
+ * What a character knows: facts keyed by (subject, kind), for at most
+ * `capacity` of them. When full, the oldest (or the weakest) goes.
+ *
+ *   const k = lib.knowledge(8, 'oldest');   // or 'weakest'
+ *   k.learn({subject: 42, kind: 1, pos: [x, y, 0], seenAt: now}, now);  // null, or the evicted fact
+ *   k.get(42, 1);     // {subject, kind, pos, seenAt, source, strength, data} or null
+ *
+ * source: 0 own, 1 heard, 2 told (more values are yours to use).
+ */
+export class Knowledge extends Table {
+  constructor(x, capacity, evict = 'oldest') {
+    const e = choice(EVICT, evict, 'evict');
+    super(x, 'sx_knowledge', x.sx_knowledge_new(capacityOf(capacity), e));
+  }
+
+  #fact() {
+    return factOf(takeRecord(this.x, this.x.sx_knowledge_record(this.h), FACT_SIZE));
+  }
+
+  #facts(n) {
+    const all = takeRecord(this.x, this.x.sx_knowledge_out(this.h), n * FACT_SIZE);
+    const facts = [];
+    for (let i = 0; i < n; i++) facts.push(factOf(all.slice(i * FACT_SIZE, (i + 1) * FACT_SIZE)));
+    return facts;
+  }
+
+  #put(fact, now, call) {
+    putRecord(this.x, this.x.sx_knowledge_record(this.h), factValues(fact));
+    return this.x[call](this.h, u32(now)) === 1 ? this.#facts(1)[0] : null;
+  }
+
+  /** Stores the fact, overwriting a known one. Returns the evicted fact, or null. */
+  learn(fact, now) {
+    return this.#put(fact, now, 'sx_knowledge_learn');
+  }
+
+  /** Like learn, but a known fact is only overwritten by one that is not older. */
+  merge(fact, now) {
+    return this.#put(fact, now, 'sx_knowledge_merge');
+  }
+
+  /** learn for a message {kind, subject, pos, seenAt, strength, data}, with the given source. */
+  learnMessage(message, source, now) {
+    return this.learn({ ...message, source }, now);
+  }
+
+  /** merge for a message. */
+  mergeMessage(message, source, now) {
+    return this.merge({ ...message, source }, now);
+  }
+
+  /** Renews the time of a fact. False if unknown. */
+  touch(subject, kind, now) {
+    return this.x.sx_knowledge_touch(this.h, u32(subject), u32(kind), u32(now)) === 1;
+  }
+
+  /** Sets the place of a fact. False if unknown. */
+  setPos(subject, kind, [px, py, pz]) {
+    return this.x.sx_knowledge_set_pos(this.h, u32(subject), u32(kind), i32(px), i32(py), i32(pz)) === 1;
+  }
+
+  /** Sets the data of a fact. False if unknown. */
+  setData(subject, kind, data) {
+    return this.x.sx_knowledge_set_data(this.h, u32(subject), u32(kind), u32(data)) === 1;
+  }
+
+  /** Sets the strength of a fact. False if unknown. */
+  setStrength(subject, kind, strength) {
+    return this.x.sx_knowledge_set_strength(this.h, u32(subject), u32(kind), u32(strength)) === 1;
+  }
+
+  /** Forgets one fact. False if unknown. */
+  remove(subject, kind) {
+    return this.x.sx_knowledge_remove(this.h, u32(subject), u32(kind)) === 1;
+  }
+
+  /** Forgets all facts about a subject. Returns how many. */
+  removeSubject(subject) {
+    return this.x.sx_knowledge_remove_subject(this.h, u32(subject));
+  }
+
+  /** The fact (subject, kind) or null. */
+  get(subject, kind) {
+    return this.x.sx_knowledge_get(this.h, u32(subject), u32(kind)) === 1 ? this.#fact() : null;
+  }
+
+  /** All facts in slot order. */
+  list() {
+    const n = this.x.sx_knowledge_count(this.h);
+    const all = [];
+    for (let i = 0; i < n; i++) {
+      this.x.sx_knowledge_at(this.h, i);
+      all.push(this.#fact());
+    }
+    return all;
+  }
+
+  /**
+   * Forgets facts at least maxAge old; returns them in slot order. With
+   * perKind (a function fact => maxAge) every fact has its own age limit and
+   * maxAge is ignored.
+   */
+  expire(now, maxAge, perKind) {
+    if (!perKind) return this.#facts(this.x.sx_knowledge_expire(this.h, u32(now), u32(maxAge)));
+    const gone = [];
+    for (const f of this.list()) {
+      const limit = perKind(f);
+      if (typeof limit !== 'number' || Number.isNaN(limit)) throw new TypeError('Sagax: perKind must return a number');
+      if (u32(u32(now) - f.seenAt) >= u32(limit)) gone.push(f);
+    }
+    for (const f of gone) this.remove(f.subject, f.kind);
+    return gone;
+  }
+
+  /** Like expire, for facts of one kind only (other kinds stay). */
+  expireKind(now, kind, maxAge) {
+    return this.#facts(this.x.sx_knowledge_expire_kind(this.h, u32(now), u32(kind), u32(maxAge)));
+  }
+
+  /** Number of facts. */
+  count() {
+    return this.x.sx_knowledge_count(this.h);
+  }
+
+  /** Forgets everything. */
+  clear() {
+    this.x.sx_knowledge_clear(this.h);
+  }
+}
+
+/**
+ * Messages one sender wants to send, for at most `capacity`.
+ *
+ *   const o = lib.outbox(4);
+ *   o.post(msg, now, 102, 170);   // 'ok', 'full' or 'cooldown'
+ *   o.due(now);                   // messages whose delay is over, in post order
+ *
+ * A message: {kind, subject, pos, seenAt, strength, data, sender, keepIfSenderGone}.
+ */
+export class Outbox extends Table {
+  constructor(x, capacity) {
+    super(x, 'sx_outbox', x.sx_outbox_new(capacityOf(capacity)));
+  }
+
+  /**
+   * Queues a message that is due after delay ticks. Refused with 'full' if no
+   * room, or 'cooldown' if the last accepted post is younger than cooldown
+   * (the first post is never held back).
+   */
+  post(message, now, delay = 0, cooldown = 0) {
+    putRecord(this.x, this.x.sx_outbox_record(this.h), messageValues(message));
+    return POST[this.x.sx_outbox_post(this.h, u32(now), u32(delay), u32(cooldown))];
+  }
+
+  /** Takes (at most max of) the messages whose own delay is over, in post order. */
+  due(now, max = ALL) {
+    const n = this.x.sx_outbox_due(this.h, u32(now), u32(max));
+    return messagesOf(takeRecord(this.x, this.x.sx_outbox_out(this.h), n * MESSAGE_SIZE), n);
+  }
+
+  /** The sender is gone: drops every message not marked keepIfSenderGone. */
+  senderGone() {
+    this.x.sx_outbox_sender_gone(this.h);
+  }
+
+  /** Number of messages waiting. */
+  pending() {
+    return this.x.sx_outbox_pending(this.h);
+  }
+
+  /** Drops all messages (the cooldown keeps running). */
+  clear() {
+    this.x.sx_outbox_clear(this.h);
+  }
+}
+
+/**
+ * Messages on their way to one receiver, for at most `capacity`.
+ *
+ *   const i = lib.inbox(4);
+ *   i.push(msg, lib.arrival(now, 0, distance, perUnit));   // false if refused
+ *   i.takeDue(now);                                        // arrived messages, in push order
+ */
+export class Inbox extends Table {
+  constructor(x, capacity) {
+    super(x, 'sx_inbox', x.sx_inbox_new(capacityOf(capacity)));
+  }
+
+  /** Puts a message on its way, arriving at arriveAt. When full, the one arriving latest makes room if the new one is earlier; else false. */
+  push(message, arriveAt) {
+    putRecord(this.x, this.x.sx_inbox_record(this.h), messageValues(message));
+    return this.x.sx_inbox_push(this.h, u32(arriveAt)) === 1;
+  }
+
+  /** Takes (at most max of) the messages that have arrived, in push order. */
+  takeDue(now, max = ALL) {
+    const n = this.x.sx_inbox_take_due(this.h, u32(now), u32(max));
+    return messagesOf(takeRecord(this.x, this.x.sx_inbox_out(this.h), n * MESSAGE_SIZE), n);
+  }
+
+  /** Number of messages on their way. */
+  count() {
+    return this.x.sx_inbox_len(this.h);
+  }
+
+  /** Drops all messages. */
+  clear() {
+    this.x.sx_inbox_clear(this.h);
+  }
+}
+
+/** The 9 integers of cell, start, goal in the scratch buffer; returns the pointer. */
+function cellsScratch(x, cell, start, goal) {
+  const ptr = x.sx_scratch(9);
+  new Int32Array(x.memory.buffer, ptr, 9).set([...cell, ...start, ...goal].map(i32));
+  return ptr;
+}
+
+/**
+ * Round areas (noise, light, danger) that fade after their lifetime.
+ *
+ *   const a = lib.areas(8);
+ *   a.add({kind: 1, pos: [x, y, 0], radius: 600, strength: 5, lifetime: 3000, blocking: false}, now);
+ *   a.cost(cell, start, goal);    // extra path cost for a cell
+ *   a.blocks(cell, start, goal);  // for a path finder
+ *
+ * Optional: data, source [x, y, z] (where it came from).
+ */
+export class Areas extends Table {
+  constructor(x, capacity) {
+    super(x, 'sx_areas', x.sx_areas_new(capacityOf(capacity)));
+  }
+
+  /** Adds an area (since = now), or renews the first of the same kind whose centre is closer than its radius. Returns its index. */
+  add(area, now) {
+    putRecord(this.x, this.x.sx_areas_record(this.h), areaValues(area));
+    return this.x.sx_areas_add(this.h, u32(now));
+  }
+
+  /** Removes areas whose age is at least their lifetime. Returns how many. */
+  expire(now) {
+    return this.x.sx_areas_expire(this.h, u32(now));
+  }
+
+  /** Index of the first area containing pos, or null. */
+  contains([px, py, pz]) {
+    const i = this.x.sx_areas_contains(this.h, i32(px), i32(py), i32(pz));
+    return i >= 0 ? i : null;
+  }
+
+  /** Like contains, for areas of one kind. */
+  containsKind([px, py, pz], kind) {
+    const i = this.x.sx_areas_contains_kind(this.h, i32(px), i32(py), i32(pz), u32(kind));
+    return i >= 0 ? i : null;
+  }
+
+  /** True if a blocking area holds cell but neither start nor goal. */
+  blocks(cell, start, goal) {
+    const h = this.h;
+    return this.x.sx_areas_blocks(h, cellsScratch(this.x, cell, start, goal)) === 1;
+  }
+
+  /** Extra cost of cell: the strengths (saturating) of the non-blocking areas holding it but neither start nor goal. */
+  cost(cell, start, goal) {
+    const h = this.h;
+    return u32(this.x.sx_areas_cost(h, cellsScratch(this.x, cell, start, goal)));
+  }
+
+  /** All areas in slot order. */
+  list() {
+    const n = this.x.sx_areas_count(this.h);
+    const all = [];
+    for (let i = 0; i < n; i++) {
+      this.x.sx_areas_at(this.h, i);
+      all.push(areaOf(takeRecord(this.x, this.x.sx_areas_record(this.h), AREA_SIZE)));
+    }
+    return all;
+  }
+
+  /** Number of areas. */
+  count() {
+    return this.x.sx_areas_count(this.h);
+  }
+
+  /** Removes all areas. */
+  clear() {
+    this.x.sx_areas_clear(this.h);
+  }
+}
+
+/**
+ * Ids that count as "on" for a while (ignore a target, no alarm again).
+ *
+ *   const t = lib.timers(8);
+ *   t.set(id, now, 300);   // on for 300 ticks (renews; when full, the one with least time left is replaced)
+ *   t.active(id, now);
+ */
+export class Timers extends Table {
+  constructor(x, capacity) {
+    super(x, 'sx_timers', x.sx_timers_new(capacityOf(capacity)));
+  }
+
+  /** Starts or renews the timer of id. */
+  set(id, now, duration) {
+    this.x.sx_timers_set(this.h, u32(id), u32(now), u32(duration));
+  }
+
+  /** True while the timer of id runs (age below its duration). */
+  active(id, now) {
+    return this.x.sx_timers_active(this.h, u32(id), u32(now)) === 1;
+  }
+
+  /** Time left of the timer of id (0 if none or over). */
+  left(id, now) {
+    return u32(this.x.sx_timers_left(this.h, u32(id), u32(now)));
+  }
+
+  /** Stops the timer of id. False if there was none. */
+  remove(id) {
+    return this.x.sx_timers_remove(this.h, u32(id)) === 1;
+  }
+
+  /** Stops all timers. */
+  clear() {
+    this.x.sx_timers_clear(this.h);
+  }
+
+  /** Number of timers. */
+  count() {
+    return this.x.sx_timers_count(this.h);
+  }
+}
+
+/**
+ * Tells whether a chase still gets closer: the best value so far (lower is
+ * better, e.g. a distance) and when it last improved.
+ */
+export class Progress {
+  constructor() {
+    this.reset();
+  }
+
+  /** Starts with value at now. */
+  start(value, now) {
+    this.best = i32(value);
+    this.since = u32(now);
+    this.started = true;
+  }
+
+  /** If value beats the best by at least minGain, it becomes the best (since = now) and true is returned. False if not started. */
+  update(value, now, minGain) {
+    if (!this.started) return false;
+    // A difference of two i32 is exact in a double.
+    if (this.best - i32(value) >= i32(minGain)) {
+      this.best = i32(value);
+      this.since = u32(now);
+      return true;
+    }
+    return false;
+  }
+
+  /** True if started and the last improvement is at least limit old. */
+  stalled(now, limit) {
+    return this.started && u32(u32(now) - this.since) >= u32(limit);
+  }
+
+  /** Back to not started. */
+  reset() {
+    this.best = 0;
+    this.since = 0;
+    this.started = false;
+  }
+}
+
+/** A timer for "every N ticks"; never started counts as due. */
+export class Interval {
+  constructor() {
+    this.reset();
+  }
+
+  /** True if never marked, or at least every has passed since the mark. */
+  due(now, every) {
+    return !this.started || u32(u32(now) - this.last) >= u32(every);
+  }
+
+  /** Records that it ran at now. */
+  mark(now) {
+    this.last = u32(now);
+    this.started = true;
+  }
+
+  /** Back to never started. */
+  reset() {
+    this.last = 0;
+    this.started = false;
+  }
+}
+
+const ALERT_LEVELS = 8;
+
+/** An alert config {max, decayPerTick, hold, hysteresis, thresholds} as u32s; at most 8 thresholds. */
+function alertConfig(cfg) {
+  const thresholds = cfg.thresholds ?? [];
+  if (thresholds.length > ALERT_LEVELS) throw new RangeError(`Sagax: an alertness has at most ${ALERT_LEVELS} thresholds`);
+  return {
+    max: u32(cfg.max),
+    decay: u32(cfg.decayPerTick ?? 0),
+    hold: u32(cfg.hold ?? 0),
+    hysteresis: u32(cfg.hysteresis ?? 0),
+    thresholds: thresholds.map(u32),
+  };
+}
+
+/**
+ * A value that rises with stimuli and decays, with levels (unaware,
+ * suspicious, searching, alert, ...) that you name yourself.
+ *
+ *   const cfg = {max: 100, decayPerTick: 2, hold: 5, hysteresis: 5, thresholds: [20, 50, 80]};
+ *   const a = new Alertness();
+ *   a.stimulus(30, now, cfg);
+ *   a.update(now, cfg);   // null, or [from, to] when the level changed
+ *   a.value; a.level;
+ *
+ * Decay (decayPerTick per tick) only counts ticks after hold ticks since the
+ * last stimulus. The level jumps straight to the highest threshold reached
+ * and falls when the value is below its threshold minus hysteresis.
+ */
+export class Alertness {
+  constructor() {
+    this.value = 0;
+    this.last = 0;
+    this.lastStimulus = 0;
+    this.level = 0;
+  }
+
+  /** Adds amount (up to max) and remembers now as the last stimulus. */
+  stimulus(amount, now, cfg) {
+    const c = alertConfig(cfg);
+    this.value = Math.min(c.max, Math.min(this.value + u32(amount), ALL));
+    this.lastStimulus = u32(now);
+  }
+
+  /** Decays up to now and sets the level. Returns [from, to] if it changed, else null. */
+  update(now, cfg) {
+    const c = alertConfig(cfg);
+    now = u32(now);
+    const sinceLast = u32(now - this.last);
+    const afterHold = Math.max(0, u32(now - this.lastStimulus) - c.hold);
+    // The product can pass 2^53, but then it is far above any value anyway.
+    const lost = c.decay * Math.min(sinceLast, afterHold);
+    this.value = lost >= this.value ? 0 : this.value - lost;
+    this.last = now;
+
+    const th = c.thresholds;
+    const from = this.level;
+    const reached = th.filter((t) => this.value >= t).length;
+    let to = from;
+    if (reached > to) {
+      to = reached;
+    } else {
+      while (to > 0 && to - 1 < th.length && this.value < Math.max(0, th[to - 1] - c.hysteresis)) to--;
+    }
+    this.level = to;
+    return to !== from ? [from, to] : null;
+  }
+}
+
+/** The route rule as [code, argument]: {nearest: k}, {inRange: r}, 'all' or {to: id}. */
+function ruleOf(rule) {
+  if (rule === 'all') return [2, 0];
+  if (rule !== null && typeof rule === 'object') {
+    if (Object.hasOwn(rule, 'nearest')) {
+      const k = rule.nearest;
+      if (!Number.isInteger(k) || k < 0 || k > ALL) throw new RangeError('Sagax: nearest must be an integer from 0 to 4294967295');
+      return [0, k];
+    }
+    if (Object.hasOwn(rule, 'inRange')) {
+      const r = rule.inRange;
+      if (!Number.isSafeInteger(r)) throw new RangeError('Sagax: inRange must be a safe integer');
+      return [1, r];
+    }
+    if (Object.hasOwn(rule, 'to')) {
+      const id = rule.to;
+      if (!Number.isInteger(id) || id < 0 || id > ALL) throw new RangeError('Sagax: to must be an integer from 0 to 4294967295');
+      return [3, id];
+    }
+  }
+  throw new RangeError("Sagax: a route rule is {nearest: k}, {inRange: r}, {to: id} or 'all'");
+}
+
+/** Ids picked from candidates [{id, x, y}] by a rule, see Sagax.route. */
+function routeOf(x, rule, [ox, oy], candidates, metric, divisor) {
+  const [code, arg] = ruleOf(rule);
+  const m = choice(METRIC, metric, 'metric');
+  const n = candidates.length;
+  const size = Math.max(n * 3, 1);
+  // The pointer first, the view right after: asking for the buffer may grow
+  // the memory, and a grown memory kills older views. Only the number is kept.
+  const ptr = x.sx_scratch(size);
+  const view = new Int32Array(x.memory.buffer, ptr, size);
+  for (let i = 0; i < n; i++) {
+    const c = candidates[i];
+    view[i * 3] = i32(c.id);
+    view[i * 3 + 1] = i32(c.x);
+    view[i * 3 + 2] = i32(c.y);
+  }
+  // The call may grow the memory again: make a new view from the number.
+  const count = x.sx_route(code, arg, n, i32(ox), i32(oy), m, i32(divisor));
+  if (count < 0) throw new RangeError('Sagax: bad route arguments');
+  return Array.from(new Uint32Array(x.memory.buffer, ptr, count));
+}
+
+const POINT_DEFAULT = {
+  headingStep: 0x62,
+  firstDistance: 0x100,
+  offsets: [0, 0x20, -0x20],
+  distances: [5 * 256, 9 * 256, 12 * 256],
+  min: [0, 0],
+  max: [32767, 32767],
+  sine: 'fine',
+};
+
+/** Point of an agent around a place: [x, y, z] or null past the last step. */
+function pointsAroundOf(x, agent, step, [cx, cy, cz], pattern) {
+  const p = { ...POINT_DEFAULT, ...pattern };
+  const sine = choice(SINE, p.sine, 'sine');
+  let custom = 0;
+  let ptr;
+  if (pattern) {
+    if (p.offsets.length > 8 || p.distances.length > 8) {
+      throw new RangeError('Sagax: a point pattern has at most 8 steps, one distance each');
+    }
+    const fill = (list) => [...list, ...new Array(8 - list.length).fill(0)];
+    const offsets = fill(p.offsets);
+    // Like Rust: a missing distance counts as 0 (an extra one is ignored).
+    const distances = fill(p.distances.slice(0, p.offsets.length));
+    ptr = x.sx_scratch(23);
+    new Int32Array(x.memory.buffer, ptr, 23).set([p.headingStep, p.firstDistance, p.offsets.length, ...offsets, ...distances, ...p.min, ...p.max].map(i32));
+    custom = 1;
+  } else {
+    ptr = x.sx_scratch(3);
+  }
+  const r = x.sx_points_around(u32(agent), u32(step), i32(cx), i32(cy), i32(cz), custom, sine);
+  if (r < 0) throw new RangeError('Sagax: bad point pattern');
+  if (r === 0) return null;
+  return Array.from(new Int32Array(x.memory.buffer, ptr, 3));
+}
+
+Object.assign(Sagax.prototype, {
+  /** Facts keyed by (subject, kind) for at most capacity; evict 'oldest' or 'weakest'. See Knowledge. */
+  knowledge(capacity, evict = 'oldest') {
+    return new Knowledge(this.x, capacity, evict);
+  },
+  /** Messages to send, for at most capacity. See Outbox. */
+  outbox(capacity) {
+    return new Outbox(this.x, capacity);
+  },
+  /** Messages on their way to one receiver, for at most capacity. See Inbox. */
+  inbox(capacity) {
+    return new Inbox(this.x, capacity);
+  },
+  /** Areas to avoid or pay extra for, for at most capacity. See Areas. */
+  areas(capacity) {
+    return new Areas(this.x, capacity);
+  },
+  /** Id timers for at most capacity ids. See Timers. */
+  timers(capacity) {
+    return new Timers(this.x, capacity);
+  },
+  /**
+   * Picks recipients: route(rule, [x, y], candidates, metric = 'euclid', divisor = 1).
+   * rule: {nearest: k}, {inRange: r} (distance <= r, in candidate order), 'all' or {to: id}.
+   * candidates: [{id, x, y}], already filtered by the game (team, free).
+   * metric: 'euclid' (squared compare), 'manhattan', 'chebyshev' or 'hex' (axial q, r).
+   * Each axis is divided by divisor (truncating) first. Ties: the earlier candidate wins.
+   * Returns the ids.
+   */
+  route(rule, origin, candidates, metric = 'euclid', divisor = 1) {
+    return routeOf(this.x, rule, origin, candidates, metric, divisor);
+  },
+  /** When a message sent at now arrives: now + base + distance * perUnit (u32, wrapping). */
+  arrival(now, base, distance, perUnit) {
+    return u32(u32(now) + u32(base) + Math.imul(u32(distance), u32(perUnit)));
+  },
+  /** Sine of a heading (256 = full turn): 'fine' times 65536, 'coarse' times 256 (17-entry table). */
+  sine(heading, mode = 'fine') {
+    return this.x.sx_sine(i32(heading), choice(SINE, mode, 'sine'));
+  },
+  /**
+   * Point where an agent looks around a place: pointsAround(agent, step, [x, y, z], pattern?).
+   * pattern: {headingStep, firstDistance, offsets, distances, min: [x, y], max: [x, y], sine: 'fine'|'coarse'}.
+   */
+  pointsAround(agent, step, centre, pattern) {
+    return pointsAroundOf(this.x, agent, step, centre, pattern);
+  },
+  /** sweepHeading(base, elapsed, stepTicks, offsets?): heading 0..255 while looking around. */
+  sweepHeading(base, elapsed, stepTicks, offsets) {
+    if (!offsets) return this.x.sx_sweep_heading(i32(base), u32(elapsed), u32(stepTicks), -1);
+    const ptr = this.x.sx_scratch(offsets.length);
+    new Int32Array(this.x.memory.buffer, ptr, Math.max(offsets.length, 1)).set(offsets.map(i32));
+    return this.x.sx_sweep_heading(i32(base), u32(elapsed), u32(stepTicks), offsets.length);
+  },
+});

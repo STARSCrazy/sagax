@@ -1339,3 +1339,1047 @@ pub unsafe extern "C" fn sx_machine_set_state(m: *mut WasmMachine, state: u32, n
         Err(_) => ERROR_ARGUMENT,
     }
 }
+
+// ---- world memory ----------------------------------------------------------
+//
+// Same blocks as the C interface (`sx_knowledge_*`, `sx_outbox_*`, ...), but
+// without structs: every handle has a record buffer (`u32`s; signed values
+// as their bit pattern) that JS fills before and reads after a call, and
+// the tables that hand out several records have an out buffer too.
+
+use sagax_decide::memory::{
+    Area, Areas, Evict, Fact, Inbox, Knowledge, LOOK_OFFSETS, Message, Metric, Outbox,
+    PointPattern, Refused, Route, Sine, Timers, points_around, route, sine, sweep_heading,
+};
+
+/// Numbers per fact record: subject, kind, x, y, z, seen at, strength, data,
+/// source.
+const FACT_SIZE: usize = 9;
+/// Numbers per message record: kind, subject, x, y, z, seen at, strength,
+/// data, sender, keep if sender gone.
+const MESSAGE_SIZE: usize = 10;
+/// Numbers per area record: kind, x, y, z, radius, strength, since, lifetime,
+/// data, source x, y, z, blocking, has source.
+const AREA_SIZE: usize = 14;
+
+fn fact_record(f: &Fact) -> [u32; FACT_SIZE] {
+    [
+        f.subject,
+        f.kind,
+        f.pos[0] as u32,
+        f.pos[1] as u32,
+        f.pos[2] as u32,
+        f.seen_at,
+        f.strength,
+        f.data,
+        u32::from(f.source),
+    ]
+}
+
+fn fact_of(r: &[u32; FACT_SIZE]) -> Fact {
+    Fact {
+        subject: r[0],
+        kind: r[1],
+        pos: [r[2] as i32, r[3] as i32, r[4] as i32],
+        seen_at: r[5],
+        strength: r[6],
+        data: r[7],
+        source: r[8] as u8,
+    }
+}
+
+fn message_record(m: &Message) -> [u32; MESSAGE_SIZE] {
+    [
+        m.kind,
+        m.subject,
+        m.pos[0] as u32,
+        m.pos[1] as u32,
+        m.pos[2] as u32,
+        m.seen_at,
+        m.strength,
+        m.data,
+        m.sender,
+        u32::from(m.keep_if_sender_gone),
+    ]
+}
+
+fn message_of(r: &[u32; MESSAGE_SIZE]) -> Message {
+    Message {
+        kind: r[0],
+        subject: r[1],
+        pos: [r[2] as i32, r[3] as i32, r[4] as i32],
+        seen_at: r[5],
+        strength: r[6],
+        data: r[7],
+        sender: r[8],
+        keep_if_sender_gone: r[9] as u8,
+    }
+}
+
+fn area_record(a: &Area) -> [u32; AREA_SIZE] {
+    [
+        a.kind,
+        a.pos[0] as u32,
+        a.pos[1] as u32,
+        a.pos[2] as u32,
+        a.radius as u32,
+        a.strength,
+        a.since,
+        a.lifetime,
+        a.data,
+        a.source[0] as u32,
+        a.source[1] as u32,
+        a.source[2] as u32,
+        u32::from(a.blocking),
+        u32::from(a.has_source),
+    ]
+}
+
+fn area_of(r: &[u32; AREA_SIZE]) -> Area {
+    Area {
+        kind: r[0],
+        pos: [r[1] as i32, r[2] as i32, r[3] as i32],
+        radius: r[4] as i32,
+        strength: r[5],
+        since: r[6],
+        lifetime: r[7],
+        data: r[8],
+        source: [r[9] as i32, r[10] as i32, r[11] as i32],
+        blocking: r[12] as u8,
+        has_source: r[13] as u8,
+    }
+}
+
+/// Knowledge with a fact record (in and out) and the facts handed out by the
+/// last call that removed or evicted some.
+pub struct WasmKnowledge {
+    knowledge: Knowledge,
+    record: [u32; FACT_SIZE],
+    out: Vec<u32>,
+}
+
+macro_rules! knowledge {
+    ($k:expr) => {
+        // SAFETY: JS passes a handle from sx_knowledge_new (wrapper guarantees it).
+        match unsafe { $k.as_mut() } {
+            Some(k) => k,
+            None => return ERROR_ARGUMENT,
+        }
+    };
+}
+
+/// Knowledge for at most `capacity` facts; `evict` 0 drops the oldest when
+/// full, 1 the weakest. Null if `capacity` is 0 or `evict` unknown.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_knowledge_new(capacity: u32, evict: u32) -> *mut WasmKnowledge {
+    let evict = match evict {
+        0 => Evict::Oldest,
+        1 => Evict::Weakest,
+        _ => return std::ptr::null_mut(),
+    };
+    match Knowledge::new(capacity as usize, evict) {
+        Ok(knowledge) => Box::into_raw(Box::new(WasmKnowledge {
+            knowledge,
+            record: [0; FACT_SIZE],
+            out: Vec::new(),
+        })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Frees knowledge.
+///
+/// # Safety
+/// `k` is null or from [`sx_knowledge_new`] and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_free(k: *mut WasmKnowledge) {
+    if !k.is_null() {
+        // SAFETY: see above.
+        drop(unsafe { Box::from_raw(k) });
+    }
+}
+
+/// The record buffer (9 `u32`): the fact JS gives to `learn` and `merge`, and
+/// the fact `get` and `at` load.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`]. Valid until memory grows.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_record(k: *mut WasmKnowledge) -> *mut u32 {
+    // SAFETY: see above.
+    unsafe { k.as_mut() }.map_or(std::ptr::null_mut(), |w| w.record.as_mut_ptr())
+}
+
+/// The out buffer: the evicted fact or the removed facts (9 `u32` each).
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`]. Valid until memory grows.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_out(k: *mut WasmKnowledge) -> *const u32 {
+    // SAFETY: see above.
+    unsafe { k.as_ref() }.map_or(std::ptr::null(), |w| w.out.as_ptr())
+}
+
+fn evicted_out(w: &mut WasmKnowledge, evicted: Option<Fact>) -> i32 {
+    w.out.clear();
+    match evicted {
+        Some(f) => {
+            w.out.extend_from_slice(&fact_record(&f));
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Learns the fact in the record buffer (overwrites a known one). Returns 1
+/// if another fact was evicted (it is in the out buffer), else 0.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_learn(k: *mut WasmKnowledge, now: u32) -> i32 {
+    let w = knowledge!(k);
+    let evicted = w.knowledge.learn(fact_of(&w.record), now);
+    evicted_out(w, evicted)
+}
+
+/// Merges the fact in the record buffer (a known fact is only overwritten by
+/// a not older one). Returns 1 if another fact was evicted, else 0.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_merge(k: *mut WasmKnowledge, now: u32) -> i32 {
+    let w = knowledge!(k);
+    let evicted = w.knowledge.merge(fact_of(&w.record), now);
+    evicted_out(w, evicted)
+}
+
+/// Renews the time of a fact; 1 if known.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_touch(
+    k: *mut WasmKnowledge,
+    subject: u32,
+    kind: u32,
+    now: u32,
+) -> i32 {
+    i32::from(knowledge!(k).knowledge.touch(subject, kind, now))
+}
+
+/// Sets the place of a fact; 1 if known.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_set_pos(
+    k: *mut WasmKnowledge,
+    subject: u32,
+    kind: u32,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> i32 {
+    i32::from(knowledge!(k).knowledge.set_pos(subject, kind, [x, y, z]))
+}
+
+/// Sets the data of a fact; 1 if known.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_set_data(
+    k: *mut WasmKnowledge,
+    subject: u32,
+    kind: u32,
+    data: u32,
+) -> i32 {
+    i32::from(knowledge!(k).knowledge.set_data(subject, kind, data))
+}
+
+/// Sets the strength of a fact; 1 if known.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_set_strength(
+    k: *mut WasmKnowledge,
+    subject: u32,
+    kind: u32,
+    strength: u32,
+) -> i32 {
+    i32::from(
+        knowledge!(k)
+            .knowledge
+            .set_strength(subject, kind, strength),
+    )
+}
+
+/// Forgets one fact; 1 if known.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_remove(
+    k: *mut WasmKnowledge,
+    subject: u32,
+    kind: u32,
+) -> i32 {
+    i32::from(knowledge!(k).knowledge.remove(subject, kind))
+}
+
+/// Forgets all facts about `subject`; returns how many.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_remove_subject(k: *mut WasmKnowledge, subject: u32) -> i32 {
+    to_i32(knowledge!(k).knowledge.remove_subject(subject))
+}
+
+/// Loads the fact (subject, kind) into the record buffer; 1 if known.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_get(k: *mut WasmKnowledge, subject: u32, kind: u32) -> i32 {
+    let w = knowledge!(k);
+    match w.knowledge.get(subject, kind) {
+        Some(f) => {
+            w.record = fact_record(f);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Loads the fact in slot `index` into the record buffer; 1 if present.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_at(k: *mut WasmKnowledge, index: u32) -> i32 {
+    let w = knowledge!(k);
+    match w.knowledge.iter().nth(index as usize) {
+        Some(f) => {
+            w.record = fact_record(f);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Number of facts.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_count(k: *mut WasmKnowledge) -> i32 {
+    to_i32(knowledge!(k).knowledge.len())
+}
+
+/// Forgets everything.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_clear(k: *mut WasmKnowledge) -> i32 {
+    knowledge!(k).knowledge.clear();
+    0
+}
+
+/// Forgets facts of age at least `max_age`; returns how many. The facts are
+/// in the out buffer, in slot order.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_expire(k: *mut WasmKnowledge, now: u32, max_age: u32) -> i32 {
+    let w = knowledge!(k);
+    w.out.clear();
+    let out = &mut w.out;
+    w.knowledge
+        .expire(now, max_age, |f| out.extend_from_slice(&fact_record(&f)));
+    to_i32(w.out.len() / FACT_SIZE)
+}
+
+/// Like [`sx_knowledge_expire`], for facts of one `kind` only.
+///
+/// # Safety
+/// `k` from [`sx_knowledge_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_expire_kind(
+    k: *mut WasmKnowledge,
+    now: u32,
+    kind: u32,
+    max_age: u32,
+) -> i32 {
+    let w = knowledge!(k);
+    w.out.clear();
+    let out = &mut w.out;
+    w.knowledge.expire_kind(now, kind, max_age, |f| {
+        out.extend_from_slice(&fact_record(&f));
+    });
+    to_i32(w.out.len() / FACT_SIZE)
+}
+
+/// Messages waiting to be sent, with a message record (in) and an out buffer
+/// for the messages that are due.
+pub struct WasmOutbox {
+    outbox: Outbox,
+    record: [u32; MESSAGE_SIZE],
+    out: Vec<u32>,
+}
+
+macro_rules! outbox {
+    ($o:expr) => {
+        // SAFETY: JS passes a handle from sx_outbox_new (wrapper guarantees it).
+        match unsafe { $o.as_mut() } {
+            Some(o) => o,
+            None => return ERROR_ARGUMENT,
+        }
+    };
+}
+
+/// An outbox for at most `capacity` messages; null if `capacity` is 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_outbox_new(capacity: u32) -> *mut WasmOutbox {
+    match Outbox::new(capacity as usize) {
+        Ok(outbox) => Box::into_raw(Box::new(WasmOutbox {
+            outbox,
+            record: [0; MESSAGE_SIZE],
+            out: Vec::new(),
+        })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Frees an outbox.
+///
+/// # Safety
+/// `o` is null or from [`sx_outbox_new`] and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_outbox_free(o: *mut WasmOutbox) {
+    if !o.is_null() {
+        // SAFETY: see above.
+        drop(unsafe { Box::from_raw(o) });
+    }
+}
+
+/// The record buffer (10 `u32`): the message JS gives to `post`.
+///
+/// # Safety
+/// `o` from [`sx_outbox_new`]. Valid until memory grows.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_outbox_record(o: *mut WasmOutbox) -> *mut u32 {
+    // SAFETY: see above.
+    unsafe { o.as_mut() }.map_or(std::ptr::null_mut(), |w| w.record.as_mut_ptr())
+}
+
+/// The out buffer: the messages `due` handed out (10 `u32` each).
+///
+/// # Safety
+/// `o` from [`sx_outbox_new`]. Valid until memory grows.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_outbox_out(o: *mut WasmOutbox) -> *const u32 {
+    // SAFETY: see above.
+    unsafe { o.as_ref() }.map_or(std::ptr::null(), |w| w.out.as_ptr())
+}
+
+/// Posts the message in the record buffer: 0 accepted, 1 refused because the
+/// outbox is full, 2 refused by the cooldown.
+///
+/// # Safety
+/// `o` from [`sx_outbox_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_outbox_post(
+    o: *mut WasmOutbox,
+    now: u32,
+    delay: u32,
+    cooldown: u32,
+) -> i32 {
+    let w = outbox!(o);
+    match w.outbox.post(message_of(&w.record), now, delay, cooldown) {
+        Ok(()) => 0,
+        Err(Refused::Full) => 1,
+        Err(Refused::Cooldown) => 2,
+    }
+}
+
+/// Moves up to `max` due messages to the out buffer, in post order; returns
+/// how many.
+///
+/// # Safety
+/// `o` from [`sx_outbox_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_outbox_due(o: *mut WasmOutbox, now: u32, max: u32) -> i32 {
+    let w = outbox!(o);
+    let mut list = Vec::new();
+    w.outbox.due_max(now, max as usize, &mut list);
+    w.out.clear();
+    for m in &list {
+        w.out.extend_from_slice(&message_record(m));
+    }
+    to_i32(list.len())
+}
+
+/// Drops the messages that are not marked to be kept.
+///
+/// # Safety
+/// `o` from [`sx_outbox_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_outbox_sender_gone(o: *mut WasmOutbox) -> i32 {
+    outbox!(o).outbox.sender_gone();
+    0
+}
+
+/// Number of messages waiting.
+///
+/// # Safety
+/// `o` from [`sx_outbox_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_outbox_pending(o: *mut WasmOutbox) -> i32 {
+    to_i32(outbox!(o).outbox.pending())
+}
+
+/// Drops all messages (the cooldown keeps running).
+///
+/// # Safety
+/// `o` from [`sx_outbox_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_outbox_clear(o: *mut WasmOutbox) -> i32 {
+    outbox!(o).outbox.clear();
+    0
+}
+
+/// Messages on their way to one receiver, with a message record (in) and an
+/// out buffer for the messages that arrived.
+pub struct WasmInbox {
+    inbox: Inbox,
+    record: [u32; MESSAGE_SIZE],
+    out: Vec<u32>,
+}
+
+macro_rules! inbox {
+    ($i:expr) => {
+        // SAFETY: JS passes a handle from sx_inbox_new (wrapper guarantees it).
+        match unsafe { $i.as_mut() } {
+            Some(i) => i,
+            None => return ERROR_ARGUMENT,
+        }
+    };
+}
+
+/// An inbox for at most `capacity` messages; null if `capacity` is 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_inbox_new(capacity: u32) -> *mut WasmInbox {
+    match Inbox::new(capacity as usize) {
+        Ok(inbox) => Box::into_raw(Box::new(WasmInbox {
+            inbox,
+            record: [0; MESSAGE_SIZE],
+            out: Vec::new(),
+        })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Frees an inbox.
+///
+/// # Safety
+/// `i` is null or from [`sx_inbox_new`] and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_inbox_free(i: *mut WasmInbox) {
+    if !i.is_null() {
+        // SAFETY: see above.
+        drop(unsafe { Box::from_raw(i) });
+    }
+}
+
+/// The record buffer (10 `u32`): the message JS gives to `push`.
+///
+/// # Safety
+/// `i` from [`sx_inbox_new`]. Valid until memory grows.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_inbox_record(i: *mut WasmInbox) -> *mut u32 {
+    // SAFETY: see above.
+    unsafe { i.as_mut() }.map_or(std::ptr::null_mut(), |w| w.record.as_mut_ptr())
+}
+
+/// The out buffer: the messages `take_due` handed out (10 `u32` each).
+///
+/// # Safety
+/// `i` from [`sx_inbox_new`]. Valid until memory grows.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_inbox_out(i: *mut WasmInbox) -> *const u32 {
+    // SAFETY: see above.
+    unsafe { i.as_ref() }.map_or(std::ptr::null(), |w| w.out.as_ptr())
+}
+
+/// Puts the message in the record buffer on its way, arriving at
+/// `arrive_at`; 1 if kept, 0 if refused.
+///
+/// # Safety
+/// `i` from [`sx_inbox_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_inbox_push(i: *mut WasmInbox, arrive_at: u32) -> i32 {
+    let w = inbox!(i);
+    i32::from(w.inbox.push(message_of(&w.record), arrive_at))
+}
+
+/// Moves up to `max` arrived messages to the out buffer, in push order;
+/// returns how many.
+///
+/// # Safety
+/// `i` from [`sx_inbox_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_inbox_take_due(i: *mut WasmInbox, now: u32, max: u32) -> i32 {
+    let w = inbox!(i);
+    let mut list = Vec::new();
+    w.inbox.take_due_max(now, max as usize, &mut list);
+    w.out.clear();
+    for m in &list {
+        w.out.extend_from_slice(&message_record(m));
+    }
+    to_i32(list.len())
+}
+
+/// Number of messages on their way.
+///
+/// # Safety
+/// `i` from [`sx_inbox_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_inbox_len(i: *mut WasmInbox) -> i32 {
+    to_i32(inbox!(i).inbox.len())
+}
+
+/// Drops all messages.
+///
+/// # Safety
+/// `i` from [`sx_inbox_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_inbox_clear(i: *mut WasmInbox) -> i32 {
+    inbox!(i).inbox.clear();
+    0
+}
+
+/// Areas with an area record (in and out).
+pub struct WasmAreas {
+    areas: Areas,
+    record: [u32; AREA_SIZE],
+}
+
+macro_rules! areas {
+    ($a:expr) => {
+        // SAFETY: JS passes a handle from sx_areas_new (wrapper guarantees it).
+        match unsafe { $a.as_mut() } {
+            Some(a) => a,
+            None => return ERROR_ARGUMENT,
+        }
+    };
+}
+
+/// Areas for at most `capacity`; null if `capacity` is 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_areas_new(capacity: u32) -> *mut WasmAreas {
+    match Areas::new(capacity as usize) {
+        Ok(areas) => Box::into_raw(Box::new(WasmAreas {
+            areas,
+            record: [0; AREA_SIZE],
+        })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Frees areas.
+///
+/// # Safety
+/// `a` is null or from [`sx_areas_new`] and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_areas_free(a: *mut WasmAreas) {
+    if !a.is_null() {
+        // SAFETY: see above.
+        drop(unsafe { Box::from_raw(a) });
+    }
+}
+
+/// The record buffer (14 `u32`): the area JS gives to `add`, and the area
+/// `at` loads.
+///
+/// # Safety
+/// `a` from [`sx_areas_new`]. Valid until memory grows.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_areas_record(a: *mut WasmAreas) -> *mut u32 {
+    // SAFETY: see above.
+    unsafe { a.as_mut() }.map_or(std::ptr::null_mut(), |w| w.record.as_mut_ptr())
+}
+
+/// Adds the area in the record buffer (or renews the one it falls in);
+/// returns its index.
+///
+/// # Safety
+/// `a` from [`sx_areas_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_areas_add(a: *mut WasmAreas, now: u32) -> i32 {
+    let w = areas!(a);
+    to_i32(w.areas.add(area_of(&w.record), now))
+}
+
+/// Removes expired areas; returns how many.
+///
+/// # Safety
+/// `a` from [`sx_areas_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_areas_expire(a: *mut WasmAreas, now: u32) -> i32 {
+    to_i32(areas!(a).areas.expire(now))
+}
+
+/// Index of the first area containing the place, or -2 if none.
+///
+/// # Safety
+/// `a` from [`sx_areas_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_areas_contains(a: *mut WasmAreas, x: i32, y: i32, z: i32) -> i32 {
+    areas!(a).areas.contains([x, y, z]).map_or(-2, to_i32)
+}
+
+/// Like [`sx_areas_contains`], for areas of one kind.
+///
+/// # Safety
+/// `a` from [`sx_areas_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_areas_contains_kind(
+    a: *mut WasmAreas,
+    x: i32,
+    y: i32,
+    z: i32,
+    kind: u32,
+) -> i32 {
+    areas!(a)
+        .areas
+        .contains_kind([x, y, z], kind)
+        .map_or(-2, to_i32)
+}
+
+/// 1 if a blocking area holds `cell` but neither `start` nor `goal`; reads 9
+/// integers (cell, start, goal).
+///
+/// # Safety
+/// `a` from [`sx_areas_new`]; `cells` null or points to 9 integers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_areas_blocks(a: *mut WasmAreas, cells: *const i32) -> i32 {
+    let w = areas!(a);
+    if cells.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: see above.
+    let p = unsafe { std::slice::from_raw_parts(cells, 9) };
+    i32::from(
+        w.areas
+            .blocks([p[0], p[1], p[2]], [p[3], p[4], p[5]], [p[6], p[7], p[8]]),
+    )
+}
+
+/// The extra cost of `cell` (sum of the strengths of non-blocking areas
+/// holding it but neither `start` nor `goal`, saturating) as a `u32`; reads
+/// 9 integers (cell, start, goal). A null handle or `cells` returns 0.
+///
+/// # Safety
+/// `a` from [`sx_areas_new`]; `cells` null or points to 9 integers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_areas_cost(a: *mut WasmAreas, cells: *const i32) -> u32 {
+    // SAFETY: see above.
+    let (Some(w), false) = (unsafe { a.as_ref() }, cells.is_null()) else {
+        return 0;
+    };
+    // SAFETY: see above.
+    let p = unsafe { std::slice::from_raw_parts(cells, 9) };
+    w.areas
+        .cost([p[0], p[1], p[2]], [p[3], p[4], p[5]], [p[6], p[7], p[8]])
+}
+
+/// Loads the area in slot `index` into the record buffer; 1 if present.
+///
+/// # Safety
+/// `a` from [`sx_areas_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_areas_at(a: *mut WasmAreas, index: u32) -> i32 {
+    let w = areas!(a);
+    match w.areas.iter().nth(index as usize) {
+        Some(f) => {
+            w.record = area_record(f);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// Number of areas.
+///
+/// # Safety
+/// `a` from [`sx_areas_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_areas_count(a: *mut WasmAreas) -> i32 {
+    to_i32(areas!(a).areas.len())
+}
+
+/// Removes all areas.
+///
+/// # Safety
+/// `a` from [`sx_areas_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_areas_clear(a: *mut WasmAreas) -> i32 {
+    areas!(a).areas.clear();
+    0
+}
+
+/// Ids that count as "on" for a while.
+pub struct WasmTimers(Timers);
+
+macro_rules! timers {
+    ($t:expr) => {
+        // SAFETY: JS passes a handle from sx_timers_new (wrapper guarantees it).
+        match unsafe { $t.as_mut() } {
+            Some(t) => &mut t.0,
+            None => return ERROR_ARGUMENT,
+        }
+    };
+}
+
+/// Timers for at most `capacity` ids; null if `capacity` is 0.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_timers_new(capacity: u32) -> *mut WasmTimers {
+    match Timers::new(capacity as usize) {
+        Ok(t) => Box::into_raw(Box::new(WasmTimers(t))),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Frees timers.
+///
+/// # Safety
+/// `t` is null or from [`sx_timers_new`] and not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_timers_free(t: *mut WasmTimers) {
+    if !t.is_null() {
+        // SAFETY: see above.
+        drop(unsafe { Box::from_raw(t) });
+    }
+}
+
+/// Starts (or renews) the timer of `id`.
+///
+/// # Safety
+/// `t` from [`sx_timers_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_timers_set(
+    t: *mut WasmTimers,
+    id: u32,
+    now: u32,
+    duration: u32,
+) -> i32 {
+    timers!(t).set(id, now, duration);
+    0
+}
+
+/// 1 if the timer of `id` still runs.
+///
+/// # Safety
+/// `t` from [`sx_timers_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_timers_active(t: *mut WasmTimers, id: u32, now: u32) -> i32 {
+    i32::from(timers!(t).active(id, now))
+}
+
+/// Time left of the timer of `id` as a `u32`; a null handle returns 0.
+///
+/// # Safety
+/// `t` from [`sx_timers_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_timers_left(t: *mut WasmTimers, id: u32, now: u32) -> u32 {
+    // SAFETY: see above.
+    unsafe { t.as_ref() }.map_or(0, |w| w.0.left(id, now))
+}
+
+/// Stops the timer of `id`; 1 if there was one.
+///
+/// # Safety
+/// `t` from [`sx_timers_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_timers_remove(t: *mut WasmTimers, id: u32) -> i32 {
+    i32::from(timers!(t).remove(id))
+}
+
+/// Stops all timers.
+///
+/// # Safety
+/// `t` from [`sx_timers_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_timers_clear(t: *mut WasmTimers) -> i32 {
+    timers!(t).clear();
+    0
+}
+
+/// Number of timers.
+///
+/// # Safety
+/// `t` from [`sx_timers_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_timers_count(t: *mut WasmTimers) -> i32 {
+    to_i32(timers!(t).len())
+}
+
+thread_local! {
+    static SCRATCH: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A shared buffer of `count` integers for the helper functions below
+/// ([`sx_route`], [`sx_points_around`], [`sx_sweep_heading`]). Valid until
+/// memory grows or the buffer is asked for again.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_scratch(count: i32) -> *mut i32 {
+    SCRATCH.with(|s| {
+        let mut s = s.borrow_mut();
+        s.clear();
+        s.resize(usize::try_from(count).unwrap_or(0).max(1), 0);
+        s.as_mut_ptr()
+    })
+}
+
+fn sine_of(mode: i32) -> Option<Sine> {
+    match mode {
+        0 => Some(Sine::Fine),
+        1 => Some(Sine::Coarse),
+        _ => None,
+    }
+}
+
+/// The sine of a heading (256 = full turn): `mode` 0 fine (times 65536), 1
+/// coarse (times 256). Returns `i32::MIN` for an unknown mode.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_sine(heading: i32, mode: i32) -> i32 {
+    sine_of(mode).map_or(i32::MIN, |s| sine(heading, s))
+}
+
+/// Picks recipients. Scratch in: `n` triples (id, x, y); scratch out: the
+/// ids, in the order of the rule. `rule` 0 nearest `arg` (a count), 1 in
+/// range `arg` (a distance, an integer in an `f64`), 2 all, 3 to the id
+/// `arg`; `metric` 0 euclid, 1 manhattan, 2 chebyshev, 3 hex. Returns how
+/// many ids, -1 on bad arguments.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_route(
+    rule: i32,
+    arg: f64,
+    n: u32,
+    ox: i32,
+    oy: i32,
+    metric: i32,
+    divisor: i32,
+) -> i32 {
+    let rule = match rule {
+        0 if arg >= 0.0 => Route::Nearest(arg as usize),
+        1 => Route::InRange(arg as i64),
+        2 => Route::All,
+        3 if arg >= 0.0 => Route::To(arg as u32),
+        _ => return ERROR_ARGUMENT,
+    };
+    let metric = match metric {
+        0 => Metric::Euclid,
+        1 => Metric::Manhattan,
+        2 => Metric::Chebyshev,
+        3 => Metric::Hex,
+        _ => return ERROR_ARGUMENT,
+    };
+    SCRATCH.with(|s| {
+        let mut s = s.borrow_mut();
+        let Some(len) = (n as usize).checked_mul(3).filter(|&len| len <= s.len()) else {
+            return ERROR_ARGUMENT;
+        };
+        let list: Vec<(u32, i32, i32)> = s[..len]
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|c| (c[0] as u32, c[1], c[2]))
+            .collect();
+        let mut ids = Vec::new();
+        route(rule, (ox, oy), &list, metric, divisor, &mut ids);
+        let count = ids.len();
+        for (i, id) in ids.into_iter().enumerate() {
+            s[i] = id as i32;
+        }
+        to_i32(count)
+    })
+}
+
+/// Number of integers a point pattern takes in the scratch buffer.
+const PATTERN_SIZE: usize = 23;
+
+/// A point around a place. With `custom` not 0 the scratch buffer holds the
+/// pattern (heading step, first distance, count at most 8, 8 offsets, 8
+/// distances, min x, min y, max x, max y); otherwise the default pattern is
+/// used. `sine` 0 fine, 1 coarse. Returns 1 and puts x, y, z in the scratch
+/// buffer (at least 3 integers long), 0 past the last step, -1 on bad
+/// arguments.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_points_around(
+    agent: u32,
+    step: u32,
+    cx: i32,
+    cy: i32,
+    cz: i32,
+    custom: i32,
+    sine: i32,
+) -> i32 {
+    let Some(sine) = sine_of(sine) else {
+        return ERROR_ARGUMENT;
+    };
+    SCRATCH.with(|s| {
+        let mut s = s.borrow_mut();
+        let pattern = if custom != 0 {
+            if s.len() < PATTERN_SIZE || !(0..=8).contains(&s[2]) {
+                return ERROR_ARGUMENT;
+            }
+            let n = s[2] as usize;
+            PointPattern {
+                heading_step: s[0],
+                first_distance: s[1],
+                offsets: s[3..3 + n].to_vec(),
+                distances: s[11..11 + n].to_vec(),
+                sine,
+                min: (s[19], s[20]),
+                max: (s[21], s[22]),
+            }
+        } else {
+            PointPattern {
+                sine,
+                ..PointPattern::default()
+            }
+        };
+        if s.len() < 3 {
+            return ERROR_ARGUMENT;
+        }
+        match points_around(agent, step as usize, [cx, cy, cz], &pattern) {
+            Some(p) => {
+                s[..3].copy_from_slice(&p);
+                1
+            }
+            None => 0,
+        }
+    })
+}
+
+/// The heading while looking around. With `count` below 0 the default
+/// offsets are used, otherwise `count` offsets are read from the scratch
+/// buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_sweep_heading(base: i32, elapsed: u32, step_ticks: u32, count: i32) -> i32 {
+    if count < 0 {
+        return sweep_heading(base, elapsed, step_ticks, &LOOK_OFFSETS);
+    }
+    SCRATCH.with(|s| {
+        let s = s.borrow();
+        let n = (count as usize).min(s.len());
+        sweep_heading(base, elapsed, step_ticks, &s[..n])
+    })
+}
