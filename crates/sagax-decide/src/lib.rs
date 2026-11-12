@@ -24,6 +24,8 @@
 //! What happened can be followed factor by factor through a
 //! [`sagax_core::Sink`] of [`DecideEvent`]s.
 
+pub mod state;
+
 use std::cell::RefCell;
 
 use sagax_core::{NoopSink, Sink};
