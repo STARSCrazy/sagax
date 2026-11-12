@@ -106,7 +106,9 @@ pub struct Slot {
     pub dist: i32,
 }
 
-/// When the group signal fires by itself.
+/// When the group signal fires by itself. Once the signal was given, the
+/// plan is no longer replaced by a better one; only its [`Abort`] rules end
+/// it (see [`Squad::check`](super::Squad::check)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Trigger {
     /// Never by itself.

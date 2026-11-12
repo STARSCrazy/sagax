@@ -30,7 +30,7 @@ const NAMES: [&str; 3] = ["rush", "formation", "flank"];
 
 /// What happened, for the trace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Event {
+enum Event {
     /// The leader made a plan (pending while it thinks).
     Planned {
         /// Tick.
@@ -91,7 +91,7 @@ fn step_toward(from: Pos, to: Pos) -> Pos {
 }
 
 /// Runs the scene for ticks `0 ..= end` and returns what happened.
-pub fn run_scene(end: u32) -> Vec<Event> {
+fn run_scene(end: u32) -> Vec<Event> {
     let mut ev = Vec::new();
     let mut sq = Squad::new(4, 8, 4, 8, Metric::Chebyshev).unwrap();
     let members = [(1, 0, 0), (2, 0, 2), (3, 0, -2), (4, -3, 0)];

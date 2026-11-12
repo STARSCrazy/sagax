@@ -1479,6 +1479,84 @@ fn all_arrived_needs_an_active_member() {
     assert_eq!(sq.check(6 + wait, &[], &[], 0), Ok(Status::Signal));
 }
 
+#[test]
+fn no_better_replan_after_signal() {
+    let build = || {
+        let mut sq = squad_of(Metric::Euclid, &four());
+        sq.add_tactic(Tactic {
+            weight: ONE / 2,
+            aborts: vec![Abort {
+                input: IN_LOSSES,
+                at_least: 1,
+            }],
+            ..tactics::rush()
+        });
+        sq.add_tactic(Tactic {
+            considerations: vec![Consideration::new(IN_EXTRA as u32, Curve::Linear, 0, 100)],
+            weight: ONE,
+            ..tactics::rush()
+        });
+        sq.set_extra_columns(1);
+        sq.set_skill(255);
+        see(&mut sq, 10, 20, 0, 0);
+        sq.check(0, &[0, 40], &[], 0).unwrap();
+        assert_eq!(sq.check(5, &[0, 40], &[], 0), Ok(Status::Keep));
+        assert_eq!(sq.active_plan().unwrap().tactic, 0);
+        sq
+    };
+    // Without the signal 0.9 beats 0.5 by more than the bonus ...
+    let mut sq = build();
+    assert!(matches!(
+        sq.check(8, &[0, 90], &[], 0),
+        Ok(Status::Replan(_))
+    ));
+    // ... after it the started attack is carried through.
+    let mut sq = build();
+    assert!(sq.signal(6));
+    assert_eq!(sq.check(8, &[0, 90], &[], 0), Ok(Status::Keep));
+    assert_eq!(sq.check(9, &[0, 100], &[], 0), Ok(Status::Keep));
+    assert!(sq.pending_plan().is_none());
+    // An abort rule still ends it.
+    assert!(sq.set_gone(4));
+    assert!(matches!(
+        sq.check(10, &[0, 100], &[], 0),
+        Ok(Status::Replan(_))
+    ));
+}
+
+#[test]
+fn signal_orders_wait_for_the_slowest() {
+    let mut sq = squad_of(Metric::Euclid, &[(1, 0, 0, 0), (2, 3, 0, 0), (3, 6, 0, 0)]);
+    sq.add_tactic(tactics::flank(2, 4));
+    sq.set_skill(255);
+    see(&mut sq, 10, 20, 0, 0);
+    let radio = Channel::Radio {
+        base: 0,
+        per_unit: 1,
+    };
+    assert!(sq.set_channel(2, radio) && sq.set_channel(3, radio));
+    sq.check(0, &[], &[], 0).unwrap();
+    sq.check(5, &[], &[], 0).unwrap();
+    assert!(sq.signal(6));
+    let mut out = Vec::new();
+    sq.orders_due(1000, &mut out);
+    let mut second: Vec<(u32, Start)> = out
+        .iter()
+        .filter(|o| o.goal.issued_at == 6)
+        .map(|o| (o.member, o.goal.start))
+        .collect();
+    second.sort_unstable_by_key(|&(m, _)| m);
+    // In at 6 (leader), 9 (3 away) and 12 (6 away): all start at 12.
+    assert_eq!(
+        second,
+        [
+            (1, Start::AfterTicks(6)),
+            (2, Start::AfterTicks(3)),
+            (3, Start::Now),
+        ]
+    );
+}
+
 // --- Reference scenes: scripted members over the public API only ---
 //
 // 17 ticks per second, 4 members, 2 enemies. Each member walks one cell
@@ -1980,8 +2058,9 @@ fn ambush_on_target_in_radius() {
     let mut s = Scene::new(Metric::Chebyshev, 192, &SQUARE_FOUR, hidden.to_vec());
     let ambush = s.sq.add_tactic(tactics::ambush());
     let x_at = |start: i32, t: u32| start - (t / STEP) as i32;
-    // Until all attack (86); E2 reaches the group soon after.
-    for t in 0..=87 {
+    // Well past the attack: E2 walks through the group and E1 would then
+    // score higher, but a started attack is carried through.
+    for t in 0..=200 {
         for (id, start) in [(E1, 40), (E2, 44)] {
             s.sq.observe(
                 Fact {
@@ -2150,6 +2229,9 @@ fn no_cheat() {
             s.tick(t);
             assert!(see_hidden || s.sq.knowledge().iter().all(|f| f.subject != E3));
             if let Some(p) = s.sq.active_plan() {
+                targets.push(p.target);
+            }
+            if let Some(p) = s.sq.pending_plan() {
                 targets.push(p.target);
             }
         }

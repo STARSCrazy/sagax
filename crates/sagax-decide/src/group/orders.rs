@@ -157,12 +157,15 @@ impl Squad {
     /// active member whose goal has a `then_pos` or starts
     /// [`Start::OnSignal`] gets a second order, sent now like the first:
     /// `pos` = `then_pos` (`unchecked` = `then_unchecked`), or the old `pos`
-    /// without one; same plan and start delay. So that all start at the
-    /// same tick, `start` is [`Start::AfterTicks`] of the time between this
+    /// without one; same plan and start delay. The orders line up their
+    /// arrival: `start` is [`Start::AfterTicks`] of the time between this
     /// member's order and the slowest second order arriving
     /// ([`Start::Now`] for the slowest, and for all when they arrive
-    /// together). False when no plan is active or the signal was already
-    /// given.
+    /// together), so all would start at the same tick; each member's
+    /// `start_delay` still comes on top (it spreads weak members). After
+    /// the signal, [`Squad::check`] no longer replans for a better plan,
+    /// only on an abort rule. False when no plan is active or the signal
+    /// was already given.
     pub fn signal(&mut self, now: u32) -> bool {
         self.advance(now);
         let Some(a) = self.active.as_mut() else {
@@ -211,7 +214,9 @@ impl Squad {
     ///   ([`Status::Replan`]) among the other candidates only, so a weak
     ///   squad's chance pick cannot restart the same plan. An active pair
     ///   that is no candidate any more (target forgotten, slots no longer
-    ///   fillable) scores 0.
+    ///   fillable) scores 0. Not once the signal of the active plan was
+    ///   given: a started attack is carried through, and only an abort
+    ///   rule ends it.
     /// - The trigger fires and the signal was not given yet: it gives the
     ///   signal ([`Squad::signal`]) and returns [`Status::Signal`].
     ///   [`Trigger::AllArrived`]: at least one member of the plan is active,
@@ -416,6 +421,11 @@ impl Squad {
         if fires(&self.tactics[t], &s.rows) {
             return Ok(Verdict::Abort);
         }
+        // A started attack is carried through: after the signal only the
+        // abort rules end the plan.
+        if a.signal_at.is_some() {
+            return Ok(Verdict::Hold);
+        }
         self.score_candidates(s, now, centre, extra)?;
         let (mut mine, mut other) = (0u32, 0u32);
         for (&(ct, ci), &score) in s.candidates.iter().zip(&s.scores) {
@@ -479,9 +489,9 @@ enum Verdict {
     /// It stays.
     Hold,
 }
-/// The second order of a goal on the signal: start now at `then_pos` (or at
-/// `pos` without one). `None` for a goal that neither gathers nor waits for
-/// the signal.
+/// The second order of a goal on the signal, at `then_pos` (or at `pos`
+/// without one); its `start` is set by [`Squad::signal`]. `None` for a goal
+/// that neither gathers nor waits for the signal.
 fn on_signal(goal: Goal, at: u32) -> Option<Goal> {
     if goal.then_pos.is_none() && goal.start != Start::OnSignal {
         return None;
