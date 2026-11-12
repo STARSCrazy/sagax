@@ -1,115 +1,5 @@
 use super::*;
 
-fn ids(s: &Sightings) -> Vec<u32> {
-    s.iter().map(|x| x.id).collect()
-}
-
-#[test]
-fn sightings_evicts_oldest_and_keeps_order() {
-    let mut s = Sightings::new(3).unwrap();
-    assert_eq!(s.seen(1, [0; 3], 0), None);
-    assert_eq!(s.seen(2, [0; 3], 1), None);
-    assert_eq!(s.seen(3, [0; 3], 2), None);
-    assert!(s.touch(1, 3));
-    assert_eq!(s.seen(4, [1, 2, 3], 4), Some(2));
-    assert_eq!(ids(&s), vec![1, 3, 4]);
-    assert_eq!(s.get(4).unwrap().pos, [1, 2, 3]);
-}
-
-#[test]
-fn sightings_tie_evicts_earlier_slot() {
-    let mut s = Sightings::new(3).unwrap();
-    for id in 1..=3 {
-        s.seen(id, [0; 3], 5);
-    }
-    assert_eq!(s.seen(9, [0; 3], 5), Some(1));
-    assert_eq!(ids(&s), vec![2, 3, 9]);
-}
-
-#[test]
-fn sightings_present_while_full_does_not_evict() {
-    let mut s = Sightings::new(2).unwrap();
-    s.seen(1, [0; 3], 0);
-    s.seen(2, [0; 3], 1);
-    assert_eq!(s.seen(1, [7, 7, 7], 5), None);
-    assert_eq!(s.len(), 2);
-    assert_eq!(s.get(1).unwrap().pos, [7, 7, 7]);
-    assert_eq!(s.get(1).unwrap().last_seen, 5);
-}
-
-#[test]
-fn sightings_expire_in_slot_order() {
-    let mut s = Sightings::new(4).unwrap();
-    s.seen(1, [0; 3], 0);
-    s.seen(2, [0; 3], 1);
-    s.seen(3, [0; 3], 0);
-    let mut gone = Vec::new();
-    s.expire(2040, 2040, |id| gone.push(id));
-    assert_eq!(gone, vec![1, 3]);
-    assert_eq!(ids(&s), vec![2]);
-}
-
-#[test]
-fn sightings_expire_boundary_ages() {
-    let mut s = Sightings::new(2).unwrap();
-    s.seen(1, [0; 3], 0);
-    s.seen(2, [0; 3], 1);
-    let mut gone = Vec::new();
-    s.expire(2040, 2040, |id| gone.push(id));
-    assert_eq!(gone, vec![1]);
-    assert_eq!(ids(&s), vec![2]);
-}
-
-#[test]
-fn sightings_age_wraps() {
-    let mut s = Sightings::new(1).unwrap();
-    s.seen(1, [0; 3], u32::MAX - 5);
-    let mut gone = Vec::new();
-    s.expire(10, 17, |id| gone.push(id));
-    assert!(gone.is_empty());
-    s.expire(10, 16, |id| gone.push(id));
-    assert_eq!(gone, vec![1]);
-}
-
-#[test]
-fn sightings_setters_and_removal() {
-    let mut s = Sightings::new(2).unwrap();
-    assert!(!s.touch(1, 0) && !s.set_pos(1, [0; 3]) && !s.set_data(1, 0) && !s.remove(1));
-    s.seen(1, [0; 3], 0);
-    assert!(s.set_pos(1, [4, 5, 6]) && s.set_data(1, 9));
-    assert_eq!(s.get(1).unwrap().data, 9);
-    assert!(s.remove(1));
-    assert!(s.is_empty());
-    assert_eq!(s.capacity(), 2);
-}
-
-#[test]
-fn zero_capacity_is_error() {
-    assert_eq!(Sightings::new(0).unwrap_err(), ZeroCapacity);
-    assert_eq!(Ignore::new(0).unwrap_err(), ZeroCapacity);
-}
-
-#[test]
-fn ignore_window() {
-    let mut i = Ignore::new(2).unwrap();
-    i.add(7, 100);
-    assert!(i.ignores(7, 269, 170));
-    assert!(!i.ignores(7, 270, 170));
-    assert!(!i.ignores(8, 100, 170));
-}
-
-#[test]
-fn ignore_full_replaces_oldest_and_renews() {
-    let mut i = Ignore::new(2).unwrap();
-    i.add(1, 0);
-    i.add(2, 1);
-    i.add(1, 5);
-    i.add(3, 6);
-    assert!(i.ignores(1, 6, 100));
-    assert!(!i.ignores(2, 6, 100));
-    assert!(i.ignores(3, 6, 100));
-}
-
 #[test]
 fn interval_first_due_then_every() {
     let mut t = Interval::default();
@@ -186,49 +76,6 @@ fn zone_blocks_rule() {
 }
 
 #[test]
-fn stalled_resets_on_gain() {
-    let mut p = Pursuit::default();
-    p.begin(7, [0; 3], 1000, 0);
-    assert!(!p.stalled(900, 50, 0x80, 85));
-    assert!(!p.stalled(872, 60, 0x80, 85));
-    assert_eq!(p.best, 872);
-    assert_eq!(p.since, 60);
-    assert!(!p.stalled(872, 144, 0x80, 85));
-    assert!(p.stalled(872, 145, 0x80, 85));
-}
-
-#[test]
-fn lost_at_limit() {
-    let mut p = Pursuit::default();
-    p.begin(1, [1, 2, 3], 0, 0);
-    for _ in 0..8 {
-        p.missed(4);
-    }
-    assert_eq!(p.unseen, 32);
-    assert!(!p.lost(34));
-    p.missed(4);
-    assert!(p.lost(34));
-    p.seen([4, 5, 6]);
-    assert_eq!(p.unseen, 0);
-    assert_eq!(p.last_pos, [4, 5, 6]);
-    p.missed(u32::MAX);
-    p.missed(5);
-    assert_eq!(p.unseen, u32::MAX);
-    p.reset_progress(50, 9);
-    assert_eq!((p.best, p.since), (50, 9));
-    p.clear();
-    assert_eq!(p.target, 0);
-}
-
-#[test]
-fn pursuit_time_wraps() {
-    let mut p = Pursuit::default();
-    p.begin(1, [0; 3], 1000, u32::MAX - 10);
-    assert!(!p.stalled(1000, 73, 0x80, 85));
-    assert!(p.stalled(1000, 74, 0x80, 85));
-}
-
-#[test]
 fn radio_cooldown_from_start() {
     let mut r = Radio::default();
     assert!(r.start([1, 2, 3], 0, 170));
@@ -270,32 +117,6 @@ fn radio_first_start_ignores_cooldown() {
 }
 
 #[test]
-fn nearest_truncates_negative() {
-    let mut out = Vec::new();
-    // divisor 16: dx -15 -> 0 (distance 0), dx -17 -> -1 (distance 1).
-    nearest(&[(1, -17, 0), (2, -15, 0)], (0, 0), 2, 16, &mut out);
-    assert_eq!(out, vec![2, 1]);
-}
-
-#[test]
-fn nearest_tie_earlier_wins() {
-    let mut out = vec![99];
-    nearest(&[(1, 5, 0), (2, 0, 5), (3, 1, 0)], (0, 0), 2, 1, &mut out);
-    assert_eq!(out, vec![3, 1]);
-}
-
-#[test]
-fn nearest_fewer_than_k() {
-    let mut out = Vec::new();
-    nearest(&[(1, 5, 0)], (0, 0), 3, 0, &mut out);
-    assert_eq!(out, vec![1]);
-    nearest(&[], (0, 0), 3, 1, &mut out);
-    assert!(out.is_empty());
-    nearest(&[(1, 5, 0)], (0, 0), 0, 1, &mut out);
-    assert!(out.is_empty());
-}
-
-#[test]
 fn zone_full_evicts_slot0_then_appends() {
     let mut z = Zones::new(3, 10, 255).unwrap();
     z.add([0, 0, 0], 0, 1, None);
@@ -334,14 +155,6 @@ fn radio_wraps() {
     r.take();
     assert!(!r.start([0; 3], 158, 170));
     assert!(r.start([0; 3], 159, 170));
-}
-
-#[test]
-fn nearest_negative_dx_matches_reference() {
-    let mut out = Vec::new();
-    let c = [(1, -40, 3), (2, -31, -31), (3, 20, 0), (4, -100, -17)];
-    nearest(&c, (10, 5), 3, 16, &mut out);
-    assert_eq!(out, vec![3, 2, 1]);
 }
 
 #[test]
@@ -429,21 +242,6 @@ fn search_point_past_last_step_is_none() {
 }
 
 #[test]
-fn ignore_len_and_clear() {
-    let mut i = Ignore::new(2).unwrap();
-    assert!(i.is_empty());
-    i.add(1, 10);
-    i.add(2, 10);
-    assert_eq!(i.len(), 2);
-    assert!(!i.is_empty());
-    i.clear();
-    assert_eq!((i.len(), i.is_empty()), (0, true));
-    assert!(!i.ignores(1, 11, 10));
-    i.add(3, 20);
-    assert!(i.ignores(3, 21, 10));
-}
-
-#[test]
 fn zones_extreme_coordinates_do_not_overflow() {
     let mut z = Zones::new(2, i32::MAX, 10).unwrap();
     z.add([i32::MIN, i32::MIN, 0], 0, 0, None);
@@ -457,16 +255,6 @@ fn zones_extreme_coordinates_do_not_overflow() {
 }
 
 #[test]
-fn nearest_extreme_coordinates_do_not_overflow() {
-    let mut out = Vec::new();
-    let c = [(1, i32::MIN, i32::MIN), (2, i32::MAX, i32::MAX), (3, 0, 0)];
-    nearest(&c, (i32::MAX, i32::MAX), 3, 1, &mut out);
-    assert_eq!(out, vec![2, 3, 1]);
-    nearest(&c, (i32::MIN, i32::MIN), 3, 1, &mut out);
-    assert_eq!(out, vec![1, 3, 2]);
-}
-
-#[test]
 fn search_point_missing_distance_counts_as_zero() {
     let p = SearchPattern {
         offsets: vec![0, 0],
@@ -474,4 +262,299 @@ fn search_point_missing_distance_counts_as_zero() {
         ..SearchPattern::default()
     };
     assert_eq!(search_point(0, 2, [500, 600, 7], &p), Some([500, 600, 7]));
+}
+
+// ---- Knowledge ----
+
+fn fact(subject: u32, kind: u32, seen_at: u32) -> Fact {
+    Fact {
+        subject,
+        kind,
+        seen_at,
+        ..Fact::default()
+    }
+}
+
+fn keys(k: &Knowledge) -> Vec<(u32, u32)> {
+    k.iter().map(|f| (f.subject, f.kind)).collect()
+}
+
+#[test]
+fn knowledge_key_is_subject_and_kind() {
+    let mut k = Knowledge::new(4, Evict::Oldest).unwrap();
+    assert_eq!(k.learn(fact(1, 1, 0), 0), None);
+    assert_eq!(k.learn(fact(1, 2, 0), 0), None);
+    assert_eq!(k.learn(fact(2, 1, 0), 0), None);
+    assert_eq!(k.len(), 3);
+    // Same key keeps its slot.
+    let mut f = fact(1, 2, 5);
+    f.pos = [1, 2, 3];
+    assert_eq!(k.learn(f, 5), None);
+    assert_eq!(keys(&k), vec![(1, 1), (1, 2), (2, 1)]);
+    assert_eq!(k.get(1, 2).unwrap().pos, [1, 2, 3]);
+    assert_eq!(k.get(2, 2), None);
+    assert_eq!(k.capacity(), 4);
+    assert_eq!(Knowledge::new(0, Evict::Oldest).unwrap_err(), ZeroCapacity);
+}
+
+#[test]
+fn knowledge_evict_oldest_tie_earlier() {
+    let mut k = Knowledge::new(3, Evict::Oldest).unwrap();
+    k.learn(fact(1, 0, 0), 0);
+    k.learn(fact(2, 0, 1), 1);
+    k.learn(fact(3, 0, 2), 2);
+    assert!(k.touch(1, 0, 3));
+    // At now=4 subject 2 is the oldest.
+    let out = k.learn(fact(4, 0, 4), 4).unwrap();
+    assert_eq!(out.subject, 2);
+    assert_eq!(keys(&k), vec![(1, 0), (3, 0), (4, 0)]);
+    // Tie: all seen at 5, the earlier slot goes.
+    let mut t = Knowledge::new(3, Evict::Oldest).unwrap();
+    for s in 1..=3 {
+        t.learn(fact(s, 0, 5), 5);
+    }
+    assert_eq!(t.learn(fact(9, 0, 5), 5).unwrap().subject, 1);
+    assert_eq!(keys(&t), vec![(2, 0), (3, 0), (9, 0)]);
+    // A present key while full does not evict.
+    assert_eq!(t.learn(fact(2, 0, 6), 6), None);
+    assert_eq!(t.len(), 3);
+}
+
+#[test]
+fn knowledge_evict_weakest_then_oldest() {
+    let with = |s: u32, at: u32, st: u32| Fact {
+        strength: st,
+        ..fact(s, 0, at)
+    };
+    let mut k = Knowledge::new(4, Evict::Weakest).unwrap();
+    k.learn(with(1, 10, 5), 10);
+    k.learn(with(2, 0, 9), 10);
+    k.learn(with(3, 4, 5), 10);
+    k.learn(with(4, 4, 5), 10);
+    // Smallest strength is 5 (slots 0, 2, 3); oldest of them: slots 2 and 3
+    // (age 6), the earlier one (subject 3) goes.
+    assert_eq!(k.learn(with(5, 10, 7), 10).unwrap().subject, 3);
+    assert_eq!(keys(&k), vec![(1, 0), (2, 0), (4, 0), (5, 0)]);
+    // Again strength 5: slot 0 (age 0) and subject 4 (age 6): subject 4 goes.
+    assert_eq!(k.learn(with(6, 10, 9), 10).unwrap().subject, 4);
+    // Equal strength and age: the earlier slot.
+    let mut t = Knowledge::new(2, Evict::Weakest).unwrap();
+    t.learn(with(1, 0, 3), 0);
+    t.learn(with(2, 0, 3), 0);
+    assert_eq!(t.learn(with(3, 0, 3), 0).unwrap().subject, 1);
+    // Strength beats age.
+    let mut w = Knowledge::new(2, Evict::Weakest).unwrap();
+    w.learn(with(1, 0, 8), 100);
+    w.learn(with(2, 99, 2), 100);
+    assert_eq!(w.learn(with(3, 100, 5), 100).unwrap().subject, 2);
+}
+
+#[test]
+fn knowledge_merge_keeps_newer() {
+    let mut k = Knowledge::new(2, Evict::Oldest).unwrap();
+    let mut a = fact(1, 0, 100);
+    a.data = 1;
+    k.merge(a, 110);
+    // An older fact does not overwrite.
+    let mut old = fact(1, 0, 90);
+    old.data = 2;
+    assert_eq!(k.merge(old, 110), None);
+    assert_eq!(k.get(1, 0).unwrap().data, 1);
+    // Equal time overwrites ("not older").
+    let mut same = fact(1, 0, 100);
+    same.data = 3;
+    k.merge(same, 110);
+    assert_eq!(k.get(1, 0).unwrap().data, 3);
+    // A newer one overwrites.
+    let mut newer = fact(1, 0, 105);
+    newer.data = 4;
+    k.merge(newer, 110);
+    assert_eq!(
+        (k.get(1, 0).unwrap().seen_at, k.get(1, 0).unwrap().data),
+        (105, 4)
+    );
+    // Wrap: now = 5, stored seen_at = u32::MAX - 2 (age 8); seen_at = 2 (age 3) is newer.
+    let mut w = Knowledge::new(1, Evict::Oldest).unwrap();
+    w.merge(fact(1, 0, u32::MAX - 2), 5);
+    let mut n = fact(1, 0, 2);
+    n.data = 9;
+    w.merge(n, 5);
+    assert_eq!(w.get(1, 0).unwrap().data, 9);
+    // seen_at = u32::MAX - 9 (age 15) is older and does not overwrite.
+    let mut o = fact(1, 0, u32::MAX - 9);
+    o.data = 7;
+    w.merge(o, 5);
+    assert_eq!(w.get(1, 0).unwrap().data, 9);
+    // An absent key inserts and evicts like learn.
+    let mut f = Knowledge::new(1, Evict::Oldest).unwrap();
+    f.merge(fact(1, 0, 0), 1);
+    assert_eq!(f.merge(fact(2, 0, 1), 1).unwrap().subject, 1);
+}
+
+#[test]
+fn knowledge_learn_overwrites() {
+    let mut k = Knowledge::new(2, Evict::Oldest).unwrap();
+    k.learn(fact(1, 0, 100), 110);
+    let mut older = fact(1, 0, 50);
+    older.source = SOURCE_TOLD;
+    older.strength = 4;
+    older.data = 5;
+    older.pos = [7, 8, 9];
+    assert_eq!(k.learn(older, 110), None);
+    assert_eq!(*k.get(1, 0).unwrap(), older);
+    // Setters.
+    assert!(k.touch(1, 0, 120) && k.set_pos(1, 0, [1, 1, 1]) && k.set_data(1, 0, 6));
+    assert!(k.set_strength(1, 0, 8));
+    let f = k.get(1, 0).unwrap();
+    assert_eq!(
+        (f.seen_at, f.pos, f.data, f.strength),
+        (120, [1, 1, 1], 6, 8)
+    );
+    assert!(!k.touch(2, 0, 0) && !k.set_pos(2, 0, [0; 3]) && !k.set_data(2, 0, 0));
+    assert!(!k.set_strength(2, 0, 0) && !k.remove(2, 0));
+    assert!(k.remove(1, 0));
+    assert!(k.is_empty());
+    k.learn(fact(3, 0, 0), 0);
+    k.clear();
+    assert_eq!(k.len(), 0);
+}
+
+#[test]
+fn knowledge_remove_subject_all_kinds() {
+    let mut k = Knowledge::new(5, Evict::Oldest).unwrap();
+    k.learn(fact(1, 1, 0), 0);
+    k.learn(fact(2, 1, 0), 0);
+    k.learn(fact(1, 2, 0), 0);
+    k.learn(fact(1, 3, 0), 0);
+    assert_eq!(k.remove_subject(1), 3);
+    assert_eq!(keys(&k), vec![(2, 1)]);
+    assert_eq!(k.remove_subject(1), 0);
+}
+
+#[test]
+fn knowledge_expire_with_per_kind() {
+    let mut k = Knowledge::new(5, Evict::Oldest).unwrap();
+    k.learn(fact(1, 1, 0), 0);
+    k.learn(fact(2, 2, 0), 0);
+    k.learn(fact(3, 1, 10), 10);
+    k.learn(fact(4, 2, 10), 10);
+    let mut gone = Vec::new();
+    // At now=20 the first two have age 20 (>= 20), the others 10.
+    k.expire(20, 20, |f| gone.push(f.subject));
+    assert_eq!(gone, vec![1, 2]);
+    // Kind 1 lives 5, kind 2 lives 15: only subject 3 (age 10, kind 1) goes.
+    gone.clear();
+    k.expire_with(
+        20,
+        |f| if f.kind == 1 { 5 } else { 15 },
+        |f| gone.push(f.subject),
+    );
+    assert_eq!(gone, vec![3]);
+    assert_eq!(keys(&k), vec![(4, 2)]);
+    // Boundary with a wrapped clock: age 15 at now = 10.
+    let mut w = Knowledge::new(1, Evict::Oldest).unwrap();
+    w.learn(fact(1, 0, u32::MAX - 4), 0);
+    w.expire(10, 16, |_| {});
+    assert_eq!(w.len(), 1);
+    w.expire(10, 15, |_| {});
+    assert!(w.is_empty());
+}
+
+#[test]
+fn fact_layout_is_stable() {
+    assert_eq!(std::mem::offset_of!(Fact, subject), 0);
+    assert_eq!(std::mem::offset_of!(Fact, kind), 4);
+    assert_eq!(std::mem::offset_of!(Fact, pos), 8);
+    assert_eq!(std::mem::offset_of!(Fact, seen_at), 20);
+    assert_eq!(std::mem::offset_of!(Fact, strength), 24);
+    assert_eq!(std::mem::offset_of!(Fact, data), 28);
+    assert_eq!(std::mem::offset_of!(Fact, source), 32);
+    assert_eq!(std::mem::size_of::<Fact>(), 36);
+    assert_eq!(std::mem::size_of::<Evict>(), 1);
+}
+
+// ---- Timers ----
+
+#[test]
+fn timers_renew_and_replace_least_left() {
+    let mut t = Timers::new(2).unwrap();
+    assert!(t.is_empty());
+    t.set(1, 0, 170);
+    assert!(t.active(1, 169));
+    assert!(!t.active(1, 170));
+    assert_eq!(t.left(1, 100), 70);
+    assert_eq!(t.left(1, 170), 0);
+    assert_eq!(t.left(9, 0), 0);
+    assert!(!t.active(9, 0));
+    // Renew with another duration.
+    t.set(1, 100, 50);
+    assert_eq!(t.left(1, 100), 50);
+    assert_eq!(t.len(), 1);
+    t.set(2, 100, 10);
+    // Full at now=105: left(1) = 45, left(2) = 5, so id 2 is replaced.
+    t.set(3, 105, 20);
+    assert!(t.active(1, 105) && !t.active(2, 105) && t.active(3, 105));
+    assert_eq!(t.len(), 2);
+    // At 150 both have run out (left 0, a tie): the earlier slot (id 1) goes.
+    t.set(4, 150, 5);
+    assert!(!t.active(1, 150) && t.active(4, 150) && !t.active(3, 150));
+    assert_eq!(t.left(4, 152), 3);
+    // Duration 0 is never active.
+    t.set(5, 151, 0);
+    assert!(!t.active(5, 151));
+    assert!(t.remove(5));
+    assert!(!t.remove(5));
+    t.clear();
+    assert_eq!((t.len(), t.is_empty()), (0, true));
+    assert_eq!(Timers::new(0).unwrap_err(), ZeroCapacity);
+}
+
+#[test]
+fn timers_wrap() {
+    let mut t = Timers::new(1).unwrap();
+    t.set(1, u32::MAX - 10, 30);
+    assert!(t.active(1, 18));
+    assert!(!t.active(1, 19));
+    assert_eq!(t.left(1, 9), 10);
+}
+
+// ---- Progress ----
+
+#[test]
+fn progress_update_and_stalled() {
+    let mut p = Progress::default();
+    // Before start nothing happens.
+    assert!(!p.update(0, 5, 0) && !p.stalled(1_000_000, 0));
+    p.start(1000, 0);
+    assert!(!p.update(900, 50, 0x80));
+    assert_eq!((p.best, p.since), (1000, 0));
+    assert!(p.update(872, 60, 0x80));
+    assert_eq!((p.best, p.since), (872, 60));
+    assert!(!p.stalled(144, 85));
+    assert!(p.stalled(145, 85));
+    // stalled is pure.
+    assert_eq!((p.best, p.since), (872, 60));
+    p.reset();
+    assert_eq!(p, Progress::default());
+}
+
+#[test]
+fn progress_i32_extremes() {
+    let mut p = Progress::default();
+    p.start(i32::MAX, 0);
+    // A gain of 2^32 - 1 does not overflow.
+    assert!(p.update(i32::MIN, 5, i32::MAX));
+    assert_eq!(p.best, i32::MIN);
+    let mut q = Progress::default();
+    q.start(i32::MIN, 0);
+    // A gain of -(2^32 - 1) is below any min_gain: only the age counts.
+    assert!(!q.update(i32::MAX, 10, i32::MIN));
+    assert_eq!(q.best, i32::MIN);
+    assert!(q.stalled(10, 10));
+    // Wrapped clock.
+    let mut w = Progress::default();
+    w.start(1000, u32::MAX - 10);
+    assert!(!w.stalled(73, 85));
+    assert!(w.stalled(74, 85));
+    assert!(w.update(0, 80, 1) && w.since == 80);
 }
