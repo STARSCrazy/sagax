@@ -93,5 +93,29 @@ int main(void)
 		       choice.score);
 		sx_decider_free(d);
 	}
+
+	/* A guard: patrol, chase when seen, search when lost, give up after a while. */
+	{
+		enum { PATROL, CHASE, SEARCH };
+		const uint64_t SEEN = 1;
+		sx_machine *m = sx_machine_new(3, PATROL);
+		sx_change change;
+		uint32_t frame;
+
+		sx_machine_add_transition(m, PATROL, CHASE, SEEN, 0, 0);
+		sx_machine_add_transition(m, CHASE, SEARCH, 0, SEEN, 10);
+		sx_machine_add_transition(m, SEARCH, CHASE, SEEN, 0, 0);
+		sx_machine_set_timeout(m, SEARCH, 30, PATROL);
+		for (frame = 1; frame <= 60; frame++) {
+			uint64_t flags = (frame >= 5 && frame < 8) ? SEEN : 0;
+			if (sx_machine_update(m, frame, flags, &change) == 1)
+				printf("frame %u: state %d -> %d\n", frame, change.from, change.to);
+		}
+		if (sx_machine_state(m) != PATROL) {
+			fprintf(stderr, "wrong state\n");
+			return 1;
+		}
+		sx_machine_free(m);
+	}
 	return 0;
 }

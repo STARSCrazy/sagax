@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0
+
+- State machine with timers and aborts: states, transitions on condition
+  bits (when / unless), a minimum time per transition, a timeout per state,
+  transitions from any state. Rust `state::StateMachine`, C `sx_machine_*`,
+  JavaScript `lib.machine()` with named states and conditions.
+- Decisions remember actions: `record` what was done, hard cooldowns per
+  option, and inputs for time since and count within a window (per option or
+  per option and target) for soft dislike and penalties for repeating.
+- C API version 6 (additive).
+
 ## 0.5.0
 
 - Decisions, finer control: how factors are put together is chosen per

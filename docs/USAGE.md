@@ -16,6 +16,7 @@ exact contracts are in `crates/sagax-ffi/include/sagax.h` (C),
 | Many walkers, same goals | Flow field | `sx_flow_*` | `grid.buildFlow` + `grid.flowNext` |
 | The map changes while a walker is on its way | D* Lite | `sx_dstar_*` | `grid.dstar*` |
 | What should I do, and to whom? | Decisions (utility AI) | `sx_decider_*` | `lib.decider()` |
+| Patrol, chase, search: behaviour over time | State machine | `sx_machine_*` | `lib.machine()` |
 
 Everything works on square and hex grids and in every interface.
 
@@ -402,6 +403,59 @@ C: `sx_decider_add_weighted` (pull, `SX_APPLY_*`), `sx_decider_set_combine`
 (`SX_COMBINE_*`, option -1 for all), `sx_decider_set_rank`,
 `sx_decider_set_current`. Rust: `add_weighted`, `set_combine`,
 `set_option_combine`, `set_rank`, `set_current`.
+
+### Memory: cooldowns and "not again so soon"
+
+The opposite of the bonus for the current action: after doing something, a
+character often may not, or does not want to, do it again for a while. The
+decider remembers what the game says it did (`record`, the last 256
+actions). Time is the game's own count: frames, turns, hours; set it with
+`setNow` before deciding.
+
+- **Hard cooldown** (a rule: "once every 3 turns"): `setCooldown(option, 3)`.
+  The option scores 0 until the time has passed.
+- **Soft dislike** (allowed, but not wanted): a consideration that reads
+  `MEMORY.sinceOption` (or `sincePair` for this target) instead of a row
+  value. With `curve: 'linear', min: 0, max: 10` the score is low right
+  after and full again after 10. Never done counts as very long ago.
+- **Penalty for repeating:** `MEMORY.countOption` / `countPair` counts how
+  often within the window (`setWindow(time)`); e.g. `curve: 'inverse',
+  min: 0, max: 3` for "the third time in a row is unattractive".
+
+```js
+d.setNow(turn);
+const taunt = d.addOption(1, [{ input: MEMORY.sincePair, curve: 'root', min: 0, max: 5 }]);
+d.setCooldown(heal, 3);
+const c = d.decide(candidates);
+if (c) { act(c); d.record(c, turn); }
+```
+
+C: `sx_decider_set_now`, `sx_decider_record`, `sx_decider_set_cooldown`,
+`sx_decider_set_window`, `sx_decider_forget`, inputs `SX_INPUT_SINCE_OPTION`
+and friends.
+
+### State machine
+
+For behaviour that runs over time: patrol, chase, search, give up. States
+and conditions are named (JavaScript) or numbered (C, Rust); the game says
+every tick which conditions hold. Transitions are checked in the order
+added, the first that matches wins; then the state's timeout. So put aborts
+("dead", "under fire") first, from any state. At most one change per tick.
+
+```js
+const m = lib.machine(['patrol', 'chase', 'search', 'dead'], ['seen', 'killed']);
+m.transition({ from: '*', to: 'dead', when: ['killed'] });          // abort, from any state
+m.transition({ from: 'patrol', to: 'chase', when: ['seen'] });
+m.transition({ from: 'chase', to: 'search', unless: ['seen'], after: 10 }); // chase at least 10
+m.transition({ from: 'search', to: 'chase', when: ['seen'] });
+m.timeout('search', 300, 'patrol');                                  // give up after 300
+const change = m.update(frame, { seen: canSee, killed: hp <= 0 });   // {from, to, reason} or null
+```
+
+`after` keeps a state for a while (no flicker); `timeout` ends it. Inside a
+state the decider can choose the details (which target, which weapon).
+Time may wrap around. C: `sx_machine_*` with condition bits in a
+`uint64_t`; Rust: `sagax_decide::state::StateMachine`.
 
 ## 7. Debugging and logging
 

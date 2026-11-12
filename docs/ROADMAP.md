@@ -8,8 +8,9 @@
   visibly poor ways.
 - **Faster D\* Lite**: after a change some neighbours are asked twice. A
   per-edge cost query would avoid that.
-- **Decisions, next steps:** a state machine with frame timers and abort
-  conditions, then memory with expiry (last seen position, danger zones).
+- **Decisions, next steps:** memory of the world with expiry (last seen
+  position, suspects, danger zones), then groups (rally point, calls to the
+  nearest).
 - **Perception** (sight lines, cover, flanks), on the same `sagax-core`.
 
 Known limits: flow fields and D* Lite assume moves that work both ways.
