@@ -3,6 +3,9 @@
 //! [`Sightings`] remembers the last known place and time of things (by id),
 //! with a fixed capacity. [`Ignore`] remembers ids that are to be left alone
 //! for a while. [`Interval`] is a small timer for "do this every N ticks".
+//! [`Zones`] are areas to stay out of, [`Pursuit`] tracks a chase,
+//! [`Radio`] is a call for help with a cooldown, and [`nearest`] picks the
+//! closest candidates.
 //!
 //! Time is the game's own count (u32); ages are computed with wrapping
 //! subtraction, so a wrapped clock still works. Everything is integer only

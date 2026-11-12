@@ -206,9 +206,7 @@ fn lost_at_limit() {
     }
     assert_eq!(p.unseen, 32);
     assert!(!p.lost(34));
-    for _ in 0..1 {
-        p.missed(4);
-    }
+    p.missed(4);
     assert!(p.lost(34));
     p.seen([4, 5, 6]);
     assert_eq!(p.unseen, 0);
@@ -295,4 +293,45 @@ fn nearest_fewer_than_k() {
     assert!(out.is_empty());
     nearest(&[(1, 5, 0)], (0, 0), 0, 1, &mut out);
     assert!(out.is_empty());
+}
+
+#[test]
+fn zone_full_evicts_slot0_then_appends() {
+    let mut z = Zones::new(3, 10, 255).unwrap();
+    z.add([0, 0, 0], 0, 1, None);
+    z.add([100, 0, 0], 5, 2, None);
+    z.add([200, 0, 0], 6, 3, None);
+    assert_eq!(z.add([300, 0, 0], 7, 4, None), 2);
+    let d: Vec<u32> = z.iter().map(|x| x.data).collect();
+    assert_eq!(d, vec![2, 3, 4]);
+}
+
+#[test]
+fn zone_full_age_tie_evicts_earlier_slot() {
+    let mut z = Zones::new(3, 10, 255).unwrap();
+    z.add([0, 0, 0], 5, 1, None);
+    z.add([100, 0, 0], 5, 2, None);
+    z.add([200, 0, 0], 6, 3, None);
+    assert_eq!(z.add([300, 0, 0], 7, 4, None), 2);
+    let d: Vec<u32> = z.iter().map(|x| x.data).collect();
+    assert_eq!(d, vec![2, 3, 4]);
+}
+
+#[test]
+fn zone_expire_wraps() {
+    let mut z = Zones::new(2, 10, 255).unwrap();
+    z.add([0, 0, 0], u32::MAX - 10, 1, None);
+    assert_eq!(z.expire(243), 0);
+    assert_eq!(z.expire(245), 1);
+}
+
+#[test]
+fn radio_wraps() {
+    let mut r = Radio::default();
+    assert!(r.start([0; 3], u32::MAX - 10, 170));
+    assert!(!r.due(90, 102));
+    assert!(r.due(91, 102));
+    r.take();
+    assert!(!r.start([0; 3], 158, 170));
+    assert!(r.start([0; 3], 159, 170));
 }

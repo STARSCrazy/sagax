@@ -52,8 +52,9 @@ impl Zones {
 
     /// Adds a zone at `pos`. If `pos` is inside an existing zone (the first
     /// in slot order), that zone is renewed: centre, time, data and source
-    /// are replaced. When full, the oldest zone is replaced (on a tie the
-    /// earlier slot). Returns the index of the zone.
+    /// are replaced. When full, the oldest zone is removed (on a tie the
+    /// earlier slot), the rest keep their order and the new zone goes last.
+    /// Returns the index of the zone.
     pub fn add(&mut self, pos: Pos, now: u32, data: u32, source: Option<Pos>) -> usize {
         let zone = Zone {
             pos,
@@ -79,8 +80,9 @@ impl Zones {
                 oldest_age = age;
             }
         }
-        self.items[oldest] = zone;
-        oldest
+        self.items.remove(oldest);
+        self.items.push(zone);
+        self.items.len() - 1
     }
 
     /// Removes zones whose age is at least the lifetime, keeping the order
