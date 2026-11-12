@@ -335,8 +335,62 @@ fn alert_layout_is_stable() {
     assert_eq!(std::mem::size_of::<Alertness>(), 16);
 }
 
+/// The default pattern with the v1 sine, for the golden numbers.
+fn coarse() -> PointPattern {
+    PointPattern {
+        sine: Sine::Coarse,
+        ..PointPattern::default()
+    }
+}
+
 #[test]
-fn sin256_matches_reference() {
+fn fine_sine_quarter_points() {
+    assert_eq!(sine(0, Sine::Fine), 0);
+    assert_eq!(sine(64, Sine::Fine), 65536);
+    assert_eq!(sine(128, Sine::Fine), 0);
+    assert_eq!(sine(192, Sine::Fine), -65536);
+    assert_eq!(sine(256, Sine::Fine), 0);
+    assert_eq!(sine(-64, Sine::Fine), -65536);
+    assert_eq!(sine(32, Sine::Fine), 46341);
+    assert_eq!(sine(1, Sine::Fine), 1608);
+}
+
+#[test]
+fn fine_sine_symmetry() {
+    for h in 0..256 {
+        assert_eq!(sine(h, Sine::Fine), -sine(h + 128, Sine::Fine), "h {h}");
+        assert_eq!(sine(h, Sine::Fine), sine(128 - h, Sine::Fine), "h {h}");
+        // Cosine is even.
+        assert_eq!(sine(h + 64, Sine::Fine), sine(64 - h, Sine::Fine), "h {h}");
+    }
+}
+
+#[test]
+fn points_around_fine_default() {
+    let p = PointPattern::default();
+    assert_eq!(p.sine, Sine::Fine);
+    // Agent 0 looks straight along +y.
+    assert_eq!(points_around(0, 0, [0, 0, 7], &p), Some([0, 256, 7]));
+    // Agent 1: heading 0x62 = 98.
+    let c = [5000, 5000, 7];
+    assert_eq!(points_around(1, 0, c, &p), Some([5171, 4811, 7]));
+    assert_eq!(points_around(1, 1, c, &p), Some([5859, 4052, 7]));
+    assert_eq!(points_around(1, 3, c, &p), Some([8068, 4850, 7]));
+    assert_eq!(points_around(1, 4, c, &p), None);
+}
+
+#[test]
+fn points_around_missing_distance_counts_as_zero_fine() {
+    let p = PointPattern {
+        offsets: vec![0, 0],
+        distances: vec![256],
+        ..PointPattern::default()
+    };
+    assert_eq!(points_around(0, 2, [500, 600, 7], &p), Some([500, 600, 7]));
+}
+
+#[test]
+fn coarse_sine_matches_reference() {
     let want = [
         -226, -198, -162, -142, -98, -50, 0, 25, 74, 121, 162, 181, 213, 237, 251, 255, 255, 245,
         226, 213, 181, 142, 98, 74, 25, -25, -74, -98, -142, -181, -213, -226, -245, -255, -255,
@@ -344,12 +398,15 @@ fn sin256_matches_reference() {
         251, 237, 226, 198, 162, 121, 98, 50, 0, -50, -74, -121, -162, -198, -213, -237, -251,
         -256, -255, -245, -226, -198, -181, -142, -98, -50, -25, 25, 74, 121, 142, 181, 213,
     ];
-    let got: Vec<i32> = (-300..=300).step_by(7).map(sin256).collect();
+    let got: Vec<i32> = (-300..=300)
+        .step_by(7)
+        .map(|h| sine(h, Sine::Coarse))
+        .collect();
     assert_eq!(got, want);
 }
 
 #[test]
-fn search_point_matches_reference() {
+fn points_around_matches_reference() {
     /// Centre, agent, expected (x, y) for steps 0..=3.
     type Case = ((i32, i32), u32, [(i32, i32); 4]);
     #[rustfmt::skip]
@@ -373,10 +430,10 @@ fn search_point_matches_reference() {
         ((32700, 100), 17, [(32675, 0), (32575, 0), (30918, 0), (32767, 0)]),
         ((32700, 100), 255, [(32519, 0), (31795, 0), (30396, 100), (32700, 0)]),
     ];
-    let p = SearchPattern::default();
+    let p = coarse();
     for (c, agent, pts) in want {
         for (step, (x, y)) in pts.into_iter().enumerate() {
-            let got = search_point(agent, step, [c.0, c.1, 7], &p);
+            let got = points_around(agent, step, [c.0, c.1, 7], &p);
             assert_eq!(
                 got,
                 Some([x, y, 7]),
@@ -387,46 +444,46 @@ fn search_point_matches_reference() {
 }
 
 #[test]
-fn look_heading_matches_reference() {
+fn sweep_heading_matches_reference() {
     let want = [
         10, 10, 42, 42, 74, 74, 42, 42, 10, 10, 234, 234, 202, 202, 234, 234, 10, 10, 10,
     ];
     let got: Vec<i32> = (0..=180)
         .step_by(10)
-        .map(|e| look_heading(10, e, 20, &LOOK_OFFSETS))
+        .map(|e| sweep_heading(10, e, 20, &LOOK_OFFSETS))
         .collect();
     assert_eq!(got, want);
 }
 
 #[test]
-fn search_point_clamps() {
-    let p = SearchPattern {
+fn points_around_clamps() {
+    let p = PointPattern {
         min: (100, 200),
         max: (1000, 300),
-        ..SearchPattern::default()
+        ..coarse()
     };
     // agent 0, step 1: straight along +y by 5 cells.
-    assert_eq!(search_point(0, 1, [500, 250, 0], &p), Some([500, 300, 0]));
+    assert_eq!(points_around(0, 1, [500, 250, 0], &p), Some([500, 300, 0]));
     // agent 255, step 3: towards -y by 12 cells.
-    assert_eq!(search_point(255, 3, [50, 250, 0], &p), Some([100, 200, 0]));
+    assert_eq!(points_around(255, 3, [50, 250, 0], &p), Some([100, 200, 0]));
 }
 
 #[test]
-fn search_point_past_last_step_is_none() {
-    let p = SearchPattern::default();
-    assert!(search_point(3, 3, [0; 3], &p).is_some());
-    assert_eq!(search_point(3, 4, [0; 3], &p), None);
-    assert_eq!(search_point(3, usize::MAX, [0; 3], &p), None);
+fn points_around_past_last_step_is_none() {
+    let p = coarse();
+    assert!(points_around(3, 3, [0; 3], &p).is_some());
+    assert_eq!(points_around(3, 4, [0; 3], &p), None);
+    assert_eq!(points_around(3, usize::MAX, [0; 3], &p), None);
 }
 
 #[test]
-fn search_point_missing_distance_counts_as_zero() {
-    let p = SearchPattern {
+fn points_around_missing_distance_counts_as_zero() {
+    let p = PointPattern {
         offsets: vec![0, 0],
         distances: vec![256],
-        ..SearchPattern::default()
+        ..coarse()
     };
-    assert_eq!(search_point(0, 2, [500, 600, 7], &p), Some([500, 600, 7]));
+    assert_eq!(points_around(0, 2, [500, 600, 7], &p), Some([500, 600, 7]));
 }
 
 // ---- Knowledge ----

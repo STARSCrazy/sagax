@@ -4,8 +4,10 @@
 //! [`Timers`] are ids that count as "on" for a while (ignore a target, no
 //! alarm again), [`Progress`] tells whether a chase still gets closer, and
 //! [`Interval`] is a small timer for "do this every N ticks". [`Areas`] are
-//! places to stay out of or pay extra for, [`Alertness`] is a value with levels, [`Outbox`] and [`Inbox`] carry messages (recipients
-//! are picked with [`route`]), [`search_point`] spreads search points around a place and [`look_heading`]
+//! places to stay out of or pay extra for, [`Alertness`] is a value
+//! with levels, [`Outbox`] and [`Inbox`] carry messages (recipients are picked
+//! with [`route`]), [`points_around`] spreads points around a place and
+//! [`sweep_heading`]
 //! turns the view while looking around.
 //!
 //! Time is the game's own count (u32); ages are computed with wrapping
@@ -14,12 +16,12 @@
 
 mod alertness;
 mod areas;
+mod geometry;
 mod interval;
 mod knowledge;
 mod messages;
 mod progress;
 mod route;
-mod search;
 mod timers;
 
 #[cfg(test)]
@@ -27,12 +29,12 @@ mod tests;
 
 pub use alertness::{AlertConfig, Alertness};
 pub use areas::{Area, Areas};
+pub use geometry::{LOOK_OFFSETS, PointPattern, Sine, points_around, sine, sweep_heading};
 pub use interval::Interval;
 pub use knowledge::{Evict, Fact, Knowledge, SOURCE_HEARD, SOURCE_OWN, SOURCE_TOLD};
 pub use messages::{Inbox, Message, Outbox, Refused, arrival};
 pub use progress::Progress;
 pub use route::{Metric, Route, distance, route};
-pub use search::{LOOK_OFFSETS, SearchPattern, look_heading, search_point, sin256};
 pub use timers::Timers;
 
 /// A place: three integer coordinates in the game's own units.
