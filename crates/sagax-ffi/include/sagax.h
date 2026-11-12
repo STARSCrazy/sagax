@@ -697,6 +697,19 @@ int32_t sx_areas_blocks(sx_areas *a, const int32_t *cell, const int32_t *start,
  * *out; returns 0. */
 int32_t sx_areas_cost(sx_areas *a, const int32_t *cell, const int32_t *start,
                       const int32_t *goal, uint32_t *out);
+/* An sx_move_cost_fn over areas: set map.move_cost = sx_areas_move_cost and
+ * map.context = a pointer to this. Only the cell moved to is judged: a move
+ * into a blocking area (one holding neither start nor goal) returns -1,
+ * else the extra cost of sx_areas_cost, at most INT32_MAX - 1. A null
+ * context or null areas give 0. The level is the z coordinate. If the map's
+ * own callbacks need a context too, call this from your move_cost. */
+typedef struct sx_areas_cost_ctx {
+	sx_areas *areas;
+	int32_t start[3];
+	int32_t goal[3];
+} sx_areas_cost_ctx;
+int32_t sx_areas_move_cost(void *context, int32_t x, int32_t y, int32_t level,
+                           int32_t to_x, int32_t to_y, int32_t to_level);
 int32_t sx_areas_count(sx_areas *a);
 /* Fill *out with the area in slot index. Return 1, or 0 if there is none. */
 int32_t sx_areas_at(sx_areas *a, uint32_t index, sx_area *out);

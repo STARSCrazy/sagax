@@ -1219,3 +1219,29 @@ fn inbox_take_due_max_leaves_the_rest() {
     assert_eq!(out.len(), 3);
     assert!(b.is_empty());
 }
+
+#[test]
+fn areas_move_cost_matches_cost_and_blocks() {
+    let mut z = Areas::new(4).unwrap();
+    let mut wall = area(1, 0, 100);
+    wall.blocking = 1;
+    z.add(wall, 0);
+    let mut mud = area(2, 500, 100);
+    mud.strength = 7;
+    z.add(mud, 0);
+    let start = [1000, 0, 0];
+    let goal = [2000, 0, 0];
+    let any = [900, 0, 0];
+    // Blocked destination: None, whatever `from` is.
+    assert_eq!(z.move_cost(any, [10, 0, 0], start, goal), None);
+    assert_eq!(z.move_cost([10, 0, 0], [20, 0, 0], start, goal), None);
+    // Cost area: the destination's cost.
+    assert_eq!(z.move_cost(any, [500, 0, 0], start, goal), Some(7));
+    assert_eq!(z.cost([500, 0, 0], start, goal), 7);
+    // Free cell: Some(0).
+    assert_eq!(z.move_cost(any, [800, 0, 0], start, goal), Some(0));
+    // Only the destination counts: leaving an area is free.
+    assert_eq!(z.move_cost([10, 0, 0], [800, 0, 0], start, goal), Some(0));
+    // Start inside the blocking area: it does not block.
+    assert_eq!(z.move_cost(any, [10, 0, 0], [20, 0, 0], goal), Some(0));
+}

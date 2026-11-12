@@ -807,6 +807,52 @@ pub unsafe extern "C" fn sx_areas_cost(
     0
 }
 
+/// `sx_areas_cost_ctx`: the context of [`sx_areas_move_cost`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SxAreasCostCtx {
+    /// The areas, or null (no extra costs).
+    pub areas: *mut SxAreas,
+    /// The walker's start cell.
+    pub start: [i32; 3],
+    /// The goal cell.
+    pub goal: [i32; 3],
+}
+
+/// `sx_areas_move_cost`: an `sx_move_cost_fn` over an [`SxAreasCostCtx`].
+/// Blocked is -1, else the cost saturated to `i32::MAX - 1`; null context or
+/// areas give 0. The level is the z coordinate.
+///
+/// # Safety
+/// `context` is null or points to an [`SxAreasCostCtx`] whose `areas` is null
+/// or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_areas_move_cost(
+    context: *mut std::ffi::c_void,
+    x: i32,
+    y: i32,
+    level: i32,
+    to_x: i32,
+    to_y: i32,
+    to_level: i32,
+) -> i32 {
+    // SAFETY: see above.
+    let Some(ctx) = (unsafe { context.cast::<SxAreasCostCtx>().as_ref() }) else {
+        return 0;
+    };
+    // SAFETY: see above.
+    let Some(areas) = (unsafe { ctx.areas.as_ref() }) else {
+        return 0;
+    };
+    match areas
+        .0
+        .move_cost([x, y, level], [to_x, to_y, to_level], ctx.start, ctx.goal)
+    {
+        None => -1,
+        Some(c) => c.min(i32::MAX as u32 - 1) as i32,
+    }
+}
+
 /// `sx_areas_count`.
 ///
 /// # Safety

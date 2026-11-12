@@ -136,6 +136,19 @@ impl Areas {
             .fold(0u32, |sum, a| sum.saturating_add(a.strength))
     }
 
+    /// Extra cost of the move `from` -> `to` for a path search: `None` if
+    /// `to` is blocked (see [`Areas::blocks`]), else `Some` of the cost of
+    /// `to` (see [`Areas::cost`]). Only the destination cell is judged;
+    /// `from` is accepted for symmetry with the search's callback and is
+    /// not used yet.
+    pub fn move_cost(&self, _from: Pos, to: Pos, start: Pos, goal: Pos) -> Option<u32> {
+        if self.blocks(to, start, goal) {
+            None
+        } else {
+            Some(self.cost(to, start, goal))
+        }
+    }
+
     /// The areas in slot order.
     pub fn iter(&self) -> impl Iterator<Item = &Area> {
         self.items.iter()

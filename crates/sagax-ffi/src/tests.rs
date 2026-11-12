@@ -604,3 +604,170 @@ fn flee_and_several_goals() {
     assert_eq!(points[n as usize - 1], p(19, 5));
     unsafe { sx_nav_destroy(nav) };
 }
+
+mod areas_cost {
+    use super::*;
+    use crate::memory::SxAreasCostCtx;
+    use crate::memory::{SxArea, sx_areas_add, sx_areas_free, sx_areas_move_cost, sx_areas_new};
+
+    fn circle(kind: u32, x: i32, y: i32, radius: i32, strength: u32, blocking: u8) -> SxArea {
+        SxArea {
+            kind,
+            pos: [x, y, 0],
+            radius,
+            strength,
+            lifetime: 255,
+            blocking,
+            ..SxArea::default()
+        }
+    }
+
+    /// The way from (0, 5) to (19, 5) on an open map with `area` in the way:
+    /// (cells, cost).
+    fn way_with(area: Option<SxArea>) -> (Vec<Point>, i32) {
+        let areas = sx_areas_new(4);
+        if let Some(a) = area {
+            assert_eq!(unsafe { sx_areas_add(areas, &a, 0) }, 0);
+        }
+        let mut ctx = SxAreasCostCtx {
+            areas,
+            start: [0, 5, 0],
+            goal: [19, 5, 0],
+        };
+        let mut w = walls(&[]);
+        let mut map = map_of(&mut w);
+        // Both callbacks share one context: the walls and the adapter's.
+        let mut shim = Shim {
+            walls: &mut w,
+            ctx: &mut ctx,
+        };
+        map.step = Some(shim_step);
+        map.context = (&mut shim as *mut Shim).cast();
+        map.move_cost = Some(shim_cost);
+        let nav = unsafe { sx_nav_create(&rules(0)) };
+        let mut points = [Point::default(); 64];
+        let mut result = SxResult::default();
+        let n = unsafe {
+            sx_nav_find_path(
+                nav,
+                &map,
+                p(0, 5),
+                &p(19, 5),
+                1,
+                0,
+                0,
+                points.as_mut_ptr(),
+                64,
+                &mut result,
+            )
+        };
+        assert_eq!(result.status, FOUND);
+        unsafe { sx_nav_destroy(nav) };
+        unsafe { sx_areas_free(areas) };
+        (points[..n as usize].to_vec(), result.cost)
+    }
+
+    /// One context for both callbacks: the walls and the areas adapter.
+    struct Shim<'a> {
+        walls: &'a mut Walls,
+        ctx: &'a mut SxAreasCostCtx,
+    }
+
+    unsafe extern "C" fn shim_step(
+        c: *mut c_void,
+        x: i32,
+        y: i32,
+        level: i32,
+        dx: i32,
+        dy: i32,
+    ) -> i32 {
+        let s = unsafe { &mut *c.cast::<Shim>() };
+        unsafe { step((s.walls as *mut Walls).cast(), x, y, level, dx, dy) }
+    }
+
+    unsafe extern "C" fn shim_cost(
+        c: *mut c_void,
+        x: i32,
+        y: i32,
+        level: i32,
+        tx: i32,
+        ty: i32,
+        tl: i32,
+    ) -> i32 {
+        let s = unsafe { &mut *c.cast::<Shim>() };
+        unsafe {
+            sx_areas_move_cost(
+                (s.ctx as *mut SxAreasCostCtx).cast(),
+                x,
+                y,
+                level,
+                tx,
+                ty,
+                tl,
+            )
+        }
+    }
+
+    fn inside(cells: &[Point], x: i32, y: i32, r: i32) -> usize {
+        cells
+            .iter()
+            .filter(|c| (c.x - x).pow(2) + (c.y - y).pow(2) < r * r)
+            .count()
+    }
+
+    #[test]
+    fn blocking_area_is_walked_around() {
+        let (open, open_cost) = way_with(None);
+        assert_eq!(inside(&open, 10, 5, 3), 5);
+        let (cells, cost) = way_with(Some(circle(1, 10, 5, 3, 0, 1)));
+        assert_eq!(cells.first(), Some(&p(0, 5)));
+        assert_eq!(cells.last(), Some(&p(19, 5)));
+        assert_eq!(inside(&cells, 10, 5, 3), 0);
+        assert!(cost > open_cost);
+    }
+
+    #[test]
+    fn cost_area_is_paid_or_avoided() {
+        let (_, open_cost) = way_with(None);
+        // Dear: cheaper to go around.
+        let (cells, cost) = way_with(Some(circle(1, 10, 5, 3, 1000, 0)));
+        assert_eq!(inside(&cells, 10, 5, 3), 0);
+        assert!(cost > open_cost && cost < open_cost + 1000);
+        // Cheap: the path goes straight through and its cost includes 2 per cell.
+        let (cells, cost) = way_with(Some(circle(1, 10, 5, 3, 2, 0)));
+        assert_eq!(inside(&cells, 10, 5, 3), 5);
+        assert_eq!(cost, open_cost + 5 * 2);
+    }
+
+    #[test]
+    fn adapter_edge_cases() {
+        let mut ctx = SxAreasCostCtx {
+            areas: std::ptr::null_mut(),
+            start: [0; 3],
+            goal: [0; 3],
+        };
+        let c = (&mut ctx as *mut SxAreasCostCtx).cast();
+        assert_eq!(unsafe { sx_areas_move_cost(c, 0, 0, 0, 1, 0, 0) }, 0);
+        assert_eq!(
+            unsafe { sx_areas_move_cost(std::ptr::null_mut(), 0, 0, 0, 1, 0, 0) },
+            0
+        );
+        let areas = sx_areas_new(2);
+        let mut a = circle(1, 50, 50, 3, u32::MAX, 0);
+        assert_eq!(unsafe { sx_areas_add(areas, &a, 0) }, 0);
+        a.kind = 2;
+        a.pos = [60, 50, 0];
+        a.blocking = 1;
+        unsafe { sx_areas_add(areas, &a, 0) };
+        ctx.areas = areas;
+        ctx.goal = [0, 0, 0];
+        let c = (&mut ctx as *mut SxAreasCostCtx).cast();
+        assert_eq!(
+            unsafe { sx_areas_move_cost(c, 49, 50, 0, 50, 50, 0) },
+            i32::MAX - 1
+        );
+        assert_eq!(unsafe { sx_areas_move_cost(c, 59, 50, 0, 60, 50, 0) }, -1);
+        assert_eq!(unsafe { sx_areas_move_cost(c, 9, 9, 0, 10, 10, 0) }, 0);
+        unsafe { sx_areas_free(areas) };
+    }
+}
