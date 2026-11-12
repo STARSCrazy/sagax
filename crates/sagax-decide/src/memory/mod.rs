@@ -4,7 +4,8 @@
 //! [`Timers`] are ids that count as "on" for a while (ignore a target, no
 //! alarm again), [`Progress`] tells whether a chase still gets closer, and
 //! [`Interval`] is a small timer for "do this every N ticks". [`Zones`] are
-//! areas to stay out of, [`Radio`] is a call for help with a cooldown,
+//! areas to stay out of, [`Outbox`] and [`Inbox`] carry messages (recipients are picked
+//! with [`route`]),
 //! [`search_point`] spreads search points around a place and [`look_heading`]
 //! turns the view while looking around.
 //!
@@ -14,8 +15,9 @@
 
 mod interval;
 mod knowledge;
+mod messages;
 mod progress;
-mod radio;
+mod route;
 mod search;
 mod timers;
 mod zones;
@@ -25,8 +27,9 @@ mod tests;
 
 pub use interval::Interval;
 pub use knowledge::{Evict, Fact, Knowledge, SOURCE_HEARD, SOURCE_OWN, SOURCE_TOLD};
+pub use messages::{Inbox, Message, Outbox, Refused, arrival};
 pub use progress::Progress;
-pub use radio::Radio;
+pub use route::{Metric, Route, distance, route};
 pub use search::{LOOK_OFFSETS, SearchPattern, look_heading, search_point, sin256};
 pub use timers::Timers;
 pub use zones::{Zone, Zones};

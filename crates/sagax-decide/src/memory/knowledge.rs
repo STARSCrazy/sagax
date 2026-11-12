@@ -247,3 +247,15 @@ impl Knowledge {
         });
     }
 }
+
+impl Knowledge {
+    /// [`Knowledge::learn`] for the fact a message tells (`source` as given).
+    pub fn learn_message(&mut self, msg: &super::Message, source: u8, now: u32) -> Option<Fact> {
+        self.learn(msg.to_fact(source), now)
+    }
+
+    /// [`Knowledge::merge`] for the fact a message tells (`source` as given).
+    pub fn merge_message(&mut self, msg: &super::Message, source: u8, now: u32) -> Option<Fact> {
+        self.merge(msg.to_fact(source), now)
+    }
+}

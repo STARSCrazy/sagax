@@ -76,47 +76,6 @@ fn zone_blocks_rule() {
 }
 
 #[test]
-fn radio_cooldown_from_start() {
-    let mut r = Radio::default();
-    assert!(r.start([1, 2, 3], 0, 170));
-    assert_eq!(r.take(), Some([1, 2, 3]));
-    assert!(!r.start([0; 3], 169, 170));
-    assert!(r.start([0; 3], 170, 170));
-}
-
-#[test]
-fn radio_refuses_while_pending() {
-    let mut r = Radio::default();
-    assert!(r.start([0; 3], 0, 0));
-    assert!(r.pending());
-    assert!(!r.start([1; 3], 1000, 0));
-    r.cancel();
-    assert!(!r.pending());
-    assert!(r.start([1; 3], 1000, 0));
-}
-
-#[test]
-fn radio_due_after_delay() {
-    let mut r = Radio::default();
-    assert!(!r.due(1000, 0));
-    r.start([0; 3], 10, 170);
-    assert!(!r.due(111, 102));
-    assert!(r.due(112, 102));
-}
-
-#[test]
-fn radio_take_without_pending_is_none() {
-    let mut r = Radio::default();
-    assert_eq!(r.take(), None);
-}
-
-#[test]
-fn radio_first_start_ignores_cooldown() {
-    let mut r = Radio::default();
-    assert!(r.start([0; 3], 5, 170));
-}
-
-#[test]
 fn zone_full_evicts_slot0_then_appends() {
     let mut z = Zones::new(3, 10, 255).unwrap();
     z.add([0, 0, 0], 0, 1, None);
@@ -144,17 +103,6 @@ fn zone_expire_wraps() {
     z.add([0, 0, 0], u32::MAX - 10, 1, None);
     assert_eq!(z.expire(243), 0);
     assert_eq!(z.expire(245), 1);
-}
-
-#[test]
-fn radio_wraps() {
-    let mut r = Radio::default();
-    assert!(r.start([0; 3], u32::MAX - 10, 170));
-    assert!(!r.due(90, 102));
-    assert!(r.due(91, 102));
-    r.take();
-    assert!(!r.start([0; 3], 158, 170));
-    assert!(r.start([0; 3], 159, 170));
 }
 
 #[test]
@@ -557,4 +505,300 @@ fn progress_i32_extremes() {
     assert!(!w.stalled(73, 85));
     assert!(w.stalled(74, 85));
     assert!(w.update(0, 80, 1) && w.since == 80);
+}
+
+fn msg(subject: u32, kind: u32) -> Message {
+    Message {
+        kind,
+        subject,
+        pos: [1, 2, 3],
+        seen_at: 7,
+        strength: 8,
+        data: 9,
+        sender: 10,
+        keep_if_sender_gone: 0,
+    }
+}
+
+#[test]
+fn outbox_cooldown_from_last_accepted_post() {
+    let mut o = Outbox::new(4).unwrap();
+    assert_eq!(o.post(msg(1, 1), 0, 102, 170), Ok(()));
+    assert_eq!(o.post(msg(2, 1), 169, 102, 170), Err(Refused::Cooldown));
+    // A refused post does not move the cooldown start.
+    assert_eq!(o.post(msg(3, 1), 170, 102, 170), Ok(()));
+    assert_eq!(o.post(msg(4, 1), 339, 102, 170), Err(Refused::Cooldown));
+    assert_eq!(o.post(msg(5, 1), 340, 102, 170), Ok(()));
+    assert_eq!(o.pending(), 3);
+    // Wrapped clock.
+    let mut w = Outbox::new(2).unwrap();
+    assert_eq!(w.post(msg(1, 1), u32::MAX - 10, 0, 170), Ok(()));
+    assert_eq!(w.post(msg(1, 1), 158, 0, 170), Err(Refused::Cooldown));
+    assert_eq!(w.post(msg(1, 1), 159, 0, 170), Ok(()));
+}
+
+#[test]
+fn outbox_full_refused() {
+    let mut o = Outbox::new(2).unwrap();
+    assert_eq!(o.post(msg(1, 1), 0, 5, 0), Ok(()));
+    assert_eq!(o.post(msg(2, 1), 0, 5, 0), Ok(()));
+    assert_eq!(o.post(msg(3, 1), 0, 5, 0), Err(Refused::Full));
+    let mut out = Vec::new();
+    o.due(5, &mut out);
+    assert_eq!(o.post(msg(3, 1), 5, 5, 0), Ok(()));
+    assert!(Outbox::new(0).is_err());
+}
+
+#[test]
+fn outbox_due_each_own_delay_in_post_order() {
+    let mut o = Outbox::new(4).unwrap();
+    o.post(msg(1, 1), 0, 10, 0).unwrap();
+    o.post(msg(2, 1), 1, 2, 0).unwrap();
+    o.post(msg(3, 1), 2, 0, 0).unwrap();
+    let mut out = vec![msg(99, 1)];
+    o.due(3, &mut out);
+    let ids: Vec<u32> = out.iter().map(|m| m.subject).collect();
+    assert_eq!(ids, vec![99, 2, 3]);
+    assert_eq!(o.pending(), 1);
+    out.clear();
+    o.due(10, &mut out);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].subject, 1);
+    assert_eq!(o.pending(), 0);
+}
+
+#[test]
+fn outbox_sender_gone_keeps_marked() {
+    let mut o = Outbox::new(4).unwrap();
+    let mut keep = msg(2, 1);
+    keep.keep_if_sender_gone = 1;
+    o.post(msg(1, 1), 0, 5, 0).unwrap();
+    o.post(keep, 0, 5, 0).unwrap();
+    o.sender_gone();
+    assert_eq!(o.pending(), 1);
+    let mut out = Vec::new();
+    o.due(5, &mut out);
+    assert_eq!(out[0].subject, 2);
+    o.post(msg(3, 1), 6, 5, 0).unwrap();
+    o.clear();
+    assert_eq!(o.pending(), 0);
+    assert_eq!(o.post(msg(4, 1), 7, 5, 100), Ok(()));
+}
+
+#[test]
+fn inbox_take_due_in_push_order() {
+    let mut b = Inbox::new(4).unwrap();
+    assert!(b.push(msg(1, 1), 20));
+    assert!(b.push(msg(2, 1), 5));
+    assert!(b.push(msg(3, 1), 10));
+    let mut out = Vec::new();
+    b.take_due(10, &mut out);
+    let ids: Vec<u32> = out.iter().map(|m| m.subject).collect();
+    assert_eq!(ids, vec![2, 3]);
+    assert_eq!(b.len(), 1);
+    b.take_due(19, &mut out);
+    assert_eq!(out.len(), 2);
+    b.take_due(20, &mut out);
+    assert_eq!(out.len(), 3);
+    assert!(b.is_empty());
+    // Wrapped clock: arrival just after the wrap.
+    assert!(b.push(msg(4, 1), 5));
+    out.clear();
+    b.take_due(u32::MAX - 1, &mut out);
+    assert!(out.is_empty());
+    b.take_due(5, &mut out);
+    assert_eq!(out.len(), 1);
+    assert_eq!(arrival(u32::MAX - 1, 2, 3, 4), 12);
+    assert_eq!(arrival(10, 0, 0, 0), 10);
+    b.push(msg(5, 1), 1);
+    b.clear();
+    assert_eq!(b.len(), 0);
+}
+
+#[test]
+fn inbox_full_replaces_latest_if_earlier() {
+    let mut b = Inbox::new(3).unwrap();
+    b.push(msg(1, 1), 10);
+    b.push(msg(2, 1), 30);
+    b.push(msg(3, 1), 30);
+    // Equal to the latest: refused.
+    assert!(!b.push(msg(4, 1), 30));
+    // Earlier: the later of the two latest (slot 2) goes.
+    assert!(b.push(msg(5, 1), 20));
+    let mut out = Vec::new();
+    b.take_due(100, &mut out);
+    let ids: Vec<u32> = out.iter().map(|m| m.subject).collect();
+    assert_eq!(ids, vec![1, 2, 5]);
+}
+
+#[test]
+fn route_nearest_tie_earlier() {
+    let mut out = vec![99];
+    let e = Metric::Euclid;
+    // divisor 16: dx -15 -> 0, dx -17 -> -1.
+    route(
+        Route::Nearest(2),
+        (0, 0),
+        &[(1, -17, 0), (2, -15, 0)],
+        e,
+        16,
+        &mut out,
+    );
+    assert_eq!(out, vec![2, 1]);
+    route(
+        Route::Nearest(2),
+        (0, 0),
+        &[(1, 5, 0), (2, 0, 5), (3, 1, 0)],
+        e,
+        1,
+        &mut out,
+    );
+    assert_eq!(out, vec![3, 1]);
+    route(Route::Nearest(3), (0, 0), &[(1, 5, 0)], e, 0, &mut out);
+    assert_eq!(out, vec![1]);
+    route(Route::Nearest(3), (0, 0), &[], e, 1, &mut out);
+    assert!(out.is_empty());
+    route(Route::Nearest(0), (0, 0), &[(1, 5, 0)], e, 1, &mut out);
+    assert!(out.is_empty());
+    let c = [(1, -40, 3), (2, -31, -31), (3, 20, 0), (4, -100, -17)];
+    route(Route::Nearest(3), (10, 5), &c, e, 16, &mut out);
+    assert_eq!(out, vec![3, 2, 1]);
+    let c = [(1, i32::MIN, i32::MIN), (2, i32::MAX, i32::MAX), (3, 0, 0)];
+    route(Route::Nearest(3), (i32::MAX, i32::MAX), &c, e, 1, &mut out);
+    assert_eq!(out, vec![2, 3, 1]);
+    route(Route::Nearest(3), (i32::MIN, i32::MIN), &c, e, 1, &mut out);
+    assert_eq!(out, vec![1, 3, 2]);
+}
+
+#[test]
+fn route_in_range_inclusive() {
+    let c = [(1, 3, 4), (2, 5, 0), (3, 4, 4), (4, -3, -3), (5, 0, 6)];
+    let mut out = Vec::new();
+    // Euclid: d² <= 25: (3,4)=25 in, (5,0)=25 in, (4,4)=32 out, (-3,-3)=18 in, (0,6)=36 out.
+    route(Route::InRange(5), (0, 0), &c, Metric::Euclid, 1, &mut out);
+    assert_eq!(out, vec![1, 2, 4]);
+    // Manhattan <= 7: 7 in, 5 in, 8 out, 6 in, 6 in.
+    route(
+        Route::InRange(7),
+        (0, 0),
+        &c,
+        Metric::Manhattan,
+        1,
+        &mut out,
+    );
+    assert_eq!(out, vec![1, 2, 4, 5]);
+    // Chebyshev <= 4: 4 in, 5 out, 4 in, 3 in, 6 out.
+    route(
+        Route::InRange(4),
+        (0, 0),
+        &c,
+        Metric::Chebyshev,
+        1,
+        &mut out,
+    );
+    assert_eq!(out, vec![1, 3, 4]);
+    // Hex <= 4: (3,4)=7, (5,0)=5, (4,4)=8, (-3,-3)=6, (0,6)=6: all out.
+    route(Route::InRange(4), (0, 0), &c, Metric::Hex, 1, &mut out);
+    assert!(out.is_empty());
+    // Hex <= 5: (5,0)=5 in.
+    route(Route::InRange(5), (0, 0), &c, Metric::Hex, 1, &mut out);
+    assert_eq!(out, vec![2]);
+    // Negative: nobody; zero: only the same place; divisor applies per axis.
+    route(
+        Route::InRange(-1),
+        (0, 0),
+        &[(1, 0, 0)],
+        Metric::Euclid,
+        1,
+        &mut out,
+    );
+    assert!(out.is_empty());
+    route(
+        Route::InRange(0),
+        (0, 0),
+        &[(1, 0, 0), (2, 1, 0)],
+        Metric::Euclid,
+        1,
+        &mut out,
+    );
+    assert_eq!(out, vec![1]);
+    route(
+        Route::InRange(1),
+        (0, 0),
+        &[(1, 15, 0), (2, 16, 0)],
+        Metric::Manhattan,
+        16,
+        &mut out,
+    );
+    assert_eq!(out, vec![1, 2]);
+    route(
+        Route::InRange(1),
+        (0, 0),
+        &[(1, 31, 0), (2, 32, 0)],
+        Metric::Manhattan,
+        16,
+        &mut out,
+    );
+    assert_eq!(out, vec![1]);
+}
+
+#[test]
+fn route_all_and_to() {
+    let c = [(7, 0, 0), (3, 9, 9), (5, -2, 1)];
+    let mut out = vec![1];
+    route(Route::All, (0, 0), &c, Metric::Euclid, 1, &mut out);
+    assert_eq!(out, vec![7, 3, 5]);
+    route(Route::To(3), (0, 0), &c, Metric::Hex, 1, &mut out);
+    assert_eq!(out, vec![3]);
+    route(Route::To(4), (0, 0), &c, Metric::Hex, 1, &mut out);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn hex_distance_axial() {
+    assert_eq!(distance(Metric::Hex, 0, 0), 0);
+    assert_eq!(distance(Metric::Hex, 1, 0), 1);
+    assert_eq!(distance(Metric::Hex, 0, -1), 1);
+    // (1, -1) is a neighbour in axial; (1, 1) is two steps away.
+    assert_eq!(distance(Metric::Hex, 1, -1), 1);
+    assert_eq!(distance(Metric::Hex, -1, 1), 1);
+    assert_eq!(distance(Metric::Hex, 1, 1), 2);
+    assert_eq!(distance(Metric::Hex, 3, -5), 5);
+    assert_eq!(distance(Metric::Euclid, 3, 4), 25);
+    assert_eq!(distance(Metric::Manhattan, -3, 4), 7);
+    assert_eq!(distance(Metric::Chebyshev, -3, 4), 4);
+    let m = i64::from(i32::MAX) - i64::from(i32::MIN);
+    assert_eq!(distance(Metric::Hex, m, m), i128::from(m) * 2);
+}
+
+#[test]
+fn message_to_knowledge() {
+    let mut k = Knowledge::new(2, Evict::Oldest).unwrap();
+    let m = msg(5, 3);
+    assert_eq!(k.learn_message(&m, SOURCE_TOLD, 20), None);
+    let f = *k.get(5, 3).unwrap();
+    assert_eq!(
+        f,
+        Fact {
+            subject: 5,
+            kind: 3,
+            pos: [1, 2, 3],
+            seen_at: 7,
+            strength: 8,
+            data: 9,
+            source: SOURCE_TOLD,
+        }
+    );
+    // merge: an older message does not overwrite, a newer one does.
+    let mut old = msg(5, 3);
+    old.seen_at = 6;
+    old.data = 1;
+    k.merge_message(&old, SOURCE_HEARD, 20);
+    assert_eq!(k.get(5, 3).unwrap().data, 9);
+    let mut new = msg(5, 3);
+    new.seen_at = 8;
+    new.data = 2;
+    k.merge_message(&new, SOURCE_HEARD, 20);
+    assert_eq!(k.get(5, 3).unwrap().data, 2);
+    assert_eq!(k.get(5, 3).unwrap().source, SOURCE_HEARD);
 }
