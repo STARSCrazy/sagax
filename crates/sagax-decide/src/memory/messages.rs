@@ -111,10 +111,18 @@ impl Outbox {
     /// Moves every message whose age is at least its own delay to the end of
     /// `out`, in post order.
     pub fn due(&mut self, now: u32, out: &mut Vec<Message>) {
+        self.due_max(now, usize::MAX, out);
+    }
+
+    /// Like [`Outbox::due`], but moves at most `max` messages (the first in
+    /// post order); the rest stay pending, due or not.
+    pub fn due_max(&mut self, now: u32, max: usize, out: &mut Vec<Message>) {
+        let mut moved = 0;
         self.items.retain(|p| {
-            let due = now.wrapping_sub(p.at) >= p.delay;
+            let due = moved < max && now.wrapping_sub(p.at) >= p.delay;
             if due {
                 out.push(p.msg);
+                moved += 1;
             }
             !due
         });
@@ -196,10 +204,18 @@ impl Inbox {
     /// (`now.wrapping_sub(arrive_at) < 2^31`) to the end of `out`, in push
     /// order.
     pub fn take_due(&mut self, now: u32, out: &mut Vec<Message>) {
+        self.take_due_max(now, usize::MAX, out);
+    }
+
+    /// Like [`Inbox::take_due`], but moves at most `max` messages (the first
+    /// in push order); the rest stay, due or not.
+    pub fn take_due_max(&mut self, now: u32, max: usize, out: &mut Vec<Message>) {
+        let mut moved = 0;
         self.items.retain(|(m, at)| {
-            let due = now.wrapping_sub(*at) < 1 << 31;
+            let due = moved < max && now.wrapping_sub(*at) < 1 << 31;
             if due {
                 out.push(*m);
+                moved += 1;
             }
             !due
         });

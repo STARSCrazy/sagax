@@ -1127,3 +1127,39 @@ fn route_nearest_other_metrics_and_three_way_tie() {
     route(Route::Nearest(2), (0, 0), &t, Metric::Euclid, 1, &mut out);
     assert_eq!(out, vec![7, 8]);
 }
+
+#[test]
+fn outbox_due_max_leaves_the_rest_pending() {
+    let mut o = Outbox::new(4).unwrap();
+    o.post(msg(1, 1), 0, 0, 0).unwrap();
+    o.post(msg(2, 1), 0, 0, 0).unwrap();
+    o.post(msg(3, 1), 0, 0, 0).unwrap();
+    let mut out = Vec::new();
+    o.due_max(5, 2, &mut out);
+    let ids: Vec<u32> = out.iter().map(|m| m.subject).collect();
+    assert_eq!(ids, vec![1, 2]);
+    assert_eq!(o.pending(), 1);
+    o.due_max(5, 0, &mut out);
+    assert_eq!(o.pending(), 1);
+    o.due_max(5, 9, &mut out);
+    assert_eq!(out.len(), 3);
+    assert_eq!(o.pending(), 0);
+}
+
+#[test]
+fn inbox_take_due_max_leaves_the_rest() {
+    let mut b = Inbox::new(4).unwrap();
+    for id in 1..=3 {
+        assert!(b.push(msg(id, 1), 5));
+    }
+    let mut out = Vec::new();
+    b.take_due_max(5, 2, &mut out);
+    let ids: Vec<u32> = out.iter().map(|m| m.subject).collect();
+    assert_eq!(ids, vec![1, 2]);
+    assert_eq!(b.len(), 1);
+    b.take_due_max(5, 0, &mut out);
+    assert_eq!(b.len(), 1);
+    b.take_due_max(5, 9, &mut out);
+    assert_eq!(out.len(), 3);
+    assert!(b.is_empty());
+}

@@ -1194,3 +1194,4 @@ mod tests;
 
 pub mod decide;
 pub mod machine;
+pub mod memory;
