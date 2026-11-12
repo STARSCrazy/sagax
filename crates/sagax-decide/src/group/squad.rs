@@ -1,18 +1,17 @@
 use super::members::{Group, Member, MemberState};
-use super::orders::{Channel, Order, REPORT_DANGER, REPORT_ENEMY, REPORT_GOAL_BROKEN, Status};
+use super::orders::{Channel, Order};
 use super::skill::SkillTable;
 use super::spots::{Spot, SpotPick, pick_spot, wish_point};
-use super::tactic::{GoalKind, Slot, Start, Tactic, Trigger};
+use super::tactic::{GoalKind, Slot, Start, Tactic};
 use crate::memory::{
-    Area, Areas, Evict, Fact, Inbox, Knowledge, Message, Metric, Pos, SOURCE_OWN, SOURCE_TOLD,
-    ZeroCapacity, distance,
+    Area, Areas, Evict, Fact, Inbox, Knowledge, Message, Metric, Pos, ZeroCapacity, distance,
 };
-use crate::{Candidate, Decider, INPUT_SINCE_OPTION, ONE, choose, mix};
+use crate::{Candidate, Decider, INPUT_SINCE_OPTION, choose, mix};
 
 /// Built-in row column: own losses (members marked gone).
 pub const IN_LOSSES: usize = 0;
 /// Built-in row column: active members that reported their goal of the
-/// active plan broken ([`REPORT_GOAL_BROKEN`]); 0 in the row of any other
+/// active plan broken ([`REPORT_GOAL_BROKEN`](super::REPORT_GOAL_BROKEN)); 0 in the row of any other
 /// candidate (a new plan starts with nobody off it).
 pub const IN_OFF_PLAN: usize = 1;
 /// Built-in row column: ticks since the target was last seen (no target:
@@ -152,39 +151,39 @@ pub(super) fn plain_dist(metric: Metric, a: Pos, b: Pos) -> i32 {
 
 /// Reused buffers, so planning does not allocate once they have grown.
 #[derive(Clone, Debug, Default)]
-struct Scratch {
-    targets: Vec<Fact>,
-    candidates: Vec<(usize, Option<usize>)>,
-    rows: Vec<i32>,
-    scores: Vec<u32>,
-    order: Vec<usize>,
-    wishes: Vec<Pos>,
-    then_wishes: Vec<Option<Pos>>,
-    counts: Vec<u8>,
-    used: Vec<bool>,
-    picks: Vec<(usize, usize)>,
-    taken: Vec<bool>,
-    then_taken: Vec<bool>,
-    near: Vec<(i128, usize)>,
-    reports: Vec<Message>,
+pub(super) struct Scratch {
+    pub(super) targets: Vec<Fact>,
+    pub(super) candidates: Vec<(usize, Option<usize>)>,
+    pub(super) rows: Vec<i32>,
+    pub(super) scores: Vec<u32>,
+    pub(super) order: Vec<usize>,
+    pub(super) wishes: Vec<Pos>,
+    pub(super) then_wishes: Vec<Option<Pos>>,
+    pub(super) counts: Vec<u8>,
+    pub(super) used: Vec<bool>,
+    pub(super) picks: Vec<(usize, usize)>,
+    pub(super) taken: Vec<bool>,
+    pub(super) then_taken: Vec<bool>,
+    pub(super) near: Vec<(i128, usize)>,
+    pub(super) reports: Vec<Message>,
 }
 
 /// The plan being carried out, with what happened since it became active.
 #[derive(Clone, Debug)]
-struct Active {
-    plan: Plan,
+pub(super) struct Active {
+    pub(super) plan: Plan,
     /// When it became active (its `active_at`).
-    since: u32,
+    pub(super) since: u32,
     /// When the signal was given.
-    signal_at: Option<u32>,
+    pub(super) signal_at: Option<u32>,
     /// Members that called [`Squad::arrived`].
-    arrived: Vec<u32>,
+    pub(super) arrived: Vec<u32>,
     /// Members that reported their goal broken.
-    broken: Vec<u32>,
+    pub(super) broken: Vec<u32>,
 }
 
 impl Active {
-    fn has(&self, member: u32) -> bool {
+    pub(super) fn has(&self, member: u32) -> bool {
         self.plan.goals.iter().any(|(m, _)| *m == member)
     }
 }
@@ -197,10 +196,10 @@ const JOINT_SLOTS: usize = 12;
 const DANGER: Area = Area {
     kind: 0,
     pos: [0; 3],
-    radius: 3,
+    radius: 2,
     strength: 1,
     since: 0,
-    lifetime: 340,
+    lifetime: 255,
     data: 0,
     source: [0; 3],
     blocking: 0,
@@ -225,25 +224,25 @@ const DANGER: Area = Area {
 /// [`Squad::signal`] sends the "on signal" members their second order.
 #[derive(Clone, Debug)]
 pub struct Squad {
-    group: Group,
-    knowledge: Knowledge,
-    areas: Areas,
-    inbox: Inbox,
-    metric: Metric,
-    tactics: Vec<Tactic>,
-    decider: Decider,
-    skill: u8,
-    table: SkillTable,
-    leader: Option<u32>,
-    target_kind: u32,
-    extra_columns: usize,
-    pending: Option<Plan>,
-    active: Option<Active>,
-    orders: Vec<(Order, u32)>,
-    channels: Vec<(u32, Channel)>,
-    danger: Area,
-    next_id: PlanId,
-    scratch: Scratch,
+    pub(super) group: Group,
+    pub(super) knowledge: Knowledge,
+    pub(super) areas: Areas,
+    pub(super) inbox: Inbox,
+    pub(super) metric: Metric,
+    pub(super) tactics: Vec<Tactic>,
+    pub(super) decider: Decider,
+    pub(super) skill: u8,
+    pub(super) table: SkillTable,
+    pub(super) leader: Option<u32>,
+    pub(super) target_kind: u32,
+    pub(super) extra_columns: usize,
+    pub(super) pending: Option<Plan>,
+    pub(super) active: Option<Active>,
+    pub(super) orders: Vec<(Order, u32)>,
+    pub(super) channels: Vec<(u32, Channel)>,
+    pub(super) danger: Area,
+    pub(super) next_id: PlanId,
+    pub(super) scratch: Scratch,
 }
 
 impl Squad {
@@ -401,15 +400,15 @@ impl Squad {
             .map_or_else(Channel::default, |e| e.1)
     }
 
-    /// The area a [`REPORT_DANGER`] adds: its kind, radius, strength,
+    /// The area a [`REPORT_DANGER`](super::REPORT_DANGER) adds: its kind, radius, strength,
     /// lifetime and blocking are used; centre, source and data come from the
-    /// report. Default: kind 0, radius 3, strength 1, lifetime 340 ticks
-    /// (20 s at 17 ticks per second), not blocking.
+    /// report. Default: kind 0, radius 2 (two cells), strength 1, lifetime
+    /// 255 ticks (15 s at about 17 ticks per second), not blocking.
     pub fn set_danger_area(&mut self, template: Area) {
         self.danger = template;
     }
 
-    /// The area a [`REPORT_DANGER`] adds (see [`Squad::set_danger_area`]).
+    /// The area a [`REPORT_DANGER`](super::REPORT_DANGER) adds (see [`Squad::set_danger_area`]).
     pub fn danger_area(&self) -> Area {
         self.danger
     }
@@ -468,173 +467,8 @@ impl Squad {
         self.active.as_ref().is_some_and(|a| a.signal_at.is_some())
     }
 
-    /// A member report on its way to the leader, read from `arrive_at` on by
-    /// [`Squad::check`] and [`Squad::plan`]. Kinds: [`REPORT_GOAL_BROKEN`]
-    /// (counts in [`IN_OFF_PLAN`] while the plan it names is active),
-    /// [`REPORT_ENEMY`] (a target in the leader's knowledge) and
-    /// [`REPORT_DANGER`] (a danger area); other kinds are dropped when read.
-    /// False when the inbox refused it (see [`Inbox::push`]).
-    pub fn report(&mut self, msg: Message, arrive_at: u32) -> bool {
-        self.inbox.push(msg, arrive_at)
-    }
-
-    /// The leader's own sighting: merged into its knowledge
-    /// ([`Knowledge::merge`]) with source [`SOURCE_OWN`]. Returns the fact
-    /// dropped to make room, if any.
-    pub fn observe(&mut self, fact: Fact, now: u32) -> Option<Fact> {
-        self.knowledge.merge(
-            Fact {
-                source: SOURCE_OWN,
-                ..fact
-            },
-            now,
-        )
-    }
-
-    /// Moves every order whose arrival time has come to the end of `out`, in
-    /// the order they were sent; orders for members that are no longer
-    /// active (suspended or gone) are dropped. First a pending plan whose
-    /// think time has passed becomes active.
-    ///
-    /// On activation each active member of the plan gets its goal, timed
-    /// from the leader's position then and from [`Plan::active_at`]: the
-    /// leader at once, the others by their [`Channel`]. A member with
-    /// [`Channel::None`], beyond shout range or not active then gets no
-    /// order. Orders of the old plan still on their way are dropped.
-    pub fn orders_due(&mut self, now: u32, out: &mut Vec<Order>) {
-        self.advance(now);
-        let group = &self.group;
-        self.orders.retain(|(order, at)| {
-            let due = now.wrapping_sub(*at) < 1 << 31;
-            let active = group
-                .index(order.member)
-                .and_then(|i| group.get(i))
-                .is_some_and(|m| m.state == MemberState::Active);
-            if due && active {
-                out.push(*order);
-            }
-            !due
-        });
-    }
-
-    /// Gives the signal of the active plan at `now`, once per plan. Every
-    /// active member whose goal has a `then_pos` or starts
-    /// [`Start::OnSignal`] gets a second order, sent now like the first:
-    /// `pos` = `then_pos` (`unchecked` = `then_unchecked`), or the old `pos`
-    /// without one; `start` = [`Start::Now`]; same plan and start delay.
-    /// False when no plan is active or the signal was already given.
-    pub fn signal(&mut self, now: u32) -> bool {
-        self.advance(now);
-        let Some(a) = self.active.as_mut() else {
-            return false;
-        };
-        if a.signal_at.is_some() {
-            return false;
-        }
-        a.signal_at = Some(now);
-        self.send(now, true);
-        true
-    }
-
-    /// The member with this id reached its first spot (for
-    /// [`Trigger::AllArrived`]). False when it has no goal in the active
-    /// plan.
-    pub fn arrived(&mut self, id: u32, now: u32) -> bool {
-        self.advance(now);
-        let Some(a) = self.active.as_mut() else {
-            return false;
-        };
-        if !a.has(id) {
-            return false;
-        }
-        if !a.arrived.contains(&id) {
-            a.arrived.push(id);
-        }
-        true
-    }
-
-    /// Watches the plans at `now`; call it regularly, with the same `extra`
-    /// and `spots` as for [`Squad::plan`] (which it calls to replan, with
-    /// `seed`).
-    ///
-    /// First a pending plan whose think time has passed becomes active, and
-    /// the reports that have arrived are read. Then, in this order:
-    ///
-    /// - A plan is pending: [`Status::Keep`] (no replan while thinking).
-    /// - No plan is active: it plans; [`Status::Replan`] with the new id, or
-    ///   [`Status::NoPlan`] when nothing scores.
-    /// - An [`Abort`](super::Abort) of the active tactic fires on the active
-    ///   plan's row: it plans anew ([`Status::Replan`]); when nothing scores
-    ///   the active plan and its orders are dropped ([`Status::NoPlan`]).
-    /// - Another candidate scores more than the active (tactic, target)
-    ///   times `1 + hold_bonus` (from skill, [`ONE`] = 1.0): it plans anew
-    ///   ([`Status::Replan`]). An active pair that is no candidate any more
-    ///   (target forgotten, slots no longer fillable) scores 0.
-    /// - The trigger fires and the signal was not given yet: it gives the
-    ///   signal ([`Squad::signal`]) and returns [`Status::Signal`].
-    ///   [`Trigger::AllArrived`]: every active member of the plan called
-    ///   [`Squad::arrived`], or `max_wait` ticks passed since activation.
-    ///   [`Trigger::TargetInRadius`]: the plan's target, as the leader knows
-    ///   it, is within the radius of the group centre. [`Trigger::None`] and
-    ///   [`Trigger::Manual`] never fire here.
-    /// - Else [`Status::Keep`].
-    ///
-    /// A new plan is pending first; the old one stays active until then.
-    /// Losing a member, also the leader, is no reason by itself: it only
-    /// counts in [`IN_LOSSES`]. With no active member left it keeps the
-    /// active plan ([`Status::Keep`]) or, without one, returns
-    /// [`Status::NoPlan`].
-    pub fn check(
-        &mut self,
-        now: u32,
-        extra: &[i32],
-        spots: &[Spot],
-        seed: u64,
-    ) -> Result<Status, PlanError> {
-        self.validate()?;
-        self.advance(now);
-        self.read_reports(now);
-        if self.pending.is_some() {
-            return Ok(Status::Keep);
-        }
-        let Some(centre) = self.centre() else {
-            return Ok(if self.active.is_some() {
-                Status::Keep
-            } else {
-                Status::NoPlan
-            });
-        };
-        let verdict = match self.active {
-            None => Verdict::Abort,
-            Some(_) => {
-                let mut s = std::mem::take(&mut self.scratch);
-                let v = self.judge(&mut s, now, centre, extra);
-                self.scratch = s;
-                v?
-            }
-        };
-        match verdict {
-            Verdict::Abort => match self.plan_now(now, extra, spots, seed)? {
-                Some(id) => Ok(Status::Replan(id)),
-                None => {
-                    self.active = None;
-                    self.orders.clear();
-                    Ok(Status::NoPlan)
-                }
-            },
-            Verdict::Better => Ok(self
-                .plan_now(now, extra, spots, seed)?
-                .map_or(Status::Keep, Status::Replan)),
-            Verdict::Hold if self.trigger_fires(now, centre) => {
-                self.signal(now);
-                Ok(Status::Signal)
-            }
-            Verdict::Hold => Ok(Status::Keep),
-        }
-    }
-
     /// The member that leads (see [`Squad::leader`]).
-    fn acting_leader(&self) -> Option<&Member> {
+    pub(super) fn acting_leader(&self) -> Option<&Member> {
         let active = |id: u32| {
             self.group
                 .index(id)
@@ -656,7 +490,7 @@ impl Squad {
         in_plan.or_else(|| self.group.active().map(|(_, m)| m).next())
     }
 
-    fn is_active_member(&self, id: u32) -> bool {
+    pub(super) fn is_active_member(&self, id: u32) -> bool {
         self.group
             .index(id)
             .and_then(|i| self.group.get(i))
@@ -664,7 +498,7 @@ impl Squad {
     }
 
     /// The mean position of the active members (rounded down).
-    fn centre(&self) -> Option<Pos> {
+    pub(super) fn centre(&self) -> Option<Pos> {
         let mut sum = [0i64; 3];
         let mut n = 0i64;
         for (_, m) in self.group.active() {
@@ -676,189 +510,12 @@ impl Squad {
         (n > 0).then(|| sum.map(|s| s.div_euclid(n) as i32))
     }
 
-    /// Makes the pending plan active once its think time has passed, and
-    /// sends its orders.
-    fn advance(&mut self, now: u32) {
-        let due = self
-            .pending
-            .as_ref()
-            .is_some_and(|p| now.wrapping_sub(p.made_at) >= p.active_at.wrapping_sub(p.made_at));
-        if !due {
-            return;
-        }
-        let Some(plan) = self.pending.take() else {
-            return;
-        };
-        let since = plan.active_at;
-        // Orders of the old plan still on their way are void.
-        self.orders.clear();
-        self.active = Some(Active {
-            plan,
-            since,
-            signal_at: None,
-            arrived: Vec::new(),
-            broken: Vec::new(),
-        });
-        self.send(since, false);
-    }
-
-    /// Queues one order per active member of the active plan, timed from the
-    /// leader's position at `at`: the goals as planned, or (`signal`) the
-    /// second orders (see [`Squad::signal`]).
-    fn send(&mut self, at: u32, signal: bool) {
-        let mut orders = std::mem::take(&mut self.orders);
-        if let (Some(a), Some(leader)) = (&self.active, self.acting_leader()) {
-            for &(member, goal) in &a.plan.goals {
-                let Some(m) = self.group.index(member).and_then(|i| self.group.get(i)) else {
-                    continue;
-                };
-                if m.state != MemberState::Active {
-                    continue;
-                }
-                let goal = if signal {
-                    match on_signal(goal, at) {
-                        Some(g) => g,
-                        None => continue,
-                    }
-                } else {
-                    goal
-                };
-                let arrive = if member == leader.id {
-                    Some(at)
-                } else {
-                    self.channel(member)
-                        .arrival(self.metric, leader.pos, m.pos, at)
-                };
-                if let Some(t) = arrive {
-                    orders.push((Order { member, goal }, t));
-                }
-            }
-        }
-        self.orders = orders;
-    }
-
-    /// Reads the reports that have arrived by `now`.
-    fn read_reports(&mut self, now: u32) {
-        let mut due = std::mem::take(&mut self.scratch.reports);
-        due.clear();
-        self.inbox.take_due(now, &mut due);
-        for msg in &due {
-            match msg.kind {
-                REPORT_GOAL_BROKEN => {
-                    if let Some(a) = self.active.as_mut()
-                        && a.plan.id == msg.data
-                        && a.has(msg.sender)
-                        && !a.broken.contains(&msg.sender)
-                    {
-                        a.broken.push(msg.sender);
-                    }
-                }
-                REPORT_ENEMY => {
-                    let fact = Fact {
-                        kind: self.target_kind,
-                        ..msg.to_fact(SOURCE_TOLD)
-                    };
-                    self.knowledge.merge(fact, now);
-                }
-                REPORT_DANGER => {
-                    let area = Area {
-                        pos: msg.pos,
-                        source: [msg.strength as i32, msg.data as i32, msg.pos[2]],
-                        has_source: 1,
-                        data: msg.subject,
-                        ..self.danger
-                    };
-                    self.areas.add(area, now);
-                }
-                _ => {}
-            }
-        }
-        self.scratch.reports = due;
-    }
-
-    /// Whether the active plan must go (an abort fires), may go (a better
-    /// candidate) or stays.
-    fn judge(
-        &self,
-        s: &mut Scratch,
-        now: u32,
-        centre: Pos,
-        extra: &[i32],
-    ) -> Result<Verdict, PlanError> {
-        let Some(a) = &self.active else {
-            return Ok(Verdict::Hold);
-        };
-        let (t, target) = (a.plan.tactic, a.plan.target);
-        s.targets.clear();
-        s.targets.extend(self.targets().copied());
-        let found = target.and_then(|id| s.targets.iter().position(|f| f.subject == id));
-        let fact = found.map(|i| s.targets[i]);
-        // The extra block of the active pair; none if its target is gone.
-        let block = match (target, found) {
-            (None, _) => Some(0),
-            (Some(_), Some(i)) => Some(i + 1),
-            (Some(_), None) => None,
-        };
-        self.row_into(&mut s.rows, now, centre, fact.as_ref(), block, extra, true);
-        if fires(&self.tactics[t], &s.rows) {
-            return Ok(Verdict::Abort);
-        }
-        self.score_candidates(s, now, centre, extra)?;
-        let (mut mine, mut other) = (0u32, 0u32);
-        for (&(ct, ci), &score) in s.candidates.iter().zip(&s.scores) {
-            if ct == t && ci.map(|i| s.targets[i].subject) == target {
-                mine = score;
-            } else {
-                other = other.max(score);
-            }
-        }
-        let bonus = u64::from(self.table.hold_bonus[SkillTable::level(self.skill)]);
-        let bar = u64::from(mine) + u64::from(mine) * bonus / u64::from(ONE);
-        Ok(if u64::from(other) > bar {
-            Verdict::Better
-        } else {
-            Verdict::Hold
-        })
-    }
-
-    /// Whether the active plan's trigger fires now (not after the signal).
-    fn trigger_fires(&self, now: u32, centre: Pos) -> bool {
-        let Some(a) = &self.active else {
-            return false;
-        };
-        if a.signal_at.is_some() {
-            return false;
-        }
-        match self.tactics[a.plan.tactic].trigger {
-            Trigger::AllArrived { max_wait } => {
-                now.wrapping_sub(a.since) >= max_wait
-                    || a.plan
-                        .goals
-                        .iter()
-                        .all(|(m, _)| !self.is_active_member(*m) || a.arrived.contains(m))
-            }
-            Trigger::TargetInRadius(r) => {
-                let limit = if self.metric == Metric::Euclid {
-                    i128::from(r) * i128::from(r)
-                } else {
-                    i128::from(r)
-                };
-                r >= 0
-                    && a.plan
-                        .target
-                        .and_then(|id| self.knowledge.get(id, self.target_kind))
-                        .is_some_and(|f| dist(self.metric, centre, f.pos) <= limit)
-            }
-            Trigger::None | Trigger::Manual => false,
-        }
-    }
-
     /// Fills `row` for one candidate: the built-in inputs, then the extra
     /// block `block` (`None`: zeros). `active` marks the row of the active
     /// (tactic, target), which reads the active plan's off-plan count and
     /// age; other rows read 0 there.
     #[allow(clippy::too_many_arguments)]
-    fn row_into(
+    pub(super) fn row_into(
         &self,
         row: &mut Vec<i32>,
         now: u32,
@@ -910,7 +567,7 @@ impl Squad {
 
     /// Fills `s.candidates` and `s.scores` from `s.targets` (see
     /// [`Squad::plan`]).
-    fn score_candidates(
+    pub(super) fn score_candidates(
         &self,
         s: &mut Scratch,
         now: u32,
@@ -1084,18 +741,22 @@ impl Squad {
         self.validate()?;
         self.advance(now);
         self.read_reports(now);
-        self.plan_now(now, extra, spots, seed)
+        self.plan_now(now, extra, spots, seed, false)
     }
 
-    fn plan_now(
+    /// [`Squad::plan`] without the first steps. With `skip_active` the
+    /// active (tactic, target) is no candidate, so a replan for a better
+    /// plan cannot pick the same pair again.
+    pub(super) fn plan_now(
         &mut self,
         now: u32,
         extra: &[i32],
         spots: &[Spot],
         seed: u64,
+        skip_active: bool,
     ) -> Result<Option<PlanId>, PlanError> {
         let mut s = std::mem::take(&mut self.scratch);
-        let made = self.plan_with(&mut s, now, extra, spots, seed);
+        let made = self.plan_with(&mut s, now, extra, spots, seed, skip_active);
         self.scratch = s;
         made
     }
@@ -1107,6 +768,7 @@ impl Squad {
         extra: &[i32],
         spots: &[Spot],
         seed: u64,
+        skip_active: bool,
     ) -> Result<Option<PlanId>, PlanError> {
         let (Some(leader), Some(centre)) = (self.acting_leader().map(|m| m.pos), self.centre())
         else {
@@ -1117,6 +779,13 @@ impl Squad {
         s.targets.clear();
         s.targets.extend(self.targets().copied());
         self.score_candidates(s, now, centre, extra)?;
+        if skip_active && let Some(a) = &self.active {
+            for (&(t, ti), score) in s.candidates.iter().zip(s.scores.iter_mut()) {
+                if t == a.plan.tactic && ti.map(|i| s.targets[i].subject) == a.plan.target {
+                    *score = 0;
+                }
+            }
+        }
         let Some(choice) = choose(&s.scores, self.table.pick[level], seed, &mut s.order) else {
             return Ok(None);
         };
@@ -1309,42 +978,10 @@ impl Squad {
     }
 }
 
-/// What [`Squad::check`] makes of the active plan.
-enum Verdict {
-    /// An abort rule fired (also: no plan is active).
-    Abort,
-    /// Another candidate beats it by more than the hold bonus.
-    Better,
-    /// It stays.
-    Hold,
-}
-
 /// True when one of `tactic`'s abort rules fires on `row`.
-fn fires(tactic: &Tactic, row: &[i32]) -> bool {
+pub(super) fn fires(tactic: &Tactic, row: &[i32]) -> bool {
     tactic
         .aborts
         .iter()
         .any(|ab| row.get(ab.input).is_some_and(|&v| v >= ab.at_least))
-}
-
-/// The second order of a goal on the signal: start now at `then_pos` (or at
-/// `pos` without one). `None` for a goal that neither gathers nor waits for
-/// the signal.
-fn on_signal(goal: Goal, at: u32) -> Option<Goal> {
-    if goal.then_pos.is_none() && goal.start != Start::OnSignal {
-        return None;
-    }
-    let (pos, unchecked) = match goal.then_pos {
-        Some(p) => (Some(p), goal.then_unchecked),
-        None => (goal.pos, goal.unchecked),
-    };
-    Some(Goal {
-        pos,
-        unchecked,
-        then_pos: None,
-        then_unchecked: false,
-        start: Start::Now,
-        issued_at: at,
-        ..goal
-    })
 }

@@ -1415,3 +1415,66 @@ fn role_feasibility_is_joint() {
     got.sort_unstable();
     assert_eq!(got, [(1, 1), (2, 0)]);
 }
+
+#[test]
+fn better_replan_never_restarts_same_pair() {
+    let think = SkillTable::default().think_ticks[0];
+    for seed in 0..16 {
+        let mut sq = squad_of(Metric::Euclid, &four());
+        sq.add_tactic(Tactic {
+            weight: ONE / 2,
+            ..tactics::rush()
+        });
+        sq.add_tactic(Tactic {
+            considerations: vec![Consideration::new(IN_EXTRA as u32, Curve::Linear, 0, 100)],
+            weight: ONE,
+            ..tactics::rush()
+        });
+        sq.set_extra_columns(1);
+        sq.set_skill(0);
+        see(&mut sq, 10, 20, 0, 0);
+        // The second tactic scores 0 at first: the weak pick must take rush.
+        assert!(matches!(
+            sq.check(0, &[0, 0], &[], seed),
+            Ok(Status::Replan(_))
+        ));
+        assert_eq!(sq.check(think, &[0, 0], &[], seed), Ok(Status::Keep));
+        assert_eq!(sq.active_plan().unwrap().tactic, 0);
+        // 0.6 beats 0.5 by more than the weak bonus; with a fixed seed the
+        // chance pick must never restart rush.
+        for now in think + 1..think + 200 {
+            if let Ok(Status::Replan(_)) = sq.check(now, &[0, 60], &[], seed) {
+                assert_eq!(sq.pending_plan().unwrap().tactic, 1, "seed {seed}");
+            }
+        }
+        assert_eq!(sq.active_plan().unwrap().tactic, 1, "seed {seed}");
+    }
+}
+
+#[test]
+fn all_arrived_needs_an_active_member() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::flank(2, 4));
+    sq.set_skill(255);
+    see(&mut sq, 10, 20, 0, 0);
+    assert!(matches!(sq.check(0, &[], &[], 0), Ok(Status::Replan(_))));
+    assert_eq!(sq.check(5, &[], &[], 0), Ok(Status::Keep));
+    // A newcomer outside the plan keeps the group in play; every plan
+    // member is suspended.
+    sq.group_mut().add(Member {
+        id: 5,
+        pos: [0, 0, 0],
+        roles: 0,
+        skill: 0,
+        state: MemberState::Active,
+    });
+    for m in 1..=4 {
+        sq.group_mut().suspend(m);
+    }
+    let wait = tactics::FLANK_MAX_WAIT;
+    assert_eq!(sq.check(5 + wait, &[], &[], 0), Ok(Status::Keep));
+    assert!(!sq.signal_given());
+    // One plan member back: max_wait has passed, the signal fires.
+    sq.group_mut().resume(2);
+    assert_eq!(sq.check(6 + wait, &[], &[], 0), Ok(Status::Signal));
+}

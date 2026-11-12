@@ -111,9 +111,9 @@ pub struct Slot {
 pub enum Trigger {
     /// Never by itself.
     None,
-    /// When every assigned member has arrived at its gather spot, or
-    /// `max_wait` ticks after the gather orders went out, whichever comes
-    /// first.
+    /// When every assigned active member has arrived at its gather spot,
+    /// or `max_wait` ticks after the gather orders went out, whichever
+    /// comes first; never while no assigned member is active.
     AllArrived {
         /// Longest wait for stragglers.
         max_wait: u32,
