@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.0
+
+- Memory of the world, in `sagax-decide` (module `memory`): `Sightings`
+  (table of known ids with place and time, oldest dropped when full),
+  `Zones` (remembered areas, merge radius, lifetime, `blocks` for a map's
+  `move_cost`), `Pursuit` (lost / stalled), `Ignore`, `Radio` with cooldown,
+  `Interval`, `nearest`, and a deterministic search pattern (`search_point`,
+  `look_heading`, `sin256`). Integer only, wrap-safe time, fixed sizes; every
+  time and limit is a parameter. Rust `sagax_decide::memory`, C `sx_sightings_*`,
+  `sx_zones_*`, `sx_ignore_*`, `sx_pursuit_*`, `sx_radio_*`, `sx_interval_*`,
+  `sx_nearest`, `sx_search_point`, `sx_look_heading`, JavaScript
+  `lib.sightings()`, `lib.zones()`, `lib.ignore()`, `Pursuit`, `Radio`,
+  `Interval`, `lib.nearest()`, `lib.searchPoint()`.
+- Example `officer` (Rust, with a reference test) and `examples/c/memory.c`;
+  recipes in the guide (section 7).
+- C API version 7. `SX_API_VERSION` is now 7, so the version check of a game
+  built with the new header refuses an older library; the functions are
+  additive and nothing was changed in the older ones.
+
 ## 0.6.0
 
 - State machine with timers and aborts: states, transitions on condition
