@@ -32,7 +32,7 @@ pub use skill::SkillTable;
 pub use spots::{Spot, SpotPick, heading, pick_spot, wish_point};
 pub use squad::{
     Goal, IN_AREA, IN_EXTRA, IN_LOSSES, IN_OFF_PLAN, IN_PLAN_AGE, IN_RANGED, IN_TARGET_AGE,
-    IN_TARGET_DIST, Plan, PlanId, ROLE_AREA, ROLE_RANGED, Squad,
+    IN_TARGET_DIST, Plan, PlanError, PlanId, ROLE_AREA, ROLE_RANGED, Squad,
 };
 pub use tactic::{
     Abort, GoalKind, Place, Shape, Side, Slot, Start, TAG_CHOKE, TAG_COVER, TAG_HIDDEN, TAG_HIGH,

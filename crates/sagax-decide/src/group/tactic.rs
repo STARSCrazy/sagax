@@ -85,8 +85,7 @@ pub enum Start {
 /// One role in a tactic, filled by `min ..= max` members.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Slot {
-    /// Role bits a member should all have: members with them are chosen
-    /// first, others only when none is left; 0 takes anyone.
+    /// Role bits a member must all have to fill the slot; 0 takes anyone.
     pub roles: u32,
     /// Fewest members the slot needs.
     pub min: u8,

@@ -444,11 +444,11 @@ fn weak_squad_does_not_know_flank() {
     see(&mut sq, 10, 20, 0, 0);
     sq.set_skill(0);
     for seed in 0..32 {
-        sq.plan(0, &[], &[], seed).unwrap();
+        sq.plan(0, &[], &[], seed).unwrap().unwrap();
         assert_eq!(sq.pending_plan().unwrap().tactic, rush);
     }
     sq.set_skill(255);
-    sq.plan(0, &[], &[], 0).unwrap();
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
     assert_eq!(sq.pending_plan().unwrap().tactic, flank);
 }
 
@@ -462,7 +462,7 @@ fn elite_picks_best() {
     see(&mut sq, 10, 20, 0, 0);
     sq.set_skill(255);
     for seed in 0..32 {
-        sq.plan(0, &[], &[], seed).unwrap();
+        sq.plan(0, &[], &[], seed).unwrap().unwrap();
         let p = sq.pending_plan().unwrap();
         assert_eq!((p.tactic, p.target), (flank, Some(10)));
     }
@@ -487,8 +487,8 @@ fn weak_pick_is_seeded_and_repeatable() {
     let mut b = build();
     let mut seen = [false; 4];
     for seed in 0..64 {
-        a.plan(7, &[], &[], seed).unwrap();
-        b.plan(7, &[], &[], seed).unwrap();
+        a.plan(7, &[], &[], seed).unwrap().unwrap();
+        b.plan(7, &[], &[], seed).unwrap().unwrap();
         let (pa, pb) = (a.pending_plan().unwrap(), b.pending_plan().unwrap());
         assert_eq!((pa.tactic, &pa.goals), (pb.tactic, &pb.goals));
         seen[pa.tactic] = true;
@@ -532,7 +532,7 @@ fn assign_roles_first_then_distance() {
     );
     sq.add_tactic(t);
     sq.set_skill(255);
-    let id = sq.plan(0, &[], &[], 0).unwrap();
+    let id = sq.plan(0, &[], &[], 0).unwrap().unwrap();
     let p = sq.pending_plan().unwrap();
     assert_eq!(p.id, id);
     let got: Vec<(u32, u8)> = p.goals.iter().map(|(m, g)| (*m, g.slot)).collect();
@@ -552,7 +552,7 @@ fn assign_skips_suspended() {
     see(&mut sq, 10, 20, 0, 0);
     sq.group_mut().suspend(2);
     sq.group_mut().set_gone(3);
-    sq.plan(0, &[], &[], 0).unwrap();
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
     // Nearest the wish point (the target's front) first.
     let ids: Vec<u32> = sq
         .pending_plan()
@@ -571,7 +571,7 @@ fn target_only_from_leader_memory() {
     sq.add_tactic(tactics::focus());
     sq.set_skill(255);
     // Nothing known: no plan with a target is possible.
-    assert_eq!(sq.plan(0, &[], &[], 0), None);
+    assert_eq!(sq.plan(0, &[], &[], 0), Ok(None));
     assert!(sq.pending_plan().is_none());
     // Enemy 11 stands right next to the group in the caller's world, but
     // the leader knows only enemy 10 (and a noise of 11, another kind).
@@ -587,7 +587,7 @@ fn target_only_from_leader_memory() {
         0,
     );
     for seed in 0..16 {
-        sq.plan(0, &[], &[], seed).unwrap();
+        sq.plan(0, &[], &[], seed).unwrap().unwrap();
         assert_eq!(sq.pending_plan().unwrap().target, Some(10));
     }
 }
@@ -606,14 +606,14 @@ fn per_target_scoring() {
     see(&mut sq, 10, 60, 0, 0);
     see(&mut sq, 11, 20, 0, 0);
     // Rows: no target, then the targets in memory order (10, 11).
-    sq.plan(0, &[0, 5, 2], &[], 0).unwrap();
+    sq.plan(0, &[0, 5, 2], &[], 0).unwrap().unwrap();
     let p = sq.pending_plan().unwrap();
     assert_eq!((p.tactic, p.target), (f, Some(11)));
     // The nearer one is now too strong.
-    sq.plan(0, &[0, 5, 9], &[], 0).unwrap();
+    sq.plan(0, &[0, 5, 9], &[], 0).unwrap().unwrap();
     assert_eq!(sq.pending_plan().unwrap().target, Some(10));
     // Plain distance: the nearer target wins on equal strength.
-    sq.plan(0, &[0, 5, 5], &[], 0).unwrap();
+    sq.plan(0, &[0, 5, 5], &[], 0).unwrap().unwrap();
     assert_eq!(sq.pending_plan().unwrap().target, Some(11));
 }
 
@@ -631,7 +631,7 @@ fn isolate_picks_farthest_from_friends() {
     see(&mut sq, 10, 20, 0, 0);
     see(&mut sq, 11, 22, 0, 0);
     see(&mut sq, 12, 20, 30, 0);
-    sq.plan(0, &[0, 2, 2, 30], &[], 0).unwrap();
+    sq.plan(0, &[0, 2, 2, 30], &[], 0).unwrap().unwrap();
     let p = sq.pending_plan().unwrap();
     assert_eq!(p.target, Some(12));
     // Hold between 12 and its nearest friend 10; the rest attack.
@@ -668,7 +668,7 @@ fn hex_assign_same_as_square_shape() {
         sq.add_tactic(tactics::rush());
         sq.set_skill(255);
         see(&mut sq, 10, 20, 0, 0);
-        sq.plan(0, &[], &[], 0).unwrap();
+        sq.plan(0, &[], &[], 0).unwrap().unwrap();
         got.push(slots_of(&sq));
     }
     assert_eq!(got[0], got[1]);
@@ -685,7 +685,7 @@ fn flank_spreads_over_sides() {
     sq.add_tactic(tactics::flank(3, 4));
     sq.set_skill(255);
     see(&mut sq, 10, 20, 0, 0);
-    sq.plan(0, &[], &[], 0).unwrap();
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
     let mut per_slot = [0; 3];
     for (_, slot, _) in slots_of(&sq) {
         per_slot[usize::from(slot)] += 1;
@@ -699,11 +699,11 @@ fn fall_back_without_target_moves_away_from_danger() {
     let fb = sq.add_tactic(tactics::fall_back());
     sq.set_skill(255);
     // No losses: fall back scores 0, nothing else known.
-    assert_eq!(sq.plan(0, &[], &[], 0), None);
+    assert_eq!(sq.plan(0, &[], &[], 0), Ok(None));
     sq.group_mut().set_gone(3);
     sq.group_mut().set_gone(4);
     // No target, no danger: stay at the leader.
-    sq.plan(0, &[], &[], 0).unwrap();
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
     let p = sq.pending_plan().unwrap();
     assert_eq!((p.tactic, p.target), (fb, None));
     assert!(p.goals.iter().all(|(_, g)| g.pos == Some([0, 0, 0])));
@@ -717,13 +717,13 @@ fn fall_back_without_target_moves_away_from_danger() {
         },
         0,
     );
-    sq.plan(1, &[], &[], 0).unwrap();
+    sq.plan(1, &[], &[], 0).unwrap().unwrap();
     let p = sq.pending_plan().unwrap();
     assert_eq!(p.goals[0].1.pos, Some([-tactics::FALL_BACK_DIST, 0, 0]));
     assert_eq!(p.goals[0].1.kind, GoalKind::Retreat);
     // A known enemy to +y beats the area as the nearest threat.
     see(&mut sq, 10, 0, 5, 1);
-    sq.plan(2, &[], &[], 0).unwrap();
+    sq.plan(2, &[], &[], 0).unwrap().unwrap();
     let p = sq.pending_plan().unwrap();
     assert_eq!(p.target, None);
     assert_eq!(p.goals[0].1.pos, Some([0, -tactics::FALL_BACK_DIST, 0]));
@@ -744,7 +744,7 @@ fn weak_spot_error_seeded() {
         sq.add_tactic(tactics::rush());
         sq.set_skill(skill);
         see(&mut sq, 10, 20, 0, 0);
-        sq.plan(3, &[], &spots, seed).unwrap();
+        sq.plan(3, &[], &spots, seed).unwrap().unwrap();
         sq.pending_plan().unwrap().goals[0].1.pos.unwrap()
     };
     let mut ranks = [false; 6];
@@ -763,8 +763,8 @@ fn plan_ids_increase_and_stamp_time() {
     let mut sq = squad_of(Metric::Euclid, &four());
     sq.add_tactic(tactics::rush());
     see(&mut sq, 10, 20, 0, 0);
-    let a = sq.plan(0, &[], &[], 0).unwrap();
-    let b = sq.plan(5, &[], &[], 0).unwrap();
+    let a = sq.plan(0, &[], &[], 0).unwrap().unwrap();
+    let b = sq.plan(5, &[], &[], 0).unwrap().unwrap();
     assert!(b > a);
     let p = sq.pending_plan().unwrap();
     assert_eq!(p.made_at, 5);
@@ -782,4 +782,137 @@ fn plan_ids_increase_and_stamp_time() {
         ],
         [0, 1, 2, 3, 4, 5, 6, 7]
     );
+}
+
+#[test]
+fn plan_rejects_column_beyond_row() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    let mut focus = tactics::focus();
+    focus
+        .considerations
+        .push(Consideration::new(IN_EXTRA as u32, Curve::Linear, 0, 10));
+    sq.add_tactic(tactics::rush());
+    let f = sq.add_tactic(focus);
+    sq.set_skill(255);
+    see(&mut sq, 10, 20, 0, 0);
+    // No caller columns: a caller error, not a silent "no plan".
+    let err = PlanError::InputOutOfRange {
+        tactic: f,
+        input: IN_EXTRA as u32,
+    };
+    assert_eq!(sq.validate(), Err(err));
+    assert_eq!(sq.plan(0, &[], &[], 0), Err(err));
+    assert!(sq.pending_plan().is_none());
+    // Also with nothing to plan for.
+    sq.knowledge_mut().clear();
+    assert_eq!(sq.plan(0, &[], &[], 0), Err(err));
+    sq.set_extra_columns(1);
+    assert_eq!(sq.validate(), Ok(()));
+    see(&mut sq, 10, 20, 0, 0);
+    assert!(sq.plan(0, &[0, 10], &[], 0).unwrap().is_some());
+}
+
+#[test]
+fn required_roles_are_hard() {
+    // A flank whose left side needs a ranged member.
+    let mut ranged_flank = tactics::flank(2, 4);
+    ranged_flank.slots[0].roles = ROLE_RANGED;
+    let build = |members: &[(u32, i32, i32, u32)]| {
+        let mut sq = squad_of(Metric::Euclid, members);
+        sq.add_tactic(tactics::rush());
+        sq.add_tactic(ranged_flank.clone());
+        sq.set_skill(255);
+        see(&mut sq, 10, 20, 0, 0);
+        sq
+    };
+    // Nobody ranged: the flank is no candidate, rush is chosen.
+    let mut sq = build(&four());
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
+    assert_eq!(sq.pending_plan().unwrap().tactic, 0);
+    // Member 4 is ranged: the flank wins, and only 4 fills the left side.
+    let mut members = four();
+    members[3].3 = ROLE_RANGED;
+    let mut sq = build(&members);
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
+    assert_eq!(sq.pending_plan().unwrap().tactic, 1);
+    let left: Vec<u32> = slots_of(&sq)
+        .iter()
+        .filter(|g| g.1 == 0)
+        .map(|g| g.0)
+        .collect();
+    assert_eq!(left, [4]);
+    assert_eq!(slots_of(&sq).len(), 4);
+}
+
+#[test]
+fn open_slot_does_not_use_up_specialist() {
+    let slot = |roles| Slot {
+        roles,
+        min: 1,
+        max: 1,
+        gather: None,
+        place: Place::Here,
+        kind: GoalKind::Hold,
+        start: Start::Now,
+        want_tags: 0,
+        dist: 1,
+    };
+    let t = Tactic {
+        slots: vec![slot(0), slot(ROLE_RANGED)],
+        considerations: Vec::new(),
+        weight: ONE,
+        aborts: Vec::new(),
+        trigger: Trigger::None,
+        min_skill: 0,
+        needs_target: false,
+    };
+    // The only ranged member is nearest the open slot's wish point.
+    let mut sq = squad_of(Metric::Euclid, &[(1, 0, 0, ROLE_RANGED), (2, 5, 0, 0)]);
+    sq.add_tactic(t);
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
+    let got: Vec<(u32, u8)> = slots_of(&sq).iter().map(|g| (g.0, g.1)).collect();
+    assert_eq!(got, [(1, 1), (2, 0)]);
+}
+
+#[test]
+fn gather_slot_has_then_pos() {
+    let mut t = tactics::rush();
+    t.slots[0].gather = Some(Place::Here);
+    t.slots[0].start = Start::OnSignal;
+    let mut sq = squad_of(Metric::Euclid, &[(1, 0, 0, 0)]);
+    sq.add_tactic(t);
+    sq.add_tactic(tactics::rush());
+    see(&mut sq, 10, 20, 0, 0);
+    sq.set_skill(255);
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
+    // Gather at the leader first, then the target's front.
+    let g = sq.pending_plan().unwrap().goals[0].1;
+    assert_eq!((g.pos, g.then_pos), (Some([0, 0, 0]), Some([19, 0, 0])));
+    // Flank: gather and attack point coincide; both phases may take the
+    // same spot.
+    let mut sq = squad_of(Metric::Euclid, &[(1, 0, 0, 0), (2, 1, 0, 0)]);
+    sq.add_tactic(tactics::flank(2, 4));
+    see(&mut sq, 10, 20, 0, 0);
+    sq.set_skill(255);
+    let spots = [
+        Spot {
+            pos: [20, 4, 0],
+            tags: 0,
+        },
+        Spot {
+            pos: [20, -4, 0],
+            tags: 0,
+        },
+    ];
+    sq.plan(0, &[], &spots, 0).unwrap().unwrap();
+    for (_, g) in &sq.pending_plan().unwrap().goals {
+        assert!(g.pos.is_some());
+        assert_eq!(g.then_pos, g.pos);
+    }
+    // Without a gather place there is no second position.
+    let mut sq = squad_of(Metric::Euclid, &[(1, 0, 0, 0)]);
+    sq.add_tactic(tactics::rush());
+    see(&mut sq, 10, 20, 0, 0);
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
+    assert_eq!(sq.pending_plan().unwrap().goals[0].1.then_pos, None);
 }
