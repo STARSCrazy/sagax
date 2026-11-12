@@ -579,4 +579,38 @@ test('lookHeading matches the reference', () => {
   assert.equal(lib.lookHeading(10, 1, 0, [1, 2]), 12); // step 0 counts as 1
 });
 
+
+test('scratch buffer survives memory growth', () => {
+  const c = [];
+  for (let i = 0; i < 200000; i++) c.push({ id: i, x: i, y: 0 });
+  assert.deepEqual(lib.nearest(c, [150000, 0], 3, 1), [150000, 149999, 150001]);
+  assert.deepEqual(lib.nearest(c.slice(0, 2), [0, 0], 1000000, 1), [0, 1]);
+});
+
+test('capacity is validated', () => {
+  for (const bad of [0, -1, 1.5, 2 ** 31, NaN, '3']) {
+    assert.throws(() => lib.sightings(bad), RangeError);
+    assert.throws(() => lib.zones(bad, 1, 1), RangeError);
+    assert.throws(() => lib.ignore(bad), RangeError);
+  }
+});
+
+test('radio.take returns a copy', () => {
+  const r = new Radio();
+  r.start([1, 2, 3], 0, 0);
+  const p = r.take();
+  p[0] = 99;
+  assert.deepEqual(r.pos, [1, 2, 3]);
+});
+
+test('pursuit.stalled at i32 extremes', () => {
+  const p = new Pursuit();
+  p.begin(1, [0, 0, 0], 2147483647, 0);
+  assert.equal(p.stalled(-2147483648, 5, 2147483647, 10), false); // gain 4294967295, no overflow
+  assert.equal(p.best, -2147483648);
+  const q = new Pursuit();
+  q.begin(1, [0, 0, 0], -2147483648, 0);
+  assert.equal(q.stalled(2147483647, 10, -2147483648, 10), true); // gain -4294967295 is below minGain, so only the age counts
+});
+
 console.log(`${passed} tests passed`);

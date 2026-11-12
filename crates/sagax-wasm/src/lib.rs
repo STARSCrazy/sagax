@@ -1780,10 +1780,10 @@ pub extern "C" fn sx_nearest(n: u32, px: i32, py: i32, k: u32, divisor: i32) -> 
     SCRATCH.with(|s| {
         let mut s = s.borrow_mut();
         let n = n as usize;
-        if s.len() < n * 3 {
+        let Some(len) = n.checked_mul(3).filter(|&len| len <= s.len()) else {
             return ERROR_ARGUMENT;
-        }
-        let list: Vec<(u32, i32, i32)> = s[..n * 3]
+        };
+        let list: Vec<(u32, i32, i32)> = s[..len]
             .as_chunks::<3>()
             .0
             .iter()

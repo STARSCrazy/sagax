@@ -669,6 +669,12 @@ export class Machine {
 const u32 = (v) => v >>> 0;
 const i32 = (v) => v | 0;
 
+/** A capacity: an integer from 1 to 2^31 - 1, else RangeError. */
+function capacityOf(c) {
+  if (!Number.isInteger(c) || c < 1 || c > 0x7fffffff) throw new RangeError("Sagax: capacity must be an integer from 1 to 2147483647");
+  return c;
+}
+
 /**
  * What a character has seen: the last place and time of things, by id, for at
  * most `capacity` ids (the oldest is dropped when full). Times are the game's
@@ -681,7 +687,7 @@ const i32 = (v) => v | 0;
 export class Sightings {
   constructor(x, capacity) {
     this.x = x;
-    this.handle = x.sx_sightings_new(u32(capacity));
+    this.handle = x.sx_sightings_new(capacityOf(capacity));
     if (!this.handle) throw new RangeError('Sagax: capacity must be at least 1');
   }
 
@@ -762,7 +768,7 @@ export class Sightings {
 export class Zones {
   constructor(x, capacity, radius, lifetime) {
     this.x = x;
-    this.handle = x.sx_zones_new(u32(capacity), i32(radius), u32(lifetime));
+    this.handle = x.sx_zones_new(capacityOf(capacity), i32(radius), u32(lifetime));
     if (!this.handle) throw new RangeError('Sagax: capacity must be at least 1');
   }
 
@@ -816,7 +822,7 @@ export class Zones {
 export class Ignore {
   constructor(x, capacity) {
     this.x = x;
-    this.handle = x.sx_ignore_new(u32(capacity));
+    this.handle = x.sx_ignore_new(capacityOf(capacity));
     if (!this.handle) throw new RangeError('Sagax: capacity must be at least 1');
   }
 
@@ -924,7 +930,7 @@ export class Radio {
   take() {
     if (!this.pending) return null;
     this.pending = false;
-    return this.pos;
+    return [...this.pos];
   }
 
   /** Drops a pending call; the cooldown keeps running. */
@@ -968,7 +974,8 @@ const PATTERN_DEFAULT = {
 
 /** The scratch buffer of the module, `count` integers long, filled from values. */
 function scratch(x, count, values = []) {
-  const view = new Int32Array(x.memory.buffer, x.sx_scratch(count), Math.max(count, 1));
+  const ptr = x.sx_scratch(count);
+  const view = new Int32Array(x.memory.buffer, ptr, Math.max(count, 1));
   view.set(values.map(i32));
   return view;
 }
@@ -976,10 +983,10 @@ function scratch(x, count, values = []) {
 /** The ids of the k candidates {id, x, y} nearest to [px, py], nearest first. */
 function nearestOf(x, candidates, [px, py], k, divisor = 1) {
   const n = candidates.length;
-  const view = scratch(x, Math.max(n * 3, k, 1), candidates.flatMap((c) => [c.id, c.x, c.y]));
+  const ptr = scratch(x, Math.max(n * 3, Math.min(k, n), 1), candidates.flatMap((c) => [c.id, c.x, c.y])).byteOffset;
   const count = x.sx_nearest(n, i32(px), i32(py), u32(k), i32(divisor));
   if (count < 0) throw new RangeError('Sagax: bad candidates');
-  return Array.from(new Uint32Array(x.memory.buffer, view.byteOffset, count));
+  return Array.from(new Uint32Array(x.memory.buffer, ptr, count));
 }
 
 /** Search point of an agent: [x, y, z] or null past the last step. */
@@ -994,15 +1001,15 @@ function searchPointOf(x, agent, step, [cx, cy, cz], pattern) {
     const fill = (list) => [...list, ...new Array(8 - list.length).fill(0)];
     const offsets = fill(p.offsets);
     const distances = fill(p.distances.slice(0, p.offsets.length));
-    at = scratch(x, 23, [p.headingStep, p.firstDistance, p.offsets.length, ...offsets, ...distances, ...p.min, ...p.max]);
+    at = scratch(x, 23, [p.headingStep, p.firstDistance, p.offsets.length, ...offsets, ...distances, ...p.min, ...p.max]).byteOffset;
     custom = 1;
   } else {
-    at = scratch(x, 3);
+    at = scratch(x, 3).byteOffset;
   }
   const r = x.sx_search_point(u32(agent), u32(step), i32(cx), i32(cy), i32(cz), custom);
   if (r < 0) throw new RangeError('Sagax: bad search pattern');
   if (r === 0) return null;
-  return Array.from(new Int32Array(x.memory.buffer, at.byteOffset, 3));
+  return Array.from(new Int32Array(x.memory.buffer, at, 3));
 }
 
 /** Heading while looking around; offsets default to a quarter turn each way. */
