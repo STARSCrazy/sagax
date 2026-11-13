@@ -18,6 +18,7 @@
 
 const BLOCKED = 0xffffffff;
 const DIRECTIONS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+const HEX_WALLS_CHANGED = 'Sagax: hex wall bits changed in 0.9 (offset bits); use addHexWall';
 const STATUS = ['idle', 'running', 'found', 'partial', 'unreachable', 'done'];
 const OUTPUT = { cells: 0, turns: 1, smooth: 2 };
 const TRACE = [null, 'started', 'expanded', 'improved', 'paused', 'finished'];
@@ -109,7 +110,12 @@ export class Grid {
   costs() {
     return new Uint32Array(this.x.memory.buffer, this.x.sx_grid_costs(this.handle), this.width * this.height);
   }
+  /** Raw wall bits, square grids only: bit i blocks the move by DIRECTIONS[i]. */
   walls() {
+    if (this.hex !== null) throw new TypeError(HEX_WALLS_CHANGED);
+    return this.#wallBits();
+  }
+  #wallBits() {
     return new Uint8Array(this.x.memory.buffer, this.x.sx_grid_walls(this.handle), this.width * this.height);
   }
   zones() {
@@ -118,7 +124,7 @@ export class Grid {
 
   /** Bulk filling, row by row (width * height entries each). */
   setCosts(array) { this.costs().set(array); }
-  setWalls(array) { this.walls().set(array); }
+  setWalls(array) { this.walls().set(array); } // square grids only
   setAllZones(array) { this.zones().set(array); }
 
   contains(x, y) {
@@ -133,17 +139,17 @@ export class Grid {
     this.setCost(x, y, BLOCKED);
   }
 
-  /** Square grids: a wall between x, y and its neighbour dx, dy away (both ways). */
+  /** A wall between x, y and its neighbour dx, dy away (both ways); on hex grids dx, dy is the neighbour's offset. */
   addWall(x, y, dx, dy) {
     const there = DIRECTIONS.findIndex(([a, b]) => a === dx && b === dy);
     const back = DIRECTIONS.findIndex(([a, b]) => a === -dx && b === -dy);
     if (there < 0) return;
-    const walls = this.walls();
+    const walls = this.#wallBits();
     if (this.contains(x, y)) walls[y * this.width + x] |= 1 << there;
     if (this.contains(x + dx, y + dy)) walls[(y + dy) * this.width + x + dx] |= 1 << back;
   }
 
-  /** Hex grids: the six neighbours of x, y; the index is the direction and wall bit. */
+  /** Hex grids: the six neighbours of x, y; the index is the direction (as for addHexWall). */
   hexNeighbors(x, y) {
     if (this.x.sx_hex_neighbors(this.handle, x, y) !== 6) throw new RangeError('Sagax: not a hex grid');
     return this.readCells(6, 2);
@@ -152,10 +158,8 @@ export class Grid {
   /** Hex grids: a wall between x, y and its neighbour in direction dir (both ways). */
   addHexWall(x, y, dir) {
     const n = this.hexNeighbors(x, y)[dir];
-    const back = this.hexNeighbors(n.x, n.y).findIndex((c) => c.x === x && c.y === y);
-    const walls = this.walls();
-    if (this.contains(x, y)) walls[y * this.width + x] |= 1 << dir;
-    if (back >= 0 && this.contains(n.x, n.y)) walls[n.y * this.width + n.x] |= 1 << back;
+    if (n === undefined) return;
+    this.addWall(x, y, n.x - x, n.y - y);
   }
 
   /** Zone bits of a cell (bit i: inside zone i, e.g. the reach of enemy i). */

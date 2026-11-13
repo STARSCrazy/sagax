@@ -9,7 +9,12 @@ use crate::search::{Cost, Goal, Graph};
 
 pub use sagax_core::Cell;
 
-/// The game's map as the grid search sees it.
+/// The game's map as the grid search sees it, on square and hex grids alike.
+///
+/// A move is always asked as the offset `dx`, `dy` (each in -1..=1) from a
+/// cell to its neighbour. On hex grids in offset coordinates the six
+/// neighbours of a cell are six of these eight offsets (which six depends on
+/// the row or column).
 pub trait CellMap {
     /// Can one walk from `from` into the neighbour `from.x + dx, from.y + dy`
     /// (`dx`, `dy` in -1..=1)? Returns the level one arrives on there.
@@ -30,13 +35,21 @@ pub trait CellMap {
     }
 
     /// The answers of [`step`](CellMap::step) (or, with `from_start`,
-    /// [`start_step`](CellMap::start_step)) for the first `count` (4 or 8)
-    /// directions of [`DenseGrid::DIRECTIONS`] at once: `out[i]` for
-    /// direction `i`. The default asks one direction after the other;
+    /// [`start_step`](CellMap::start_step)) for several neighbours at once:
+    /// `out[i]` for the offset `offsets[i]`. `offsets.len() == out.len()`,
+    /// at most 8. Square grids pass the first 4 or 8 entries of
+    /// [`DenseGrid::DIRECTIONS`], hex grids the six neighbour offsets in hex
+    /// direction order 0..6. The default asks one offset after the other;
     /// override it when the map answers all neighbours more cheaply together.
-    fn steps(&mut self, from: Cell, from_start: bool, count: usize, out: &mut [Option<i32>; 8]) {
-        for (i, &(dx, dy)) in DIRECTIONS[..count].iter().enumerate() {
-            out[i] = if from_start {
+    fn steps(
+        &mut self,
+        from: Cell,
+        from_start: bool,
+        offsets: &[(i32, i32)],
+        out: &mut [Option<i32>],
+    ) {
+        for (o, &(dx, dy)) in out.iter_mut().zip(offsets) {
+            *o = if from_start {
                 self.start_step(from, dx, dy)
             } else {
                 self.step(from, dx, dy)
@@ -140,7 +153,12 @@ impl<M: CellMap> Graph for GridGraph<M> {
         // every direction is asked once; diagonals reuse the straight
         // answers for the corner check (8 map questions per cell, not 16)
         let mut answers = [None; 8];
-        self.map.steps(node, from_start, count, &mut answers);
+        self.map.steps(
+            node,
+            from_start,
+            &DIRECTIONS[..count],
+            &mut answers[..count],
+        );
         for (i, &(dx, dy)) in DIRECTIONS[..count].iter().enumerate() {
             let Some(level) = answers[i] else {
                 continue;
@@ -234,8 +252,11 @@ pub fn turning_points(path: &[Cell], first_always: bool, out: &mut Vec<Cell>) {
 ///
 /// Per cell it holds:
 /// * an extra cost of entering it, or [`BLOCKED`](Self::BLOCKED);
-/// * walls: 8 bits, bit `i` forbids the move in direction `i` of
-///   [`DenseGrid::DIRECTIONS`] out of this cell (walls between cells);
+/// * walls: 8 bits, bit `i` forbids the move by the offset in entry `i` of
+///   [`DenseGrid::DIRECTIONS`] out of this cell (walls between cells). This
+///   holds on hex grids too: a wall to a hex neighbour is the bit of the
+///   neighbour's offset (neighbour minus cell), set with
+///   [`add_wall`](Self::add_wall);
 /// * zones: 32 bits, one per zone (e.g. an enemy's reach). A move that leaves
 ///   zones costs [`leave_cost`](Self::set_leave_cost) for each zone left.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -252,7 +273,8 @@ impl DenseGrid {
     /// A cell value that cannot be entered.
     pub const BLOCKED: Cost = Cost::MAX;
 
-    /// The 8 move directions; bit `i` of a cell's walls belongs to entry `i`.
+    /// The 8 neighbour offsets; bit `i` of a cell's walls belongs to entry `i`
+    /// (on square and hex grids).
     pub const DIRECTIONS: [(i32, i32); 8] = DIRECTIONS;
 
     /// A `width` x `height` grid of open cells with extra cost 0, no walls and
@@ -309,20 +331,23 @@ impl DenseGrid {
         self.get(x, y).is_some_and(|c| c != Self::BLOCKED)
     }
 
-    /// The wall bits of `x`, `y` (0 off the grid).
-    pub fn walls(&self, x: i32, y: i32) -> u8 {
+    /// The wall bits of `x`, `y` (0 off the grid): bit `i` blocks the offset
+    /// in entry `i` of [`DIRECTIONS`](Self::DIRECTIONS).
+    pub fn wall_bits(&self, x: i32, y: i32) -> u8 {
         self.slot(x, y).map_or(0, |i| self.walls[i])
     }
 
-    /// Sets all wall bits of `x`, `y`. Ignored off the grid.
-    pub fn set_walls(&mut self, x: i32, y: i32, walls: u8) {
+    /// Sets all wall bits of `x`, `y` (see [`wall_bits`](Self::wall_bits)).
+    /// Ignored off the grid.
+    pub fn set_wall_bits(&mut self, x: i32, y: i32, walls: u8) {
         if let Some(i) = self.slot(x, y) {
             self.walls[i] = walls;
         }
     }
 
     /// Puts a wall between `x`, `y` and its neighbour `dx`, `dy` away, in both
-    /// directions. Not a neighbour or off the grid: ignored.
+    /// directions; on hex grids `dx`, `dy` is the hex neighbour's offset.
+    /// Not a neighbour or off the grid: ignored.
     pub fn add_wall(&mut self, x: i32, y: i32, dx: i32, dy: i32) {
         let (Some(there), Some(back)) = (direction_index(dx, dy), direction_index(-dx, -dy)) else {
             return;
@@ -371,8 +396,9 @@ impl DenseGrid {
         &mut self.cells
     }
 
-    /// All wall bits, row by row, for bulk filling.
-    pub fn walls_mut(&mut self) -> &mut [u8] {
+    /// All wall bits (see [`wall_bits`](Self::wall_bits)), row by row, for
+    /// bulk filling.
+    pub fn wall_bits_mut(&mut self) -> &mut [u8] {
         &mut self.walls
     }
 
@@ -389,7 +415,7 @@ fn direction_index(dx: i32, dy: i32) -> Option<usize> {
 impl CellMap for DenseGrid {
     fn step(&mut self, from: Cell, dx: i32, dy: i32) -> Option<i32> {
         let blocked_by_wall =
-            direction_index(dx, dy).is_some_and(|i| self.walls(from.x, from.y) & (1 << i) != 0);
+            direction_index(dx, dy).is_some_and(|i| self.wall_bits(from.x, from.y) & (1 << i) != 0);
         (!blocked_by_wall && self.open(from.x + dx, from.y + dy)).then_some(from.level)
     }
 
@@ -414,8 +440,14 @@ impl<M: CellMap + ?Sized> CellMap for &mut M {
         (**self).move_cost(from, to)
     }
 
-    fn steps(&mut self, from: Cell, from_start: bool, count: usize, out: &mut [Option<i32>; 8]) {
-        (**self).steps(from, from_start, count, out);
+    fn steps(
+        &mut self,
+        from: Cell,
+        from_start: bool,
+        offsets: &[(i32, i32)],
+        out: &mut [Option<i32>],
+    ) {
+        (**self).steps(from, from_start, offsets, out);
     }
 }
 

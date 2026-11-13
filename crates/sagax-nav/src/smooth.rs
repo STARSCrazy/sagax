@@ -14,7 +14,7 @@
 //! into [`smooth_path`].
 
 use crate::grid::{Cell, CellMap};
-use crate::hex::{HexLayout, HexMap};
+use crate::hex::HexLayout;
 use crate::search::Cost;
 
 /// Keeps from `path` only the points a walker needs: the start, every point
@@ -120,13 +120,13 @@ pub fn line_clear_within<M: CellMap>(map: &mut M, a: Cell, b: Cell, max_extra: C
 /// line touches must be entered by an allowed step without extra cost. Where
 /// the line runs exactly along the edge between two hexes, both sides must
 /// be clear.
-pub fn hex_line_clear<M: HexMap>(map: &mut M, layout: HexLayout, a: Cell, b: Cell) -> bool {
+pub fn hex_line_clear<M: CellMap>(map: &mut M, layout: HexLayout, a: Cell, b: Cell) -> bool {
     hex_line_clear_within(map, layout, a, b, 0)
 }
 
 /// [`hex_line_clear`] that also crosses hexes whose extra move cost is at
 /// most `max_extra`.
-pub fn hex_line_clear_within<M: HexMap>(
+pub fn hex_line_clear_within<M: CellMap>(
     map: &mut M,
     layout: HexLayout,
     a: Cell,
@@ -156,12 +156,12 @@ pub fn hex_line_clear_within<M: HexMap>(
             if (x, y) == (cur.x, cur.y) {
                 continue;
             }
-            let Some(dir) = layout.direction(cur.x, cur.y, x, y) else {
+            if layout.direction(cur.x, cur.y, x, y).is_none() {
                 return false; // cannot happen for a line, but never jump
-            };
+            }
             let next = Cell::new(x, y, cur.level);
-            if HexMap::step(map, cur, dir, (x, y)) != Some(cur.level)
-                || HexMap::move_cost(map, cur, next).is_none_or(|c| c > max_extra)
+            if map.step(cur, x - cur.x, y - cur.y) != Some(cur.level)
+                || map.move_cost(cur, next).is_none_or(|c| c > max_extra)
             {
                 return false;
             }

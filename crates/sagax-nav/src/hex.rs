@@ -4,9 +4,12 @@
 //! and Foundry VTT store them. Every second row (or column) is shifted by half
 //! a cell; [`HexLayout`] says which. Internally distances use axial
 //! coordinates. Each cell has six neighbours, numbered 0..6 so that `i` and
-//! `(i + 3) % 6` are opposite; a wall bit `i` blocks direction `i`.
+//! `(i + 3) % 6` are opposite. The map is the same [`CellMap`] as on square
+//! grids: a move is asked as the offset of the neighbour (each part in
+//! -1..=1), and a [`DenseGrid`](crate::grid::DenseGrid) wall bit belongs to
+//! that offset, as on square grids.
 
-use crate::grid::{Cell, DenseGrid};
+use crate::grid::{Cell, CellMap};
 use crate::search::{Cost, Goal, Graph};
 
 pub use sagax_core::{HexLayout, axial_step};
@@ -38,83 +41,9 @@ pub fn hex_turning_points(
     }
 }
 
-/// The game's hex map as the search sees it.
-pub trait HexMap {
-    /// Can one walk from `from` in direction `dir` into the cell `to`
-    /// (its neighbour)? Returns the level one arrives on there.
-    fn step(&mut self, from: Cell, dir: usize, to: (i32, i32)) -> Option<i32>;
-
-    /// As [`step`](HexMap::step), for moves off the start cell (where the
-    /// walker may not stand in the cell's middle). Defaults to `step`.
-    fn start_step(&mut self, from: Cell, dir: usize, to: (i32, i32)) -> Option<i32> {
-        self.step(from, dir, to)
-    }
-
-    /// Extra cost of the move on top of the step cost; `None` forbids it.
-    fn move_cost(&mut self, from: Cell, to: Cell) -> Option<Cost> {
-        let _ = (from, to);
-        Some(0)
-    }
-
-    /// The answers for all six directions at once (`to[i]` is the neighbour
-    /// in direction `i`): `out[i]` as [`step`](HexMap::step) or, with
-    /// `from_start`, [`start_step`](HexMap::start_step) would answer. The
-    /// default asks one direction after the other.
-    fn steps(
-        &mut self,
-        from: Cell,
-        from_start: bool,
-        to: &[(i32, i32); 6],
-        out: &mut [Option<i32>; 6],
-    ) {
-        for dir in 0..6 {
-            out[dir] = if from_start {
-                self.start_step(from, dir, to[dir])
-            } else {
-                self.step(from, dir, to[dir])
-            };
-        }
-    }
-}
-
-/// [`DenseGrid`] as a hex map: wall bit `i` blocks hex direction `i`; costs
-/// and zones work as on square grids.
-impl HexMap for DenseGrid {
-    fn step(&mut self, from: Cell, dir: usize, to: (i32, i32)) -> Option<i32> {
-        let wall = self.walls(from.x, from.y) & (1 << dir) != 0;
-        (!wall && self.open(to.0, to.1)).then_some(from.level)
-    }
-
-    fn move_cost(&mut self, from: Cell, to: Cell) -> Option<Cost> {
-        crate::grid::CellMap::move_cost(self, from, to)
-    }
-}
-
-impl<M: HexMap + ?Sized> HexMap for &mut M {
-    fn step(&mut self, from: Cell, dir: usize, to: (i32, i32)) -> Option<i32> {
-        HexMap::step(&mut **self, from, dir, to)
-    }
-
-    fn start_step(&mut self, from: Cell, dir: usize, to: (i32, i32)) -> Option<i32> {
-        HexMap::start_step(&mut **self, from, dir, to)
-    }
-
-    fn move_cost(&mut self, from: Cell, to: Cell) -> Option<Cost> {
-        HexMap::move_cost(&mut **self, from, to)
-    }
-
-    fn steps(
-        &mut self,
-        from: Cell,
-        from_start: bool,
-        to: &[(i32, i32); 6],
-        out: &mut [Option<i32>; 6],
-    ) {
-        HexMap::steps(&mut **self, from, from_start, to, out);
-    }
-}
-
-/// A [`HexMap`] seen as a [`Graph`]; every step costs `step_cost` plus extras.
+/// A [`CellMap`] seen as a hex [`Graph`]; every step costs `step_cost` plus
+/// extras. The map is asked with the offset of each neighbour (neighbour
+/// minus cell), in hex direction order 0..6.
 pub struct HexGraph<M> {
     /// The game's map.
     pub map: M,
@@ -122,11 +51,11 @@ pub struct HexGraph<M> {
     pub layout: HexLayout,
     /// Cost of one step.
     pub step_cost: Cost,
-    /// Moves off this cell use [`HexMap::start_step`].
+    /// Moves off this cell use [`CellMap::start_step`].
     pub start: Option<Cell>,
 }
 
-impl<M: HexMap> HexGraph<M> {
+impl<M: CellMap> HexGraph<M> {
     /// A hex graph; `start` selects the cell whose moves use `start_step`.
     pub fn new(map: M, layout: HexLayout, step_cost: Cost, start: Option<Cell>) -> Self {
         Self {
@@ -138,21 +67,22 @@ impl<M: HexMap> HexGraph<M> {
     }
 }
 
-impl<M: HexMap> Graph for HexGraph<M> {
+impl<M: CellMap> Graph for HexGraph<M> {
     type Node = Cell;
 
     fn neighbors(&mut self, node: Cell, out: &mut Vec<(Cell, Cost)>) {
-        let to: [(i32, i32); 6] =
-            std::array::from_fn(|dir| self.layout.neighbor(node.x, node.y, dir));
+        let offsets: [(i32, i32); 6] = std::array::from_fn(|dir| {
+            let (x, y) = self.layout.neighbor(node.x, node.y, dir);
+            (x - node.x, y - node.y)
+        });
         let mut answers = [None; 6];
         self.map
-            .steps(node, self.start == Some(node), &to, &mut answers);
-        for dir in 0..6 {
-            let to = to[dir];
-            let Some(level) = answers[dir] else {
+            .steps(node, self.start == Some(node), &offsets, &mut answers);
+        for (&(dx, dy), answer) in offsets.iter().zip(answers) {
+            let Some(level) = answer else {
                 continue;
             };
-            let next = Cell::new(to.0, to.1, level);
+            let next = Cell::new(node.x + dx, node.y + dy, level);
             let Some(extra) = self.map.move_cost(node, next) else {
                 continue;
             };
@@ -192,6 +122,7 @@ impl Goal<Cell> for HexGoal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grid::DenseGrid;
 
     const ALL: [HexLayout; 4] = [
         HexLayout::OddR,
@@ -247,20 +178,57 @@ mod tests {
         let layout = HexLayout::OddR;
         let mut grid = DenseGrid::new(5, 5);
         let (nx, ny) = layout.neighbor(2, 2, 0);
-        grid.set_walls(2, 2, 1 << 0);
-        let back = layout.direction(nx, ny, 2, 2).unwrap();
-        grid.set_walls(nx, ny, 1 << back);
+        grid.add_wall(2, 2, nx - 2, ny - 2);
+        let (bx, by) = (2 - nx, 2 - ny);
+        assert_eq!(grid.step(Cell::new(2, 2, 0), nx - 2, ny - 2), None);
+        assert_eq!(grid.step(Cell::new(nx, ny, 0), bx, by), None);
+        let (ox, oy) = layout.neighbor(2, 2, 1);
+        assert_eq!(grid.step(Cell::new(2, 2, 0), ox - 2, oy - 2), Some(0));
+    }
+
+    #[test]
+    fn hex_wall_bits_follow_offsets() {
+        let layout = HexLayout::OddR;
+        let mut grid = DenseGrid::new(5, 5);
+        let (nx, ny) = layout.neighbor(2, 2, 0);
+        let (dx, dy) = (nx - 2, ny - 2);
+        grid.add_wall(2, 2, dx, dy);
+        assert_eq!(CellMap::step(&mut grid, Cell::new(2, 2, 0), dx, dy), None);
         assert_eq!(
-            HexMap::step(&mut grid, Cell::new(2, 2, 0), 0, (nx, ny)),
+            CellMap::step(&mut grid, Cell::new(nx, ny, 0), -dx, -dy),
             None
         );
+        let (ox, oy) = layout.neighbor(2, 2, 1);
         assert_eq!(
-            HexMap::step(&mut grid, Cell::new(nx, ny, 0), back, (2, 2)),
-            None
-        );
-        assert_eq!(
-            HexMap::step(&mut grid, Cell::new(2, 2, 0), 1, layout.neighbor(2, 2, 1)),
+            CellMap::step(&mut grid, Cell::new(2, 2, 0), ox - 2, oy - 2),
             Some(0)
         );
+        // the bit is the offset's entry in DenseGrid::DIRECTIONS
+        let bit = DenseGrid::DIRECTIONS
+            .iter()
+            .position(|&d| d == (dx, dy))
+            .unwrap();
+        assert_eq!(grid.wall_bits(2, 2), 1 << bit);
+
+        // the hex search honours a wall set by offset in every direction,
+        // on even and odd rows and columns of every layout
+        for layout in ALL {
+            for (x, y) in [(2, 2), (3, 3)] {
+                for dir in 0..6 {
+                    let mut grid = DenseGrid::new(7, 7);
+                    let (wx, wy) = layout.neighbor(x, y, dir);
+                    grid.add_wall(x, y, wx - x, wy - y);
+                    let mut g = HexGraph::new(&mut grid, layout, 1, None);
+                    let mut out = Vec::new();
+                    g.neighbors(Cell::new(x, y, 0), &mut out);
+                    assert_eq!(out.len(), 5, "{layout:?} ({x}, {y}) dir {dir}");
+                    assert!(out.iter().all(|&(c, _)| (c.x, c.y) != (wx, wy)));
+                    out.clear();
+                    g.neighbors(Cell::new(wx, wy, 0), &mut out);
+                    assert_eq!(out.len(), 5, "{layout:?} back to ({x}, {y}) dir {dir}");
+                    assert!(out.iter().all(|&(c, _)| (c.x, c.y) != (x, y)));
+                }
+            }
+        }
     }
 }

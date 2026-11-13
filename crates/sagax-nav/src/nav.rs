@@ -24,7 +24,6 @@ use sagax_core::NoopSink;
 
 use crate::formation::Formation;
 use crate::grid::{Cell, CellMap};
-use crate::hex::HexMap;
 use crate::search::{Cost, Goal, Limits, NoGoal, Search, SearchStatus};
 use crate::topology::Topology;
 use crate::trace::{TraceSink, Tracer};
@@ -245,7 +244,7 @@ impl Navigator {
     /// let (s, g) = (Cell::new(0, 0, 0), [Cell::new(5, 5, 0)]);
     /// nav.find_path(&mut map, s, &g, 5usize);
     /// ```
-    pub fn find_path<M: CellMap + HexMap>(
+    pub fn find_path<M: CellMap>(
         &mut self,
         map: &mut M,
         start: Cell,
@@ -271,7 +270,7 @@ impl Navigator {
     /// Goes on with the last search for another `budget` cells (after
     /// [`Status::Running`]). Without a search to go on with the status is
     /// [`Status::Idle`].
-    pub fn continue_search<M: CellMap + HexMap>(
+    pub fn continue_search<M: CellMap>(
         &mut self,
         map: &mut M,
         budget: impl Into<Budget>,
@@ -286,18 +285,14 @@ impl Navigator {
 
     /// Old name of [`continue_search`](Self::continue_search).
     #[deprecated(note = "renamed to continue_search")]
-    pub fn resume<M: CellMap + HexMap>(
-        &mut self,
-        map: &mut M,
-        budget: impl Into<Budget>,
-    ) -> Report {
+    pub fn resume<M: CellMap>(&mut self, map: &mut M, budget: impl Into<Budget>) -> Report {
         self.continue_search(map, budget)
     }
 
     /// Every cell reachable from `start` at a cost of at most `max_cost`,
     /// expanding at most `budget` cells. Afterwards [`area`](Self::area)
     /// lists them and [`path_to`](Self::path_to) gives the way to each.
-    pub fn reachable<M: CellMap + HexMap>(
+    pub fn reachable<M: CellMap>(
         &mut self,
         map: &mut M,
         start: Cell,
@@ -327,7 +322,7 @@ impl Navigator {
     /// threats, give cells near them an extra move cost.
     ///
     /// The first call reserves a second search of the same capacity.
-    pub fn flee<M: CellMap + HexMap>(
+    pub fn flee<M: CellMap>(
         &mut self,
         map: &mut M,
         start: Cell,
@@ -402,7 +397,7 @@ impl Navigator {
     }
 
     /// The current way as `output`.
-    pub fn output<M: CellMap + HexMap>(&mut self, map: &mut M, output: Output) -> &[Cell] {
+    pub fn output<M: CellMap>(&mut self, map: &mut M, output: Output) -> &[Cell] {
         let way = WayOptions {
             keep_first: self.keep_first,
             smooth_max_extra: self.smooth_max_extra,
@@ -425,11 +420,7 @@ impl Navigator {
     /// Places the members of `formation` along the current way (the
     /// leader's): `result[k][i]` is member `k`'s cell while the leader stands
     /// on `path()[i]`. See [`Topology::place_members`].
-    pub fn formation<M: CellMap + HexMap>(
-        &mut self,
-        map: &mut M,
-        formation: &Formation,
-    ) -> &[Vec<Cell>] {
+    pub fn formation<M: CellMap>(&mut self, map: &mut M, formation: &Formation) -> &[Vec<Cell>] {
         self.topology
             .place_members(map, &self.path, formation, &mut self.members);
         &self.members
@@ -440,7 +431,7 @@ impl Navigator {
         &self.members
     }
 
-    fn run_path<M: CellMap + HexMap>(&mut self, map: &mut M, budget: Budget) -> Report {
+    fn run_path<M: CellMap>(&mut self, map: &mut M, budget: Budget) -> Report {
         let goal = Goals {
             cells: &self.goals,
             topology: self.topology,
@@ -470,7 +461,7 @@ impl Navigator {
         }
     }
 
-    fn run_area<M: CellMap + HexMap>(&mut self, map: &mut M, budget: Budget) -> Report {
+    fn run_area<M: CellMap>(&mut self, map: &mut M, budget: Budget) -> Report {
         let mut graph = self.topology.graph(&mut *map, Some(self.start));
         let status = match self.tracer.as_deref_mut() {
             None => self
@@ -507,7 +498,7 @@ pub struct WayOptions {
 /// Writes `path` (start first) as `output` into `out`; the list always
 /// begins with the start and ends at the last cell. `scratch` is reused
 /// memory.
-pub fn write_way<M: CellMap + HexMap>(
+pub fn write_way<M: CellMap>(
     topology: Topology,
     map: &mut M,
     path: &[Cell],
@@ -688,6 +679,44 @@ mod tests {
             let members = nav.formation(&mut map, &Formation::wedge_hex(3));
             assert_eq!(members.len(), 3);
             assert!(members.iter().all(|m| m.len() == cells));
+        }
+    }
+
+    #[test]
+    fn square_only_map_runs_on_hex() {
+        /// A 15 x 15 open map that implements only `CellMap`.
+        struct Open;
+        impl CellMap for Open {
+            fn step(&mut self, from: Cell, dx: i32, dy: i32) -> Option<i32> {
+                let (x, y) = (from.x + dx, from.y + dy);
+                ((0..15).contains(&x) && (0..15).contains(&y)).then_some(from.level)
+            }
+        }
+        for layout in [
+            HexLayout::OddR,
+            HexLayout::EvenR,
+            HexLayout::OddQ,
+            HexLayout::EvenQ,
+        ] {
+            let mut nav = Navigator::new(
+                Topology::Hex {
+                    layout,
+                    step_cost: 1,
+                },
+                10_000,
+            );
+            let report = nav.find_path(
+                &mut Open,
+                Cell::new(2, 3, 0),
+                &[Cell::new(12, 9, 0)],
+                Budget::UNLIMITED,
+            );
+            assert_eq!(report.status, Status::Found, "{layout:?}");
+            assert_eq!(
+                report.cost as i32,
+                layout.distance(2, 3, 12, 9),
+                "{layout:?}"
+            );
         }
     }
 

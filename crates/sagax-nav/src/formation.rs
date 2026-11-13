@@ -21,7 +21,7 @@
 //! ([`rotate_hex`]).
 
 use crate::grid::{Cell, CellMap, DenseGrid};
-use crate::hex::{HexLayout, HexMap, axial_step};
+use crate::hex::{HexLayout, axial_step};
 use crate::smooth::{hex_line_clear, line_clear};
 
 /// Slot offsets relative to the leader: `(forward, right)` in cells, for a
@@ -131,7 +131,7 @@ pub fn rotate_hex((forward, right): (i32, i32), dir: usize) -> (i32, i32) {
 /// [`rotate_hex`]; [`Formation::block_of_four`] and [`Formation::column`]
 /// keep their meaning, [`Formation::wedge_hex`] is the hex wedge. Sight is
 /// [`hex_line_clear`].
-pub fn place_members_hex<M: HexMap>(
+pub fn place_members_hex<M: CellMap>(
     map: &mut M,
     layout: HexLayout,
     leader_path: &[Cell],

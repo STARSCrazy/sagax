@@ -14,8 +14,8 @@ use sagax_nav::Limits;
 use sagax_nav::dstar::{DStarLite, DStarStatus};
 use sagax_nav::flow::FlowField;
 use sagax_nav::formation::Formation;
-use sagax_nav::grid::{Cell, CellMap, DenseGrid, GridRules, Moves};
-use sagax_nav::hex::{HexLayout, HexMap};
+use sagax_nav::grid::{Cell, CellMap, GridRules, Moves};
+use sagax_nav::hex::HexLayout;
 use sagax_nav::nav::{Budget, Navigator, Output, Report, Status, WayOptions, write_way};
 use sagax_nav::topology::Topology;
 use sagax_nav::trace::{TraceEvent, TraceSink, Tracer};
@@ -343,68 +343,31 @@ impl CellMap for CallbackMap {
         self.extra(from, to)
     }
 
-    fn steps(&mut self, from: Cell, from_start: bool, count: usize, out: &mut [Option<i32>; 8]) {
-        let mut offsets = [0i32; 16];
-        for (i, &(dx, dy)) in DenseGrid::DIRECTIONS[..count].iter().enumerate() {
-            offsets[2 * i] = dx;
-            offsets[2 * i + 1] = dy;
-        }
-        let mut levels = [-1i32; 8];
-        if self.batch(
-            from,
-            from_start,
-            &offsets[..2 * count],
-            &mut levels[..count],
-        ) {
-            for i in 0..count {
-                out[i] = (levels[i] >= 0).then_some(levels[i]);
-            }
-            return;
-        }
-        let f = self.step_fn(from_start);
-        for (i, &(dx, dy)) in DenseGrid::DIRECTIONS[..count].iter().enumerate() {
-            out[i] = self.call(f, from, dx, dy);
-        }
-    }
-}
-
-/// Hex grids: the step callback is asked with the offset (dx, dy) of the
-/// neighbour cell, each in -1..1.
-impl HexMap for CallbackMap {
-    fn step(&mut self, from: Cell, _dir: usize, to: (i32, i32)) -> Option<i32> {
-        self.call(self.step, from, to.0 - from.x, to.1 - from.y)
-    }
-
-    fn start_step(&mut self, from: Cell, _dir: usize, to: (i32, i32)) -> Option<i32> {
-        self.call(self.step_fn(true), from, to.0 - from.x, to.1 - from.y)
-    }
-
-    fn move_cost(&mut self, from: Cell, to: Cell) -> Option<Cost> {
-        self.extra(from, to)
-    }
-
+    /// Square and hex grids alike: `offsets` are the neighbour offsets
+    /// (dx, dy), each in -1..1, in the order the search asks them.
     fn steps(
         &mut self,
         from: Cell,
         from_start: bool,
-        to: &[(i32, i32); 6],
-        out: &mut [Option<i32>; 6],
+        offsets: &[(i32, i32)],
+        out: &mut [Option<i32>],
     ) {
-        let mut offsets = [0i32; 12];
-        for (i, &(x, y)) in to.iter().enumerate() {
-            offsets[2 * i] = x - from.x;
-            offsets[2 * i + 1] = y - from.y;
+        let count = offsets.len().min(out.len()).min(8);
+        let mut flat = [0i32; 16];
+        for (i, &(dx, dy)) in offsets[..count].iter().enumerate() {
+            flat[2 * i] = dx;
+            flat[2 * i + 1] = dy;
         }
-        let mut levels = [-1i32; 6];
-        if self.batch(from, from_start, &offsets, &mut levels) {
-            for i in 0..6 {
-                out[i] = (levels[i] >= 0).then_some(levels[i]);
+        let mut levels = [-1i32; 8];
+        if self.batch(from, from_start, &flat[..2 * count], &mut levels[..count]) {
+            for (o, &level) in out.iter_mut().zip(&levels[..count]) {
+                *o = (level >= 0).then_some(level);
             }
             return;
         }
         let f = self.step_fn(from_start);
-        for i in 0..6 {
-            out[i] = self.call(f, from, offsets[2 * i], offsets[2 * i + 1]);
+        for (o, &(dx, dy)) in out.iter_mut().zip(&offsets[..count]) {
+            *o = self.call(f, from, dx, dy);
         }
     }
 }

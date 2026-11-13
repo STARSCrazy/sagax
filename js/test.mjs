@@ -109,6 +109,23 @@ test('hex grid: distance, walls between hexes, reachable', () => {
   g.free();
 });
 
+test('hex walls: raw bits throw', () => {
+  const g = lib.grid(5, 5, { hex: HEX.oddR });
+  const hexMsg = /hex wall bits changed in 0\.9/;
+  assert.throws(() => g.walls(), (e) => e instanceof TypeError && hexMsg.test(e.message));
+  assert.throws(() => g.setWalls(new Uint8Array(25)), (e) => e instanceof TypeError && hexMsg.test(e.message));
+  // addHexWall still blocks exactly the one pair
+  const n = g.hexNeighbors(2, 2)[3];
+  g.addHexWall(2, 2, 3);
+  const area = g.reachable({ x: 2, y: 2 }, 1).cells;
+  assert.equal(area.length, 1 + 5);
+  assert.ok(!area.some((c) => c.x === n.x && c.y === n.y));
+  g.free();
+  const square = lib.grid(3, 3);
+  assert.equal(square.walls().length, 9);
+  square.free();
+});
+
 test('speed on a 60 x 60 battle map', () => {
   const g = lib.grid(60, 60);
   for (let i = 0; i < 600; i++) g.block((i * 37) % 60, (i * 91) % 60);

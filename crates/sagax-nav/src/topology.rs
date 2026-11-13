@@ -8,7 +8,7 @@
 use crate::dstar::{DStarLite, Heuristic, HexHeuristic};
 use crate::formation::{Formation, place_members, place_members_hex};
 use crate::grid::{Cell, CellMap, GridGraph, GridRules, turning_points};
-use crate::hex::{HexGraph, HexLayout, HexMap, hex_turning_points};
+use crate::hex::{HexGraph, HexLayout, hex_turning_points};
 use crate::search::{Cost, Graph};
 use crate::smooth::{hex_line_clear_within, line_clear_within, smooth_path};
 
@@ -39,13 +39,7 @@ impl Topology {
     /// `true` if one can walk straight from `a` to `b` through cells whose
     /// extra move cost is at most `max_extra` (see [`line_clear_within`] and
     /// [`hex_line_clear_within`]).
-    pub fn line_clear<M: CellMap + HexMap>(
-        &self,
-        map: &mut M,
-        a: Cell,
-        b: Cell,
-        max_extra: Cost,
-    ) -> bool {
+    pub fn line_clear<M: CellMap>(&self, map: &mut M, a: Cell, b: Cell, max_extra: Cost) -> bool {
         match *self {
             Self::Square(_) => line_clear_within(map, a, b, max_extra),
             Self::Hex { layout, .. } => hex_line_clear_within(map, layout, a, b, max_extra),
@@ -54,7 +48,7 @@ impl Topology {
 
     /// Smooths `path` into `out` (see [`smooth_path`]); lines cross cells
     /// with an extra cost of at most `max_extra`.
-    pub fn smooth<M: CellMap + HexMap>(
+    pub fn smooth<M: CellMap>(
         &self,
         map: &mut M,
         path: &[Cell],
@@ -104,7 +98,7 @@ impl Topology {
 
     /// Places a formation along the leader's path (see [`place_members`] and
     /// [`place_members_hex`]).
-    pub fn place_members<M: CellMap + HexMap>(
+    pub fn place_members<M: CellMap>(
         &self,
         map: &mut M,
         leader_path: &[Cell],
@@ -119,7 +113,7 @@ impl Topology {
 
     /// A graph of `map` for this topology. `start` is the cell whose moves
     /// use the map's `start_step`.
-    pub fn graph<M: CellMap + HexMap>(&self, map: M, start: Option<Cell>) -> AnyGraph<M> {
+    pub fn graph<M: CellMap>(&self, map: M, start: Option<Cell>) -> AnyGraph<M> {
         match *self {
             Self::Square(rules) => AnyGraph::Square(GridGraph::new(map, rules, start)),
             Self::Hex { layout, step_cost } => {
@@ -171,7 +165,7 @@ impl<M> AnyGraph<M> {
     }
 }
 
-impl<M: CellMap + HexMap> Graph for AnyGraph<M> {
+impl<M: CellMap> Graph for AnyGraph<M> {
     type Node = Cell;
 
     fn neighbors(&mut self, node: Cell, out: &mut Vec<(Cell, Cost)>) {

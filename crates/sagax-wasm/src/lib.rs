@@ -301,15 +301,20 @@ pub unsafe extern "C" fn sx_grid_costs(g: *mut WasmGrid) -> *mut u32 {
     grid!(g, std::ptr::null_mut()).grid.costs_mut().as_mut_ptr()
 }
 
-/// Wall bits per cell, `width * height` bytes; bit `i` blocks the move in
-/// direction `i` (square: 0 +x, 1 -x, 2 +y, 3 -y, 4 +x+y, 5 +x-y, 6 -x+y,
-/// 7 -x-y; hex: see [`sx_hex_neighbors`]).
+/// Wall bits per cell, `width * height` bytes; bit `i` blocks the move by
+/// the neighbour offset `i` (0 +x, 1 -x, 2 +y, 3 -y, 4 +x+y, 5 +x-y, 6 -x+y,
+/// 7 -x-y), on square and hex grids alike. On hex grids the offset is the
+/// neighbour (see [`sx_hex_neighbors`]) minus the cell; since 0.9 the bits no
+/// longer follow the hex direction number.
 ///
 /// # Safety
 /// As [`sx_grid_costs`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_grid_walls(g: *mut WasmGrid) -> *mut u8 {
-    grid!(g, std::ptr::null_mut()).grid.walls_mut().as_mut_ptr()
+    grid!(g, std::ptr::null_mut())
+        .grid
+        .wall_bits_mut()
+        .as_mut_ptr()
 }
 
 /// Zone bits per cell, `width * height` `u32`s; leaving a zone costs
@@ -379,8 +384,9 @@ pub unsafe extern "C" fn sx_result(g: *mut WasmGrid) -> *const i32 {
     grid!(g, std::ptr::null()).result.as_ptr()
 }
 
-/// The six hex neighbours of `x`, `y` in direction order (the wall bit
-/// numbers) as `x, y` pairs. Returns 6, or -1 on a square grid.
+/// The six hex neighbours of `x`, `y` in direction order as `x, y` pairs
+/// (the wall bit of a neighbour is that of its offset, see
+/// [`sx_grid_walls`]). Returns 6, or -1 on a square grid.
 ///
 /// # Safety
 /// `g` from [`sx_grid_new`].

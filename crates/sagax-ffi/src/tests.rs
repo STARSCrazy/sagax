@@ -466,6 +466,43 @@ fn dstar_repairs_after_a_change() {
 }
 
 #[test]
+fn batched_steps_match_single_steps_hex() {
+    for grid in 1..=4 {
+        let nav = unsafe { sx_nav_new(&rules(grid)) };
+        let mut ways = Vec::new();
+        for batch in [false, true] {
+            let mut w = wall_line();
+            let mut map = map_of(&mut w);
+            if batch {
+                map.steps = Some(steps);
+            }
+            let mut points = [Point::default(); 64];
+            let mut result = SxResult::default();
+            let n = unsafe {
+                sx_nav_find_path(
+                    nav,
+                    &map,
+                    p(2, 2),
+                    &p(18, 2),
+                    1,
+                    0,
+                    0,
+                    points.as_mut_ptr(),
+                    64,
+                    &mut result,
+                )
+            };
+            assert_eq!(result.status, FOUND, "grid {grid}");
+            ways.push((points[..n as usize].to_vec(), result.cost, w.calls));
+        }
+        assert_eq!(ways[0].0, ways[1].0, "grid {grid}");
+        assert_eq!(ways[0].1, ways[1].1, "grid {grid}");
+        assert!(ways[1].2 * 4 < ways[0].2, "grid {grid}");
+        unsafe { sx_nav_free(nav) };
+    }
+}
+
+#[test]
 fn hex_grids_work_everywhere() {
     for grid in 1..=4 {
         let mut w = wall_line();
