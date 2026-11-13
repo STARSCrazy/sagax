@@ -2372,6 +2372,180 @@ mod conventions {
         names
     }
 
+    /// Size and chosen field offsets of every value struct, from the Rust
+    /// `#[repr(C)]` types: `(c name, size, [(field, offset)])`.
+    type Layout = (&'static str, usize, Vec<(&'static str, usize)>);
+
+    fn rust_layouts() -> Vec<Layout> {
+        use crate::crew::{SxCrewConfig, SxCrewEvent, SxMemberInputs};
+        use crate::decide::{SxCandidate, SxChoice, SxConsideration, SxDecideEvent};
+        use crate::group::{
+            SxGatherCandidate, SxGoal, SxMember, SxOrder, SxPlace, SxPlan, SxSkillTable, SxSlot,
+            SxSpot, SxSquadConfig,
+        };
+        use crate::machine::SxChange;
+        use crate::memory::{
+            SxAlertConfig, SxAlertness, SxArea, SxFact, SxInterval, SxMessage, SxNearby,
+            SxPointPattern, SxProgress,
+        };
+        use crate::{Point, SxEvent, SxResult, SxRules};
+        use std::mem::{offset_of, size_of};
+
+        macro_rules! layout {
+            ($c:literal, $t:ty $(, $f:ident)*) => {
+                (
+                    $c,
+                    size_of::<$t>(),
+                    vec![$((stringify!($f), offset_of!($t, $f))),*],
+                )
+            };
+        }
+        vec![
+            layout!("sx_point", Point, level),
+            layout!("sx_rules", SxRules, cost_straight, smooth_max_extra),
+            layout!("sx_result", SxResult, node_limit_hit),
+            layout!("sx_event", SxEvent, cell, parent, cost, found),
+            layout!("sx_consideration", SxConsideration, max),
+            layout!("sx_candidate", SxCandidate, target),
+            layout!("sx_choice", SxChoice, score),
+            layout!("sx_decide_event", SxDecideEvent, score),
+            layout!("sx_change", SxChange, transition),
+            layout!("sx_fact", SxFact, pos, seen_at, data, source),
+            layout!("sx_message", SxMessage, pos, sender, keep_if_sender_gone),
+            layout!("sx_area", SxArea, radius, source, blocking, has_source),
+            layout!("sx_progress", SxProgress, since, started),
+            layout!("sx_interval", SxInterval, started),
+            layout!("sx_alertness", SxAlertness),
+            layout!("sx_alert_config", SxAlertConfig, thresholds),
+            layout!("sx_nearby", SxNearby, y),
+            layout!(
+                "sx_point_pattern",
+                SxPointPattern,
+                offsets,
+                distances,
+                sine,
+                max_y
+            ),
+            layout!("sx_member", SxMember, pos, roles, skill, state),
+            layout!("sx_spot", SxSpot, tags),
+            layout!("sx_gather_candidate", SxGatherCandidate, pos, free),
+            layout!("sx_place", SxPlace, z, value),
+            layout!(
+                "sx_slot",
+                SxSlot,
+                min,
+                max,
+                place,
+                gather,
+                dist,
+                gather_dist
+            ),
+            layout!("sx_skill_table", SxSkillTable, hold_bonus, spot_rank_error),
+            layout!(
+                "sx_goal",
+                SxGoal,
+                pos,
+                then_pos,
+                target,
+                start_delay,
+                has_pos,
+                unchecked,
+                has_then_pos,
+                then_unchecked,
+                has_target
+            ),
+            layout!("sx_order", SxOrder, goal),
+            layout!("sx_plan", SxPlan, goal_count, has_target),
+            layout!("sx_squad_config", SxSquadConfig, metric),
+            layout!("sx_member_inputs", SxMemberInputs, discipline),
+            layout!(
+                "sx_crew_config",
+                SxCrewConfig,
+                squad,
+                arrive_radius,
+                hex_grid
+            ),
+            layout!("sx_crew_event", SxCrewEvent, start_at, goal, has_start_at),
+        ]
+    }
+
+    /// The `_Static_assert` lines of the header: ("sx_x", None or field, value).
+    fn header_asserts() -> BTreeSet<(String, Option<String>, usize)> {
+        let mut found = BTreeSet::new();
+        for line in HEADER.lines() {
+            let Some(rest) = line.trim().strip_prefix("_Static_assert(") else {
+                continue;
+            };
+            if let Some(rest) = rest.strip_prefix("sizeof(") {
+                let (name, rest) = rest.split_once(") == ").expect("sizeof assert");
+                let (n, _) = rest.split_once(',').expect("value ends at ,");
+                found.insert((name.to_string(), None, n.trim().parse().expect("a number")));
+            } else if let Some(rest) = rest.strip_prefix("offsetof(") {
+                let (name, rest) = rest.split_once(", ").expect("offsetof struct");
+                let (field, rest) = rest.split_once(") == ").expect("offsetof field");
+                let (n, _) = rest.split_once(',').expect("value ends at ,");
+                found.insert((
+                    name.to_string(),
+                    Some(field.to_string()),
+                    n.trim().parse().expect("a number"),
+                ));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn header_static_asserts_match_rust() {
+        let mut expected = BTreeSet::new();
+        for (name, size, fields) in rust_layouts() {
+            expected.insert((name.to_string(), None, size));
+            for (field, offset) in fields {
+                expected.insert((name.to_string(), Some(field.to_string()), offset));
+            }
+        }
+        assert_eq!(header_asserts(), expected);
+        assert!(HEADER.contains(
+            "#if !defined(__cplusplus) && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L"
+        ));
+        assert!(HEADER.contains("#include <stddef.h>"));
+    }
+
+    /// Structs holding pointers: no size assert (they differ between 32 and 64 bit).
+    const POINTER_STRUCTS: [&str; 2] = ["sx_map", "sx_areas_cost_ctx"];
+
+    #[test]
+    fn every_value_struct_has_a_size_assert() {
+        let code = header_code();
+        let sized: BTreeSet<String> = header_asserts()
+            .into_iter()
+            .filter(|(_, field, _)| field.is_none())
+            .map(|(name, _, _)| name)
+            .collect();
+        let mut bodies = 0;
+        for chunk in code.split("typedef struct ").skip(1) {
+            let Some((head, rest)) = chunk.split_once('{') else {
+                continue;
+            };
+            let name = head.trim();
+            if name.contains(';') || name.contains(char::is_whitespace) {
+                continue;
+            }
+            let (body, _) = rest.split_once('}').expect("a struct body ends");
+            bodies += 1;
+            if POINTER_STRUCTS.contains(&name) {
+                assert!(body.contains('*'), "{name} holds no pointer");
+                assert!(!sized.contains(name), "{name} must have no size assert");
+            } else {
+                assert!(
+                    !body.contains('*'),
+                    "{name} holds a pointer: list it as an exception"
+                );
+                assert!(sized.contains(name), "{name} has no sizeof assert");
+            }
+        }
+        assert!(bodies >= 30, "found only {bodies} struct bodies");
+    }
+
     #[test]
     fn every_export_is_declared_in_the_header() {
         let exports = exports();

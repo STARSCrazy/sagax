@@ -4,18 +4,6 @@
 #include <stdio.h>
 #include "sagax.h"
 
-/* The structs are shared with the library as plain memory: check the layout
- * at compile time (a negative array size is an error). */
-typedef char layout_fact[sizeof(sx_fact) == 36 ? 1 : -1];
-typedef char layout_message[sizeof(sx_message) == 40 ? 1 : -1];
-typedef char layout_area[sizeof(sx_area) == 52 ? 1 : -1];
-typedef char layout_progress[sizeof(sx_progress) == 12 ? 1 : -1];
-typedef char layout_interval[sizeof(sx_interval) == 8 ? 1 : -1];
-typedef char layout_alertness[sizeof(sx_alertness) == 16 ? 1 : -1];
-typedef char layout_alert_config[sizeof(sx_alert_config) == 52 ? 1 : -1];
-typedef char layout_nearby[sizeof(sx_nearby) == 12 ? 1 : -1];
-typedef char layout_pattern[sizeof(sx_point_pattern) == 96 ? 1 : -1];
-
 #define CHECK(cond) \
 	do { \
 		if (!(cond)) { \

@@ -7,27 +7,6 @@
 #include <stdio.h>
 #include "sagax.h"
 
-/* The structs are shared with the library as plain memory: check the layout
- * at compile time (a negative array size is an error). */
-typedef char layout_member[sizeof(sx_member) == 24 ? 1 : -1];
-typedef char layout_spot[sizeof(sx_spot) == 16 ? 1 : -1];
-typedef char layout_gather_candidate[sizeof(sx_gather_candidate) == 24 ? 1 : -1];
-typedef char layout_place[sizeof(sx_place) == 20 ? 1 : -1];
-typedef char layout_slot[sizeof(sx_slot) == 76 ? 1 : -1];
-typedef char layout_goal[sizeof(sx_goal) == 68 ? 1 : -1];
-typedef char layout_order[sizeof(sx_order) == 72 ? 1 : -1];
-typedef char layout_plan[sizeof(sx_plan) == 28 ? 1 : -1];
-typedef char layout_skill_table[sizeof(sx_skill_table) == 100 ? 1 : -1];
-/* A few key field offsets too (all of them are checked on the Rust side). */
-typedef char layout_member_state[offsetof(sx_member, state) == 21 ? 1 : -1];
-typedef char layout_slot_place[offsetof(sx_slot, place) == 8 ? 1 : -1];
-typedef char layout_slot_gather_dist[offsetof(sx_slot, gather_dist) == 72 ? 1 : -1];
-typedef char layout_goal_then_pos[offsetof(sx_goal, then_pos) == 20 ? 1 : -1];
-typedef char layout_goal_has_target[offsetof(sx_goal, has_target) == 64 ? 1 : -1];
-typedef char layout_order_goal[offsetof(sx_order, goal) == 4 ? 1 : -1];
-typedef char layout_plan_has_target[offsetof(sx_plan, has_target) == 24 ? 1 : -1];
-typedef char layout_skill_table_error[offsetof(sx_skill_table, spot_rank_error) == 96 ? 1 : -1];
-
 #define CHECK(cond) \
 	do { \
 		if (!(cond)) { \

@@ -1596,4 +1596,113 @@ int32_t sx_report_goal_broken(uint32_t sender, uint32_t plan, sx_message *out);
 }
 #endif
 
+/* Layout checks (C11 and later): the sizes and field offsets below are the ones
+ * the Rust library uses, so a header and a library that disagree fail to compile.
+ * Every value struct is listed except those that hold a pointer, whose size
+ * depends on the platform: sx_map and sx_areas_cost_ctx. */
+#if !defined(__cplusplus) && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#include <stddef.h>
+_Static_assert(sizeof(sx_point) == 12, "sx_point layout");
+_Static_assert(offsetof(sx_point, level) == 8, "sx_point.level layout");
+_Static_assert(sizeof(sx_rules) == 24, "sx_rules layout");
+_Static_assert(offsetof(sx_rules, cost_straight) == 8, "sx_rules.cost_straight layout");
+_Static_assert(offsetof(sx_rules, smooth_max_extra) == 20, "sx_rules.smooth_max_extra layout");
+_Static_assert(sizeof(sx_result) == 20, "sx_result layout");
+_Static_assert(offsetof(sx_result, node_limit_hit) == 16, "sx_result.node_limit_hit layout");
+_Static_assert(sizeof(sx_event) == 44, "sx_event layout");
+_Static_assert(offsetof(sx_event, cell) == 4, "sx_event.cell layout");
+_Static_assert(offsetof(sx_event, parent) == 16, "sx_event.parent layout");
+_Static_assert(offsetof(sx_event, cost) == 28, "sx_event.cost layout");
+_Static_assert(offsetof(sx_event, found) == 40, "sx_event.found layout");
+_Static_assert(sizeof(sx_consideration) == 16, "sx_consideration layout");
+_Static_assert(offsetof(sx_consideration, max) == 12, "sx_consideration.max layout");
+_Static_assert(sizeof(sx_candidate) == 8, "sx_candidate layout");
+_Static_assert(offsetof(sx_candidate, target) == 4, "sx_candidate.target layout");
+_Static_assert(sizeof(sx_choice) == 8, "sx_choice layout");
+_Static_assert(offsetof(sx_choice, score) == 4, "sx_choice.score layout");
+_Static_assert(sizeof(sx_decide_event) == 24, "sx_decide_event layout");
+_Static_assert(offsetof(sx_decide_event, score) == 20, "sx_decide_event.score layout");
+_Static_assert(sizeof(sx_change) == 16, "sx_change layout");
+_Static_assert(offsetof(sx_change, transition) == 12, "sx_change.transition layout");
+_Static_assert(sizeof(sx_fact) == 36, "sx_fact layout");
+_Static_assert(offsetof(sx_fact, pos) == 8, "sx_fact.pos layout");
+_Static_assert(offsetof(sx_fact, seen_at) == 20, "sx_fact.seen_at layout");
+_Static_assert(offsetof(sx_fact, data) == 28, "sx_fact.data layout");
+_Static_assert(offsetof(sx_fact, source) == 32, "sx_fact.source layout");
+_Static_assert(sizeof(sx_message) == 40, "sx_message layout");
+_Static_assert(offsetof(sx_message, pos) == 8, "sx_message.pos layout");
+_Static_assert(offsetof(sx_message, sender) == 32, "sx_message.sender layout");
+_Static_assert(offsetof(sx_message, keep_if_sender_gone) == 36, "sx_message.keep_if_sender_gone layout");
+_Static_assert(sizeof(sx_area) == 52, "sx_area layout");
+_Static_assert(offsetof(sx_area, radius) == 16, "sx_area.radius layout");
+_Static_assert(offsetof(sx_area, source) == 36, "sx_area.source layout");
+_Static_assert(offsetof(sx_area, blocking) == 48, "sx_area.blocking layout");
+_Static_assert(offsetof(sx_area, has_source) == 49, "sx_area.has_source layout");
+_Static_assert(sizeof(sx_progress) == 12, "sx_progress layout");
+_Static_assert(offsetof(sx_progress, since) == 4, "sx_progress.since layout");
+_Static_assert(offsetof(sx_progress, started) == 8, "sx_progress.started layout");
+_Static_assert(sizeof(sx_interval) == 8, "sx_interval layout");
+_Static_assert(offsetof(sx_interval, started) == 4, "sx_interval.started layout");
+_Static_assert(sizeof(sx_alertness) == 16, "sx_alertness layout");
+_Static_assert(sizeof(sx_alert_config) == 52, "sx_alert_config layout");
+_Static_assert(offsetof(sx_alert_config, thresholds) == 20, "sx_alert_config.thresholds layout");
+_Static_assert(sizeof(sx_nearby) == 12, "sx_nearby layout");
+_Static_assert(offsetof(sx_nearby, y) == 8, "sx_nearby.y layout");
+_Static_assert(sizeof(sx_point_pattern) == 96, "sx_point_pattern layout");
+_Static_assert(offsetof(sx_point_pattern, offsets) == 12, "sx_point_pattern.offsets layout");
+_Static_assert(offsetof(sx_point_pattern, distances) == 44, "sx_point_pattern.distances layout");
+_Static_assert(offsetof(sx_point_pattern, sine) == 76, "sx_point_pattern.sine layout");
+_Static_assert(offsetof(sx_point_pattern, max_y) == 92, "sx_point_pattern.max_y layout");
+_Static_assert(sizeof(sx_member) == 24, "sx_member layout");
+_Static_assert(offsetof(sx_member, pos) == 4, "sx_member.pos layout");
+_Static_assert(offsetof(sx_member, roles) == 16, "sx_member.roles layout");
+_Static_assert(offsetof(sx_member, skill) == 20, "sx_member.skill layout");
+_Static_assert(offsetof(sx_member, state) == 21, "sx_member.state layout");
+_Static_assert(sizeof(sx_spot) == 16, "sx_spot layout");
+_Static_assert(offsetof(sx_spot, tags) == 12, "sx_spot.tags layout");
+_Static_assert(sizeof(sx_gather_candidate) == 24, "sx_gather_candidate layout");
+_Static_assert(offsetof(sx_gather_candidate, pos) == 8, "sx_gather_candidate.pos layout");
+_Static_assert(offsetof(sx_gather_candidate, free) == 20, "sx_gather_candidate.free layout");
+_Static_assert(sizeof(sx_place) == 20, "sx_place layout");
+_Static_assert(offsetof(sx_place, z) == 12, "sx_place.z layout");
+_Static_assert(offsetof(sx_place, value) == 16, "sx_place.value layout");
+_Static_assert(sizeof(sx_slot) == 76, "sx_slot layout");
+_Static_assert(offsetof(sx_slot, min) == 4, "sx_slot.min layout");
+_Static_assert(offsetof(sx_slot, max) == 5, "sx_slot.max layout");
+_Static_assert(offsetof(sx_slot, place) == 8, "sx_slot.place layout");
+_Static_assert(offsetof(sx_slot, gather) == 28, "sx_slot.gather layout");
+_Static_assert(offsetof(sx_slot, dist) == 68, "sx_slot.dist layout");
+_Static_assert(offsetof(sx_slot, gather_dist) == 72, "sx_slot.gather_dist layout");
+_Static_assert(sizeof(sx_skill_table) == 100, "sx_skill_table layout");
+_Static_assert(offsetof(sx_skill_table, hold_bonus) == 64, "sx_skill_table.hold_bonus layout");
+_Static_assert(offsetof(sx_skill_table, spot_rank_error) == 96, "sx_skill_table.spot_rank_error layout");
+_Static_assert(sizeof(sx_goal) == 68, "sx_goal layout");
+_Static_assert(offsetof(sx_goal, pos) == 8, "sx_goal.pos layout");
+_Static_assert(offsetof(sx_goal, then_pos) == 20, "sx_goal.then_pos layout");
+_Static_assert(offsetof(sx_goal, target) == 32, "sx_goal.target layout");
+_Static_assert(offsetof(sx_goal, start_delay) == 56, "sx_goal.start_delay layout");
+_Static_assert(offsetof(sx_goal, has_pos) == 60, "sx_goal.has_pos layout");
+_Static_assert(offsetof(sx_goal, unchecked) == 61, "sx_goal.unchecked layout");
+_Static_assert(offsetof(sx_goal, has_then_pos) == 62, "sx_goal.has_then_pos layout");
+_Static_assert(offsetof(sx_goal, then_unchecked) == 63, "sx_goal.then_unchecked layout");
+_Static_assert(offsetof(sx_goal, has_target) == 64, "sx_goal.has_target layout");
+_Static_assert(sizeof(sx_order) == 72, "sx_order layout");
+_Static_assert(offsetof(sx_order, goal) == 4, "sx_order.goal layout");
+_Static_assert(sizeof(sx_plan) == 28, "sx_plan layout");
+_Static_assert(offsetof(sx_plan, goal_count) == 20, "sx_plan.goal_count layout");
+_Static_assert(offsetof(sx_plan, has_target) == 24, "sx_plan.has_target layout");
+_Static_assert(sizeof(sx_squad_config) == 24, "sx_squad_config layout");
+_Static_assert(offsetof(sx_squad_config, metric) == 20, "sx_squad_config.metric layout");
+_Static_assert(sizeof(sx_member_inputs) == 20, "sx_member_inputs layout");
+_Static_assert(offsetof(sx_member_inputs, discipline) == 16, "sx_member_inputs.discipline layout");
+_Static_assert(sizeof(sx_crew_config) == 32, "sx_crew_config layout");
+_Static_assert(offsetof(sx_crew_config, squad) == 0, "sx_crew_config.squad layout");
+_Static_assert(offsetof(sx_crew_config, arrive_radius) == 24, "sx_crew_config.arrive_radius layout");
+_Static_assert(offsetof(sx_crew_config, hex_grid) == 28, "sx_crew_config.hex_grid layout");
+_Static_assert(sizeof(sx_crew_event) == 88, "sx_crew_event layout");
+_Static_assert(offsetof(sx_crew_event, start_at) == 12, "sx_crew_event.start_at layout");
+_Static_assert(offsetof(sx_crew_event, goal) == 16, "sx_crew_event.goal layout");
+_Static_assert(offsetof(sx_crew_event, has_start_at) == 84, "sx_crew_event.has_start_at layout");
+#endif
+
 #endif

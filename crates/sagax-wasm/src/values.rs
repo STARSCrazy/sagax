@@ -16,6 +16,7 @@
 //! -1 (`SX_ERROR_ARGUMENT`).
 
 use sagax_decide::memory::{AlertConfig, Alertness, Interval, Progress, arrival};
+use std::mem::{align_of, size_of};
 
 use super::{ERROR_ARGUMENT, SCRATCH};
 
@@ -25,6 +26,22 @@ const PROGRESS_WORDS: usize = 3;
 const INTERVAL_WORDS: usize = 2;
 /// Numbers in an alertness record: the state, then the config.
 const ALERTNESS_WORDS: usize = 4 + 13;
+/// Numbers of the state part of an alertness record; the config starts there.
+const ALERTNESS_STATE_WORDS: usize = 4;
+
+// The in-place casts below rely on these sizes and alignments; a change to
+// the structs in `sagax-decide` breaks the build here, not the records.
+const _: () = {
+    assert!(size_of::<Progress>() <= PROGRESS_WORDS * 4);
+    assert!(align_of::<Progress>() <= 4);
+    assert!(size_of::<Interval>() <= INTERVAL_WORDS * 4);
+    assert!(align_of::<Interval>() <= 4);
+    assert!(size_of::<Alertness>() == ALERTNESS_STATE_WORDS * 4);
+    assert!(align_of::<Alertness>() <= 4);
+    assert!(size_of::<AlertConfig>() == 13 * 4);
+    assert!(align_of::<AlertConfig>() <= 4);
+    assert!(ALERTNESS_WORDS * 4 >= size_of::<Alertness>() + size_of::<AlertConfig>());
+};
 
 /// Runs `f` on the record at the start of the scratch buffer, in place.
 /// The record is a `repr(C)` struct of 4-byte words (and a trailing `u8`)
@@ -107,7 +124,7 @@ pub extern "C" fn sx_alertness_stimulus(ptr: *mut i32, amount: u32, now: u32) ->
         let (alertness, config) = unsafe {
             (
                 &mut *p.cast::<Alertness>(),
-                &*p.add(4).cast::<AlertConfig>(),
+                &*p.add(ALERTNESS_STATE_WORDS).cast::<AlertConfig>(),
             )
         };
         alertness.stimulus(amount, now, config);
@@ -124,7 +141,7 @@ pub extern "C" fn sx_alertness_update(ptr: *mut i32, now: u32) -> i32 {
         let (alertness, config) = unsafe {
             (
                 &mut *p.cast::<Alertness>(),
-                &*p.add(4).cast::<AlertConfig>(),
+                &*p.add(ALERTNESS_STATE_WORDS).cast::<AlertConfig>(),
             )
         };
         i32::from(alertness.update(now, config).is_some())
