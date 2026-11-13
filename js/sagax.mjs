@@ -1548,7 +1548,7 @@ function reportMessage(kind, sender, { subject = 0, pos = [0, 0, 0], seenAt = 0,
   };
 }
 
-/** Columns of the scoring row, role bits, spot tags and report kinds. */
+/** Columns of the scoring row, role bits, spot tags and report kinds (danger has its own call, Squad.reportDanger). */
 export const SQUAD = {
   inLosses: 0, // members marked gone and still listed (not reset by a new plan)
   inOffPlan: 1, // active members whose goal of the active plan broke
@@ -1567,7 +1567,6 @@ export const SQUAD = {
   tagChoke: 8,
   reportGoalBroken: 1, // sender: the member; data: the plan id of its goal
   reportEnemy: 2, // subject, pos, seenAt, strength, data: a target (told)
-  reportDanger: 3, // pos: the danger's centre; the shooter at x = strength, y = data
   reportArrived: 4, // sender: the member; data: the plan id: at its gather spot
   maxExtraColumns: 1024, // most columns setExtraColumns takes
 };
@@ -1581,8 +1580,6 @@ const START = { now: 0, after: 1, signal: 2 };
 const STARTS = Object.keys(START);
 const PLACE = { none: 0, offset: 1, side: 2, between: 3, tagged: 4, here: 5 };
 const SIDE = { front: 0, left: 1, right: 2, rear: 3 };
-const TRIGGER = { none: 0, allArrived: 1, targetInRadius: 2, manual: 3 };
-const CHANNEL = { none: 0, shout: 1, radio: 2 };
 const SHAPE = { line: 1, wedge: 2, column: 3 };
 const PICKS = Object.keys(PICK);
 const SQUAD_STATUS = ['keep', 'replan', 'signal', 'noPlan'];
@@ -1777,7 +1774,7 @@ function seedOf(seed) {
  *   t.addSlot({ min: 1, max: 3, place: { kind: 'side', side: 'left' }, dist: 4, kind: 'attack' });
  *   t.addConsideration({ input: SQUAD.inTargetDist, curve: 'inverse', min: 0, max: 50 });
  *   t.addAbort(SQUAD.inLosses, 2);
- *   t.setTrigger({ kind: 'allArrived', maxWait: 170 });
+ *   t.triggerAllArrived(170);
  */
 export class Tactic extends Table {
   constructor(x, handle) {
@@ -1815,25 +1812,31 @@ export class Tactic extends Table {
     this.x.sx_tactic_add_abort(this.h, u32Of(input, 'input'), i32Of(atLeast, 'atLeast'));
   }
 
-  /**
-   * When the signal fires by itself: {kind: 'none'} (default), {kind:
-   * 'allArrived', maxWait} (every assigned active member at its gather spot,
-   * or maxWait ticks after activation), {kind: 'targetInRadius', radius} or
-   * {kind: 'manual'} (only by Squad.signal).
-   */
-  setTrigger(trigger) {
-    const kind = choice(TRIGGER, trigger?.kind, 'trigger');
-    let value = 0;
-    if (kind === TRIGGER.allArrived) value = u32Of(trigger.maxWait, 'maxWait');
-    if (kind === TRIGGER.targetInRadius) value = safeOf(trigger.radius, 'radius');
-    this.x.sx_tactic_set_trigger(this.h, kind, value);
+  /** The signal never fires by itself (the default). */
+  triggerNone() {
+    this.x.sx_tactic_trigger_none(this.h);
+  }
+
+  /** The signal fires when every assigned active member is at its gather spot, or maxWait ticks after activation. */
+  triggerAllArrived(maxWait) {
+    this.x.sx_tactic_trigger_all_arrived(this.h, u32Of(maxWait, 'maxWait'));
+  }
+
+  /** The signal fires when the target is within radius of the group centre. */
+  triggerTargetInRadius(radius) {
+    this.x.sx_tactic_trigger_target_in_radius(this.h, safeOf(radius, 'radius'));
+  }
+
+  /** The signal is only given by Squad.signal. */
+  triggerManual() {
+    this.x.sx_tactic_trigger_manual(this.h);
   }
 }
 
 /**
  * A squad leader with its own memory, planning for a group.
  *
- *   const sq = lib.squad({ groupCap: 8, memoryCap: 16, areaCap: 4, inboxCap: 8, metric: 'chebyshev' });
+ *   const sq = lib.squad({ members: 8, memory: 16, areas: 4, inbox: 8, dangers: 4, metric: 'chebyshev' });
  *   sq.addMember({ id: 1, pos: [0, 0, 0] }); sq.setLeader(1); sq.setTargetKind(ENEMY);
  *   sq.addTactic(lib.tactics.flank(3, 4)); sq.setSkill(192);
  *   sq.observe(now, { subject: 9, kind: ENEMY, pos: [20, 0, 0], seenAt: now });
@@ -1841,15 +1844,28 @@ export class Tactic extends Table {
  *   for (const order of sq.ordersDue(now)) give(order);        // goals, see above
  *
  * Targets come only from the squad's own knowledge (observe, enemy reports).
+ * Config keys and defaults: members 8, memory 32, areas 8, inbox 16, dangers 8,
+ * metric 'euclid'. The old keys groupCap, memoryCap, areaCap and inboxCap
+ * still work (0.9 only); an old and a new key for the same field is a TypeError.
  */
 export class Squad extends Table {
   #knowledge = null;
   #areas = null;
 
-  constructor(x, { groupCap, memoryCap, areaCap, inboxCap, metric = 'euclid' }) {
-    const caps = [groupCap, memoryCap, areaCap, inboxCap].map(capacityOf);
-    const m = choice(METRIC, metric, 'metric');
-    super(x, 'sx_squad', x.sx_squad_new(...caps, m));
+  constructor(x, config = {}) {
+    const field = (name, old, fallback) => {
+      if (config[name] !== undefined && config[old] !== undefined) {
+        throw new TypeError(`Sagax: squad config has both ${name} and its old name ${old}`);
+      }
+      return capacityOf(config[name] ?? config[old] ?? fallback);
+    };
+    const members = field('members', 'groupCap', 8);
+    const memory = field('memory', 'memoryCap', 32);
+    const areas = field('areas', 'areaCap', 8);
+    const inbox = field('inbox', 'inboxCap', 16);
+    const dangers = capacityOf(config.dangers ?? 8);
+    const m = choice(METRIC, config.metric ?? 'euclid', 'metric');
+    super(x, 'sx_squad', x.sx_squad_new(members, memory, areas, inbox, dangers, m));
   }
 
   #out(count) {
@@ -1897,8 +1913,13 @@ export class Squad extends Table {
    * of the active plan at now over its channel (after the signal: the
    * signal order). False if unknown.
    */
+  reinstate(id, now) {
+    return this.x.sx_squad_reinstate(this.h, u32Of(id, 'id'), timeOf(now)) === 1;
+  }
+
+  /** The old name of reinstate (0.9 only). */
   resume(id, now) {
-    return this.x.sx_squad_resume(this.h, u32Of(id, 'id'), timeOf(now)) === 1;
+    return this.reinstate(id, now);
   }
 
   /** Marks a member dead or lost (counts in SQUAD.inLosses). False if unknown. */
@@ -1948,20 +1969,22 @@ export class Squad extends Table {
   }
 
   /**
-   * How orders reach a member: {kind: 'none'}, {kind: 'shout', range} (1 tick
-   * per unit, within range) or {kind: 'radio', base = 0, perUnit = 0}
-   * (default: radio at once). False if the id is not in the group.
+   * Orders (and reports) reach the member after 1 tick per unit of distance
+   * from the leader, within range (inclusive). False if the id is not in the
+   * group. The default for a member is radio 0, 0: at once.
    */
-  setChannel(id, channel) {
-    const kind = choice(CHANNEL, channel?.kind, 'channel');
-    let a = 0;
-    let b = 0;
-    if (kind === CHANNEL.shout) a = safeOf(channel.range, 'range');
-    if (kind === CHANNEL.radio) {
-      a = u32Of(channel.base ?? 0, 'base');
-      b = u32Of(channel.perUnit ?? 0, 'perUnit');
-    }
-    return this.#checked(this.x.sx_squad_set_channel(this.h, u32Of(id, 'id'), kind, a, b)) === 1;
+  setShout(id, range) {
+    return this.x.sx_squad_set_shout(this.h, u32Of(id, 'id'), safeOf(range, 'range')) === 1;
+  }
+
+  /** Orders reach the member after base + distance * perUnit ticks, at any distance. False if the id is not in the group. */
+  setRadio(id, base = 0, perUnit = 0) {
+    return this.x.sx_squad_set_radio(this.h, u32Of(id, 'id'), u32Of(base, 'base'), u32Of(perUnit, 'perUnit')) === 1;
+  }
+
+  /** Orders never reach the member. False if the id is not in the group. */
+  setSilent(id) {
+    return this.x.sx_squad_set_silent(this.h, u32Of(id, 'id')) === 1;
   }
 
   /** The area a danger report adds (kind, radius, strength, lifetime, blocking are used). */
@@ -2021,10 +2044,37 @@ export class Squad extends Table {
 
   /** A member's report (a message, kind SQUAD.report*), read from arriveAt on. False if the inbox refused it. */
   report(message, arriveAt) {
+    if (message?.kind === 3) throw new RangeError('Sagax: kind 3 is gone, use reportDanger');
     const t = timeOf(arriveAt);
     const h = this.h;
     putScratch(this.x, messageValues(message));
     return this.x.sx_squad_report(h, t) === 1;
+  }
+
+  /**
+   * A danger report on its way to the leader: member sender was shot at near
+   * centre, from shooter (null: unknown). From arriveAt on, check and plan add
+   * a danger area (the setDangerArea template; data = sender, source =
+   * shooter). False when the danger queue (config dangers) is full.
+   */
+  reportDanger({ sender, centre, shooter = null }, arriveAt) {
+    const s = u32Of(sender, 'sender');
+    const [cx, cy, cz] = posOf(centre, 'centre');
+    const [sx, sy, sz] = shooter === null ? [0, 0, 0] : posOf(shooter, 'shooter');
+    const t = timeOf(arriveAt);
+    return this.x.sx_squad_report_danger(this.h, s, cx, cy, cz, shooter === null ? 0 : 1, sx, sy, sz, t) === 1;
+  }
+
+  /** The plan that became active since the last call (once), as its id, or null. */
+  takeActivated() {
+    return this.x.sx_squad_take_activated(this.h) === 1 ? u32(this.#out(1)[0]) : null;
+  }
+
+  /** When a report sent by member id at now reaches the acting leader (at once for the leader, else over its channel), or null if it never arrives. */
+  reportArrivesAt(id, now) {
+    const i = u32Of(id, 'id');
+    const t = timeOf(now);
+    return this.x.sx_squad_report_arrives_at(this.h, i, t) === 1 ? u32(this.#out(1)[0]) : null;
   }
 
   /** The known targets (facts of the target kind, in knowledge order). */
@@ -2249,7 +2299,7 @@ function shipped(x, which, param = 0) {
 }
 
 Object.assign(Sagax.prototype, {
-  /** A squad {groupCap, memoryCap, areaCap, inboxCap, metric = 'euclid'}; see Squad. */
+  /** A squad {members, memory, areas, inbox, dangers, metric = 'euclid'}; see Squad. */
   squad(options) {
     return new Squad(this.x, options);
   },

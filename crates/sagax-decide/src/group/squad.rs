@@ -251,6 +251,48 @@ const DANGER: Area = Area {
     has_source: 0,
 };
 
+/// Capacities and metric of a [`Squad`] (see [`Squad::new`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SquadConfig {
+    /// Most members.
+    pub members: usize,
+    /// Most facts the leader remembers (the oldest goes first).
+    pub memory: usize,
+    /// Most danger areas.
+    pub areas: usize,
+    /// Most member reports waiting in the inbox.
+    pub inbox: usize,
+    /// Most danger reports waiting to arrive (see
+    /// [`Squad::report_danger`]).
+    pub dangers: usize,
+    /// How distances are measured.
+    pub metric: Metric,
+}
+
+impl Default for SquadConfig {
+    /// 8 members, 32 facts, 8 areas, 16 inbox reports, 8 danger reports,
+    /// [`Metric::Euclid`].
+    fn default() -> Self {
+        Self {
+            members: 8,
+            memory: 32,
+            areas: 8,
+            inbox: 16,
+            dangers: 8,
+            metric: Metric::Euclid,
+        }
+    }
+}
+
+/// A danger report on its way to the leader (see [`Squad::report_danger`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DangerReport {
+    pub(super) sender: u32,
+    pub(super) centre: Pos,
+    pub(super) shooter: Option<Pos>,
+    pub(super) arrive_at: u32,
+}
+
 /// The squad leader: the group, what the leader knows, the tactics it can
 /// use and the plans it made.
 ///
@@ -273,6 +315,9 @@ pub struct Squad {
     pub(super) knowledge: Knowledge,
     pub(super) areas: Areas,
     pub(super) inbox: Inbox,
+    pub(super) dangers: Vec<DangerReport>,
+    pub(super) dangers_cap: usize,
+    pub(super) activated: Option<PlanId>,
     pub(super) metric: Metric,
     pub(super) tactics: Vec<Tactic>,
     pub(super) decider: Decider,
@@ -292,22 +337,21 @@ pub struct Squad {
 }
 
 impl Squad {
-    /// A squad for at most `group_cap` members, `memory_cap` facts,
-    /// `area_cap` areas and `inbox_cap` waiting reports, measuring in
-    /// `metric`. The knowledge drops the oldest fact when full.
-    pub fn new(
-        group_cap: usize,
-        memory_cap: usize,
-        area_cap: usize,
-        inbox_cap: usize,
-        metric: Metric,
-    ) -> Result<Self, ZeroCapacity> {
+    /// A squad with the capacities and metric of `config`. The knowledge
+    /// drops the oldest fact when full. A capacity of 0 is an error.
+    pub fn new(config: SquadConfig) -> Result<Self, ZeroCapacity> {
+        if config.dangers == 0 {
+            return Err(ZeroCapacity);
+        }
         Ok(Self {
-            group: Group::new(group_cap)?,
-            knowledge: Knowledge::new(memory_cap, Evict::Oldest)?,
-            areas: Areas::new(area_cap)?,
-            inbox: Inbox::new(inbox_cap)?,
-            metric,
+            group: Group::new(config.members)?,
+            knowledge: Knowledge::new(config.memory, Evict::Oldest)?,
+            areas: Areas::new(config.areas)?,
+            inbox: Inbox::new(config.inbox)?,
+            dangers: Vec::with_capacity(config.dangers),
+            dangers_cap: config.dangers,
+            activated: None,
+            metric: config.metric,
             tactics: Vec::new(),
             decider: Decider::new(),
             skill: 0,
@@ -447,15 +491,15 @@ impl Squad {
             .map_or_else(Channel::default, |e| e.1)
     }
 
-    /// The area a [`REPORT_DANGER`](super::REPORT_DANGER) adds: its kind, radius, strength,
-    /// lifetime and blocking are used; centre, source and data come from the
-    /// report. Default: kind 0, radius 2 (two cells), strength 1, lifetime
+    /// The area a danger report ([`Squad::report_danger`]) adds: its kind,
+    /// radius, strength, lifetime and blocking are used; centre, source and
+    /// data come from the report. Default: kind 0, radius 2 (two cells), strength 1, lifetime
     /// 255 ticks (15 s at about 17 ticks per second), not blocking.
     pub fn set_danger_area(&mut self, template: Area) {
         self.danger = template;
     }
 
-    /// The area a [`REPORT_DANGER`](super::REPORT_DANGER) adds (see [`Squad::set_danger_area`]).
+    /// The area a danger report adds (see [`Squad::set_danger_area`]).
     pub fn danger_area(&self) -> Area {
         self.danger
     }
@@ -536,6 +580,15 @@ impl Squad {
     /// The plan being carried out, if any.
     pub fn active_plan(&self) -> Option<&Plan> {
         self.active.as_ref().map(|a| &a.plan)
+    }
+
+    /// The plan that became active since the last call, once (`None` when
+    /// none did). A plan becomes active inside [`Squad::plan`],
+    /// [`Squad::check`], [`Squad::orders_due`], [`Squad::signal`],
+    /// [`Squad::arrived`] or [`Squad::reinstate`]; if two plans became
+    /// active in between, the later one is returned.
+    pub fn take_activated(&mut self) -> Option<PlanId> {
+        self.activated.take()
     }
 
     /// True when the signal of the active plan was given.

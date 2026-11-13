@@ -2499,8 +2499,8 @@ pub extern "C" fn sx_sweep_heading(base: i32, elapsed: u32, step_ticks: u32, cou
 
 use sagax_decide::group::{
     Abort, Channel, Goal, GoalKeeper, GoalKind, Member, MemberState, Nearby, Order, Place, Plan,
-    PlanError, Shape, Side, SkillTable, Slot, Spot, Squad, Start, Status as SquadStatus, Tactic,
-    Trigger, gather, tactics,
+    PlanError, Shape, Side, SkillTable, Slot, Spot, Squad, SquadConfig, Start,
+    Status as SquadStatus, Tactic, Trigger, gather, tactics,
 };
 
 /// A tactic reads a column beyond the row (`SX_ERROR_PLAN`).
@@ -2880,8 +2880,10 @@ pub extern "C" fn sx_tactic_new(weight: u32, min_skill: u32, needs_target: u32) 
     })))
 }
 
-/// A shipped tactic (`which` as `SX_TACTIC_*`, `param` as given there).
-/// Null for an unknown one.
+/// A shipped tactic: `which` 0 rush, 1 line, 2 wedge, 3 column, 4 flank from
+/// 2 sides, 5 flank from 3, 6 ambush, 7 focus, 8 isolate, 9 fall back;
+/// `param` is the spacing or distance where there is one. Null for an
+/// unknown one.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_tactic_shipped(which: u32, param: i32) -> *mut WasmTactic {
     let t = match which {
@@ -2963,24 +2965,48 @@ pub unsafe extern "C" fn sx_tactic_add_abort(t: *mut WasmTactic, input: u32, at_
     0
 }
 
-/// When the signal fires by itself: `kind` 0 never, 1 all arrived (`value`
-/// the most ticks to wait, 0 .. 2^32 - 1), 2 target within `value`, 3 only
-/// by hand. Returns 0; -1 for an unknown kind or a bad wait.
+/// The signal never fires by itself (the default). Returns 0.
 ///
 /// # Safety
 /// `t` from [`sx_tactic_new`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_tactic_set_trigger(t: *mut WasmTactic, kind: u32, value: f64) -> i32 {
-    let t = tactic!(t);
-    t.trigger = match kind {
-        0 => Trigger::None,
-        1 if (0.0..=f64::from(u32::MAX)).contains(&value) => Trigger::AllArrived {
-            max_wait: value as u32,
-        },
-        2 => Trigger::TargetInRadius(value as i64),
-        3 => Trigger::Manual,
-        _ => return ERROR_ARGUMENT,
-    };
+pub unsafe extern "C" fn sx_tactic_trigger_none(t: *mut WasmTactic) -> i32 {
+    tactic!(t).trigger = Trigger::None;
+    0
+}
+
+/// The signal fires when every active member arrived, or `max_wait` ticks
+/// after activation. Returns 0.
+///
+/// # Safety
+/// `t` from [`sx_tactic_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_trigger_all_arrived(t: *mut WasmTactic, max_wait: u32) -> i32 {
+    tactic!(t).trigger = Trigger::AllArrived { max_wait };
+    0
+}
+
+/// The signal fires when the target is within `radius` of the group centre.
+/// Returns 0.
+///
+/// # Safety
+/// `t` from [`sx_tactic_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_trigger_target_in_radius(
+    t: *mut WasmTactic,
+    radius: f64,
+) -> i32 {
+    tactic!(t).trigger = Trigger::TargetInRadius(radius as i64);
+    0
+}
+
+/// The signal is only given by hand. Returns 0.
+///
+/// # Safety
+/// `t` from [`sx_tactic_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_trigger_manual(t: *mut WasmTactic) -> i32 {
+    tactic!(t).trigger = Trigger::Manual;
     0
 }
 
@@ -3069,26 +3095,28 @@ macro_rules! squad {
     };
 }
 
-/// A squad (see `sx_squad_new`). Null if a capacity is 0 or the metric is
-/// unknown.
+/// A squad (see `sx_squad_new` in `sagax.h`). Null if a capacity is 0 or the
+/// metric is unknown.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_squad_new(
-    group_cap: u32,
-    memory_cap: u32,
-    area_cap: u32,
-    inbox_cap: u32,
+    members: u32,
+    memory: u32,
+    areas: u32,
+    inbox: u32,
+    dangers: u32,
     metric: i32,
 ) -> *mut WasmSquad {
     let Some(metric) = metric_of(metric) else {
         return std::ptr::null_mut();
     };
-    let Ok(squad) = Squad::new(
-        group_cap as usize,
-        memory_cap as usize,
-        area_cap as usize,
-        inbox_cap as usize,
+    let Ok(squad) = Squad::new(SquadConfig {
+        members: members as usize,
+        memory: memory as usize,
+        areas: areas as usize,
+        inbox: inbox as usize,
+        dangers: dangers as usize,
         metric,
-    ) else {
+    }) else {
         return std::ptr::null_mut();
     };
     let s = Box::into_raw(Box::new(WasmSquad {
@@ -3217,13 +3245,13 @@ pub unsafe extern "C" fn sx_squad_suspend(s: *mut WasmSquad, id: u32) -> i32 {
 }
 
 /// Puts a member back and, if it was suspended, sends it its goal of the
-/// active plan (see `Squad::resume`); 1, or 0 if unknown.
+/// active plan (see `Squad::reinstate`); 1, or 0 if unknown.
 ///
 /// # Safety
 /// `s` from [`sx_squad_new`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_squad_resume(s: *mut WasmSquad, id: u32, now: u32) -> i32 {
-    i32::from(squad!(s).squad.resume(id, now))
+pub unsafe extern "C" fn sx_squad_reinstate(s: *mut WasmSquad, id: u32, now: u32) -> i32 {
+    i32::from(squad!(s).squad.reinstate(id, now))
 }
 
 /// Marks a member dead or lost; 1, or 0 if unknown.
@@ -3328,31 +3356,110 @@ pub unsafe extern "C" fn sx_squad_skill_table(s: *mut WasmSquad) -> i32 {
     0
 }
 
-/// How orders reach a member: `kind` 0 never, 1 shout within `a`, 2 radio
-/// with base `a` (0 .. 2^32 - 1) plus `b` per unit. Returns 1, or 0 if the
-/// id is not in the group; -1 for an unknown kind or a bad base.
+/// Orders (and reports) reach the member after 1 tick per unit, within
+/// `range`. Returns 1, or 0 if the id is not in the group.
 ///
 /// # Safety
 /// `s` from [`sx_squad_new`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_squad_set_channel(
+pub unsafe extern "C" fn sx_squad_set_shout(s: *mut WasmSquad, id: u32, range: f64) -> i32 {
+    let w = squad!(s);
+    i32::from(w.squad.set_channel(
+        id,
+        Channel::Shout {
+            range: range as i64,
+        },
+    ))
+}
+
+/// Orders reach the member after `base + distance * per_unit` ticks.
+/// Returns 1, or 0 if the id is not in the group.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_radio(
     s: *mut WasmSquad,
     id: u32,
-    kind: u32,
-    a: f64,
-    b: u32,
+    base: u32,
+    per_unit: u32,
 ) -> i32 {
     let w = squad!(s);
-    let channel = match kind {
-        0 => Channel::None,
-        1 => Channel::Shout { range: a as i64 },
-        2 if (0.0..=f64::from(u32::MAX)).contains(&a) => Channel::Radio {
-            base: a as u32,
-            per_unit: b,
-        },
-        _ => return ERROR_ARGUMENT,
-    };
-    i32::from(w.squad.set_channel(id, channel))
+    i32::from(w.squad.set_channel(id, Channel::Radio { base, per_unit }))
+}
+
+/// Orders never reach the member. Returns 1, or 0 if the id is not in the
+/// group.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_silent(s: *mut WasmSquad, id: u32) -> i32 {
+    i32::from(squad!(s).squad.set_channel(id, Channel::None))
+}
+
+/// A danger report on its way to the leader: centre (`cx`, `cy`, `cz`), the
+/// shooter's position when `has_shooter` is not 0. Returns 1, or 0 when the
+/// danger queue is full.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sx_squad_report_danger(
+    s: *mut WasmSquad,
+    sender: u32,
+    cx: i32,
+    cy: i32,
+    cz: i32,
+    has_shooter: u32,
+    sx: i32,
+    sy: i32,
+    sz: i32,
+    arrive_at: u32,
+) -> i32 {
+    let shooter = (has_shooter != 0).then_some([sx, sy, sz]);
+    i32::from(
+        squad!(s)
+            .squad
+            .report_danger(sender, [cx, cy, cz], shooter, arrive_at),
+    )
+}
+
+/// The plan that became active since the last call to the first number of
+/// the out buffer; 1, or 0 if none did.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_take_activated(s: *mut WasmSquad) -> i32 {
+    let w = squad!(s);
+    w.out.clear();
+    match w.squad.take_activated() {
+        Some(id) => {
+            w.out.push(id as i32);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// When a report sent by member `id` at `now` reaches the leader, to the
+/// first number of the out buffer; 1, or 0 if it never arrives.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_report_arrives_at(s: *mut WasmSquad, id: u32, now: u32) -> i32 {
+    let w = squad!(s);
+    w.out.clear();
+    match w.squad.report_arrives_at(id, now) {
+        Some(t) => {
+            w.out.push(t as i32);
+            1
+        }
+        None => 0,
+    }
 }
 
 /// Sets the area a danger report adds from the area record in the scratch

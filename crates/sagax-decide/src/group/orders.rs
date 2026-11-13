@@ -1,7 +1,9 @@
 use super::members::MemberState;
 use super::skill::SkillTable;
 use super::spots::Spot;
-use super::squad::{Active, Goal, PlanError, PlanId, Scratch, Squad, dist, fires, plain_dist};
+use super::squad::{
+    Active, DangerReport, Goal, PlanError, PlanId, Scratch, Squad, dist, fires, plain_dist,
+};
 use super::tactic::{Slot, Start, Trigger};
 use crate::ONE;
 use crate::memory::{Area, Fact, Message, Metric, Pos, SOURCE_OWN, SOURCE_TOLD, arrival};
@@ -14,12 +16,6 @@ pub const REPORT_GOAL_BROKEN: u32 = 1;
 /// and `data` become a fact of the squad's target kind in the leader's
 /// knowledge (merged, source [`crate::memory::SOURCE_TOLD`]).
 pub const REPORT_ENEMY: u32 = 2;
-/// Report kind: the sender was shot at. `pos` is the centre of the danger
-/// area; the shooter stood at x = `strength`, y = `data` (both read as
-/// `i32`), z = `pos[2]`, which becomes the area's `source`; `subject` (who
-/// shot, if known) becomes the area's `data`. Radius, lifetime, kind,
-/// strength and blocking come from [`super::Squad::set_danger_area`].
-pub const REPORT_DANGER: u32 = 3;
 /// Report kind: the sender reached its first spot (for
 /// [`Trigger::AllArrived`]). `sender` is the member's id, `data` the plan
 /// id. Like [`super::Squad::arrived`], but it counts only once it has
@@ -147,13 +143,48 @@ impl Squad {
     /// A member report on its way to the leader, read from `arrive_at` on by
     /// [`Squad::check`] and [`Squad::plan`]. Kinds: [`REPORT_GOAL_BROKEN`]
     /// (counts in [`IN_OFF_PLAN`](super::IN_OFF_PLAN) while the plan it names is active),
-    /// [`REPORT_ENEMY`] (a target in the leader's knowledge),
-    /// [`REPORT_DANGER`] (a danger area) and [`REPORT_ARRIVED`] (as
+    /// [`REPORT_ENEMY`] (a target in the leader's knowledge) and
+    /// [`REPORT_ARRIVED`] (as
     /// [`Squad::arrived`] for the plan it names, if active); other kinds are
     /// dropped when read.
     /// False when the inbox refused it (see [`Inbox::push`](crate::memory::Inbox::push)).
     pub fn report(&mut self, msg: Message, arrive_at: u32) -> bool {
         self.inbox.push(msg, arrive_at)
+    }
+
+    /// A danger report on its way to the leader: member `sender` was shot at
+    /// near `centre`, from `shooter` if known. From `arrive_at` on (wrapping)
+    /// [`Squad::check`] and [`Squad::plan`] add a danger area (the
+    /// [`Squad::danger_area`] template with `pos` = `centre`, `source` =
+    /// `shooter`, `has_source` 1 if given, `data` = `sender`), right after
+    /// the inbox reports of the same call. False when `dangers` reports
+    /// (see [`super::SquadConfig`]) are already waiting.
+    #[must_use]
+    pub fn report_danger(
+        &mut self,
+        sender: u32,
+        centre: Pos,
+        shooter: Option<Pos>,
+        arrive_at: u32,
+    ) -> bool {
+        if self.dangers.len() >= self.dangers_cap {
+            return false;
+        }
+        self.dangers.push(DangerReport {
+            sender,
+            centre,
+            shooter,
+            arrive_at,
+        });
+        true
+    }
+
+    /// When a report sent by member `id` at `now` reaches the acting leader:
+    /// at once for the leader, else over the channel from its position to
+    /// the leader's (as an order the other way). `None` when it never
+    /// arrives, or there is no leader or no such active member.
+    pub fn report_arrives_at(&self, id: u32, now: u32) -> Option<u32> {
+        self.arrival_of(id, now)
     }
 
     /// The leader's own sighting: merged into its knowledge
@@ -185,7 +216,7 @@ impl Squad {
     /// order. Orders of the old plan still on their way are dropped.
     ///
     /// A member has at most one order on its way: a newer one (on the
-    /// signal, or after [`Squad::resume`]) replaces it, and never arrives
+    /// signal, or after [`Squad::reinstate`]) replaces it, and never arrives
     /// earlier than the replaced one would have.
     pub fn orders_due(&mut self, now: u32, out: &mut Vec<Order>) {
         self.advance(now);
@@ -256,7 +287,7 @@ impl Squad {
     /// order (see [`Squad::signal`]; its start is not lined up any more, the
     /// others have started). A member without a goal in the active plan
     /// gets nothing. False when the id is unknown.
-    pub fn resume(&mut self, id: u32, now: u32) -> bool {
+    pub fn reinstate(&mut self, id: u32, now: u32) -> bool {
         self.advance(now);
         let was = self
             .group
@@ -286,6 +317,12 @@ impl Squad {
             queue(&mut self.orders, Order { member: id, goal }, t, now);
         }
         true
+    }
+
+    /// The old name of [`Squad::reinstate`].
+    #[deprecated(since = "0.9.0", note = "renamed to `reinstate`")]
+    pub fn resume(&mut self, id: u32, now: u32) -> bool {
+        self.reinstate(id, now)
     }
 
     /// When an order sent at `at` reaches the active member `id`: at once
@@ -407,6 +444,7 @@ impl Squad {
             return;
         };
         let since = plan.active_at;
+        self.activated = Some(plan.id);
         // Orders of the old plan still on their way are void.
         self.orders.clear();
         self.active = Some(Active {
@@ -497,20 +535,32 @@ impl Squad {
                         a.arrived.push(msg.sender);
                     }
                 }
-                REPORT_DANGER => {
-                    let area = Area {
-                        pos: msg.pos,
-                        source: [msg.strength as i32, msg.data as i32, msg.pos[2]],
-                        has_source: 1,
-                        data: msg.subject,
-                        ..self.danger
-                    };
-                    self.areas.add(now, area);
-                }
                 _ => {}
             }
         }
         self.scratch.reports = due;
+        self.read_dangers(now);
+    }
+
+    /// Adds the danger areas of the danger reports that have arrived by
+    /// `now`, in the order they were reported.
+    fn read_dangers(&mut self, now: u32) {
+        let mut i = 0;
+        while i < self.dangers.len() {
+            if now.wrapping_sub(self.dangers[i].arrive_at) >= 1 << 31 {
+                i += 1;
+                continue;
+            }
+            let d = self.dangers.remove(i);
+            let area = Area {
+                pos: d.centre,
+                source: d.shooter.unwrap_or([0; 3]),
+                has_source: u8::from(d.shooter.is_some()),
+                data: d.sender,
+                ..self.danger
+            };
+            self.areas.add(now, area);
+        }
     }
 
     /// Whether the active plan must go (an abort fires), may go (a better

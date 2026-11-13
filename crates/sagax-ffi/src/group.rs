@@ -3,20 +3,17 @@
 
 use sagax_decide::group::{
     Abort, Channel, Goal, GoalKeeper, GoalKind, Member, MemberState, Nearby, Order, Place, Plan,
-    PlanError, Shape, Side, SkillTable, Slot, Spot, Squad, Start, Status, Tactic, Trigger, gather,
-    tactics,
+    PlanError, Shape, Side, SkillTable, Slot, Spot, Squad, SquadConfig, Start, Status, Tactic,
+    Trigger, gather, tactics,
 };
 use sagax_decide::{Consideration, Curve, Pick};
 
 use super::decide::{SxConsideration, SxDecider};
-use super::memory::{SxArea, SxAreas, SxFact, SxKnowledge, SxMessage, metric_of, put};
+use super::memory::{SxArea, SxAreas, SxFact, SxKnowledge, SxMessage, metric_of, pos3, put};
 use super::{ERROR_ARGUMENT, ERROR_PLAN, create, destroy, guarded, slice_of, to_i32};
+use sagax_decide::memory::Metric;
 
 // Numbers of the C interface (`SX_*` in `sagax.h`).
-
-pub(crate) const CHANNEL_NONE: u32 = 0;
-pub(crate) const CHANNEL_SHOUT: u32 = 1;
-pub(crate) const CHANNEL_RADIO: u32 = 2;
 
 pub(crate) const PLACE_NONE: u32 = 0;
 pub(crate) const PLACE_OFFSET: u32 = 1;
@@ -36,21 +33,9 @@ pub(crate) const START_NOW: u32 = 0;
 pub(crate) const START_AFTER_TICKS: u32 = 1;
 pub(crate) const START_ON_SIGNAL: u32 = 2;
 
-pub(crate) const TRIGGER_NONE: u32 = 0;
-pub(crate) const TRIGGER_ALL_ARRIVED: u32 = 1;
-pub(crate) const TRIGGER_TARGET_IN_RADIUS: u32 = 2;
-pub(crate) const TRIGGER_MANUAL: u32 = 3;
-
-pub(crate) const TACTIC_RUSH: u32 = 0;
-pub(crate) const TACTIC_LINE: u32 = 1;
-pub(crate) const TACTIC_WEDGE: u32 = 2;
-pub(crate) const TACTIC_COLUMN: u32 = 3;
-pub(crate) const TACTIC_FLANK: u32 = 4;
-pub(crate) const TACTIC_FLANK_FRONT: u32 = 5;
-pub(crate) const TACTIC_AMBUSH: u32 = 6;
-pub(crate) const TACTIC_FOCUS: u32 = 7;
-pub(crate) const TACTIC_ISOLATE: u32 = 8;
-pub(crate) const TACTIC_FALL_BACK: u32 = 9;
+pub(crate) const SHAPE_LINE: u32 = 0;
+pub(crate) const SHAPE_WEDGE: u32 = 1;
+pub(crate) const SHAPE_COLUMN: u32 = 2;
 
 pub(crate) const SQUAD_KEEP: i32 = 0;
 pub(crate) const SQUAD_REPLAN: i32 = 1;
@@ -553,44 +538,50 @@ pub unsafe extern "C" fn sx_tactic_add_abort(
     0
 }
 
-/// `sx_tactic_set_trigger`.
+/// `sx_tactic_trigger_none`.
 ///
 /// # Safety
 /// `tactic` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_tactic_set_trigger(
-    tactic: *mut SxTactic,
-    kind: u32,
-    value: i64,
-) -> i32 {
-    let t = get!(tactic);
-    t.0.trigger = match kind {
-        TRIGGER_NONE => Trigger::None,
-        TRIGGER_ALL_ARRIVED => match u32::try_from(value) {
-            Ok(max_wait) => Trigger::AllArrived { max_wait },
-            Err(_) => return ERROR_ARGUMENT,
-        },
-        TRIGGER_TARGET_IN_RADIUS => Trigger::TargetInRadius(value),
-        TRIGGER_MANUAL => Trigger::Manual,
-        _ => return ERROR_ARGUMENT,
-    };
+pub unsafe extern "C" fn sx_tactic_trigger_none(tactic: *mut SxTactic) -> i32 {
+    get!(tactic).0.trigger = Trigger::None;
     0
 }
 
-fn shipped(which: u32, param: i32) -> Option<Tactic> {
-    Some(match which {
-        TACTIC_RUSH => tactics::rush(),
-        TACTIC_LINE => tactics::formation(Shape::Line, param),
-        TACTIC_WEDGE => tactics::formation(Shape::Wedge, param),
-        TACTIC_COLUMN => tactics::formation(Shape::Column, param),
-        TACTIC_FLANK => tactics::flank(2, param),
-        TACTIC_FLANK_FRONT => tactics::flank(3, param),
-        TACTIC_AMBUSH => tactics::ambush(),
-        TACTIC_FOCUS => tactics::focus(),
-        TACTIC_ISOLATE => tactics::isolate(),
-        TACTIC_FALL_BACK => tactics::fall_back(),
-        _ => return None,
-    })
+/// `sx_tactic_trigger_all_arrived`.
+///
+/// # Safety
+/// `tactic` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_trigger_all_arrived(
+    tactic: *mut SxTactic,
+    max_wait: u32,
+) -> i32 {
+    get!(tactic).0.trigger = Trigger::AllArrived { max_wait };
+    0
+}
+
+/// `sx_tactic_trigger_target_in_radius`.
+///
+/// # Safety
+/// `tactic` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_trigger_target_in_radius(
+    tactic: *mut SxTactic,
+    radius: i64,
+) -> i32 {
+    get!(tactic).0.trigger = Trigger::TargetInRadius(radius);
+    0
+}
+
+/// `sx_tactic_trigger_manual`.
+///
+/// # Safety
+/// `tactic` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_trigger_manual(tactic: *mut SxTactic) -> i32 {
+    get!(tactic).0.trigger = Trigger::Manual;
+    0
 }
 
 // ---- squad --------------------------------------------------------------------
@@ -602,23 +593,77 @@ pub struct SxSquad {
     due: Vec<Order>,
 }
 
-/// `sx_squad_new`.
+/// `sx_squad_config`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SxSquadConfig {
+    /// Most members.
+    pub members: u32,
+    /// Most facts.
+    pub memory: u32,
+    /// Most danger areas.
+    pub areas: u32,
+    /// Most waiting member reports.
+    pub inbox: u32,
+    /// Most waiting danger reports.
+    pub dangers: u32,
+    /// `SX_METRIC_*`.
+    pub metric: u32,
+}
+
+/// `sx_squad_config_default`.
+///
+/// # Safety
+/// `out` is null or writable.
 #[unsafe(no_mangle)]
-pub extern "C" fn sx_squad_new(
-    group_cap: u32,
-    memory_cap: u32,
-    area_cap: u32,
-    inbox_cap: u32,
-    metric: u32,
-) -> *mut SxSquad {
+pub unsafe extern "C" fn sx_squad_config_default(out: *mut SxSquadConfig) -> i32 {
+    if out.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    let c = SquadConfig::default();
+    let metric = match c.metric {
+        Metric::Euclid => 0,
+        Metric::Manhattan => 1,
+        Metric::Chebyshev => 2,
+        Metric::Hex => 3,
+    };
+    // SAFETY: see above.
+    unsafe {
+        put(
+            out,
+            SxSquadConfig {
+                members: c.members as u32,
+                memory: c.memory as u32,
+                areas: c.areas as u32,
+                inbox: c.inbox as u32,
+                dangers: c.dangers as u32,
+                metric,
+            },
+        );
+    }
+    0
+}
+
+/// `sx_squad_new`: null if `config` is null, a capacity is 0 or the metric
+/// is unknown.
+///
+/// # Safety
+/// `config` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_new(config: *const SxSquadConfig) -> *mut SxSquad {
+    // SAFETY: null or valid (see above).
+    let Some(c) = (unsafe { config.as_ref() }).copied() else {
+        return std::ptr::null_mut();
+    };
     create(|| {
-        let squad = Squad::new(
-            group_cap as usize,
-            memory_cap as usize,
-            area_cap as usize,
-            inbox_cap as usize,
-            metric_of(metric)?,
-        )
+        let squad = Squad::new(SquadConfig {
+            members: c.members as usize,
+            memory: c.memory as usize,
+            areas: c.areas as usize,
+            inbox: c.inbox as usize,
+            dangers: c.dangers as usize,
+            metric: metric_of(c.metric)?,
+        })
         .ok()?;
         Some(SxSquad {
             squad,
@@ -690,13 +735,13 @@ pub unsafe extern "C" fn sx_squad_suspend(squad: *mut SxSquad, id: u32) -> i32 {
     i32::from(squad!(squad).group_mut().suspend(id))
 }
 
-/// `sx_squad_resume`.
+/// `sx_squad_reinstate`.
 ///
 /// # Safety
 /// `squad` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_squad_resume(squad: *mut SxSquad, id: u32, now: u32) -> i32 {
-    i32::from(squad!(squad).resume(id, now))
+pub unsafe extern "C" fn sx_squad_reinstate(squad: *mut SxSquad, id: u32, now: u32) -> i32 {
+    i32::from(squad!(squad).reinstate(id, now))
 }
 
 /// `sx_squad_set_gone`.
@@ -978,29 +1023,36 @@ pub unsafe extern "C" fn sx_discipline(skill: u32, table: *const SxSkillTable) -
     }
 }
 
-/// `sx_squad_set_channel`.
+/// `sx_squad_set_shout`.
 ///
 /// # Safety
 /// `squad` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_squad_set_channel(
+pub unsafe extern "C" fn sx_squad_set_shout(squad: *mut SxSquad, id: u32, range: i64) -> i32 {
+    i32::from(squad!(squad).set_channel(id, Channel::Shout { range }))
+}
+
+/// `sx_squad_set_radio`.
+///
+/// # Safety
+/// `squad` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_radio(
     squad: *mut SxSquad,
     id: u32,
-    kind: u32,
-    a: i64,
-    b: u32,
+    base: u32,
+    per_unit: u32,
 ) -> i32 {
-    let s = &mut squad!(squad);
-    let channel = match kind {
-        CHANNEL_NONE => Channel::None,
-        CHANNEL_SHOUT => Channel::Shout { range: a },
-        CHANNEL_RADIO => match u32::try_from(a) {
-            Ok(base) => Channel::Radio { base, per_unit: b },
-            Err(_) => return ERROR_ARGUMENT,
-        },
-        _ => return ERROR_ARGUMENT,
-    };
-    i32::from(s.set_channel(id, channel))
+    i32::from(squad!(squad).set_channel(id, Channel::Radio { base, per_unit }))
+}
+
+/// `sx_squad_set_silent`.
+///
+/// # Safety
+/// `squad` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_silent(squad: *mut SxSquad, id: u32) -> i32 {
+    i32::from(squad!(squad).set_channel(id, Channel::None))
 }
 
 /// `sx_squad_set_danger_area`.
@@ -1145,6 +1197,74 @@ pub unsafe extern "C" fn sx_squad_report(
     i32::from(s.report(*input!(msg), arrive_at))
 }
 
+/// `sx_squad_report_danger`: `centre` is 3 values; `shooter` is 3 values or
+/// null (unknown). 1 stored, 0 when the danger queue is full.
+///
+/// # Safety
+/// `squad` is null or valid; `centre` is null or 3 readable values;
+/// `shooter` is null or 3 readable values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_report_danger(
+    squad: *mut SxSquad,
+    sender: u32,
+    centre: *const i32,
+    shooter: *const i32,
+    arrive_at: u32,
+) -> i32 {
+    let s = &mut squad!(squad);
+    if centre.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: 3 readable values (see above).
+    let centre = unsafe { pos3(centre) };
+    let shooter = if shooter.is_null() {
+        None
+    } else {
+        // SAFETY: 3 readable values (see above).
+        Some(unsafe { pos3(shooter) })
+    };
+    i32::from(s.report_danger(sender, centre, shooter, arrive_at))
+}
+
+/// `sx_squad_take_activated`: 1 and the plan id in `plan` (may be null), or
+/// 0.
+///
+/// # Safety
+/// `squad` is null or valid; `plan` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_take_activated(squad: *mut SxSquad, plan: *mut u32) -> i32 {
+    match squad!(squad).take_activated() {
+        Some(id) => {
+            // SAFETY: null or writable (see above).
+            unsafe { put(plan, id) };
+            1
+        }
+        None => 0,
+    }
+}
+
+/// `sx_squad_report_arrives_at`: 1 and the tick in `at` (may be null), or 0
+/// when it never arrives.
+///
+/// # Safety
+/// `squad` is null or valid; `at` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_report_arrives_at(
+    squad: *mut SxSquad,
+    id: u32,
+    now: u32,
+    at: *mut u32,
+) -> i32 {
+    match squad!(squad).report_arrives_at(id, now) {
+        Some(t) => {
+            // SAFETY: null or writable (see above).
+            unsafe { put(at, t) };
+            1
+        }
+        None => 0,
+    }
+}
+
 /// `sx_squad_targets`: returns how many facts were written; `total` (may be
 /// null) gets the number of all targets.
 ///
@@ -1177,17 +1297,82 @@ pub unsafe extern "C" fn sx_squad_targets(
     to_i32(written)
 }
 
-/// `sx_squad_add_shipped`.
+/// `sx_squad_add_rush`.
 ///
 /// # Safety
 /// `squad` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_squad_add_shipped(squad: *mut SxSquad, which: u32, param: i32) -> i32 {
+pub unsafe extern "C" fn sx_squad_add_rush(squad: *mut SxSquad) -> i32 {
+    to_i32(squad!(squad).add_tactic(tactics::rush()))
+}
+
+/// `sx_squad_add_formation`: `shape` is `SX_SHAPE_*`.
+///
+/// # Safety
+/// `squad` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_add_formation(
+    squad: *mut SxSquad,
+    shape: u32,
+    spacing: i32,
+) -> i32 {
     let s = &mut squad!(squad);
-    match shipped(which, param) {
-        Some(t) => to_i32(s.add_tactic(t)),
-        None => ERROR_ARGUMENT,
+    let shape = match shape {
+        SHAPE_LINE => Shape::Line,
+        SHAPE_WEDGE => Shape::Wedge,
+        SHAPE_COLUMN => Shape::Column,
+        _ => return ERROR_ARGUMENT,
+    };
+    to_i32(s.add_tactic(tactics::formation(shape, spacing)))
+}
+
+/// `sx_squad_add_flank`: `sides` is 2 or 3.
+///
+/// # Safety
+/// `squad` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_add_flank(squad: *mut SxSquad, sides: u32, dist: i32) -> i32 {
+    let s = &mut squad!(squad);
+    match sides {
+        2 | 3 => to_i32(s.add_tactic(tactics::flank(sides as u8, dist))),
+        _ => ERROR_ARGUMENT,
     }
+}
+
+/// `sx_squad_add_ambush`.
+///
+/// # Safety
+/// `squad` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_add_ambush(squad: *mut SxSquad) -> i32 {
+    to_i32(squad!(squad).add_tactic(tactics::ambush()))
+}
+
+/// `sx_squad_add_focus`.
+///
+/// # Safety
+/// `squad` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_add_focus(squad: *mut SxSquad) -> i32 {
+    to_i32(squad!(squad).add_tactic(tactics::focus()))
+}
+
+/// `sx_squad_add_isolate`.
+///
+/// # Safety
+/// `squad` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_add_isolate(squad: *mut SxSquad) -> i32 {
+    to_i32(squad!(squad).add_tactic(tactics::isolate()))
+}
+
+/// `sx_squad_add_fall_back`.
+///
+/// # Safety
+/// `squad` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_add_fall_back(squad: *mut SxSquad) -> i32 {
+    to_i32(squad!(squad).add_tactic(tactics::fall_back()))
 }
 
 /// `sx_squad_add_tactic`: takes `tactic` over in any case.

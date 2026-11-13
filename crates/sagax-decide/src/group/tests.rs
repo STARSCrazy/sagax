@@ -387,7 +387,15 @@ use crate::{Consideration, Curve, ONE};
 const ENEMY: u32 = 1;
 
 fn squad_of(metric: Metric, members: &[(u32, i32, i32, u32)]) -> Squad {
-    let mut sq = Squad::new(8, 8, 4, 8, metric).unwrap();
+    let mut sq = Squad::new(SquadConfig {
+        members: 8,
+        memory: 8,
+        areas: 4,
+        inbox: 8,
+        metric,
+        ..SquadConfig::default()
+    })
+    .unwrap();
     for &(id, x, y, roles) in members {
         sq.group_mut().add(Member {
             id,
@@ -433,10 +441,27 @@ fn slots_of(sq: &Squad) -> Vec<(u32, u8, GoalKind)> {
 
 #[test]
 fn squad_zero_capacity() {
-    for caps in [(0, 1, 1, 1), (1, 0, 1, 1), (1, 1, 0, 1), (1, 1, 1, 0)] {
-        let r = Squad::new(caps.0, caps.1, caps.2, caps.3, Metric::Euclid);
-        assert_eq!(r.err(), Some(ZeroCapacity));
+    for k in 0..5 {
+        let mut c = SquadConfig::default();
+        match k {
+            0 => c.members = 0,
+            1 => c.memory = 0,
+            2 => c.areas = 0,
+            3 => c.inbox = 0,
+            _ => c.dangers = 0,
+        }
+        assert_eq!(Squad::new(c).err(), Some(ZeroCapacity), "field {k}");
     }
+}
+
+#[test]
+fn squad_config_default_values() {
+    let c = SquadConfig::default();
+    assert_eq!(
+        (c.members, c.memory, c.areas, c.inbox, c.dangers, c.metric),
+        (8, 32, 8, 16, 8, Metric::Euclid)
+    );
+    assert!(Squad::new(c).is_ok());
 }
 
 #[test]
@@ -1165,17 +1190,8 @@ fn report_only_after_arrival() {
     sq.add_tactic(tactics::fall_back());
     sq.set_skill(255);
     assert!(sq.set_gone(3) && sq.set_gone(4));
-    let danger = Message {
-        kind: REPORT_DANGER,
-        subject: 77,
-        pos: [20, 0, 0],
-        // The shooter stood at (25, -2).
-        strength: 25,
-        data: (-2i32) as u32,
-        sender: 2,
-        ..Message::default()
-    };
-    assert!(sq.report(danger, 50));
+    // The shooter stood at (25, -2).
+    assert!(sq.report_danger(2, [20, 0, 0], Some([25, -2, 0]), 50));
     sq.plan(49, &[], &[], 0).unwrap().unwrap();
     assert!(sq.areas().is_empty());
     assert!(
@@ -1189,7 +1205,7 @@ fn report_only_after_arrival() {
     let a = *sq.areas().iter().next().unwrap();
     assert_eq!(
         (a.pos, a.source, a.has_source, a.data),
-        ([20, 0, 0], [25, -2, 0], 1, 77)
+        ([20, 0, 0], [25, -2, 0], 1, 2)
     );
     assert_eq!(a.radius, sq.danger_area().radius);
     let g = sq.pending_plan().unwrap().goals[0].1;
@@ -1654,7 +1670,15 @@ impl Scene {
     /// Members `(id, x, y)` of `skill`; the first leads and is told at once,
     /// the others by [`RADIO`]. No tactics yet.
     fn new(metric: Metric, skill: u8, members: &[(u32, i32, i32)], spots: Vec<Spot>) -> Self {
-        let mut sq = Squad::new(8, 8, 4, 8, metric).unwrap();
+        let mut sq = Squad::new(SquadConfig {
+            members: 8,
+            memory: 8,
+            areas: 4,
+            inbox: 8,
+            metric,
+            ..SquadConfig::default()
+        })
+        .unwrap();
         for &(id, x, y) in members {
             sq.group_mut().add(Member {
                 id,
@@ -2426,7 +2450,7 @@ fn fall_back_does_not_take_cover_near_the_enemy() {
 }
 
 #[test]
-fn resumed_member_rejoins_after_signal() {
+fn reinstated_member_rejoins_after_signal() {
     // As game_orders_first, but member 3 comes back after the signal.
     let mut s = Scene::square(192);
     s.run(0..=19);
@@ -2436,8 +2460,8 @@ fn resumed_member_rejoins_after_signal() {
         s.first(|e| matches!(e, Ev::Signal { .. })),
         Some(Ev::Signal { t: 49 })
     );
-    assert!(s.sq.resume(3, 60));
-    assert!(!s.sq.resume(99, 60));
+    assert!(s.sq.reinstate(3, 60));
+    assert!(!s.sq.reinstate(99, 60));
     s.run(60..=120);
     // It gets the attack order by radio and attacks.
     let late: Vec<(u32, u32)> = s
@@ -2445,17 +2469,17 @@ fn resumed_member_rejoins_after_signal() {
         .into_iter()
         .filter(|&(t, m)| m == 3 && t >= 60)
         .collect();
-    assert_eq!(late.len(), 1, "one order after the resume");
+    assert_eq!(late.len(), 1, "one order after the reinstate");
     assert!(s.attacks().iter().any(|&(t, m)| m == 3 && t >= late[0].0));
 }
 
 #[test]
-fn resume_before_signal_resends_the_gather_order() {
+fn reinstate_before_signal_resends_the_gather_order() {
     let (mut sq, id) = active_flank();
     let mut out = Vec::new();
     sq.orders_due(5, &mut out);
     assert!(sq.group_mut().suspend(3));
-    assert!(sq.resume(3, 6));
+    assert!(sq.reinstate(3, 6));
     out.clear();
     sq.orders_due(6, &mut out);
     assert_eq!(members_of(&out), [3]);
@@ -2463,13 +2487,13 @@ fn resume_before_signal_resends_the_gather_order() {
     assert_eq!((g.kind, g.start, g.plan), (GoalKind::Move, Start::Now, id));
     assert!(g.then_pos.is_some());
     // A member that was not suspended gets nothing again.
-    assert!(sq.resume(2, 7));
+    assert!(sq.reinstate(2, 7));
     sq.orders_due(7, &mut out);
     assert_eq!(members_of(&out), [3]);
-    // Without an active plan a resume only puts the member back.
+    // Without an active plan a reinstate only puts the member back.
     let mut sq = squad_of(Metric::Euclid, &four());
     assert!(sq.group_mut().suspend(2));
-    assert!(sq.resume(2, 0));
+    assert!(sq.reinstate(2, 0));
     assert_eq!(sq.group().get(1).unwrap().state, MemberState::Active);
 }
 
@@ -2729,4 +2753,97 @@ fn report_constructors() {
             ..Message::default()
         }
     );
+}
+
+#[test]
+fn danger_without_shooter_has_no_source() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::fall_back());
+    sq.set_skill(255);
+    assert!(sq.set_gone(3) && sq.set_gone(4));
+    assert!(sq.report_danger(3, [20, 0, 0], None, 5));
+    sq.plan(4, &[], &[], 0).unwrap().unwrap();
+    assert!(sq.areas().is_empty());
+    sq.plan(5, &[], &[], 0).unwrap().unwrap();
+    let a = *sq.areas().iter().next().unwrap();
+    assert_eq!((a.pos, a.has_source, a.data), ([20, 0, 0], 0, 3));
+}
+
+#[test]
+fn danger_queue_full_refuses() {
+    let mut sq = Squad::new(SquadConfig {
+        dangers: 1,
+        ..SquadConfig::default()
+    })
+    .unwrap();
+    assert!(sq.report_danger(1, [0; 3], None, 0));
+    assert!(!sq.report_danger(2, [1, 0, 0], None, 0));
+}
+
+#[test]
+fn danger_queue_frees_room_when_read() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::fall_back());
+    for i in 0..8 {
+        assert!(sq.report_danger(2, [i, 0, 0], None, 10));
+    }
+    assert!(!sq.report_danger(2, [9, 0, 0], None, 10));
+    sq.check(10, &[], &[], 0).unwrap();
+    assert!(sq.report_danger(2, [9, 0, 0], None, 10));
+}
+
+#[test]
+fn inbox_kind_3_is_dropped() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::fall_back());
+    let old_danger = Message {
+        kind: 3,
+        subject: 77,
+        pos: [20, 0, 0],
+        sender: 2,
+        ..Message::default()
+    };
+    assert!(sq.report(old_danger, 0));
+    sq.check(0, &[], &[], 0).unwrap();
+    assert!(sq.areas().is_empty());
+}
+
+#[test]
+fn take_activated_once() {
+    let (mut sq, id) = {
+        let mut sq = squad_of(Metric::Euclid, &four());
+        sq.add_tactic(tactics::rush());
+        sq.set_skill(255);
+        see(&mut sq, 10, 20, 0, 0);
+        let id = sq.plan(0, &[], &[], 0).unwrap().unwrap();
+        (sq, id)
+    };
+    assert_eq!(sq.take_activated(), None);
+    sq.orders_due(4, &mut Vec::new());
+    assert_eq!(sq.take_activated(), None);
+    sq.orders_due(5, &mut Vec::new());
+    assert_eq!(sq.take_activated(), Some(id));
+    assert_eq!(sq.take_activated(), None);
+    sq.orders_due(6, &mut Vec::new());
+    assert_eq!(sq.take_activated(), None);
+}
+
+#[test]
+fn report_arrives_at_mirrors_orders() {
+    let mut sq = squad_of(
+        Metric::Chebyshev,
+        &[(1, 0, 0, 0), (2, 3, 0, 0), (3, 0, 9, 0)],
+    );
+    assert!(sq.set_channel(
+        2,
+        Channel::Radio {
+            base: 2,
+            per_unit: 1
+        }
+    ));
+    assert!(sq.set_channel(3, Channel::None));
+    assert_eq!(sq.report_arrives_at(2, 10), Some(15));
+    assert_eq!(sq.report_arrives_at(1, 10), Some(10));
+    assert_eq!(sq.report_arrives_at(3, 10), None);
+    assert_eq!(sq.report_arrives_at(99, 10), None);
 }

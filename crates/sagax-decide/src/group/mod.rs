@@ -18,7 +18,8 @@
 //!   reaches the members as [`Order`]s over their [`Channel`];
 //!   [`Squad::check`] replans on aborts or a clearly better plan and fires
 //!   the trigger, [`Squad::signal`] starts the "on signal" goals, and
-//!   members [`Squad::report`] back through the leader's inbox.
+//!   members [`Squad::report`] back through the leader's inbox (and
+//!   [`Squad::report_danger`] for shots).
 //!
 //! Everything is integer only and deterministic. On equal distance the
 //! lower id (or index) wins.
@@ -38,15 +39,13 @@ mod tests;
 pub use keeper::discipline;
 pub use keeper::{GOAL_OPTION_RANGE, GoalKeeper, KeeperInputs};
 pub use members::{Group, Member, MemberState, Nearby, gather};
-pub use orders::{
-    Channel, Order, REPORT_ARRIVED, REPORT_DANGER, REPORT_ENEMY, REPORT_GOAL_BROKEN, Status,
-};
+pub use orders::{Channel, Order, REPORT_ARRIVED, REPORT_ENEMY, REPORT_GOAL_BROKEN, Status};
 pub use skill::SkillTable;
 pub use spots::{Spot, SpotPick, heading, pick_spot, wish_point};
 pub use squad::{
     Goal, IN_AREA, IN_EXTRA, IN_LOSSES, IN_OFF_PLAN, IN_PLAN_AGE, IN_RANGED, IN_TARGET_AGE,
     IN_TARGET_DIST, IN_TARGET_FRIEND_DIST, MAX_EXTRA_COLUMNS, Plan, PlanError, PlanId, ROLE_AREA,
-    ROLE_RANGED, Squad,
+    ROLE_RANGED, Squad, SquadConfig,
 };
 pub use tactic::{
     Abort, GoalKind, Place, Shape, Side, Slot, Start, TAG_CHOKE, TAG_COVER, TAG_HIDDEN, TAG_HIGH,

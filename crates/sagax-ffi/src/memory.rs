@@ -127,7 +127,7 @@ pub(crate) unsafe fn put<T>(out: *mut T, value: T) {
 ///
 /// # Safety
 /// `p` points to 3 integers.
-unsafe fn pos3(p: *const i32) -> [i32; 3] {
+pub(crate) unsafe fn pos3(p: *const i32) -> [i32; 3] {
     // SAFETY: see above.
     unsafe { [*p, *p.add(1), *p.add(2)] }
 }

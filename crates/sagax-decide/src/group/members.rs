@@ -87,7 +87,8 @@ impl Group {
         self.update(id, |m| m.state = MemberState::Suspended)
     }
 
-    /// Puts a member back into play; false when the id is unknown.
+    /// Puts a member back into play; false when the id is unknown. Low-level:
+    /// flips the state only (no order is sent; see [`super::Squad::reinstate`]).
     pub fn resume(&mut self, id: u32) -> bool {
         self.update(id, |m| m.state = MemberState::Active)
     }

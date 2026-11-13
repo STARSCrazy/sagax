@@ -1198,10 +1198,10 @@ const enemy = (subject, x, y, seenAt = 0) => ({ subject, kind: ENEMY, pos: [x, y
 
 /** A squad of members [id, x, y, roles?] (the first leads) that sees enemies of kind ENEMY; the others hear by radio (2 ticks plus 1 per unit). */
 function squadOf(metric, members, { radio = true } = {}) {
-  const sq = lib.squad({ groupCap: 8, memoryCap: 8, areaCap: 4, inboxCap: 8, metric });
+  const sq = lib.squad({ members: 8, memory: 8, areas: 4, inbox: 8, dangers: 8, metric });
   members.forEach(([id, x, y, roles = 0], i) => assert.equal(sq.addMember({ id, pos: [x, y, 0], roles }), i));
   assert.equal(sq.setLeader(members[0][0]), true);
-  if (radio) for (const [id] of members.slice(1)) assert.equal(sq.setChannel(id, { kind: 'radio', base: 2, perUnit: 1 }), true);
+  if (radio) for (const [id] of members.slice(1)) assert.equal(sq.setRadio(id, 2, 1), true);
   sq.setTargetKind(ENEMY);
   return sq;
 }
@@ -1232,17 +1232,18 @@ test('tactics: shipped ones and the custom builder, taken over by a squad', () =
   assert.equal(c.addSlot({ place: { kind: 'side', side: 'rear' }, gather: { kind: 'offset', pos: [1, 2, 0] }, kind: 'custom', custom: 77, start: { kind: 'signal' }, dist: 3 }), 1);
   c.addConsideration({ input: SQUAD.inTargetDist, curve: 'inverse', min: 0, max: 50 });
   c.addAbort(SQUAD.inLosses, 1);
-  c.setTrigger({ kind: 'targetInRadius', radius: 6 });
-  c.setTrigger({ kind: 'allArrived', maxWait: 100 });
-  c.setTrigger({ kind: 'manual' });
+  c.triggerTargetInRadius(6);
+  c.triggerAllArrived(100);
+  c.triggerManual();
+  c.triggerNone();
   assert.throws(() => c.addSlot({ place: { kind: 'none' } }), RangeError);
   assert.throws(() => c.addSlot({ place: { kind: 'side', side: 'up' } }), RangeError);
   assert.throws(() => c.addSlot({ place: { kind: 'here' }, kind: 'dance' }), RangeError);
   assert.throws(() => c.addSlot({ place: { kind: 'here' }, start: { kind: 'later' } }), RangeError);
   assert.throws(() => c.addSlot({ place: { kind: 'here' }, max: 256 }), RangeError);
   assert.throws(() => c.addConsideration({ input: 0, curve: 'wobbly' }), RangeError);
-  assert.throws(() => c.setTrigger({ kind: 'allArrived', maxWait: -1 }), RangeError);
-  assert.throws(() => c.setTrigger({ kind: 'sometimes' }), RangeError);
+  assert.throws(() => c.triggerAllArrived(-1), RangeError);
+  assert.throws(() => c.triggerTargetInRadius(1.5), RangeError);
   assert.throws(() => lib.tactic({ minSkill: 256 }), RangeError);
   assert.equal(sq.addTactic(c), 10);
   c.free(); // already taken over: nothing to free
@@ -1254,11 +1255,11 @@ test('tactics: shipped ones and the custom builder, taken over by a squad', () =
 });
 
 test('squad: members, leader, skill, skill table, channels, validated', () => {
-  for (const caps of [{ groupCap: 0 }, { memoryCap: 0 }, { areaCap: 0 }, { inboxCap: 0 }]) {
-    assert.throws(() => lib.squad({ groupCap: 2, memoryCap: 2, areaCap: 2, inboxCap: 2, ...caps }), RangeError);
+  for (const caps of [{ members: 0 }, { memory: 0 }, { areas: 0 }, { inbox: 0 }, { dangers: 0 }]) {
+    assert.throws(() => lib.squad({ members: 2, memory: 2, areas: 2, inbox: 2, dangers: 2, ...caps }), RangeError);
   }
-  assert.throws(() => lib.squad({ groupCap: 2, memoryCap: 2, areaCap: 2, inboxCap: 2, metric: 'taxi' }), RangeError);
-  const sq = lib.squad({ groupCap: 3, memoryCap: 4, areaCap: 4, inboxCap: 4, metric: 'chebyshev' });
+  assert.throws(() => lib.squad({ members: 2, memory: 2, areas: 2, inbox: 2, dangers: 2, metric: 'taxi' }), RangeError);
+  const sq = lib.squad({ members: 3, memory: 4, areas: 4, inbox: 4, dangers: 4, metric: 'chebyshev' });
   assert.equal(sq.leader(), null);
   assert.equal(sq.addMember({ id: 1, pos: [0, 0, 0] }), 0);
   assert.equal(sq.addMember({ id: 1, pos: [5, 5, 0] }), null, 'same id');
@@ -1276,8 +1277,9 @@ test('squad: members, leader, skill, skill table, channels, validated', () => {
   assert.equal(sq.setPos(3, [7, -8, 1]), true);
   assert.equal(sq.setPos(9, [0, 0, 0]), false);
   assert.deepEqual(sq.members()[2].pos, [7, -8, 1]);
-  assert.equal(sq.resume(2, 0), true);
-  assert.equal(sq.resume(9, 0), false);
+  assert.equal(sq.reinstate(2, 0), true);
+  assert.equal(sq.reinstate(9, 0), false);
+  assert.equal(sq.resume(2, 0), true, 'the old name still works');
   assert.equal(sq.suspend(3), true);
   assert.equal(sq.leader(), 1, 'a suspended leader does not act');
   assert.equal(sq.setGone(1), true);
@@ -1306,13 +1308,84 @@ test('squad: members, leader, skill, skill table, channels, validated', () => {
   assert.throws(() => sq.setSkillTable({ ...table, spotRankError: [256, 0, 0, 0] }), RangeError);
   assert.throws(() => sq.setSkillTable({ ...table, thinkTicks: [1, 2, 3] }), RangeError);
   // channels
-  assert.equal(sq.setChannel(2, { kind: 'shout', range: 5 }), true);
-  assert.equal(sq.setChannel(2, { kind: 'none' }), true);
-  assert.equal(sq.setChannel(9, { kind: 'none' }), false);
-  assert.throws(() => sq.setChannel(2, { kind: 'radio', base: -1, perUnit: 0 }), RangeError);
-  assert.throws(() => sq.setChannel(2, { kind: 'pigeon' }), RangeError);
+  assert.equal(sq.setShout(2, 5), true);
+  assert.equal(sq.setSilent(2), true);
+  assert.equal(sq.setSilent(9), false);
+  assert.throws(() => sq.setRadio(2, -1, 0), RangeError);
   sq.setExtraColumns(2);
   assert.throws(() => sq.setExtraColumns(-1), RangeError);
+  sq.free();
+});
+
+test('squad: config keys and aliases', () => {
+  const d = lib.squad();
+  assert.equal(d.addMember({ id: 1, pos: [0, 0, 0] }), 0);
+  d.free();
+  const old = lib.squad({ groupCap: 1, memoryCap: 2, areaCap: 3, inboxCap: 4 });
+  assert.equal(old.addMember({ id: 1, pos: [0, 0, 0] }), 0);
+  assert.equal(old.addMember({ id: 2, pos: [0, 0, 0] }), null, 'groupCap 1 is members 1');
+  old.free();
+  assert.throws(() => lib.squad({ members: 2, groupCap: 2 }), TypeError);
+  assert.throws(() => lib.squad({ memory: 2, memoryCap: 2 }), TypeError);
+  assert.throws(() => lib.squad({ areas: 2, areaCap: 2 }), TypeError);
+  assert.throws(() => lib.squad({ inbox: 2, inboxCap: 2 }), TypeError);
+  assert.throws(() => lib.squad({ dangers: 1.5 }), RangeError);
+  const one = lib.squad({ dangers: 1 });
+  assert.equal(one.reportDanger({ sender: 1, centre: [0, 0, 0] }, 0), true);
+  assert.equal(one.reportDanger({ sender: 1, centre: [1, 0, 0] }, 0), false, 'a full danger queue refuses');
+  one.free();
+});
+
+test('squad: typed channels and triggers', () => {
+  const sq = lib.squad({ members: 4, metric: 'chebyshev' });
+  sq.addMember({ id: 1, pos: [0, 0, 0] });
+  sq.addMember({ id: 2, pos: [3, 0, 0] });
+  sq.addMember({ id: 3, pos: [9, 0, 0] });
+  sq.setLeader(1);
+  assert.equal(sq.setRadio(2, 2, 1), true);
+  assert.equal(sq.reportArrivesAt(2, 10), 15, 'radio 2 + 1 per cell, 3 cells');
+  assert.equal(sq.reportArrivesAt(1, 10), 10, 'the leader at once');
+  assert.equal(sq.setShout(3, 5), true);
+  assert.equal(sq.reportArrivesAt(3, 10), null, 'beyond the shout');
+  assert.equal(sq.setShout(3, 9), true);
+  assert.equal(sq.reportArrivesAt(3, 10), 19);
+  assert.equal(sq.setSilent(2), true);
+  assert.equal(sq.reportArrivesAt(2, 10), null);
+  assert.equal(sq.reportArrivesAt(99, 10), null, 'unknown id');
+  assert.equal(sq.setShout(99, 5), false);
+  assert.equal(sq.setRadio(99, 1, 1), false);
+  assert.equal(sq.setSilent(99), false);
+  assert.equal(sq.setChannel, undefined, 'setChannel is gone');
+  const t = lib.tactic();
+  assert.equal(t.setTrigger, undefined, 'setTrigger is gone');
+  for (const f of ['triggerNone', 'triggerManual']) assert.equal(t[f](), undefined);
+  t.triggerAllArrived(0);
+  t.triggerTargetInRadius(-1);
+  t.free();
+  sq.free();
+});
+
+test('squad: danger reports', () => {
+  const sq = squadOf('euclid', [[1, 0, 0], [2, 1, 0], [3, 0, 1], [4, 1, 1]]);
+  sq.addTactic(lib.tactics.fallBack());
+  sq.setSkill(255);
+  assert.equal(sq.setGone(3) && sq.setGone(4), true);
+  assert.throws(() => sq.report({ kind: 3, subject: 0, pos: [0, 0, 0], sender: 2 }, 0), RangeError);
+  assert.equal(sq.reportDanger({ sender: 2, centre: [20, 0, 0], shooter: { x: 25, y: -2, z: 0 } }, 50), true);
+  assert.equal(sq.reportDanger({ sender: 3, centre: { x: 4, y: 4, level: 0 } }, 50), true);
+  assert.equal(typeof sq.plan(49), 'number');
+  assert.equal(sq.areas().count(), 0, 'not yet arrived');
+  assert.equal(typeof sq.plan(50), 'number');
+  const list = sq.areas().list();
+  assert.equal(list.length, 2);
+  assert.deepEqual([list[0].pos, list[0].source, list[0].data], [[20, 0, 0], [25, -2, 0], 2]);
+  assert.deepEqual([list[1].pos, list[1].data], [[4, 4, 0], 3]);
+  assert.throws(() => sq.reportDanger({ sender: 2, centre: [0, 0, 0], shooter: 'there' }, 0), RangeError);
+  // activation is told once
+  assert.equal(sq.takeActivated(), null);
+  sq.ordersDue(60);
+  assert.equal(sq.takeActivated(), sq.activePlan().id);
+  assert.equal(sq.takeActivated(), null);
   sq.free();
 });
 
@@ -1333,10 +1406,11 @@ test('squad memory: observe, report, targets, own knowledge and areas', () => {
   assert.equal(a.count(), 0);
   sq.setDangerArea({ kind: 3, radius: 4, strength: 9, lifetime: 100, blocking: true });
   assert.equal(sq.dangerArea().radius, 4);
-  sq.report({ kind: SQUAD.reportDanger, subject: 11, pos: [5, 5, 0], seenAt: 9, strength: 30, data: 1, sender: 2 }, 9);
+  assert.equal(sq.reportDanger({ sender: 2, centre: [5, 5, 0], shooter: [30, 1, 0] }, 9), true);
   sq.check(9);
   assert.equal(a.count(), 1);
   assert.deepEqual(a.list()[0].pos, [5, 5, 0]);
+  assert.deepEqual([a.list()[0].source, a.list()[0].data], [[30, 1, 0], 2]);
   assert.equal(lib.areasMoveCost(a, [0, 0, 0], [5, 5, 0], [0, 0, 0], [20, 0, 0]), null);
   // lent memory cannot be freed on its own and dies with the squad
   k.free();
@@ -1367,7 +1441,7 @@ test('areasMoveCost: blocked is null, else the cost of the cell moved to', () =>
 
 test('plans: goals, orders by channel, signal lines up the start, errors', () => {
   const sq = squadOf('euclid', [[1, 0, 0], [2, 6, 8]], { radio: false });
-  assert.equal(sq.setChannel(2, { kind: 'radio', base: 3, perUnit: 2 }), true);
+  assert.equal(sq.setRadio(2, 3, 2), true);
   assert.equal(sq.plan(0), null, 'no tactic');
   assert.equal(sq.addTactic(lib.tactics.rush()), 0);
   assert.equal(sq.plan(0), null, 'no target');
@@ -1452,7 +1526,7 @@ test('gather orders, arrival reports, resume, stale orders, spot radius', () => 
   assert.deepEqual(attack.map((o) => o.kind), ['attack', 'attack', 'attack', 'attack']);
   // a member back after the signal gets the attack order again
   assert.equal(sq.suspend(3), true);
-  assert.equal(sq.resume(3, 30), true);
+  assert.equal(sq.reinstate(3, 30), true);
   const again = sq.ordersDue(30);
   assert.deepEqual(again.map((o) => [o.member, o.kind, o.plan]), [[3, 'attack', id]]);
   sq.free();

@@ -118,6 +118,7 @@ int main(void)
 	walker walkers[MEMBERS];
 	sx_order out[8];
 	sx_squad *squad;
+	sx_squad_config config;
 	sx_member m = {0};
 	sx_fact seen = {0};
 	sx_message told = {0};
@@ -142,9 +143,17 @@ int main(void)
 	printf("gathered: %u %u %u\n", (unsigned)called[0], (unsigned)called[1],
 	       (unsigned)called[2]);
 
-	squad = sx_squad_new(8, 8, 4, 8, SX_METRIC_CHEBYSHEV);
+	CHECK(sx_squad_config_default(&config) == 0);
+	CHECK(config.members == 8 && config.dangers == 8 && config.metric == SX_METRIC_EUCLID);
+	config.memory = 8;
+	config.areas = 4;
+	config.inbox = 8;
+	config.metric = SX_METRIC_CHEBYSHEV;
+	squad = sx_squad_new(&config);
 	CHECK(squad != NULL);
-	CHECK(sx_squad_new(0, 8, 4, 8, SX_METRIC_CHEBYSHEV) == NULL);
+	config.members = 0;
+	CHECK(sx_squad_new(&config) == NULL);
+	config.members = 8;
 	m.id = 1;
 	CHECK(sx_squad_add_member(squad, &m) == 0);
 	walkers[0].id = 1;
@@ -160,7 +169,7 @@ int main(void)
 		m.pos[1] = around[k].pos[1];
 		CHECK(sx_squad_add_member(squad, &m) == i + 1);
 		/* Orders reach the others by radio: 2 ticks plus 1 per cell. */
-		CHECK(sx_squad_set_channel(squad, m.id, SX_CHANNEL_RADIO, 2, 1) == 1);
+		CHECK(sx_squad_set_radio(squad, m.id, 2, 1) == 1);
 		walkers[i + 1].id = m.id;
 	}
 	for (i = 0; i < MEMBERS; i++) {
@@ -174,10 +183,10 @@ int main(void)
 	/* An elite squad (skill 192) knows all three levels: rush, a line and
 	 * the flank from three sides; the flank scores best. */
 	CHECK(sx_squad_set_skill(squad, 192) == 0);
-	CHECK(sx_squad_add_shipped(squad, SX_TACTIC_RUSH, 0) == 0);
-	CHECK(sx_squad_add_shipped(squad, SX_TACTIC_LINE, 2) == 1);
-	CHECK(sx_squad_add_shipped(squad, SX_TACTIC_FLANK_FRONT, 4) == 2);
-	CHECK(sx_squad_add_shipped(squad, 99, 0) == -1);
+	CHECK(sx_squad_add_rush(squad) == 0);
+	CHECK(sx_squad_add_formation(squad, SX_SHAPE_LINE, 2) == 1);
+	CHECK(sx_squad_add_flank(squad, 3, 4) == 2);
+	CHECK(sx_squad_add_flank(squad, 4, 4) == SX_ERROR_ARGUMENT);
 
 	/* The leader sees E1 itself; member 2 reports E2. */
 	seen.subject = E1;
@@ -313,7 +322,7 @@ int main(void)
 		slot.start = SX_START_NOW;
 		CHECK(sx_tactic_add_slot(hold, &slot) == 0);
 		CHECK(sx_tactic_add_abort(hold, SX_IN_LOSSES, 2) == 0);
-		CHECK(sx_tactic_set_trigger(hold, SX_TRIGGER_NONE, 0) == 0);
+		CHECK(sx_tactic_trigger_none(hold) == 0);
 		CHECK(sx_squad_add_tactic(squad, hold) == 3);
 		CHECK(sx_squad_validate(squad, NULL, NULL) == 0);
 	}

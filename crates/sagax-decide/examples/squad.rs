@@ -12,8 +12,8 @@
 //! per cell from the leader).
 
 use sagax_decide::group::{
-    Channel, GoalKind, Member, MemberState, Order, REPORT_ENEMY, Shape, Spot, Squad, Start, Status,
-    TAG_COVER, TAG_HIGH, tactics,
+    Channel, GoalKind, Member, MemberState, Order, REPORT_ENEMY, Shape, Spot, Squad, SquadConfig,
+    Start, Status, TAG_COVER, TAG_HIGH, tactics,
 };
 use sagax_decide::memory::{Fact, Message, Metric, Pos};
 
@@ -93,7 +93,15 @@ fn step_toward(from: Pos, to: Pos) -> Pos {
 /// Runs the scene for ticks `0 ..= end` and returns what happened.
 fn run_scene(end: u32) -> Vec<Event> {
     let mut ev = Vec::new();
-    let mut sq = Squad::new(4, 8, 4, 8, Metric::Chebyshev).unwrap();
+    let mut sq = Squad::new(SquadConfig {
+        members: 4,
+        memory: 8,
+        areas: 4,
+        inbox: 8,
+        metric: Metric::Chebyshev,
+        ..SquadConfig::default()
+    })
+    .unwrap();
     let members = [(1, 0, 0), (2, 0, 2), (3, 0, -2), (4, -3, 0)];
     for (id, x, y) in members {
         sq.group_mut().add(Member {
