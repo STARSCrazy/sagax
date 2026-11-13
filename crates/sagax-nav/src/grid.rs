@@ -72,10 +72,10 @@ pub enum Moves {
 /// There is no default on purpose: every game states its costs once, with
 /// [`GridRules::preset`] or by filling the fields.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0599
 /// use sagax_nav::grid::GridRules;
 ///
-/// let rules = GridRules::preset(Preset::Octile);
+/// let rules = GridRules::default();
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GridRules {
