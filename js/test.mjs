@@ -194,6 +194,12 @@ test('hex: smoothing and formation work on every layout', () => {
   }
 });
 
+test('continue before any search is idle', () => {
+  const g = lib.grid(10, 10);
+  assert.equal(g.continue().status, 'idle');
+  g.free();
+});
+
 test('small budgets, continue, outputs, bulk filling', () => {
   const g = lib.grid(30, 30);
   const costs = new Uint32Array(30 * 30);

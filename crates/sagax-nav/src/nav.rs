@@ -7,16 +7,18 @@
 //!
 //! ```
 //! use sagax_nav::grid::{Cell, DenseGrid, GridRules};
-//! use sagax_nav::nav::{ANY_LEVEL, Navigator, Output, Status};
+//! use sagax_nav::nav::{ANY_LEVEL, Budget, Navigator, Output, Status};
 //! use sagax_nav::topology::Topology;
 //!
 //! let mut map = DenseGrid::new(20, 10);
 //! let mut nav = Navigator::new(Topology::Square(GridRules::default()), 1000);
-//! let report = nav.find_path(&mut map, Cell::new(0, 0, 0), &[Cell::new(15, 3, ANY_LEVEL)], usize::MAX);
-//! assert_eq!(report.status, Some(Status::Found));
+//! let report = nav.find_path(&mut map, Cell::new(0, 0, 0), &[Cell::new(15, 3, ANY_LEVEL)], Budget::UNLIMITED);
+//! assert_eq!(report.status, Status::Found);
 //! let corners = nav.output(&mut map, Output::Smooth);
 //! assert_eq!(corners, [Cell::new(0, 0, 0), Cell::new(15, 3, 0)]);
 //! ```
+
+use std::num::NonZeroUsize;
 
 use sagax_core::NoopSink;
 
@@ -64,10 +66,52 @@ impl Goal<Cell> for Goals<'_> {
     }
 }
 
-/// How a call ended.
+/// How much work one search call may do.
+///
+/// A plain `usize` is not accepted on purpose: a count of 0 (which C and JS
+/// read as "unlimited") must not be possible by accident.
+///
+/// ```
+/// use std::num::NonZeroUsize;
+/// use sagax_nav::Budget;
+///
+/// let limited = Budget::from(NonZeroUsize::new(500).unwrap());
+/// assert_ne!(limited, Budget::UNLIMITED);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Budget {
+    /// Run until the search ends.
+    Unlimited,
+    /// Expand at most this many cells, then stop with [`Status::Running`].
+    Cells(NonZeroUsize),
+}
+
+impl Budget {
+    /// Same as [`Budget::Unlimited`], for call sites.
+    pub const UNLIMITED: Budget = Budget::Unlimited;
+
+    fn cells(self) -> usize {
+        match self {
+            Budget::Unlimited => usize::MAX,
+            Budget::Cells(n) => n.get(),
+        }
+    }
+}
+
+impl From<NonZeroUsize> for Budget {
+    fn from(cells: NonZeroUsize) -> Self {
+        Budget::Cells(cells)
+    }
+}
+
+/// How a call ended.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Status {
-    /// The budget ran out; [`Navigator::resume`] goes on. A path call has
+    /// No search has run yet (or none that [`Navigator::continue_search`] can
+    /// go on with). The status of a default [`Report`].
+    #[default]
+    Idle,
+    /// The budget ran out; [`Navigator::continue_search`] goes on. A path call has
     /// already written the best way so far.
     Running,
     /// The goal was reached.
@@ -86,7 +130,7 @@ pub enum Status {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Report {
     /// How the call ended.
-    pub status: Option<Status>,
+    pub status: Status,
     /// Cost of the way (0 for areas).
     pub cost: Cost,
     /// Cells of the way (start included) or of the area.
@@ -188,12 +232,25 @@ impl Navigator {
     /// reachable cell closest to one. Several goals, e.g. every exit of a
     /// map, cost one search; with more than 16 the closest-cell guess for a
     /// partial way is lost.
+    ///
+    /// `budget` is a [`Budget`]; a plain number is refused at compile time:
+    ///
+    /// ```compile_fail
+    /// use sagax_nav::grid::{Cell, DenseGrid, GridRules};
+    /// use sagax_nav::nav::Navigator;
+    /// use sagax_nav::topology::Topology;
+    ///
+    /// let mut map = DenseGrid::new(10, 10);
+    /// let mut nav = Navigator::new(Topology::Square(GridRules::default()), 100);
+    /// let (s, g) = (Cell::new(0, 0, 0), [Cell::new(5, 5, 0)]);
+    /// nav.find_path(&mut map, s, &g, 5usize);
+    /// ```
     pub fn find_path<M: CellMap + HexMap>(
         &mut self,
         map: &mut M,
         start: Cell,
         goals: &[Cell],
-        budget: usize,
+        budget: impl Into<Budget>,
     ) -> Report {
         self.goals.clear();
         self.goals.extend_from_slice(goals);
@@ -208,17 +265,33 @@ impl Navigator {
         self.search.begin(start, &goal, limits);
         self.start = start;
         self.last = Last::Path;
-        self.run_path(map, budget)
+        self.run_path(map, budget.into())
     }
 
     /// Goes on with the last search for another `budget` cells (after
-    /// [`Status::Running`]).
-    pub fn resume<M: CellMap + HexMap>(&mut self, map: &mut M, budget: usize) -> Report {
+    /// [`Status::Running`]). Without a search to go on with the status is
+    /// [`Status::Idle`].
+    pub fn continue_search<M: CellMap + HexMap>(
+        &mut self,
+        map: &mut M,
+        budget: impl Into<Budget>,
+    ) -> Report {
+        let budget = budget.into();
         match self.last {
             Last::Path => self.run_path(map, budget),
             Last::Area => self.run_area(map, budget),
             Last::Nothing => Report::default(),
         }
+    }
+
+    /// Old name of [`continue_search`](Self::continue_search).
+    #[deprecated(note = "renamed to continue_search")]
+    pub fn resume<M: CellMap + HexMap>(
+        &mut self,
+        map: &mut M,
+        budget: impl Into<Budget>,
+    ) -> Report {
+        self.continue_search(map, budget)
     }
 
     /// Every cell reachable from `start` at a cost of at most `max_cost`,
@@ -229,7 +302,7 @@ impl Navigator {
         map: &mut M,
         start: Cell,
         max_cost: Cost,
-        budget: usize,
+        budget: impl Into<Budget>,
     ) -> Report {
         let limits = Limits {
             max_nodes: self.capacity,
@@ -239,7 +312,7 @@ impl Navigator {
         self.start = start;
         self.last = Last::Area;
         self.path.clear();
-        self.run_area(map, budget)
+        self.run_area(map, budget.into())
     }
 
     /// A way away from `threats`: to the cell, reachable from `start` at a
@@ -278,7 +351,7 @@ impl Navigator {
             &mut NoopSink,
         );
 
-        let area = self.reachable(map, start, max_cost, usize::MAX);
+        let area = self.reachable(map, start, max_cost, Budget::UNLIMITED);
         let Some(danger) = self.flee.as_ref() else {
             return Report::default();
         };
@@ -301,7 +374,7 @@ impl Navigator {
             Status::Found
         };
         Report {
-            status: Some(status),
+            status,
             cost: best.2,
             cells: self.path.len(),
             expanded: area.expanded,
@@ -367,7 +440,7 @@ impl Navigator {
         &self.members
     }
 
-    fn run_path<M: CellMap + HexMap>(&mut self, map: &mut M, budget: usize) -> Report {
+    fn run_path<M: CellMap + HexMap>(&mut self, map: &mut M, budget: Budget) -> Report {
         let goal = Goals {
             cells: &self.goals,
             topology: self.topology,
@@ -376,10 +449,10 @@ impl Navigator {
         let status = match self.tracer.as_deref_mut() {
             None => self
                 .search
-                .advance(&mut graph, &goal, budget, &mut NoopSink),
+                .advance(&mut graph, &goal, budget.cells(), &mut NoopSink),
             Some(t) => self
                 .search
-                .advance(&mut graph, &goal, budget, &mut TraceSink(t)),
+                .advance(&mut graph, &goal, budget.cells(), &mut TraceSink(t)),
         };
         self.search.best_path(&mut self.path);
         let status = match status {
@@ -389,7 +462,7 @@ impl Navigator {
             SearchStatus::Idle | SearchStatus::Exhausted => Status::Unreachable,
         };
         Report {
-            status: Some(status),
+            status,
             cost: self.search.best().map_or(0, |(_, c)| c),
             cells: self.path.len(),
             expanded: self.search.expanded(),
@@ -397,22 +470,22 @@ impl Navigator {
         }
     }
 
-    fn run_area<M: CellMap + HexMap>(&mut self, map: &mut M, budget: usize) -> Report {
+    fn run_area<M: CellMap + HexMap>(&mut self, map: &mut M, budget: Budget) -> Report {
         let mut graph = self.topology.graph(&mut *map, Some(self.start));
         let status = match self.tracer.as_deref_mut() {
             None => self
                 .search
-                .advance(&mut graph, &NoGoal, budget, &mut NoopSink),
+                .advance(&mut graph, &NoGoal, budget.cells(), &mut NoopSink),
             Some(t) => self
                 .search
-                .advance(&mut graph, &NoGoal, budget, &mut TraceSink(t)),
+                .advance(&mut graph, &NoGoal, budget.cells(), &mut TraceSink(t)),
         };
         Report {
-            status: Some(if status == SearchStatus::Running {
+            status: if status == SearchStatus::Running {
                 Status::Running
             } else {
                 Status::Done
-            }),
+            },
             cost: 0,
             cells: self.search.settled().count(),
             expanded: self.search.expanded(),
@@ -482,8 +555,8 @@ mod tests {
         wall(&mut map, 10, 0, 15);
         let mut nav = square();
         let start = Cell::new(2, 2, 0);
-        let report = nav.find_path(&mut map, start, &[Cell::new(18, 2, 0)], usize::MAX);
-        assert_eq!(report.status, Some(Status::Found));
+        let report = nav.find_path(&mut map, start, &[Cell::new(18, 2, 0)], Budget::UNLIMITED);
+        assert_eq!(report.status, Status::Found);
         assert_eq!(report.cells, nav.path().len());
         for output in [Output::Cells, Output::Turns, Output::Smooth] {
             let list = nav.output(&mut map, output).to_vec();
@@ -501,12 +574,12 @@ mod tests {
         wall(&mut map, 15, 0, 25);
         let (start, goal) = (Cell::new(1, 1, 0), Cell::new(28, 1, 0));
         let mut whole = square();
-        let expected = whole.find_path(&mut map, start, &[goal], usize::MAX);
+        let expected = whole.find_path(&mut map, start, &[goal], Budget::UNLIMITED);
         let mut nav = square();
-        let mut report = nav.find_path(&mut map, start, &[goal], 7);
+        let mut report = nav.find_path(&mut map, start, &[goal], NonZeroUsize::new(7).unwrap());
         let mut calls = 1;
-        while report.status == Some(Status::Running) {
-            report = nav.resume(&mut map, 7);
+        while report.status == Status::Running {
+            report = nav.continue_search(&mut map, NonZeroUsize::new(7).unwrap());
             calls += 1;
         }
         assert!(calls > 10);
@@ -523,9 +596,9 @@ mod tests {
             &mut map,
             Cell::new(1, 2, 0),
             &[Cell::new(18, 2, 0)],
-            usize::MAX,
+            Budget::UNLIMITED,
         );
-        assert_eq!(report.status, Some(Status::Partial));
+        assert_eq!(report.status, Status::Partial);
         assert_eq!(nav.path().last(), Some(&Cell::new(9, 2, 0)));
 
         let mut boxed = DenseGrid::new(3, 3);
@@ -545,9 +618,9 @@ mod tests {
             &mut boxed,
             Cell::new(1, 1, 0),
             &[Cell::new(5, 5, 0)],
-            usize::MAX,
+            Budget::UNLIMITED,
         );
-        assert_eq!(report.status, Some(Status::Unreachable));
+        assert_eq!(report.status, Status::Unreachable);
         assert_eq!(nav.path(), [Cell::new(1, 1, 0)]);
     }
 
@@ -557,7 +630,7 @@ mod tests {
         let mut nav = square();
         let start = Cell::new(5, 2, 0);
         let report = nav.flee(&mut map, start, &[Cell::new(3, 2, 0)], 40);
-        assert_eq!(report.status, Some(Status::Found));
+        assert_eq!(report.status, Status::Found);
         let end = *nav.path().last().unwrap();
         assert!(end.x >= 9, "runs away from the threat, got {end:?}");
         assert_eq!(nav.path()[0], start);
@@ -565,13 +638,13 @@ mod tests {
         // cornered: nothing is farther than here
         let mut corner = DenseGrid::new(3, 1);
         let report = nav.flee(&mut corner, Cell::new(2, 0, 0), &[Cell::new(0, 0, 0)], 40);
-        assert_eq!(report.status, Some(Status::Unreachable));
+        assert_eq!(report.status, Status::Unreachable);
         assert_eq!(nav.path(), [Cell::new(2, 0, 0)]);
 
         // two exits: the cheaper one wins
         let exits = [Cell::new(0, 2, ANY_LEVEL), Cell::new(19, 2, ANY_LEVEL)];
-        let report = nav.find_path(&mut map, start, &exits, usize::MAX);
-        assert_eq!(report.status, Some(Status::Found));
+        let report = nav.find_path(&mut map, start, &exits, Budget::UNLIMITED);
+        assert_eq!(report.status, Status::Found);
         assert_eq!(nav.path().last(), Some(&Cell::new(0, 2, 0)));
     }
 
@@ -579,8 +652,8 @@ mod tests {
     fn area_and_way_to_each_cell() {
         let mut map = DenseGrid::new(10, 10);
         let mut nav = square();
-        let report = nav.reachable(&mut map, Cell::new(5, 5, 0), 20, usize::MAX);
-        assert_eq!(report.status, Some(Status::Done));
+        let report = nav.reachable(&mut map, Cell::new(5, 5, 0), 20, Budget::UNLIMITED);
+        assert_eq!(report.status, Status::Done);
         assert_eq!(report.cells, nav.area().count());
         assert!(nav.area().all(|(_, cost)| cost <= 20));
         assert_eq!(nav.path_to(Cell::new(7, 5, 0)), Some(20));
@@ -607,8 +680,8 @@ mod tests {
                 10_000,
             );
             let start = Cell::new(2, 2, 0);
-            let report = nav.find_path(&mut map, start, &[Cell::new(18, 2, 0)], usize::MAX);
-            assert_eq!(report.status, Some(Status::Found), "{layout:?}");
+            let report = nav.find_path(&mut map, start, &[Cell::new(18, 2, 0)], Budget::UNLIMITED);
+            assert_eq!(report.status, Status::Found, "{layout:?}");
             let smooth = nav.output(&mut map, Output::Smooth).to_vec();
             assert_eq!(smooth.first(), Some(&start));
             let cells = nav.path().len();
@@ -627,7 +700,7 @@ mod tests {
         wall(&mut map, 15, 0, 25);
         let (start, goal) = (Cell::new(1, 1, 0), Cell::new(28, 1, 0));
         let mut plain = square();
-        let expected = plain.find_path(&mut map, start, &[goal], usize::MAX);
+        let expected = plain.find_path(&mut map, start, &[goal], Budget::UNLIMITED);
 
         let events = Arc::new(Mutex::new(Vec::<TraceEvent>::new()));
         let sink = Arc::clone(&events);
@@ -635,9 +708,9 @@ mod tests {
         nav.set_tracer(Some(Box::new(move |e: &TraceEvent| {
             sink.lock().unwrap().push(*e)
         })));
-        let mut report = nav.find_path(&mut map, start, &[goal], 50);
-        while report.status == Some(Status::Running) {
-            report = nav.resume(&mut map, 50);
+        let mut report = nav.find_path(&mut map, start, &[goal], NonZeroUsize::new(50).unwrap());
+        while report.status == Status::Running {
+            report = nav.continue_search(&mut map, NonZeroUsize::new(50).unwrap());
         }
         assert_eq!(report, expected);
         assert_eq!(nav.path(), plain.path());
@@ -653,5 +726,40 @@ mod tests {
             (TraceKind::Finished, true, report.expanded)
         );
         assert_eq!(events[0].cell, start);
+    }
+
+    #[test]
+    fn continue_on_fresh_navigator_is_idle() {
+        let mut map = DenseGrid::new(10, 10);
+        let mut nav = square();
+        let report = nav.continue_search(&mut map, Budget::UNLIMITED);
+        assert_eq!(report.status, Status::Idle);
+        assert_eq!(report, Report::default());
+    }
+
+    #[test]
+    fn budget_cells_stops_and_continues() {
+        let mut map = DenseGrid::new(30, 30);
+        wall(&mut map, 15, 0, 25);
+        let (start, goal) = (Cell::new(1, 1, 0), Cell::new(28, 1, 0));
+        let mut whole = square();
+        let expected = whole.find_path(&mut map, start, &[goal], Budget::UNLIMITED);
+        let mut nav = square();
+        let seven = Budget::from(NonZeroUsize::new(7).unwrap());
+        let mut report = nav.find_path(&mut map, start, &[goal], seven);
+        assert_eq!(report.status, Status::Running);
+        while report.status == Status::Running {
+            report = nav.continue_search(&mut map, seven);
+        }
+        assert_eq!(report.status, Status::Found);
+        assert_eq!(report.cost, expected.cost);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn resume_forwards_to_continue_search() {
+        let mut map = DenseGrid::new(10, 10);
+        let mut nav = square();
+        assert_eq!(nav.resume(&mut map, Budget::UNLIMITED).status, Status::Idle);
     }
 }

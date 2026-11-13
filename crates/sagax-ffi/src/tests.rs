@@ -92,6 +92,32 @@ fn bad_rules_give_null() {
 }
 
 #[test]
+fn continue_on_fresh_nav_is_idle() {
+    let mut w = walls(&[]);
+    let map = map_of(&mut w);
+    let nav = unsafe { sx_nav_new(&rules(0)) };
+    let mut points = [Point::default(); 4];
+    let mut result = SxResult {
+        status: -1,
+        ..SxResult::default()
+    };
+    let n = unsafe {
+        sx_nav_continue(
+            nav,
+            &map,
+            0,
+            points.as_mut_ptr(),
+            std::ptr::null_mut(),
+            4,
+            &mut result,
+        )
+    };
+    assert_eq!(n, 0);
+    assert_eq!(result.status, IDLE);
+    unsafe { sx_nav_free(nav) };
+}
+
+#[test]
 fn find_path_writes_every_output_from_the_start() {
     let mut w = walls(&[]);
     let map = map_of(&mut w);
@@ -889,6 +915,7 @@ mod squad {
         assert_eq!(size_of::<SxSkillTable>(), 100);
         assert_eq!(define("SX_API_VERSION"), 8);
         assert_eq!(define("SX_ERROR_PLAN"), i64::from(ERROR_PLAN));
+        assert_eq!(define("SX_IDLE"), i64::from(crate::IDLE));
         let core = [
             ("SX_IN_LOSSES", IN_LOSSES as i64),
             ("SX_IN_OFF_PLAN", IN_OFF_PLAN as i64),

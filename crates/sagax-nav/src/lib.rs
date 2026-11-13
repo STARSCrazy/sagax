@@ -33,6 +33,8 @@ pub mod smooth;
 pub mod topology;
 pub mod trace;
 
+pub use nav::Budget;
+
 pub use search::{
     Cost, Goal, Graph, Limits, NoGoal, PathResult, Search, SearchEvent, SearchStatus, find_path,
 };

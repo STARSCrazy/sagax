@@ -23,11 +23,12 @@ use sagax_nav::flow::FlowField;
 use sagax_nav::formation::Formation;
 use sagax_nav::grid::{Cell, DenseGrid, GridRules, Moves};
 use sagax_nav::hex::HexLayout;
-use sagax_nav::nav::{Navigator, Output, Report, Status, WayOptions, write_way};
+use sagax_nav::nav::{Budget, Navigator, Output, Report, Status, WayOptions, write_way};
 use sagax_nav::topology::Topology;
 use sagax_nav::trace::{TraceEvent, TraceSink, Tracer};
 
 use std::cell::RefCell;
+use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 /// Numbers per trace event: kind, x, y, parent x, parent y, cost, estimate,
@@ -69,6 +70,7 @@ const ERROR_ARGUMENT: i32 = -1;
 const FOUR_WAYS: u32 = 1;
 const CUT_CORNERS: u32 = 2;
 
+const IDLE: i32 = 0;
 const RUNNING: i32 = 1;
 const FOUND: i32 = 2;
 const PARTIAL: i32 = 3;
@@ -131,6 +133,17 @@ fn topology_of(kind: i32, straight: i32, diagonal: i32, flags: u32) -> Option<To
     })
 }
 
+/// Budget 0 means unlimited; negative budgets are refused.
+fn nav_budget_of(budget: i32) -> Option<Budget> {
+    match budget {
+        0 => Some(Budget::Unlimited),
+        b => usize::try_from(b)
+            .ok()
+            .and_then(NonZeroUsize::new)
+            .map(Budget::Cells),
+    }
+}
+
 fn budget_of(budget: i32) -> Option<usize> {
     match budget {
         0 => Some(usize::MAX),
@@ -151,14 +164,14 @@ fn to_i32<T: TryInto<i32>>(value: T) -> i32 {
     value.try_into().unwrap_or(i32::MAX)
 }
 
-fn status_code(status: Option<Status>) -> i32 {
+fn status_code(status: Status) -> i32 {
     match status {
-        None => 0,
-        Some(Status::Running) => RUNNING,
-        Some(Status::Found) => FOUND,
-        Some(Status::Partial) => PARTIAL,
-        Some(Status::Unreachable) => UNREACHABLE,
-        Some(Status::Done) => DONE,
+        Status::Idle => IDLE,
+        Status::Running => RUNNING,
+        Status::Found => FOUND,
+        Status::Partial => PARTIAL,
+        Status::Unreachable => UNREACHABLE,
+        Status::Done => DONE,
     }
 }
 
@@ -402,9 +415,11 @@ pub unsafe extern "C" fn sx_find_path(
     output: i32,
 ) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
-    let (Some(budget), Some(output), Ok(count)) =
-        (budget_of(budget), output_of(output), usize::try_from(count))
-    else {
+    let (Some(budget), Some(output), Ok(count)) = (
+        nav_budget_of(budget),
+        output_of(output),
+        usize::try_from(count),
+    ) else {
         return ERROR_ARGUMENT;
     };
     if !w.input_cells(count) {
@@ -466,7 +481,7 @@ pub unsafe extern "C" fn sx_reachable(
     budget: i32,
 ) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
-    let (Some(budget), Ok(max_cost)) = (budget_of(budget), Cost::try_from(max_cost)) else {
+    let (Some(budget), Ok(max_cost)) = (nav_budget_of(budget), Cost::try_from(max_cost)) else {
         return ERROR_ARGUMENT;
     };
     let report = w
@@ -485,10 +500,10 @@ pub unsafe extern "C" fn sx_reachable(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_continue(g: *mut WasmGrid, budget: i32) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
-    let Some(budget) = budget_of(budget) else {
+    let Some(budget) = nav_budget_of(budget) else {
         return ERROR_ARGUMENT;
     };
-    let report = w.nav.resume(&mut w.grid, budget);
+    let report = w.nav.continue_search(&mut w.grid, budget);
     w.report(report);
     match w.begun {
         Begun::Nothing => 0,

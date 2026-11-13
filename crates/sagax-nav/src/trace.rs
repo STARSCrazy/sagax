@@ -7,7 +7,7 @@
 //!
 //! ```
 //! use sagax_nav::grid::{Cell, DenseGrid, GridRules};
-//! use sagax_nav::nav::Navigator;
+//! use sagax_nav::nav::{Budget, Navigator};
 //! use sagax_nav::topology::Topology;
 //! use sagax_nav::trace::{TraceEvent, TraceKind};
 //! use std::sync::{Arc, Mutex};
@@ -17,7 +17,7 @@
 //! let mut nav = Navigator::new(Topology::Square(GridRules::default()), 1000);
 //! nav.set_tracer(Some(Box::new(move |e: &TraceEvent| sink.lock().unwrap().push(*e))));
 //! let mut map = DenseGrid::new(10, 10);
-//! nav.find_path(&mut map, Cell::new(0, 0, 0), &[Cell::new(5, 0, 0)], usize::MAX);
+//! nav.find_path(&mut map, Cell::new(0, 0, 0), &[Cell::new(5, 0, 0)], Budget::UNLIMITED);
 //! let events = events.lock().unwrap();
 //! assert_eq!(events.first().unwrap().kind, TraceKind::Started);
 //! assert_eq!(events.last().unwrap().kind, TraceKind::Finished);

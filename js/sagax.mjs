@@ -12,7 +12,7 @@
 // Every search answers with the same object:
 //   {cells, status, reached, cost, steps, zonesLeft, total, expanded, nodeLimitHit}
 //   cost = steps (walking and terrain) + zonesLeft * leave cost
-//   status: 'running' (budget used up, call grid.continue()), 'found',
+//   status: 'idle' (continue before any search), 'running' (budget used up, call grid.continue()), 'found',
 //   'partial' (goal unreachable, way to the closest cell), 'unreachable',
 //   'done' (area complete). Ways always begin with the start.
 

@@ -117,6 +117,7 @@ typedef struct sx_rules {
 
 /* ---- results ------------------------------------------------------------- */
 
+#define SX_IDLE         0   /* no search to go on with (continue before any search) */
 #define SX_RUNNING      1   /* budget used up; call the _continue function */
 #define SX_FOUND        2   /* the goal was reached */
 #define SX_PARTIAL      3   /* goal unreachable; way to the closest cell */
@@ -124,7 +125,7 @@ typedef struct sx_rules {
 #define SX_DONE         5   /* area or flow field complete */
 
 typedef struct sx_result {
-	int32_t status;             /* SX_RUNNING ... SX_DONE */
+	int32_t status;             /* SX_IDLE ... SX_DONE */
 	int32_t cells;              /* cells of the whole way (start included), of
 	                             * the area or of the field, also when fewer
 	                             * were written */
@@ -149,7 +150,7 @@ typedef struct sx_result {
 #define SX_ERROR_PLAN      (-3) /* a tactic reads a column beyond the row or has more
                                  * than 255 slots (since 8) */
 
-/* budget everywhere: cells to expand at most in this call; 0: no limit. */
+/* budget everywhere: cells to expand at most in this call; 0 = unlimited. */
 
 uint32_t sx_api_version(void);
 

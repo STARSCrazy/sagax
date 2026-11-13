@@ -6,6 +6,7 @@
 //! [`DStarLite`].
 
 use std::ffi::c_void;
+use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use sagax_nav::Cost;
@@ -15,7 +16,7 @@ use sagax_nav::flow::FlowField;
 use sagax_nav::formation::Formation;
 use sagax_nav::grid::{Cell, CellMap, DenseGrid, GridRules, Moves};
 use sagax_nav::hex::{HexLayout, HexMap};
-use sagax_nav::nav::{Navigator, Output, Report, Status, WayOptions, write_way};
+use sagax_nav::nav::{Budget, Navigator, Output, Report, Status, WayOptions, write_way};
 use sagax_nav::topology::Topology;
 use sagax_nav::trace::{TraceEvent, TraceSink, Tracer};
 
@@ -30,6 +31,7 @@ const ERROR_PLAN: i32 = -3;
 const FOUR_WAYS: u32 = 1;
 const CUT_CORNERS: u32 = 2;
 
+const IDLE: i32 = 0;
 const RUNNING: i32 = 1;
 const FOUND: i32 = 2;
 const PARTIAL: i32 = 3;
@@ -240,7 +242,7 @@ pub struct SxRules {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SxResult {
-    /// `SX_RUNNING` ... `SX_DONE`, 0 before any search.
+    /// `SX_IDLE` ... `SX_DONE`; `SX_IDLE` (0) before any search.
     pub status: i32,
     /// Cells of the whole way, area or field.
     pub cells: i32,
@@ -440,6 +442,17 @@ fn rules_of(rules: *const SxRules) -> Option<(Topology, usize, Cost)> {
     Some((topology, capacity, tolerance))
 }
 
+/// Budget 0 means unlimited; negative budgets are refused.
+fn nav_budget_of(budget: i32) -> Option<Budget> {
+    match budget {
+        0 => Some(Budget::Unlimited),
+        b => usize::try_from(b)
+            .ok()
+            .and_then(NonZeroUsize::new)
+            .map(Budget::Cells),
+    }
+}
+
 fn budget_of(budget: i32) -> Option<usize> {
     match budget {
         0 => Some(usize::MAX),
@@ -466,14 +479,14 @@ fn to_i32<T: TryInto<i32>>(value: T) -> i32 {
     value.try_into().unwrap_or(i32::MAX)
 }
 
-fn status_code(status: Option<Status>) -> i32 {
+fn status_code(status: Status) -> i32 {
     match status {
-        None => 0,
-        Some(Status::Running) => RUNNING,
-        Some(Status::Found) => FOUND,
-        Some(Status::Partial) => PARTIAL,
-        Some(Status::Unreachable) => UNREACHABLE,
-        Some(Status::Done) => DONE,
+        Status::Idle => IDLE,
+        Status::Running => RUNNING,
+        Status::Found => FOUND,
+        Status::Partial => PARTIAL,
+        Status::Unreachable => UNREACHABLE,
+        Status::Done => DONE,
     }
 }
 
@@ -644,7 +657,7 @@ pub unsafe extern "C" fn sx_nav_find_path(
         return ERROR_ARGUMENT;
     };
     let (Some(budget), Some(output), Some(max), Some(count)) = (
-        budget_of(budget),
+        nav_budget_of(budget),
         output_of(output),
         room(points, max_points),
         room(goals.cast_mut(), goal_count),
@@ -725,7 +738,7 @@ pub unsafe extern "C" fn sx_nav_reachable(
     };
     let (Ok(max_cost), Some(budget), Some(max)) = (
         Cost::try_from(max_cost),
-        budget_of(budget),
+        nav_budget_of(budget),
         room(cells, max_cells),
     ) else {
         return ERROR_ARGUMENT;
@@ -756,11 +769,11 @@ pub unsafe extern "C" fn sx_nav_continue(
     let (Some(s), Some(mut map)) = (unsafe { nav.as_mut() }, CallbackMap::new(map)) else {
         return ERROR_ARGUMENT;
     };
-    let (Some(budget), Some(max)) = (budget_of(budget), room(points, max_points)) else {
+    let (Some(budget), Some(max)) = (nav_budget_of(budget), room(points, max_points)) else {
         return ERROR_ARGUMENT;
     };
     guarded(|| {
-        let report = s.nav.resume(&mut map, budget);
+        let report = s.nav.continue_search(&mut map, budget);
         write_result(result, result_of(report));
         match s.begun {
             Begun::Nothing => 0,
