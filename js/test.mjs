@@ -1939,6 +1939,29 @@ test('crew: lent handles throw when stale', () => {
   assert.throws(() => k.goal(), /after free/);
 });
 
+test('crew: a lent keeper follows its member, not its place', () => {
+  const crew = flankCrew();
+  runFlank(crew, 12);
+  // Member 2 sits at group index 1; once member 1 leaves through the squad, member 3 does.
+  const k2 = crew.keeper(2);
+  assert.equal(crew.squad().removeMember(1), true);
+  const k3 = crew.keeper(3);
+  assert.deepEqual(k2.goal(), crew.goal(2), "still member 2's keeper");
+  assert.deepEqual(k3.goal(), crew.goal(3));
+  assert.notDeepEqual(crew.goal(2), crew.goal(3));
+  // Member 2 leaves through the squad: its keeper throws.
+  assert.equal(crew.squad().removeMember(2), true);
+  assert.throws(() => k2.goal(), /stale/);
+  assert.throws(() => k2.goalPostponed(13), /stale/);
+  assert.equal(crew.keeper(2), null);
+  assert.deepEqual(k3.goal(), crew.goal(3));
+  crew.tick(13, { spots: FLANK_SPOTS, seed: 7 });
+  assert.throws(() => k2.goal(), /stale/);
+  assert.throws(() => k3.goal(), /stale/);
+  assert.deepEqual(crew.keeper(3).goal(), crew.goal(3));
+  crew.free();
+});
+
 test('crew: hex positions in and out', () => {
   const crew = lib.crew({ squad: { members: 4, memory: 8, areas: 4, inbox: 8, metric: 'hex' }, hex: 'oddR' });
   for (const [id, x, y] of [[1, 0, 1], [2, 1, 3], [3, 1, -1], [4, -2, 1]]) {

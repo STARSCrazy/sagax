@@ -2,12 +2,12 @@
 //! tick (see `sx_crew_*` in `sagax.h`). Records go in through the scratch
 //! buffer and come out of the crew's out buffer, as for the squad.
 
-use sagax_decide::group::{Crew, CrewConfig, CrewEvent, SquadConfig};
+use sagax_decide::group::{Crew, CrewConfig, CrewEvent, GoalKeeper, Squad, SquadConfig};
 
 use super::{
-    ERROR_ARGUMENT, FACT_SIZE, GOAL_SIZE, Held, MEMBER_SIZE, WasmKeeper, WasmSquad, boxed_squad,
-    drop_squad, fact_of, fact_record, goal_record, hex_layout_of, member_of, metric_of,
-    plan_error_to, plan_input, scratch_copy, to_i32,
+    ERROR_ARGUMENT, FACT_SIZE, GOAL_SIZE, Held, Lend, MEMBER_SIZE, WasmKeeper, WasmSquad,
+    boxed_squad, drop_squad, fact_of, fact_record, goal_record, hex_layout_of, member_of,
+    metric_of, plan_error_to, plan_input, scratch_copy, to_i32,
 };
 
 /// Numbers per event record: kind (`SX_CREW_*`), member, plan, start at,
@@ -19,41 +19,46 @@ pub struct WasmCrew {
     crew: Crew,
     events: Vec<CrewEvent>,
     out: Vec<i32>,
-    /// The squad handle [`sx_crew_squad`] lends (a pointer to `crew`'s
-    /// squad), with its own knowledge and areas handles.
+    /// Counts the calls that changed the crew; a lent keeper made before
+    /// the last one is stale.
+    epoch: u64,
+    /// The squad handle [`sx_crew_squad`] lends, with its own knowledge and
+    /// areas handles (its own allocation, freed with the crew).
     squad: *mut WasmSquad,
-    /// The keeper handles [`sx_crew_keeper`] lends, one per group index (as
-    /// many as the squad has room for, made once).
-    keepers: Vec<*mut WasmKeeper>,
-    /// A keeper handle points into `crew`.
-    lent: bool,
+    /// The keeper handles [`sx_crew_keeper`] lent, one per member id asked
+    /// for (each its own allocation, freed with the crew).
+    keepers: Vec<(u32, *mut WasmKeeper)>,
 }
 
 impl WasmCrew {
-    /// Makes every lent keeper handle stale: a call that changes the crew
-    /// may move its keepers.
-    fn expire(&mut self) {
-        if self.lent {
-            for &k in &self.keepers {
-                // SAFETY: made by sx_crew_new, freed only in `drop`.
-                unsafe { (*k).keeper = Held::Lent(std::ptr::null_mut()) };
-            }
-            self.lent = false;
-        }
+    pub(super) const fn epoch(&self) -> u64 {
+        self.epoch
     }
 }
 
 impl Drop for WasmCrew {
     fn drop(&mut self) {
-        // SAFETY: the handles were made by sx_crew_new for this crew only;
-        // sx_squad_free and sx_keeper_free leave lent ones alone.
+        // SAFETY: the handles were made for this crew only and are freed
+        // here once; sx_squad_free and sx_keeper_free leave lent ones alone.
         unsafe {
             drop_squad(self.squad);
-            for &k in &self.keepers {
+            for &(_, k) in &self.keepers {
                 drop(Box::from_raw(k));
             }
         }
     }
+}
+
+/// The crew's squad, for the lent squad handle.
+fn squad_of(c: &mut WasmCrew, _: u32) -> Option<&mut Squad> {
+    Some(c.crew.squad_mut())
+}
+
+/// The keeper of member `id`, for a lent keeper handle: `None` once the
+/// member left the group.
+fn keeper_of(c: &mut WasmCrew, id: u32) -> Option<&mut GoalKeeper> {
+    c.crew.squad().group().index(id)?;
+    c.crew.keeper_mut(id)
 }
 
 /// The crew behind a handle for a call that changes it (its lent keepers
@@ -64,7 +69,7 @@ macro_rules! crew {
         let Some(c) = (unsafe { $c.as_mut() }) else {
             return ERROR_ARGUMENT;
         };
-        c.expire();
+        c.epoch = c.epoch.wrapping_add(1);
         c
     }};
 }
@@ -119,27 +124,23 @@ pub extern "C" fn sx_crew_new(
     }) else {
         return std::ptr::null_mut();
     };
-    let keeper = || {
-        Box::into_raw(Box::new(WasmKeeper {
-            keeper: Held::Lent(std::ptr::null_mut()),
-            out: Vec::new(),
-        }))
-    };
-    let c = Box::into_raw(Box::new(WasmCrew {
+    let root = Box::into_raw(Box::new(WasmCrew {
         crew,
         events: Vec::new(),
         out: Vec::new(),
+        epoch: 0,
         squad: std::ptr::null_mut(),
-        keepers: (0..members).map(|_| keeper()).collect(),
-        lent: false,
+        keepers: Vec::new(),
     }));
-    // SAFETY: `c` was just made; the box keeps the crew at this address
-    // until sx_crew_free, which frees the lent squad handle with it.
-    unsafe {
-        let squad = std::ptr::from_mut((*c).crew.squad_mut());
-        (*c).squad = boxed_squad(Held::Lent(squad));
-    }
-    c
+    let squad = boxed_squad(Held::Crew(Lend {
+        root,
+        id: 0,
+        epoch: None,
+        get: squad_of,
+    }));
+    // SAFETY: `root` was just made and nothing else refers to it yet.
+    unsafe { (*root).squad = squad };
+    root
 }
 
 /// Frees a crew and every handle it lent.
@@ -379,27 +380,22 @@ pub unsafe extern "C" fn sx_crew_goal(c: *mut WasmCrew, id: u32) -> i32 {
 }
 
 /// The crew's own squad, for every `sx_squad_*` call except
-/// `sx_squad_orders_due` (-1: the crew takes the orders). It belongs to the
-/// crew (sx_squad_free does nothing to it).
+/// `sx_squad_orders_due` (-1: the crew takes the orders), until the crew is
+/// freed. It belongs to the crew (sx_squad_free does nothing to it).
 ///
 /// # Safety
 /// `c` from [`sx_crew_new`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_crew_squad(c: *mut WasmCrew) -> *mut WasmSquad {
     // SAFETY: see above.
-    let Some(w) = (unsafe { c.as_mut() }) else {
-        return std::ptr::null_mut();
-    };
-    // Point the handle at the squad anew, from the crew as it is now.
-    let squad = std::ptr::from_mut(w.crew.squad_mut());
-    // SAFETY: made by sx_crew_new, freed only with the crew.
-    unsafe { (*w.squad).squad = Held::Lent(squad) };
-    w.squad
+    unsafe { c.as_ref() }.map_or(std::ptr::null_mut(), |w| w.squad)
 }
 
 /// The keeper of member `id`, for every `sx_keeper_*` call until the next
-/// call that changes the crew (then they return -1). It belongs to the crew
-/// (sx_keeper_free does nothing to it). Null if the id is unknown.
+/// call that changes the crew or until the member leaves the group (then
+/// they return -1, see [`sx_keeper_live`](super::sx_keeper_live)). One
+/// handle per member id, freed with the crew (sx_keeper_free does nothing
+/// to it). Null if the id is unknown.
 ///
 /// # Safety
 /// `c` from [`sx_crew_new`].
@@ -409,19 +405,25 @@ pub unsafe extern "C" fn sx_crew_keeper(c: *mut WasmCrew, id: u32) -> *mut WasmK
     let Some(w) = (unsafe { c.as_mut() }) else {
         return std::ptr::null_mut();
     };
-    let Some(i) = w.crew.squad().group().index(id) else {
+    if keeper_of(w, id).is_none() {
         return std::ptr::null_mut();
+    }
+    let lend = Lend {
+        root: c,
+        id,
+        epoch: Some(w.epoch),
+        get: keeper_of,
     };
-    let Some(keeper) = w.crew.keeper_mut(id) else {
-        return std::ptr::null_mut();
-    };
-    let keeper = std::ptr::from_mut(keeper);
-    // The group has at most as many members as there are handles.
-    let Some(&k) = w.keepers.get(i) else {
-        return std::ptr::null_mut();
-    };
-    // SAFETY: made by sx_crew_new, freed only with the crew.
-    unsafe { (*k).keeper = Held::Lent(keeper) };
-    w.lent = true;
+    if let Some(&(_, k)) = w.keepers.iter().find(|(m, _)| *m == id) {
+        // SAFETY: made below for this crew, freed only with it; its own
+        // allocation, so writing it does not touch the crew.
+        unsafe { (*k).keeper = Held::Crew(lend) };
+        return k;
+    }
+    let k = Box::into_raw(Box::new(WasmKeeper {
+        keeper: Held::Crew(lend),
+        out: Vec::new(),
+    }));
+    w.keepers.push((id, k));
     k
 }

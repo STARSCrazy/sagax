@@ -8,6 +8,7 @@ use sagax_decide::group::{
 };
 use sagax_decide::{Consideration, Curve, Pick};
 
+use super::crew::SxCrew;
 use super::decide::{SxConsideration, SxDecider};
 use super::memory::{SxArea, SxAreas, SxFact, SxKnowledge, SxMessage, metric_of, pos3, put};
 use super::{ERROR_ARGUMENT, ERROR_PLAN, create, destroy, guarded, slice_of, to_i32};
@@ -590,10 +591,41 @@ pub unsafe extern "C" fn sx_tactic_trigger_manual(tactic: *mut SxTactic) -> i32 
 pub(crate) enum Held<T> {
     /// The handle owns the value and frees it with itself.
     Own(T),
-    /// A pointer into a crew, which owns the value and outlives the handle
-    /// (see `sx_crew_squad`, `sx_crew_keeper`); null once the crew has made
-    /// it stale. Freeing the handle does nothing.
-    Lent(*mut T),
+    /// Lent by a crew (see `sx_crew_squad`, `sx_crew_keeper`), which frees
+    /// the handle with itself. Freeing the handle does nothing.
+    Lent(Lend<T>),
+}
+
+/// A value lent by a crew. Only the crew's root pointer is kept: the value
+/// is reached through it anew on every call, so no pointer into the crew is
+/// held across calls that borrow the crew itself.
+pub(crate) struct Lend<T> {
+    /// The crew, as `sx_crew_new` made it (`Box::into_raw`).
+    pub(crate) root: *mut SxCrew,
+    /// The member the value belongs to (unused for the squad).
+    pub(crate) id: u32,
+    /// The crew's epoch when lent: once a call changed the crew the handle
+    /// is stale. `None`: never stale (the squad).
+    pub(crate) epoch: Option<u64>,
+    /// The value in the crew, or `None` (the member is gone).
+    pub(crate) get: fn(&mut SxCrew, u32) -> Option<&mut T>,
+}
+
+impl<T> Lend<T> {
+    /// The value, or `None` for a stale handle.
+    fn reach<'a>(&self) -> Option<&'a mut T> {
+        // SAFETY: `root` came from `Box::into_raw` in `sx_crew_new` and the
+        // crew frees its lent handles with itself, so it is alive while
+        // this handle is. The handle lives in its own allocation (not inside
+        // the crew), and the C interface is single-threaded per crew, so no
+        // other reference into the crew is alive during this call; the
+        // reference is used only within it.
+        let crew = unsafe { &mut *self.root };
+        if self.epoch.is_some_and(|e| e != crew.epoch()) {
+            return None;
+        }
+        (self.get)(crew, self.id)
+    }
 }
 
 impl<T> Held<T> {
@@ -601,11 +633,7 @@ impl<T> Held<T> {
     pub(crate) fn get(&self) -> Option<&T> {
         match self {
             Self::Own(t) => Some(t),
-            // SAFETY: a lent pointer is null or points into its live crew
-            // (the crew nulls it before the value may move, and the C
-            // interface is single-threaded per handle, so no other reference
-            // into the crew is alive during this call).
-            Self::Lent(p) => unsafe { p.as_ref() },
+            Self::Lent(l) => l.reach().map(|t| &*t),
         }
     }
 
@@ -613,8 +641,7 @@ impl<T> Held<T> {
     pub(crate) fn get_mut(&mut self) -> Option<&mut T> {
         match self {
             Self::Own(t) => Some(t),
-            // SAFETY: as in `get`.
-            Self::Lent(p) => unsafe { p.as_mut() },
+            Self::Lent(l) => l.reach(),
         }
     }
 
@@ -626,15 +653,13 @@ impl<T> Held<T> {
 impl<T> std::ops::Deref for Held<T> {
     type Target = T;
     fn deref(&self) -> &T {
-        self.get()
-            .expect("a lent handle used after its crew changed")
+        self.get().expect("a stale lent handle")
     }
 }
 
 impl<T> std::ops::DerefMut for Held<T> {
     fn deref_mut(&mut self) -> &mut T {
-        self.get_mut()
-            .expect("a lent handle used after its crew changed")
+        self.get_mut().expect("a stale lent handle")
     }
 }
 

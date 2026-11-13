@@ -1,10 +1,12 @@
 //! `sx_crew_*`: a squad with one goal keeper per member, run as one loop per
 //! tick, see `sagax.h`.
 
-use sagax_decide::group::{Crew, CrewConfig, CrewEvent, KeeperInputs, SquadConfig};
+use sagax_decide::group::{
+    Crew, CrewConfig, CrewEvent, GoalKeeper, KeeperInputs, Squad, SquadConfig,
+};
 
 use super::group::{
-    Held, SxGoal, SxKeeper, SxMember, SxSpot, SxSquad, SxSquadConfig, lists, plan_error,
+    Held, Lend, SxGoal, SxKeeper, SxMember, SxSpot, SxSquad, SxSquadConfig, lists, plan_error,
     sx_squad_config_default,
 };
 use super::memory::{SxFact, metric_of, pos3, put};
@@ -114,31 +116,47 @@ impl SxMemberInputs {
 pub struct SxCrew {
     crew: Crew,
     events: Vec<CrewEvent>,
-    /// The handle `sx_crew_squad` lends: a pointer to `crew`'s squad.
-    squad: SxSquad,
-    /// The handles `sx_crew_keeper` lends, one slot per group index (as
-    /// many as the squad has room for, made once so a slot never moves).
-    keepers: Vec<SxKeeper>,
-    /// A keeper slot points into `crew`.
-    lent: bool,
+    /// Counts the calls that changed the crew; a lent keeper made before
+    /// the last one is stale.
+    epoch: u64,
+    /// The handle `sx_crew_squad` lends (its own allocation, freed with the
+    /// crew).
+    squad: *mut SxSquad,
+    /// The handles `sx_crew_keeper` lent, one per member id asked for (each
+    /// its own allocation, freed with the crew).
+    keepers: Vec<(u32, *mut SxKeeper)>,
 }
 
 impl SxCrew {
-    /// Points the lent squad handle at the crew's squad.
-    fn lend_squad(&mut self) {
-        self.squad.squad = Held::Lent(std::ptr::from_mut(self.crew.squad_mut()));
+    pub(crate) const fn epoch(&self) -> u64 {
+        self.epoch
     }
+}
 
-    /// Makes every lent keeper handle stale: a call that changes the crew
-    /// may move its keepers.
-    fn expire(&mut self) {
-        if self.lent {
-            for k in &mut self.keepers {
-                k.0 = Held::Lent(std::ptr::null_mut());
+impl Drop for SxCrew {
+    fn drop(&mut self) {
+        // SAFETY: the handles came from `Box::into_raw` for this crew only
+        // and are freed here once; sx_squad_free and sx_keeper_free leave
+        // lent handles alone.
+        unsafe {
+            destroy(self.squad);
+            for &(_, k) in &self.keepers {
+                destroy(k);
             }
-            self.lent = false;
         }
     }
+}
+
+/// The crew's squad, for a lent squad handle.
+fn squad_of(c: &mut SxCrew, _: u32) -> Option<&mut Squad> {
+    Some(c.crew.squad_mut())
+}
+
+/// The keeper of member `id`, for a lent keeper handle: `None` once the
+/// member left the group.
+fn keeper_of(c: &mut SxCrew, id: u32) -> Option<&mut GoalKeeper> {
+    c.crew.squad().group().index(id)?;
+    c.crew.keeper_mut(id)
 }
 
 /// The crew behind a handle for a call that changes it (its lent keepers
@@ -146,7 +164,7 @@ impl SxCrew {
 macro_rules! crew {
     ($p:expr) => {{
         let c = get!($p);
-        c.expire();
+        c.epoch = c.epoch.wrapping_add(1);
         c
     }};
 }
@@ -188,7 +206,7 @@ pub unsafe extern "C" fn sx_crew_new(config: *const SxCrewConfig) -> *mut SxCrew
     let Some(c) = (unsafe { config.as_ref() }).copied() else {
         return std::ptr::null_mut();
     };
-    let crew = create(|| {
+    let root = create(|| {
         let s = c.squad;
         let layout = match c.hex_grid {
             0 => None,
@@ -207,24 +225,30 @@ pub unsafe extern "C" fn sx_crew_new(config: *const SxCrewConfig) -> *mut SxCrew
             hex_layout: layout,
         })
         .ok()?;
-        let stale = || SxKeeper(Held::Lent(std::ptr::null_mut()));
         Some(SxCrew {
             crew,
             events: Vec::new(),
-            squad: SxSquad {
-                squad: Held::Lent(std::ptr::null_mut()),
-                due: Vec::new(),
-            },
-            keepers: (0..s.members).map(|_| stale()).collect(),
-            lent: false,
+            epoch: 0,
+            squad: std::ptr::null_mut(),
+            keepers: Vec::new(),
         })
     });
-    // SAFETY: null or just made; the box keeps the crew at this address
-    // until sx_crew_free, so the lent pointer stays valid.
-    if let Some(c) = unsafe { crew.as_mut() } {
-        c.lend_squad();
+    if root.is_null() {
+        return root;
     }
-    crew
+    let squad = Box::into_raw(Box::new(SxSquad {
+        squad: Held::Lent(Lend {
+            root,
+            id: 0,
+            epoch: None,
+            get: squad_of,
+        }),
+        due: Vec::new(),
+    }));
+    // SAFETY: `root` was just made by `create` (Box::into_raw) and nothing
+    // else refers to it yet.
+    unsafe { (*root).squad = squad };
+    root
 }
 
 /// `sx_crew_free`: also ends every handle the crew lent.
@@ -466,17 +490,14 @@ pub unsafe extern "C" fn sx_crew_goal(crew: *mut SxCrew, id: u32, out: *mut SxGo
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_crew_squad(crew: *mut SxCrew) -> *mut SxSquad {
     // SAFETY: null or valid (see above).
-    let Some(c) = (unsafe { crew.as_mut() }) else {
-        return std::ptr::null_mut();
-    };
-    c.lend_squad();
-    std::ptr::from_mut(&mut c.squad)
+    unsafe { crew.as_ref() }.map_or(std::ptr::null_mut(), |c| c.squad)
 }
 
 /// `sx_crew_keeper`: the keeper of member `id`, lent until the next call
-/// that changes the crew (then every `sx_keeper_*` call on it returns
-/// `SX_ERROR_ARGUMENT`); `sx_keeper_free` does nothing to it. Null for a
-/// null crew or an unknown id.
+/// that changes the crew or until the member leaves the group (then every
+/// `sx_keeper_*` call on it returns `SX_ERROR_ARGUMENT`); `sx_keeper_free`
+/// does nothing to it. One handle per member id, freed with the crew. Null
+/// for a null crew or an unknown id.
 ///
 /// # Safety
 /// `crew` is null or valid.
@@ -486,18 +507,22 @@ pub unsafe extern "C" fn sx_crew_keeper(crew: *mut SxCrew, id: u32) -> *mut SxKe
     let Some(c) = (unsafe { crew.as_mut() }) else {
         return std::ptr::null_mut();
     };
-    let Some(i) = c.crew.squad().group().index(id) else {
+    if keeper_of(c, id).is_none() {
         return std::ptr::null_mut();
+    }
+    let lend = Lend {
+        root: crew,
+        id,
+        epoch: Some(c.epoch),
+        get: keeper_of,
     };
-    let Some(keeper) = c.crew.keeper_mut(id) else {
-        return std::ptr::null_mut();
-    };
-    let keeper = std::ptr::from_mut(keeper);
-    // The group has at most as many members as there are slots.
-    let Some(slot) = c.keepers.get_mut(i) else {
-        return std::ptr::null_mut();
-    };
-    slot.0 = Held::Lent(keeper);
-    c.lent = true;
-    std::ptr::from_mut(slot)
+    if let Some(&(_, k)) = c.keepers.iter().find(|(m, _)| *m == id) {
+        // SAFETY: made below for this crew, freed only with it; its own
+        // allocation, so writing it does not touch the crew.
+        unsafe { (*k).0 = Held::Lent(lend) };
+        return k;
+    }
+    let k = Box::into_raw(Box::new(SxKeeper(Held::Lent(lend))));
+    c.keepers.push((id, k));
+    k
 }

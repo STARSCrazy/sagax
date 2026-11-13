@@ -2955,6 +2955,49 @@ mod crew {
     }
 
     #[test]
+    fn crew_lent_keeper_follows_its_member() {
+        let c = c_crew();
+        let mut walks = [Walk::default(); 4];
+        for t in 0..=12 {
+            walk_c(c, &walks, t);
+            let (_, _, keys) = tick_c(c, t, 16);
+            note(&mut walks, t, &keys);
+        }
+        unsafe {
+            let goal = |id| {
+                let mut g = SxGoal::default();
+                assert_eq!(sx_crew_goal(c, id, &mut g), 1);
+                g
+            };
+            let mut g = SxGoal::default();
+            // Member 2 sits at group index 1; once member 1 leaves through
+            // the squad, member 3 does.
+            let k2 = sx_crew_keeper(c, 2);
+            assert_eq!(sx_squad_remove_member(sx_crew_squad(c), 1), 1);
+            let k3 = sx_crew_keeper(c, 3);
+            assert_ne!(k2, k3, "one handle per member id");
+            assert_eq!(sx_keeper_goal(k2, &mut g), 1);
+            assert_eq!(g, goal(2), "still member 2's keeper");
+            assert_eq!(sx_keeper_goal(k3, &mut g), 1);
+            assert_eq!(g, goal(3));
+            assert_eq!(sx_crew_keeper(c, 2), k2, "the same handle again");
+            // Member 2 leaves through the squad: its handle fails loudly.
+            assert_eq!(sx_squad_remove_member(sx_crew_squad(c), 2), 1);
+            assert_eq!(sx_keeper_goal(k2, &mut g), ERROR_ARGUMENT);
+            assert_eq!(sx_keeper_goal_postponed(k2, 13), ERROR_ARGUMENT);
+            assert!(sx_crew_keeper(c, 2).is_null());
+            assert_eq!(sx_keeper_goal(k3, &mut g), 1);
+            // The next tick drops member 2's keeper; its handle stays refused.
+            let (n, ..) = tick_c(c, 13, 16);
+            assert!(n >= 0);
+            assert_eq!(sx_keeper_goal(k2, &mut g), ERROR_ARGUMENT);
+            assert_eq!(sx_keeper_goal(k3, &mut g), ERROR_ARGUMENT, "stale");
+            assert_eq!(sx_keeper_goal(sx_crew_keeper(c, 3), &mut g), 1);
+            sx_crew_free(c);
+        }
+    }
+
+    #[test]
     fn crew_null_and_zero() {
         unsafe {
             assert!(sx_crew_new(null()).is_null());

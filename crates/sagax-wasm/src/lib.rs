@@ -1516,21 +1516,53 @@ enum Held<T> {
         root: *mut WasmSquad,
         get: fn(&mut Squad) -> &mut T,
     },
-    /// Lent by a [`WasmCrew`]: a pointer into it. The crew outlives the
-    /// handle (it frees it) and sets the pointer to null before the value
-    /// may move (a stale handle: every call on it returns -1).
-    Lent(*mut T),
+    /// Lent by a [`WasmCrew`], reached through its root the same way.
+    Crew(Lend<T>),
+}
+
+/// A value lent by a crew: the crew's root pointer, the member it belongs
+/// to and the crew's epoch when lent.
+struct Lend<T> {
+    /// The crew, as `sx_crew_new` made it (`Box::into_raw`).
+    root: *mut WasmCrew,
+    /// The member the value belongs to (unused for the squad).
+    id: u32,
+    /// Once a call changed the crew the handle is stale; `None`: never
+    /// stale (the squad).
+    epoch: Option<u64>,
+    /// The value in the crew, or `None` (the member left the group).
+    get: fn(&mut WasmCrew, u32) -> Option<&mut T>,
+}
+
+impl<T> Lend<T> {
+    /// The value, or `None` for a stale handle.
+    fn reach<'a>(&self) -> Option<&'a mut T> {
+        // SAFETY: `root` came from `Box::into_raw` in sx_crew_new and the
+        // crew frees its lent handles with itself, so it is alive while this
+        // handle is. The handle lives in its own allocation (not inside the
+        // crew), and JS is single threaded, so no other reference into the
+        // crew is alive during a call; the reference is used only within it.
+        let crew = unsafe { &mut *self.root };
+        if self.epoch.is_some_and(|e| e != crew.epoch()) {
+            return None;
+        }
+        (self.get)(crew, self.id)
+    }
 }
 
 impl<T> Held<T> {
-    /// False for a handle a crew made stale.
+    /// False for a lent keeper that went stale (the crew changed, or its
+    /// member left the group).
     fn is_live(&self) -> bool {
-        !matches!(self, Self::Lent(p) if p.is_null())
+        match self {
+            Self::Crew(l) => l.reach().is_some(),
+            _ => true,
+        }
     }
 
     /// True for a value lent by a crew (freeing the handle does nothing).
     const fn is_lent(&self) -> bool {
-        matches!(self, Self::Lent(_))
+        matches!(self, Self::Crew(_))
     }
 }
 
@@ -1543,10 +1575,9 @@ impl<T> std::ops::Deref for Held<T> {
             // frees the handle with itself; JS is single threaded, so no
             // other reference into the squad is alive during a call.
             Self::Via { root, get } => get(unsafe { &mut (**root).squad }),
-            // SAFETY: null or pointing into the live crew that lent it (see
-            // `Lent`); JS is single threaded, so no other reference into the
-            // crew is alive during a call. Callers check `is_live` first.
-            Self::Lent(p) => unsafe { p.as_ref() }.expect("a stale lent handle"),
+            // Callers check `is_live` first (keepers; the squad never goes
+            // stale).
+            Self::Crew(l) => l.reach().expect("a stale lent handle"),
         }
     }
 }
@@ -1557,8 +1588,7 @@ impl<T> std::ops::DerefMut for Held<T> {
             Self::Own(t) => t,
             // SAFETY: as in `deref`.
             Self::Via { root, get } => get(unsafe { &mut (**root).squad }),
-            // SAFETY: as in `deref`.
-            Self::Lent(p) => unsafe { p.as_mut() }.expect("a stale lent handle"),
+            Self::Crew(l) => l.reach().expect("a stale lent handle"),
         }
     }
 }
@@ -3913,6 +3943,17 @@ pub unsafe extern "C" fn sx_keeper_free(k: *mut WasmKeeper) {
         // SAFETY: from sx_keeper_new (see above).
         Some(_) => drop(unsafe { Box::from_raw(k) }),
     }
+}
+
+/// 1 if the keeper can be used: its own, or lent by a crew that did not
+/// change since and whose group still holds the member; else 0.
+///
+/// # Safety
+/// `k` is null, from [`sx_keeper_new`] or from [`sx_crew_keeper`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_live(k: *mut WasmKeeper) -> i32 {
+    // SAFETY: see above.
+    i32::from(unsafe { k.as_ref() }.is_some_and(|w| w.keeper.is_live()))
 }
 
 /// The out buffer of the last call that wrote one.

@@ -1565,8 +1565,11 @@ int32_t sx_crew_goal(sx_crew *crew, uint32_t id, sx_goal *out);
 /* Handles lent by the crew: its own squad (valid until sx_crew_free) and
  * the keeper of member id (valid until the next sx_crew_* call that changes
  * the crew, i.e. any but sx_crew_member_inputs, sx_crew_goal, sx_crew_squad
- * and sx_crew_keeper; after that every sx_keeper_* call on it returns
- * SX_ERROR_ARGUMENT). sx_squad_free and sx_keeper_free do nothing to them.
+ * and sx_crew_keeper, and while member id is in the group; after that
+ * every sx_keeper_* call on it returns SX_ERROR_ARGUMENT, it never reaches
+ * another member's keeper). One keeper handle per member id, the same each
+ * time. sx_squad_free and sx_keeper_free do nothing to them; the crew
+ * frees them with itself.
  * The crew takes its squad's orders itself: sx_squad_orders_due on a crew's
  * squad returns SX_ERROR_ARGUMENT. Null for a null crew or an unknown id. */
 sx_squad *sx_crew_squad(sx_crew *crew);

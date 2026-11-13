@@ -864,6 +864,9 @@ class Table {
       if (this.lentAt !== null && this.owner.epoch !== this.lentAt) {
         throw new Error('Sagax: this lent keeper is stale: the crew changed since crew.keeper(); ask for it again');
       }
+      if (this.lentAt !== null && this.x.sx_keeper_live(this.handle) !== 1) {
+        throw new Error('Sagax: this lent keeper is stale: its member left the group');
+      }
     }
     return this.handle;
   }
@@ -2356,7 +2359,9 @@ function crewEventOf(r) {
  * Channels, tactics, skill and leader go on crew.squad() (it lives until
  * crew.free(); its ordersDue throws: the crew takes the orders). crew.keeper(id)
  * is the member's keeper until the next call that changes the crew (anything
- * but memberInputs, goal, squad and keeper); after that it throws. With hex
+ * but memberInputs, goal, squad and keeper) or until the member leaves the
+ * group (also through crew.squad()); after that it throws, it never reaches
+ * another member's keeper. With hex
  * (a layout as for lib.hex, needs squad metric 'hex') the crew's own calls
  * take and return offset positions; the squad and keepers hold axial ones.
  */
@@ -2496,7 +2501,7 @@ export class Crew extends Table {
     return this.#squad;
   }
 
-  /** The member's keeper (a Keeper) until the next call that changes the crew, or null if the id is unknown. */
+  /** The member's keeper (a Keeper) until the next call that changes the crew or the member leaves the group, or null if the id is unknown. */
   keeper(id) {
     const k = this.x.sx_crew_keeper(this.h, u32Of(id, 'id'));
     return k ? new Keeper(this.x, new Lent(k, this, this.epoch)) : null;
