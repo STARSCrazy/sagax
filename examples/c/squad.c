@@ -277,7 +277,7 @@ int main(void)
 	{
 		sx_keeper *keeper = sx_keeper_new();
 		sx_skill_table table;
-		sx_message broken = {0};
+		sx_message broken;
 		int32_t inputs[5];
 		uint32_t give_up;
 
@@ -286,14 +286,12 @@ int main(void)
 		give_up = table.give_up_ticks[192 / 64];
 		CHECK(sx_keeper_set(keeper, 60, &walkers[1].goal) == 0);
 		CHECK(sx_keeper_inputs(keeper, 60, 16, 2, 0, SX_METRIC_CHEBYSHEV, 1,
-		                       (uint32_t)sx_discipline(192, &table), inputs) == 0);
-		CHECK(inputs[0] == 1 && inputs[3] == 1);
-		CHECK(sx_keeper_postpone(keeper, 61) == 0);
+		                       (uint32_t)sx_skill_table_hold_bonus_for(&table, 192), inputs) == 0);
+		CHECK(inputs[SX_KEEPER_IN_HAS_GOAL] == 1 && inputs[SX_KEEPER_IN_SIGNAL] == 1);
+		CHECK(sx_keeper_goal_postponed(keeper, 61) == 0);
 		CHECK(sx_keeper_broken(keeper, 61 + give_up - 1, give_up) == 0);
 		CHECK(sx_keeper_broken(keeper, 61 + give_up, give_up) == 1);
-		broken.kind = SX_REPORT_GOAL_BROKEN;
-		broken.sender = walkers[1].id;
-		broken.data = walkers[1].goal.plan;
+		CHECK(sx_report_goal_broken(walkers[1].id, walkers[1].goal.plan, &broken) == 0);
 		CHECK(sx_squad_report(squad, &broken, 61 + give_up) == 1);
 		printf("member %u gave its goal up after %u ticks\n", (unsigned)walkers[1].id,
 		       (unsigned)give_up);

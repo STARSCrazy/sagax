@@ -29,6 +29,38 @@ impl SkillTable {
     pub const fn level(skill: u8) -> usize {
         (skill / 64) as usize
     }
+
+    /// How the tactic is chosen at `skill`'s level.
+    pub const fn pick_for(&self, skill: u8) -> Pick {
+        self.pick[Self::level(skill)]
+    }
+
+    /// Ticks from making a plan until it is active, at `skill`'s level.
+    pub const fn think_ticks_for(&self, skill: u8) -> u32 {
+        self.think_ticks[Self::level(skill)]
+    }
+
+    /// Most ranks a spot may be off the best one, at `skill`'s level.
+    pub const fn spot_rank_error_for(&self, skill: u8) -> u8 {
+        self.spot_rank_error[Self::level(skill)]
+    }
+
+    /// Most ticks a member starts late, at `skill`'s level.
+    pub const fn timing_spread_for(&self, skill: u8) -> u32 {
+        self.timing_spread[Self::level(skill)]
+    }
+
+    /// Bonus of the active plan over a new one, and the member's discipline
+    /// at `skill`'s level.
+    pub const fn hold_bonus_for(&self, skill: u8) -> u32 {
+        self.hold_bonus[Self::level(skill)]
+    }
+
+    /// Ticks a member may postpone its goal before it reports it broken,
+    /// at `skill`'s level.
+    pub const fn give_up_ticks_for(&self, skill: u8) -> u32 {
+        self.give_up_ticks[Self::level(skill)]
+    }
 }
 
 impl Default for SkillTable {
@@ -51,5 +83,25 @@ impl Default for SkillTable {
             hold_bonus: [ONE / 8, ONE / 4, ONE * 3 / 8, ONE / 2],
             give_up_ticks: [17, 34, 51, 68],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_for_reads_the_level() {
+        let t = SkillTable::default();
+        assert_eq!(
+            [0, 64, 191, 255].map(|s| t.give_up_ticks_for(s)),
+            [17, 34, 51, 68]
+        );
+        assert_eq!(t.think_ticks_for(255), 5);
+        assert_eq!(t.hold_bonus_for(0), ONE / 8);
+        assert_eq!(t.spot_rank_error_for(0), 2);
+        assert_eq!(t.timing_spread_for(0), 17);
+        assert_eq!(t.pick_for(255), Pick::Best);
+        assert_eq!(t.pick_for(0), Pick::Weighted { top: 3 });
     }
 }

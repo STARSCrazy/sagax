@@ -4,6 +4,63 @@
 use super::skill::SkillTable;
 use super::squad::{Goal, plain_dist};
 use crate::memory::{Metric, Pos};
+use crate::{Candidate, Consideration, Curve, Decider};
+
+/// Column of [`GoalKeeper::inputs`]: 1 with a goal, else 0.
+pub const IN_HAS_GOAL: usize = 0;
+/// Column: distance to the goal's position, or -1 without one.
+pub const IN_DIST: usize = 1;
+/// Column: ticks since the goal was issued (saturated).
+pub const IN_AGE: usize = 2;
+/// Column: 1 once the group signal was given, else 0.
+pub const IN_SIGNAL: usize = 3;
+/// Column: the member's discipline.
+pub const IN_DISCIPLINE: usize = 4;
+/// First column a member's own inputs may use after the five above.
+pub const IN_EXTRA: usize = 5;
+/// Distance at which the goal option of [`GoalKeeper::add_goal_option`]
+/// scores 0.
+pub const GOAL_OPTION_RANGE: i32 = 64;
+
+/// The keeper's input columns by name (see [`GoalKeeper::inputs`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct KeeperInputs {
+    /// 1 with a goal, else 0.
+    pub has_goal: i32,
+    /// Distance to the goal's position, or -1 without one.
+    pub dist: i32,
+    /// Ticks since the goal was issued (saturated).
+    pub age: i32,
+    /// 1 once the group signal was given, else 0.
+    pub signal: i32,
+    /// The member's discipline.
+    pub discipline: i32,
+}
+
+impl KeeperInputs {
+    /// The columns in order, as a row for a [`Decider`].
+    pub const fn as_row(&self) -> [i32; 5] {
+        [
+            self.has_goal,
+            self.dist,
+            self.age,
+            self.signal,
+            self.discipline,
+        ]
+    }
+}
+
+impl From<[i32; 5]> for KeeperInputs {
+    fn from(row: [i32; 5]) -> Self {
+        Self {
+            has_goal: row[IN_HAS_GOAL],
+            dist: row[IN_DIST],
+            age: row[IN_AGE],
+            signal: row[IN_SIGNAL],
+            discipline: row[IN_DISCIPLINE],
+        }
+    }
+}
 
 /// A member's current [`Goal`] with its postpone state.
 ///
@@ -48,15 +105,56 @@ impl GoalKeeper {
 
     /// The member turns to something else for now. Already postponed: the
     /// first postpone time stays. Without a goal: nothing happens.
-    pub fn postpone(&mut self, now: u32) {
+    pub fn goal_postponed(&mut self, now: u32) {
         if self.goal.is_some() && self.postponed_at.is_none() {
             self.postponed_at = Some(now);
         }
     }
 
     /// The member is back on its goal: the postpone clock is reset.
-    pub fn resume(&mut self, _now: u32) {
+    pub fn goal_won(&mut self, _now: u32) {
         self.postponed_at = None;
+    }
+
+    /// Old name of [`goal_postponed`](Self::goal_postponed).
+    #[deprecated(since = "0.9.0", note = "renamed to `goal_postponed`")]
+    pub fn postpone(&mut self, now: u32) {
+        self.goal_postponed(now);
+    }
+
+    /// Old name of [`goal_won`](Self::goal_won).
+    #[deprecated(since = "0.9.0", note = "renamed to `goal_won`")]
+    pub fn resume(&mut self, now: u32) {
+        self.goal_won(now);
+    }
+
+    /// Adds the ready-made "keep my goal" option to a member's `decider` and
+    /// returns its number. It scores `weight` times a step on
+    /// [`IN_HAS_GOAL`] and a falling curve on [`IN_DIST`] (full at 0, 0 at
+    /// [`GOAL_OPTION_RANGE`]). The member's rows start with the five
+    /// keeper columns ([`KeeperInputs::as_row`]); its own inputs follow
+    /// from [`IN_EXTRA`].
+    pub fn add_goal_option(decider: &mut Decider, weight: u32) -> u32 {
+        let option = decider.add_option(weight);
+        decider.add_consideration(
+            option,
+            Consideration::new(IN_HAS_GOAL as u32, Curve::Step, 1, 1),
+        );
+        decider.add_consideration(
+            option,
+            Consideration::new(IN_DIST as u32, Curve::Inverse, 0, GOAL_OPTION_RANGE),
+        );
+        option
+    }
+
+    /// Tells `decider` that the goal option (`option`, from
+    /// [`add_goal_option`](Self::add_goal_option)) is the action going on
+    /// while a goal is held and not postponed: it gets `discipline` as its
+    /// bonus. Otherwise no action is current.
+    pub fn set_current(&self, decider: &mut Decider, option: u32, discipline: u32) {
+        let current =
+            (self.goal.is_some() && self.postponed_at.is_none()).then(|| Candidate::new(option, 0));
+        decider.set_current(current, discipline);
     }
 
     /// The member is out of play: [`broken`](Self::broken) is never true.
@@ -117,15 +215,16 @@ impl GoalKeeper {
 
 /// A member's discipline: the table's `hold_bonus` at the level of the
 /// member's own `skill` (`skill / 64`).
+#[deprecated(since = "0.9.0", note = "use `SkillTable::hold_bonus_for`")]
 pub fn discipline(skill: u8, table: &SkillTable) -> u32 {
-    table.hold_bonus[SkillTable::level(skill)]
+    table.hold_bonus_for(skill)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ONE;
     use crate::group::{GoalKind, Start};
+    use crate::{Candidate, Decider, ONE};
 
     fn goal(pos: Option<Pos>, issued_at: u32) -> Goal {
         Goal {
@@ -144,25 +243,25 @@ mod tests {
     }
 
     #[test]
-    fn postpone_until_give_up_reports_broken() {
+    fn goal_postponed_until_give_up() {
         let mut k = GoalKeeper::new();
         k.set(0, goal(Some([0, 0, 0]), 0));
         assert!(!k.broken(100, 10));
-        k.postpone(100);
+        k.goal_postponed(100);
         assert!(!k.broken(109, 10));
         assert!(k.broken(110, 10));
-        k.postpone(105); // keeps the first time
+        k.goal_postponed(105); // keeps the first time
         assert!(k.broken(110, 10));
     }
 
     #[test]
-    fn resume_resets_postpone() {
+    fn goal_won_resets_postpone() {
         let mut k = GoalKeeper::new();
         k.set(0, goal(None, 0));
-        k.postpone(10);
-        k.resume(15);
+        k.goal_postponed(10);
+        k.goal_won(15);
         assert!(!k.broken(1000, 10));
-        k.postpone(20);
+        k.goal_postponed(20);
         assert!(!k.broken(29, 10));
         assert!(k.broken(30, 10));
         k.set(30, goal(None, 30));
@@ -174,7 +273,7 @@ mod tests {
         let mut k = GoalKeeper::new();
         k.set(0, goal(None, 0));
         assert!(!k.broken(5, 0), "not postponed: never broken");
-        k.postpone(5);
+        k.goal_postponed(5);
         assert!(k.broken(5, 0));
         k.suspend();
         assert!(!k.broken(5, 0));
@@ -184,7 +283,7 @@ mod tests {
     fn suspended_never_broken() {
         let mut k = GoalKeeper::new();
         k.set(0, goal(None, 0));
-        k.postpone(0);
+        k.goal_postponed(0);
         k.suspend();
         assert!(!k.broken(1000, 10));
         k.unsuspend(1000);
@@ -221,18 +320,94 @@ mod tests {
         k.clear();
         assert!(k.goal().is_none());
         let t = SkillTable::default();
-        assert_eq!(discipline(0, &t), ONE / 8);
-        assert_eq!(discipline(200, &t), ONE / 2);
-        assert_eq!(discipline(255, &t), ONE / 2);
+        assert_eq!(t.hold_bonus_for(0), ONE / 8);
+        assert_eq!(t.hold_bonus_for(200), ONE / 2);
+        assert_eq!(t.hold_bonus_for(255), ONE / 2);
     }
 
     #[test]
     fn give_up_wraps() {
         let mut k = GoalKeeper::new();
         k.set(u32::MAX - 5, goal(None, u32::MAX - 5));
-        k.postpone(u32::MAX - 2);
+        k.goal_postponed(u32::MAX - 2);
         assert!(!k.broken(4, 10)); // age 7
         assert!(k.broken(7, 10)); // age 10
         assert_eq!(k.inputs(4, [0, 0, 0], Metric::Euclid, false, 0)[2], 10);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn old_keeper_names_forward() {
+        let mut k = GoalKeeper::new();
+        k.set(0, goal(None, 0));
+        k.postpone(10);
+        assert!(k.broken(20, 10));
+        k.resume(20);
+        assert!(!k.broken(1000, 10));
+        let t = SkillTable::default();
+        for skill in [0, 63, 64, 130, 200, 255] {
+            assert_eq!(discipline(skill, &t), t.hold_bonus_for(skill));
+        }
+    }
+
+    #[test]
+    fn keeper_columns_are_named() {
+        assert_eq!(
+            [
+                IN_HAS_GOAL,
+                IN_DIST,
+                IN_AGE,
+                IN_SIGNAL,
+                IN_DISCIPLINE,
+                IN_EXTRA
+            ],
+            [0, 1, 2, 3, 4, 5]
+        );
+        let mut k = GoalKeeper::new();
+        k.set(10, goal(Some([3, 4, 0]), 10));
+        let row = k.inputs(25, [0, 0, 0], Metric::Euclid, true, ONE);
+        let named = KeeperInputs::from(row);
+        assert_eq!(named.as_row(), row);
+        assert_eq!(
+            (named.has_goal, named.dist, named.age, named.signal),
+            (1, 5, 15, 1)
+        );
+        assert_eq!(named.discipline, ONE as i32);
+    }
+
+    fn goal_decider() -> Decider {
+        let mut d = Decider::new();
+        assert_eq!(GoalKeeper::add_goal_option(&mut d, ONE), 0);
+        d
+    }
+
+    #[test]
+    fn goal_option_scores_has_goal_and_closeness() {
+        let d = goal_decider();
+        let score = |row: [i32; 5]| d.score(Candidate::new(0, 0), &row).unwrap();
+        assert_eq!(score([1, 0, 0, 0, 0]), ONE);
+        assert_eq!(score([0, 0, 0, 0, 0]), 0);
+        assert_eq!(score([1, GOAL_OPTION_RANGE, 0, 0, 0]), 0);
+        assert!(score([1, 10, 0, 0, 0]) < ONE);
+    }
+
+    #[test]
+    fn set_current_gives_discipline() {
+        let mut d = goal_decider();
+        let mut k = GoalKeeper::new();
+        k.set(0, goal(Some([0, 0, 0]), 0));
+        k.set_current(&mut d, 0, ONE / 2);
+        let held = d.score(Candidate::new(0, 0), &[1, 0, 0, 0, 0]).unwrap();
+        assert_eq!(held, 98302);
+        k.goal_postponed(5);
+        k.set_current(&mut d, 0, ONE / 2);
+        let postponed = d.score(Candidate::new(0, 0), &[1, 0, 0, 0, 0]).unwrap();
+        assert_eq!(postponed, 65535);
+        k.clear();
+        k.set_current(&mut d, 0, ONE / 2);
+        assert_eq!(
+            d.score(Candidate::new(0, 0), &[1, 0, 0, 0, 0]).unwrap(),
+            65535
+        );
     }
 }

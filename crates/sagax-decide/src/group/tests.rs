@@ -2029,7 +2029,7 @@ fn game_orders_first() {
     // keeper suspended.
     assert!(s.sq.group_mut().suspend(3));
     let w = s.walker(3);
-    w.keeper.postpone(20);
+    w.keeper.goal_postponed(20);
     w.keeper.suspend();
     let give_up = SkillTable::default().give_up_ticks[SkillTable::level(192)];
     assert!(150 > 20 + give_up);
@@ -2650,4 +2650,83 @@ fn gather_negative_radius_and_zero_max() {
     assert!(out.is_empty(), "max 0 takes nobody");
     gather([0; 3], 7, 0, Metric::Chebyshev, false, &c, &mut out, 10);
     assert_eq!(out, [1], "radius 0 is inclusive");
+}
+
+fn goal_with(start: Start, delay: u32, then_pos: Option<Pos>) -> Goal {
+    Goal {
+        kind: GoalKind::Move,
+        pos: Some([0, 0, 0]),
+        unchecked: false,
+        then_pos,
+        then_unchecked: false,
+        target: None,
+        start,
+        slot: 0,
+        plan: 1,
+        issued_at: 0,
+        start_delay: delay,
+    }
+}
+
+#[test]
+fn start_tick_adds_delay_and_after_ticks() {
+    assert_eq!(
+        goal_with(Start::AfterTicks(5), 3, None).start_tick(100),
+        Some(108)
+    );
+    assert_eq!(goal_with(Start::Now, 2, None).start_tick(100), Some(102));
+    assert_eq!(goal_with(Start::OnSignal, 2, None).start_tick(100), None);
+    assert_eq!(goal_with(Start::Now, 2, None).start_tick(u32::MAX), Some(1));
+}
+
+#[test]
+fn awaits_arrival_for_gather_and_signal() {
+    assert!(goal_with(Start::Now, 0, Some([1, 1, 0])).awaits_arrival());
+    assert!(goal_with(Start::OnSignal, 0, None).awaits_arrival());
+    assert!(!goal_with(Start::Now, 0, None).awaits_arrival());
+    assert!(!goal_with(Start::AfterTicks(4), 0, None).awaits_arrival());
+}
+
+#[test]
+fn report_constructors() {
+    assert_eq!(
+        Message::arrived(3, 9),
+        Message {
+            kind: REPORT_ARRIVED,
+            sender: 3,
+            data: 9,
+            ..Message::default()
+        }
+    );
+    assert_eq!(
+        Message::goal_broken(4, 7),
+        Message {
+            kind: REPORT_GOAL_BROKEN,
+            sender: 4,
+            data: 7,
+            ..Message::default()
+        }
+    );
+    let fact = Fact {
+        subject: 8,
+        kind: 1,
+        pos: [5, 6, 1],
+        seen_at: 40,
+        strength: 3,
+        data: 12,
+        source: 0,
+    };
+    assert_eq!(
+        Message::enemy(2, fact),
+        Message {
+            kind: REPORT_ENEMY,
+            subject: 8,
+            pos: [5, 6, 1],
+            seen_at: 40,
+            strength: 3,
+            data: 12,
+            sender: 2,
+            ..Message::default()
+        }
+    );
 }

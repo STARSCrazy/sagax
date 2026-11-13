@@ -26,6 +26,43 @@ pub const REPORT_DANGER: u32 = 3;
 /// arrived at the leader.
 pub const REPORT_ARRIVED: u32 = 4;
 
+impl Message {
+    /// An enemy report from `sender`: the fact's subject, position,
+    /// `seen_at`, strength and data under [`REPORT_ENEMY`].
+    pub fn enemy(sender: u32, fact: Fact) -> Self {
+        Self {
+            kind: REPORT_ENEMY,
+            subject: fact.subject,
+            pos: fact.pos,
+            seen_at: fact.seen_at,
+            strength: fact.strength,
+            data: fact.data,
+            sender,
+            ..Self::default()
+        }
+    }
+
+    /// A [`REPORT_ARRIVED`] from `sender` for `plan`.
+    pub fn arrived(sender: u32, plan: PlanId) -> Self {
+        Self {
+            kind: REPORT_ARRIVED,
+            sender,
+            data: plan,
+            ..Self::default()
+        }
+    }
+
+    /// A [`REPORT_GOAL_BROKEN`] from `sender` for `plan`.
+    pub fn goal_broken(sender: u32, plan: PlanId) -> Self {
+        Self {
+            kind: REPORT_GOAL_BROKEN,
+            sender,
+            data: plan,
+            ..Self::default()
+        }
+    }
+}
+
 /// A goal on its way to one member (see [`super::Squad::orders_due`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Order {

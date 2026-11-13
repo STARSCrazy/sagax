@@ -3,12 +3,12 @@
 
 use sagax_decide::group::{
     Abort, Channel, Goal, GoalKeeper, GoalKind, Member, MemberState, Nearby, Order, Place, Plan,
-    PlanError, Shape, Side, SkillTable, Slot, Spot, Squad, Start, Status, Tactic, Trigger,
-    discipline, gather, tactics,
+    PlanError, Shape, Side, SkillTable, Slot, Spot, Squad, Start, Status, Tactic, Trigger, gather,
+    tactics,
 };
 use sagax_decide::{Consideration, Curve, Pick};
 
-use super::decide::SxConsideration;
+use super::decide::{SxConsideration, SxDecider};
 use super::memory::{SxArea, SxAreas, SxFact, SxKnowledge, SxMessage, metric_of, put};
 use super::{ERROR_ARGUMENT, ERROR_PLAN, create, destroy, guarded, slice_of, to_i32};
 
@@ -835,24 +835,147 @@ pub unsafe extern "C" fn sx_squad_skill_table(squad: *mut SxSquad, out: *mut SxS
     0
 }
 
-/// `sx_discipline`.
+/// The table behind a C pointer (null: the default) and the skill, or
+/// `None` for a skill above 255 or a table with a bad pick.
+///
+/// # Safety
+/// `table` is null or valid.
+unsafe fn table_and_skill(table: *const SxSkillTable, skill: u32) -> Option<(SkillTable, u8)> {
+    let skill = u8::try_from(skill).ok()?;
+    // SAFETY: see above.
+    let table = match unsafe { table.as_ref() } {
+        None => SkillTable::default(),
+        Some(t) => t.table()?,
+    };
+    Some((table, skill))
+}
+
+/// One number of the table at `skill`'s level, or `ERROR_ARGUMENT` (as
+/// `i64`).
+///
+/// # Safety
+/// `table` is null or valid.
+unsafe fn skill_number(
+    table: *const SxSkillTable,
+    skill: u32,
+    read: fn(&SkillTable, u8) -> u32,
+) -> i64 {
+    // SAFETY: see above.
+    match unsafe { table_and_skill(table, skill) } {
+        Some((t, s)) => i64::from(read(&t, s)),
+        None => i64::from(ERROR_ARGUMENT),
+    }
+}
+
+/// `sx_skill_table_think_ticks_for`.
+///
+/// # Safety
+/// `table` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_skill_table_think_ticks_for(
+    table: *const SxSkillTable,
+    skill: u32,
+) -> i64 {
+    // SAFETY: see above.
+    unsafe { skill_number(table, skill, SkillTable::think_ticks_for) }
+}
+
+/// `sx_skill_table_timing_spread_for`.
+///
+/// # Safety
+/// `table` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_skill_table_timing_spread_for(
+    table: *const SxSkillTable,
+    skill: u32,
+) -> i64 {
+    // SAFETY: see above.
+    unsafe { skill_number(table, skill, SkillTable::timing_spread_for) }
+}
+
+/// `sx_skill_table_hold_bonus_for`.
+///
+/// # Safety
+/// `table` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_skill_table_hold_bonus_for(
+    table: *const SxSkillTable,
+    skill: u32,
+) -> i64 {
+    // SAFETY: see above.
+    unsafe { skill_number(table, skill, SkillTable::hold_bonus_for) }
+}
+
+/// `sx_skill_table_give_up_ticks_for`.
+///
+/// # Safety
+/// `table` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_skill_table_give_up_ticks_for(
+    table: *const SxSkillTable,
+    skill: u32,
+) -> i64 {
+    // SAFETY: see above.
+    unsafe { skill_number(table, skill, SkillTable::give_up_ticks_for) }
+}
+
+/// `sx_skill_table_spot_rank_error_for`.
+///
+/// # Safety
+/// `table` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_skill_table_spot_rank_error_for(
+    table: *const SxSkillTable,
+    skill: u32,
+) -> i32 {
+    // SAFETY: see above.
+    match unsafe { table_and_skill(table, skill) } {
+        Some((t, s)) => i32::from(t.spot_rank_error_for(s)),
+        None => ERROR_ARGUMENT,
+    }
+}
+
+/// `sx_skill_table_pick_for`.
+///
+/// # Safety
+/// `table` is null or valid; `pick` and `top` are null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_skill_table_pick_for(
+    table: *const SxSkillTable,
+    skill: u32,
+    pick: *mut u32,
+    top: *mut u32,
+) -> i32 {
+    if pick.is_null() || top.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: see above.
+    let Some((t, s)) = (unsafe { table_and_skill(table, skill) }) else {
+        return ERROR_ARGUMENT;
+    };
+    let level = SkillTable::level(s);
+    let coded = SxSkillTable::of(&t);
+    // SAFETY: non-null and writable (see above).
+    unsafe {
+        pick.write(coded.pick[level]);
+        top.write(coded.pick_top[level]);
+    }
+    0
+}
+
+/// `sx_discipline`: the old name of `sx_skill_table_hold_bonus_for`.
 ///
 /// # Safety
 /// `table` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_discipline(skill: u32, table: *const SxSkillTable) -> i32 {
-    let Ok(skill) = u8::try_from(skill) else {
-        return ERROR_ARGUMENT;
-    };
     // SAFETY: see above.
-    let table = match unsafe { table.as_ref() } {
-        None => SkillTable::default(),
-        Some(t) => match t.table() {
-            Some(t) => t,
-            None => return ERROR_ARGUMENT,
-        },
-    };
-    to_i32(discipline(skill, &table))
+    let bonus = unsafe { sx_skill_table_hold_bonus_for(table, skill) };
+    if bonus < 0 {
+        ERROR_ARGUMENT
+    } else {
+        to_i32(bonus)
+    }
 }
 
 /// `sx_squad_set_channel`.
@@ -1407,23 +1530,23 @@ pub unsafe extern "C" fn sx_keeper_clear(keeper: *mut SxKeeper) -> i32 {
     0
 }
 
-/// `sx_keeper_postpone`.
+/// `sx_keeper_goal_postponed` (old name `sx_keeper_postpone`).
 ///
 /// # Safety
 /// `keeper` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_keeper_postpone(keeper: *mut SxKeeper, now: u32) -> i32 {
-    get!(keeper).0.postpone(now);
+pub unsafe extern "C" fn sx_keeper_goal_postponed(keeper: *mut SxKeeper, now: u32) -> i32 {
+    get!(keeper).0.goal_postponed(now);
     0
 }
 
-/// `sx_keeper_resume`.
+/// `sx_keeper_goal_won` (old name `sx_keeper_resume`).
 ///
 /// # Safety
 /// `keeper` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_keeper_resume(keeper: *mut SxKeeper, now: u32) -> i32 {
-    get!(keeper).0.resume(now);
+pub unsafe extern "C" fn sx_keeper_goal_won(keeper: *mut SxKeeper, now: u32) -> i32 {
+    get!(keeper).0.goal_won(now);
     0
 }
 
@@ -1490,5 +1613,124 @@ pub unsafe extern "C" fn sx_keeper_inputs(
         // SAFETY: room for 5 (see above).
         unsafe { out.add(i).write(*v) };
     }
+    0
+}
+
+/// `sx_keeper_add_goal_option`.
+///
+/// # Safety
+/// `decider` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_add_goal_option(decider: *mut SxDecider, weight: u32) -> i32 {
+    // SAFETY: see above.
+    let Some(d) = (unsafe { decider.as_mut() }) else {
+        return ERROR_ARGUMENT;
+    };
+    guarded(|| to_i32(GoalKeeper::add_goal_option(d.decider_mut(), weight)))
+}
+
+/// `sx_keeper_set_current`.
+///
+/// # Safety
+/// `keeper` and `decider` are null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_set_current(
+    keeper: *const SxKeeper,
+    decider: *mut SxDecider,
+    option: u32,
+    discipline: u32,
+) -> i32 {
+    // SAFETY: see above.
+    let (Some(k), Some(d)) = (unsafe { keeper.as_ref() }, unsafe { decider.as_mut() }) else {
+        return ERROR_ARGUMENT;
+    };
+    k.0.set_current(d.decider_mut(), option, discipline);
+    0
+}
+
+// ---- goal helpers and reports --------------------------------------------------
+
+/// `sx_goal_start_tick`.
+///
+/// # Safety
+/// `goal` is null or valid; `out` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_goal_start_tick(
+    goal: *const SxGoal,
+    received: u32,
+    out: *mut u32,
+) -> i32 {
+    let Some(goal) = input!(goal).goal() else {
+        return ERROR_ARGUMENT;
+    };
+    if out.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    match goal.start_tick(received) {
+        Some(tick) => {
+            // SAFETY: non-null and writable (see above).
+            unsafe { out.write(tick) };
+            1
+        }
+        None => 0,
+    }
+}
+
+/// `sx_goal_awaits_arrival`.
+///
+/// # Safety
+/// `goal` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_goal_awaits_arrival(goal: *const SxGoal) -> i32 {
+    let Some(goal) = input!(goal).goal() else {
+        return ERROR_ARGUMENT;
+    };
+    i32::from(goal.awaits_arrival())
+}
+
+/// `sx_report_enemy`.
+///
+/// # Safety
+/// `fact` is null or valid; `out` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_report_enemy(
+    sender: u32,
+    fact: *const SxFact,
+    out: *mut SxMessage,
+) -> i32 {
+    let fact = input!(fact);
+    if out.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: non-null and writable (see above).
+    unsafe { put(out, SxMessage::enemy(sender, *fact)) };
+    0
+}
+
+/// `sx_report_arrived`.
+///
+/// # Safety
+/// `out` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_report_arrived(sender: u32, plan: u32, out: *mut SxMessage) -> i32 {
+    if out.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: non-null and writable (see above).
+    unsafe { put(out, SxMessage::arrived(sender, plan)) };
+    0
+}
+
+/// `sx_report_goal_broken`.
+///
+/// # Safety
+/// `out` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_report_goal_broken(sender: u32, plan: u32, out: *mut SxMessage) -> i32 {
+    if out.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: non-null and writable (see above).
+    unsafe { put(out, SxMessage::goal_broken(sender, plan)) };
     0
 }

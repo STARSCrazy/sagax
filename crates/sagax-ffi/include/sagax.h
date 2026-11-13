@@ -1119,8 +1119,21 @@ typedef struct sx_skill_table {
  * ticks, miss spots by up to 2 ranks and start up to 17 ticks apart; elite
  * squads pick the best, think 5 ticks and start together. Returns 0. */
 int32_t sx_skill_table_default(sx_skill_table *out);
-/* A member's discipline: hold_bonus at the level of its own skill (0 ..
- * 255); table null: the default. Returns it, or SX_ERROR_ARGUMENT. */
+/* One entry of the table at the level of a member's own skill (0 .. 255,
+ * level skill / 64); table null: the default. Return it, or SX_ERROR_ARGUMENT
+ * (for a skill above 255 or a table with a bad pick). hold_bonus is also the
+ * member's discipline (SX_ONE = 1.0). */
+int64_t sx_skill_table_think_ticks_for(const sx_skill_table *table, uint32_t skill);
+int64_t sx_skill_table_timing_spread_for(const sx_skill_table *table, uint32_t skill);
+int64_t sx_skill_table_hold_bonus_for(const sx_skill_table *table, uint32_t skill);
+int64_t sx_skill_table_give_up_ticks_for(const sx_skill_table *table, uint32_t skill);
+int32_t sx_skill_table_spot_rank_error_for(const sx_skill_table *table, uint32_t skill);
+/* The pick at that level: SX_PICK_* to *pick, its top to *top. Returns 0, or
+ * SX_ERROR_ARGUMENT. */
+int32_t sx_skill_table_pick_for(const sx_skill_table *table, uint32_t skill,
+                                uint32_t *pick, uint32_t *top);
+/* Deprecated (0.9): the old name of sx_skill_table_hold_bonus_for, same
+ * answer as an int32_t. */
 int32_t sx_discipline(uint32_t skill, const sx_skill_table *table);
 
 /* -- squad: the leader, its group, memory and plans -- */
@@ -1367,9 +1380,12 @@ int32_t sx_keeper_goal(sx_keeper *keeper, sx_goal *out);
 /* Drop the goal and the postpone state. */
 int32_t sx_keeper_clear(sx_keeper *keeper);
 /* The member turns to something else for now (the first time stays). */
-int32_t sx_keeper_postpone(sx_keeper *keeper, uint32_t now);
+int32_t sx_keeper_goal_postponed(sx_keeper *keeper, uint32_t now);
 /* Back on the goal: the postpone clock is reset. */
-int32_t sx_keeper_resume(sx_keeper *keeper, uint32_t now);
+int32_t sx_keeper_goal_won(sx_keeper *keeper, uint32_t now);
+/* Deprecated (0.9): the old names. */
+#define sx_keeper_postpone sx_keeper_goal_postponed
+#define sx_keeper_resume sx_keeper_goal_won
 /* Out of play: never broken. unsuspend restarts a postponed goal's clock at
  * now. */
 int32_t sx_keeper_suspend(sx_keeper *keeper);
@@ -1380,10 +1396,56 @@ int32_t sx_keeper_broken(sx_keeper *keeper, uint32_t now, uint32_t give_up_ticks
 /* The member's decider inputs at x, y, z to out (room for 5): has_goal,
  * dist_to_goal (in metric SX_METRIC_*, Euclid the root; -1 without a goal
  * or pos), goal_age (saturated), signal_given (0 or 1), discipline (see
- * sx_discipline). Returns 0; SX_ERROR_ARGUMENT for an unknown metric. */
+ * sx_skill_table_hold_bonus_for). Returns 0; SX_ERROR_ARGUMENT for an
+ * unknown metric. The five numbers are the columns SX_KEEPER_IN_* and fit
+ * an sx_member_inputs. */
 int32_t sx_keeper_inputs(sx_keeper *keeper, uint32_t now, int32_t x, int32_t y, int32_t z,
                          uint32_t metric, uint32_t signal_given, uint32_t discipline,
                          int32_t *out);
+
+/* The columns of sx_keeper_inputs by number. A member's decider row starts
+ * with these five; its own inputs follow from SX_KEEPER_IN_EXTRA. */
+#define SX_KEEPER_IN_HAS_GOAL   0
+#define SX_KEEPER_IN_DIST       1
+#define SX_KEEPER_IN_AGE        2
+#define SX_KEEPER_IN_SIGNAL     3
+#define SX_KEEPER_IN_DISCIPLINE 4
+#define SX_KEEPER_IN_EXTRA      5
+
+/* The same five numbers by name (named after the member: the function
+ * sx_keeper_inputs already takes the obvious name). */
+typedef struct sx_member_inputs {
+	int32_t has_goal, dist, age, signal, discipline;
+} sx_member_inputs;
+
+/* Adds the ready-made "keep my goal" option to a member's decider and returns
+ * its option number: weight times (has_goal is 1) times a falling curve on
+ * dist (full at 0, nothing at 64). Rows start with the five keeper columns.
+ * Returns SX_ERROR_ARGUMENT for a null decider. */
+int32_t sx_keeper_add_goal_option(sx_decider *decider, uint32_t weight);
+/* Marks the goal option (from sx_keeper_add_goal_option) as the action going
+ * on while the keeper holds a goal that is not postponed, with discipline as
+ * its bonus; otherwise no action is current. Returns 0, or SX_ERROR_ARGUMENT
+ * for a null keeper or decider. */
+int32_t sx_keeper_set_current(const sx_keeper *keeper, sx_decider *decider,
+                              uint32_t option, uint32_t discipline);
+
+/* -- goal and report helpers -- */
+
+/* The tick a goal starts when its order arrived at received: received +
+ * start_delay (+ start_ticks for SX_START_AFTER_TICKS), wrapping. Returns 1
+ * and writes *out, 0 for SX_START_ON_SIGNAL (it starts on the signal), or
+ * SX_ERROR_ARGUMENT. */
+int32_t sx_goal_start_tick(const sx_goal *goal, uint32_t received, uint32_t *out);
+/* 1 if the member must report its arrival (the goal gathers first or waits
+ * for the signal), else 0; SX_ERROR_ARGUMENT for a null or bad goal. */
+int32_t sx_goal_awaits_arrival(const sx_goal *goal);
+/* Fill *out with a report for sx_squad_report. Return 0, or
+ * SX_ERROR_ARGUMENT for a null argument. enemy copies the fact's subject,
+ * pos, seen_at, strength and data. arrived and goal_broken name the plan. */
+int32_t sx_report_enemy(uint32_t sender, const sx_fact *fact, sx_message *out);
+int32_t sx_report_arrived(uint32_t sender, uint32_t plan, sx_message *out);
+int32_t sx_report_goal_broken(uint32_t sender, uint32_t plan, sx_message *out);
 
 #ifdef __cplusplus
 }

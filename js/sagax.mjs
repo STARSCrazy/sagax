@@ -1514,6 +1514,40 @@ Object.assign(Sagax.prototype, {
 // kind: 'move', 'hold', 'attack', 'wait', 'retreat' or 'custom' (the game's
 // kind in custom); pos, thenPos and target may be null.
 
+/** The columns of Keeper.inputs: a member's decider row starts with these five, its own inputs follow from extra. */
+export const KEEPER = { hasGoal: 0, dist: 1, age: 2, signal: 3, discipline: 4, extra: 5 };
+
+/**
+ * Member reports as messages for Squad.report: enemy(sender, fact) tells a
+ * target (fact: {subject, kind, pos, seenAt, strength, data}), arrived(sender,
+ * plan) that the member reached its first spot, goalBroken(sender, plan) that
+ * its goal broke.
+ */
+export const Report = {
+  enemy(sender, fact) {
+    return reportMessage(SQUAD.reportEnemy, sender, { subject: fact.subject, pos: fact.pos, seenAt: fact.seenAt, strength: fact.strength, data: fact.data });
+  },
+  arrived(sender, plan) {
+    return reportMessage(SQUAD.reportArrived, sender, { data: plan });
+  },
+  goalBroken(sender, plan) {
+    return reportMessage(SQUAD.reportGoalBroken, sender, { data: plan });
+  },
+};
+
+function reportMessage(kind, sender, { subject = 0, pos = [0, 0, 0], seenAt = 0, strength = 0, data = 0 }) {
+  return {
+    kind,
+    subject: u32Of(subject, 'subject'),
+    pos: posOf(pos),
+    seenAt: timeOf(seenAt),
+    strength: u32Of(strength, 'strength'),
+    data: u32Of(data, 'data'),
+    sender: u32Of(sender, 'sender'),
+    keepIfSenderGone: false,
+  };
+}
+
 /** Columns of the scoring row, role bits, spot tags and report kinds. */
 export const SQUAD = {
   inLosses: 0, // members marked gone and still listed (not reset by a new plan)
@@ -2131,13 +2165,47 @@ export class Keeper extends Table {
   }
 
   /** The member turns to something else for now (the first time stays). */
-  postpone(now) {
-    this.x.sx_keeper_postpone(this.h, timeOf(now));
+  goalPostponed(now) {
+    this.x.sx_keeper_goal_postponed(this.h, timeOf(now));
   }
 
   /** Back on the goal: the postpone clock is reset. */
+  goalWon(now) {
+    this.x.sx_keeper_goal_won(this.h, timeOf(now));
+  }
+
+  /** Old name of goalPostponed (for 0.9 only). */
+  postpone(now) {
+    this.goalPostponed(now);
+  }
+
+  /** Old name of goalWon (for 0.9 only). */
   resume(now) {
-    this.x.sx_keeper_resume(this.h, timeOf(now));
+    this.goalWon(now);
+  }
+
+  /**
+   * Adds the ready-made "keep my goal" option to a member's decider and
+   * returns its number: weight times (has goal) times a falling curve on the
+   * distance (full at 0, nothing at 64). The member's rows start with the
+   * five keeper columns (KEEPER); its own inputs follow from KEEPER.extra.
+   */
+  addGoalOption(decider, weight = 1) {
+    if (!(decider instanceof Decider)) throw new TypeError('Sagax: addGoalOption takes a Decider');
+    const w = fixed(weight, 'weight');
+    const option = this.x.sx_keeper_add_goal_option(decider.handle, w);
+    decider.inputCount = Math.max(decider.inputCount, KEEPER.extra);
+    return option;
+  }
+
+  /**
+   * Marks the goal option as the action going on while the keeper holds a
+   * goal that is not postponed, with discipline (a number, as in inputs) as
+   * its bonus; otherwise no action is current.
+   */
+  setCurrent(decider, option, discipline) {
+    if (!(decider instanceof Decider)) throw new TypeError('Sagax: setCurrent takes a Decider');
+    this.x.sx_keeper_set_current(this.h, decider.handle, u32Of(option, 'option'), u32Of(discipline, 'discipline'));
   }
 
   /** Out of play: never broken. */
@@ -2167,6 +2235,14 @@ export class Keeper extends Table {
   }
 }
 
+/** One number of a skill table at skill's level (which: see sx_skill_for); table null: the default. */
+function skillEntry(x, which, table, skill) {
+  const s = u8Of(skill, 'skill');
+  const ptr = table ? putScratch(x, skillValues(table)) : x.sx_scratch(1);
+  if (x.sx_skill_for(which, s, table ? 1 : 0) < 0) throw new RangeError('Sagax: bad skill table');
+  return u32(takeInts(x, ptr, 1)[0]);
+}
+
 /** A shipped tactic as a Tactic. */
 function shipped(x, which, param = 0) {
   return new Tactic(x, x.sx_tactic_shipped(which, i32Of(param, 'param')));
@@ -2191,14 +2267,52 @@ Object.assign(Sagax.prototype, {
     this.x.sx_skill_table_default();
     return skillOf(takeInts(this.x, ptr, SKILL_SIZE));
   },
-  /** A member's discipline: holdBonus at the level of its own skill (table: the default). */
+  /** A member's discipline: holdBonus at the level of its own skill (table: the default). Old name of holdBonusFor. */
   discipline(skill, table) {
+    return this.holdBonusFor(table, skill);
+  },
+  /** Ticks from making a plan until it is active, at the level of skill (0 .. 255) in table (null: the default). */
+  thinkTicksFor(table, skill) {
+    return skillEntry(this.x, 0, table, skill);
+  },
+  /** Most ticks a member starts late, at skill's level. */
+  timingSpreadFor(table, skill) {
+    return skillEntry(this.x, 1, table, skill);
+  },
+  /** The bonus of the active plan, and the members' discipline, at skill's level. */
+  holdBonusFor(table, skill) {
+    return skillEntry(this.x, 2, table, skill);
+  },
+  /** Ticks a member may postpone its goal, at skill's level. */
+  giveUpTicksFor(table, skill) {
+    return skillEntry(this.x, 3, table, skill);
+  },
+  /** Most ranks a spot may be off the best one, at skill's level. */
+  spotRankErrorFor(table, skill) {
+    return skillEntry(this.x, 4, table, skill);
+  },
+  /** How the tactic is chosen at skill's level: {pick: 'best' | 'weighted' | 'uniform', top}. */
+  pickFor(table, skill) {
     const s = u8Of(skill, 'skill');
-    if (!table) return this.x.sx_discipline(s, 0);
-    putScratch(this.x, skillValues(table));
-    const r = this.x.sx_discipline(s, 1);
-    if (r < 0) throw new RangeError('Sagax: bad skill table');
-    return u32(r);
+    const ptr = table ? putScratch(this.x, skillValues(table)) : this.x.sx_scratch(2);
+    if (this.x.sx_skill_pick_for(s, table ? 1 : 0) < 0) throw new RangeError('Sagax: bad skill table');
+    const [pick, top] = takeInts(this.x, ptr, 2);
+    return { pick: PICKS[pick], top: u32(top) };
+  },
+  /** The tick a goal starts when its order arrived at received (wrap-safe), or null for a goal that starts on the signal. */
+  startTick(goal, received) {
+    const t = timeOf(received);
+    const ptr = putScratch(this.x, goalValues(goal));
+    const r = this.x.sx_goal_start_tick(t);
+    if (r < 0) throw new RangeError('Sagax: bad goal');
+    return r === 1 ? u32(takeInts(this.x, ptr, 1)[0]) : null;
+  },
+  /** True when the member must report its arrival at the first spot: the goal gathers first (thenPos) or waits for the signal. */
+  awaitsArrival(goal) {
+    putScratch(this.x, goalValues(goal));
+    const r = this.x.sx_goal_awaits_arrival();
+    if (r < 0) throw new RangeError('Sagax: bad goal');
+    return r === 1;
   },
   /**
    * Picks who joins: gather([x, y], faction, radius, candidates, {metric = 'euclid', freeOnly = false, max}).

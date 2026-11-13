@@ -1679,6 +1679,193 @@ mod squad {
     }
 
     #[test]
+    fn keeper_member_helpers_through_c() {
+        use crate::decide::{
+            SxCandidate, SxChoice, sx_decider_decide, sx_decider_free, sx_decider_new,
+        };
+        unsafe {
+            assert_eq!(define("SX_KEEPER_IN_HAS_GOAL"), 0);
+            assert_eq!(define("SX_KEEPER_IN_DIST"), 1);
+            assert_eq!(define("SX_KEEPER_IN_AGE"), 2);
+            assert_eq!(define("SX_KEEPER_IN_SIGNAL"), 3);
+            assert_eq!(define("SX_KEEPER_IN_DISCIPLINE"), 4);
+            assert_eq!(define("SX_KEEPER_IN_EXTRA"), 5);
+            assert!(HEADER.contains("#define sx_keeper_resume sx_keeper_goal_won"));
+            assert!(HEADER.contains("#define sx_keeper_postpone sx_keeper_goal_postponed"));
+            assert!(HEADER.contains("sx_member_inputs"));
+
+            let d = sx_decider_new();
+            assert_eq!(sx_keeper_add_goal_option(d, ONE_WEIGHT), 0);
+            assert_eq!(
+                sx_keeper_add_goal_option(null_mut(), ONE_WEIGHT),
+                ERROR_ARGUMENT
+            );
+            let score = |row: [i32; 5]| {
+                let c = [SxCandidate {
+                    option: 0,
+                    target: 0,
+                }];
+                let mut scores = [0u32; 1];
+                let mut choice = SxChoice::default();
+                assert!(
+                    sx_decider_decide(
+                        d,
+                        c.as_ptr(),
+                        1,
+                        row.as_ptr(),
+                        5,
+                        0,
+                        0,
+                        1,
+                        scores.as_mut_ptr(),
+                        &mut choice
+                    ) >= 0
+                );
+                scores[0]
+            };
+            assert_eq!(score([1, 0, 0, 0, 0]), ONE_WEIGHT);
+            assert_eq!(score([0, 0, 0, 0, 0]), 0);
+            assert_eq!(score([1, 64, 0, 0, 0]), 0);
+
+            let k = sx_keeper_new();
+            let goal = SxGoal {
+                kind: GOAL_MOVE,
+                has_pos: 1,
+                pos: [0, 0, 0],
+                ..SxGoal::default()
+            };
+            assert_eq!(sx_keeper_set(k, 0, &goal), 0);
+            assert_eq!(sx_keeper_set_current(k, d, 0, ONE_WEIGHT / 2), 0);
+            assert_eq!(score([1, 0, 0, 0, 0]), 98302);
+            assert_eq!(sx_keeper_goal_postponed(k, 5), 0);
+            assert_eq!(sx_keeper_set_current(k, d, 0, ONE_WEIGHT / 2), 0);
+            assert_eq!(score([1, 0, 0, 0, 0]), 65535);
+            assert_eq!(sx_keeper_set_current(null(), d, 0, 0), ERROR_ARGUMENT);
+            assert_eq!(sx_keeper_set_current(k, null_mut(), 0, 0), ERROR_ARGUMENT);
+            sx_keeper_free(k);
+            sx_decider_free(d);
+        }
+    }
+
+    #[test]
+    fn goal_start_and_arrival_through_c() {
+        unsafe {
+            let goal = |start, start_ticks, has_then| SxGoal {
+                kind: GOAL_MOVE,
+                start,
+                start_ticks,
+                start_delay: 3,
+                has_then_pos: has_then,
+                ..SxGoal::default()
+            };
+            let mut out = 0u32;
+            assert_eq!(
+                sx_goal_start_tick(&goal(START_AFTER_TICKS, 5, 0), 100, &mut out),
+                1
+            );
+            assert_eq!(out, 108);
+            assert_eq!(
+                sx_goal_start_tick(&goal(START_NOW, 0, 0), u32::MAX, &mut out),
+                1
+            );
+            assert_eq!(out, 2);
+            assert_eq!(
+                sx_goal_start_tick(&goal(START_ON_SIGNAL, 0, 0), 1, &mut out),
+                0
+            );
+            assert_eq!(
+                sx_goal_start_tick(&goal(START_NOW, 0, 0), 1, null_mut()),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(sx_goal_start_tick(null(), 1, &mut out), ERROR_ARGUMENT);
+            assert_eq!(sx_goal_awaits_arrival(&goal(START_NOW, 0, 1)), 1);
+            assert_eq!(sx_goal_awaits_arrival(&goal(START_ON_SIGNAL, 0, 0)), 1);
+            assert_eq!(sx_goal_awaits_arrival(&goal(START_NOW, 0, 0)), 0);
+            assert_eq!(sx_goal_awaits_arrival(null()), ERROR_ARGUMENT);
+        }
+    }
+
+    #[test]
+    fn skill_lookups_through_c() {
+        unsafe {
+            let err = i64::from(ERROR_ARGUMENT);
+            assert_eq!(sx_skill_table_give_up_ticks_for(null(), 255), 68);
+            assert_eq!(sx_skill_table_give_up_ticks_for(null(), 0), 17);
+            assert_eq!(sx_skill_table_think_ticks_for(null(), 255), 5);
+            assert_eq!(sx_skill_table_hold_bonus_for(null(), 0), 65535 / 8);
+            assert_eq!(sx_skill_table_timing_spread_for(null(), 0), 17);
+            assert_eq!(sx_skill_table_spot_rank_error_for(null(), 0), 2);
+            assert_eq!(sx_skill_table_give_up_ticks_for(null(), 256), err);
+            let (mut pick, mut top) = (9, 9);
+            assert_eq!(sx_skill_table_pick_for(null(), 255, &mut pick, &mut top), 0);
+            assert_eq!((pick, top), (0, 0));
+            assert_eq!(sx_skill_table_pick_for(null(), 0, &mut pick, &mut top), 0);
+            assert_eq!((pick, top), (1, 3));
+            assert_eq!(
+                sx_skill_table_pick_for(null(), 0, null_mut(), &mut top),
+                ERROR_ARGUMENT
+            );
+            let mut table = SxSkillTable::default();
+            assert_eq!(sx_skill_table_default(&mut table), 0);
+            table.give_up_ticks[1] = 99;
+            assert_eq!(sx_skill_table_give_up_ticks_for(&table, 64), 99);
+            table.pick[0] = 7;
+            assert_eq!(sx_skill_table_give_up_ticks_for(&table, 64), err);
+            // the old name gives the same answer
+            for skill in [0, 63, 64, 130, 200, 255] {
+                assert_eq!(
+                    i64::from(sx_discipline(skill, null())),
+                    sx_skill_table_hold_bonus_for(null(), skill)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn report_constructors_through_c() {
+        unsafe {
+            let mut m = SxMessage::default();
+            assert_eq!(sx_report_arrived(3, 9, &mut m), 0);
+            assert_eq!(
+                m,
+                SxMessage {
+                    kind: REPORT_ARRIVED,
+                    sender: 3,
+                    data: 9,
+                    ..SxMessage::default()
+                }
+            );
+            assert_eq!(sx_report_goal_broken(4, 7, &mut m), 0);
+            assert_eq!((m.kind, m.sender, m.data), (REPORT_GOAL_BROKEN, 4, 7));
+            let fact = SxFact {
+                subject: 8,
+                pos: [5, 6, 1],
+                seen_at: 40,
+                strength: 3,
+                data: 12,
+                ..SxFact::default()
+            };
+            assert_eq!(sx_report_enemy(2, &fact, &mut m), 0);
+            assert_eq!(
+                m,
+                SxMessage {
+                    kind: REPORT_ENEMY,
+                    subject: 8,
+                    pos: [5, 6, 1],
+                    seen_at: 40,
+                    strength: 3,
+                    data: 12,
+                    sender: 2,
+                    ..SxMessage::default()
+                }
+            );
+            assert_eq!(sx_report_enemy(2, null(), &mut m), ERROR_ARGUMENT);
+            assert_eq!(sx_report_arrived(1, 1, null_mut()), ERROR_ARGUMENT);
+            assert_eq!(sx_report_goal_broken(1, 1, null_mut()), ERROR_ARGUMENT);
+        }
+    }
+
+    #[test]
     fn keeper_through_c() {
         unsafe {
             let k = sx_keeper_new();
@@ -1706,7 +1893,7 @@ mod squad {
             assert_eq!(sx_keeper_inputs(k, 15, 1, 0, 0, CHEBYSHEV, 1, 9, i), 0);
             assert_eq!(inputs, [1, 3, 5, 1, 9]);
             assert_eq!(sx_keeper_inputs(k, 15, 1, 0, 0, 7, 1, 9, i), ERROR_ARGUMENT);
-            assert_eq!(sx_keeper_postpone(k, 20), 0);
+            assert_eq!(sx_keeper_goal_postponed(k, 20), 0);
             assert_eq!(sx_keeper_broken(k, 29, 10), 0);
             assert_eq!(sx_keeper_broken(k, 30, 10), 1);
             assert_eq!(sx_keeper_suspend(k), 0);
@@ -1714,7 +1901,7 @@ mod squad {
             assert_eq!(sx_keeper_unsuspend(k, 40), 0);
             assert_eq!(sx_keeper_broken(k, 49, 10), 0);
             assert_eq!(sx_keeper_broken(k, 50, 10), 1);
-            assert_eq!(sx_keeper_resume(k, 50), 0);
+            assert_eq!(sx_keeper_goal_won(k, 50), 0);
             assert_eq!(sx_keeper_broken(k, 99, 10), 0);
             assert_eq!(sx_keeper_clear(k), 0);
             assert_eq!(sx_keeper_goal(k, &mut g), 0);
@@ -1783,8 +1970,8 @@ mod squad {
             assert_eq!(sx_keeper_goal(real, null_mut()), e);
             assert_eq!(sx_keeper_inputs(real, 0, 0, 0, 0, 0, 0, 0, null_mut()), e);
             assert_eq!(sx_keeper_clear(k), e);
-            assert_eq!(sx_keeper_postpone(k, 0), e);
-            assert_eq!(sx_keeper_resume(k, 0), e);
+            assert_eq!(sx_keeper_goal_postponed(k, 0), e);
+            assert_eq!(sx_keeper_goal_won(k, 0), e);
             assert_eq!(sx_keeper_suspend(k), e);
             assert_eq!(sx_keeper_unsuspend(k, 0), e);
             assert_eq!(sx_keeper_broken(k, 0, 0), e);

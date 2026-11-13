@@ -3,7 +3,7 @@
 
 import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
-import { MEMORY, ONE, SQUAD, loadSagax, HEX, FORMATION, Progress, Interval, Alertness } from './sagax.mjs';
+import { KEEPER, MEMORY, ONE, Report, SQUAD, loadSagax, HEX, FORMATION, Progress, Interval, Alertness } from './sagax.mjs';
 
 const wasm = await readFile(new URL('../target/wasm32-unknown-unknown/release/sagax_wasm.wasm', import.meta.url));
 console.log(`wasm size ${(wasm.length / 1024).toFixed(0)} KB`);
@@ -1508,16 +1508,72 @@ test('plan activation wraps around 2^32', () => {
   sq.free();
 });
 
+test('keeper: named columns, goal option, renames', () => {
+  assert.deepEqual(KEEPER, { hasGoal: 0, dist: 1, age: 2, signal: 3, discipline: 4, extra: 5 });
+  const d = lib.decider();
+  const k = lib.keeper();
+  assert.equal(k.addGoalOption(d, 1), 0);
+  const score = (row) => d.decide([{ option: 0, target: 0, inputs: row }]);
+  assert.equal(score([1, 0, 0, 0, 0]).score, ONE);
+  assert.equal(score([0, 0, 0, 0, 0]), null);
+  assert.equal(score([1, 64, 0, 0, 0]), null);
+  k.set(0, { kind: 'move', pos: [0, 0, 0] });
+  k.setCurrent(d, 0, ONE / 2 | 0);
+  assert.equal(score([1, 0, 0, 0, 0]).score, 98302);
+  k.goalPostponed(5);
+  k.setCurrent(d, 0, ONE / 2 | 0);
+  assert.equal(score([1, 0, 0, 0, 0]).score, 65535);
+  assert.throws(() => k.setCurrent({}, 0, 0), TypeError);
+  // the old names still work and give the same answers
+  k.goalWon(6);
+  k.postpone(10);
+  assert.equal(k.broken(20, 10), true);
+  k.resume(20);
+  assert.equal(k.broken(1000, 10), false);
+  assert.equal(lib.discipline(200), lib.holdBonusFor(null, 200));
+  k.free();
+});
+
+test('skill lookups read the level', () => {
+  assert.deepEqual([0, 64, 191, 255].map((s) => lib.giveUpTicksFor(null, s)), [17, 34, 51, 68]);
+  assert.equal(lib.thinkTicksFor(null, 255), 5);
+  assert.equal(lib.holdBonusFor(null, 0), Math.floor(ONE / 8));
+  assert.equal(lib.spotRankErrorFor(null, 0), 2);
+  assert.equal(lib.timingSpreadFor(null, 0), 17);
+  assert.deepEqual(lib.pickFor(null, 255), { pick: 'best', top: 0 });
+  assert.deepEqual(lib.pickFor(null, 0), { pick: 'weighted', top: 3 });
+  const table = { ...lib.skillTable(), giveUpTicks: [1, 99, 3, 4] };
+  assert.equal(lib.giveUpTicksFor(table, 64), 99);
+  assert.throws(() => lib.giveUpTicksFor(null, 256), RangeError);
+  assert.throws(() => lib.holdBonusFor({ ...table, pick: ['lucky', 'best', 'best', 'best'] }, 0), RangeError);
+});
+
+test('reports and start ticks', () => {
+  assert.deepEqual(Report.arrived(3, 9), { kind: SQUAD.reportArrived, subject: 0, pos: [0, 0, 0], seenAt: 0, strength: 0, data: 9, sender: 3, keepIfSenderGone: false });
+  assert.deepEqual(Report.goalBroken(4, 7), { kind: SQUAD.reportGoalBroken, subject: 0, pos: [0, 0, 0], seenAt: 0, strength: 0, data: 7, sender: 4, keepIfSenderGone: false });
+  const fact = { subject: 8, kind: 1, pos: [5, 6, 1], seenAt: 40, strength: 3, data: 12 };
+  assert.deepEqual(Report.enemy(2, fact), { kind: SQUAD.reportEnemy, subject: 8, pos: [5, 6, 1], seenAt: 40, strength: 3, data: 12, sender: 2, keepIfSenderGone: false });
+  const goal = (start, startDelay, thenPos = null) => ({ kind: 'move', pos: [0, 0, 0], thenPos, start, startDelay });
+  assert.equal(lib.startTick(goal({ kind: 'after', ticks: 5 }, 3), 100), 108);
+  assert.equal(lib.startTick(goal({ kind: 'now' }, 2), 100), 102);
+  assert.equal(lib.startTick(goal({ kind: 'signal' }, 2), 100), null);
+  assert.equal(lib.startTick(goal({ kind: 'now' }, 2), 4294967295), 1);
+  assert.equal(lib.awaitsArrival(goal({ kind: 'now' }, 0, [1, 1, 0])), true);
+  assert.equal(lib.awaitsArrival(goal({ kind: 'signal' }, 0)), true);
+  assert.equal(lib.awaitsArrival(goal({ kind: 'now' }, 0)), false);
+  assert.throws(() => lib.startTick({ kind: 'dance' }, 0), RangeError);
+});
+
 test('keeper: postpone, broken, suspend never breaks, inputs', () => {
   const k = lib.keeper();
   assert.equal(k.goal(), null);
-  k.postpone(0); // without a goal: nothing
+  k.goalPostponed(0); // without a goal: nothing
   assert.equal(k.broken(100, 10), false);
   const goal = { kind: 'hold', pos: [3, 4, 0], target: 7, start: { kind: 'after', ticks: 2 }, slot: 1, plan: 5, issuedAt: 4294967290, startDelay: 1 };
   k.set(4294967290, goal);
   assert.deepEqual(k.goal(), { member: null, kind: 'hold', custom: 0, pos: [3, 4, 0], unchecked: false, thenPos: null, thenUnchecked: false, target: 7, start: { kind: 'after', ticks: 2 }, slot: 1, plan: 5, issuedAt: 4294967290, startDelay: 1 });
-  k.postpone(4294967295);
-  k.postpone(3); // the first time stays
+  k.goalPostponed(4294967295);
+  k.goalPostponed(3); // the first time stays
   assert.equal(k.broken(8, 10), false);
   assert.equal(k.broken(9, 10), true, 'wraps: 10 ticks since 2^32 - 1');
   k.suspend();
@@ -1525,7 +1581,7 @@ test('keeper: postpone, broken, suspend never breaks, inputs', () => {
   k.unsuspend(200);
   assert.equal(k.broken(209, 10), false, 'the clock restarts');
   assert.equal(k.broken(210, 10), true);
-  k.resume(211);
+  k.goalWon(211);
   assert.equal(k.broken(500, 10), false);
   // inputs: has goal, distance, age, signal, discipline
   assert.deepEqual(k.inputs(4294967295, [0, 0, 0], 'euclid', true, 9), [1, 5, 5, 1, 9]);

@@ -114,6 +114,13 @@ pub struct SxDecider {
     trace: Option<(DecideTraceFn, *mut c_void)>,
 }
 
+impl SxDecider {
+    /// The decider behind the handle.
+    pub(crate) fn decider_mut(&mut self) -> &mut Decider {
+        &mut self.decider
+    }
+}
+
 /// `sx_decider_new`.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_decider_new() -> *mut SxDecider {

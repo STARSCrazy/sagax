@@ -86,6 +86,26 @@ pub struct Goal {
     pub start_delay: u32,
 }
 
+impl Goal {
+    /// The tick the goal starts, for an order that arrived at `received`:
+    /// `received + start_delay`, plus `n` for [`Start::AfterTicks`]`(n)`
+    /// (wrapping). `None` for [`Start::OnSignal`]: it starts on the signal.
+    pub fn start_tick(&self, received: u32) -> Option<u32> {
+        let wait = match self.start {
+            Start::Now => 0,
+            Start::AfterTicks(n) => n,
+            Start::OnSignal => return None,
+        };
+        Some(received.wrapping_add(self.start_delay).wrapping_add(wait))
+    }
+
+    /// True when the member must report its arrival at the first spot:
+    /// the goal gathers first (`then_pos`) or waits for the signal.
+    pub fn awaits_arrival(&self) -> bool {
+        self.then_pos.is_some() || self.start == Start::OnSignal
+    }
+}
+
 /// A plan made by [`Squad::plan`]: pending until `active_at`, then active
 /// (see [`Squad::active_plan`]).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

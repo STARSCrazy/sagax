@@ -2500,7 +2500,7 @@ pub extern "C" fn sx_sweep_heading(base: i32, elapsed: u32, step_ticks: u32, cou
 use sagax_decide::group::{
     Abort, Channel, Goal, GoalKeeper, GoalKind, Member, MemberState, Nearby, Order, Place, Plan,
     PlanError, Shape, Side, SkillTable, Slot, Spot, Squad, Start, Status as SquadStatus, Tactic,
-    Trigger, discipline, gather, tactics,
+    Trigger, gather, tactics,
 };
 
 /// A tactic reads a column beyond the row (`SX_ERROR_PLAN`).
@@ -2991,23 +2991,61 @@ pub extern "C" fn sx_skill_table_default() -> i32 {
     0
 }
 
-/// A member's discipline at `skill` (0 .. 255); with `custom` not 0 the
-/// skill table is read from the scratch buffer, else the default. Returns
-/// it, or -1.
-#[unsafe(no_mangle)]
-pub extern "C" fn sx_discipline(skill: u32, custom: u32) -> i32 {
-    let Ok(skill) = u8::try_from(skill) else {
-        return ERROR_ARGUMENT;
-    };
+/// The skill table to read (the default, or with `custom` not 0 the one in
+/// the scratch buffer) and the skill (0 .. 255).
+fn table_and_skill(skill: u32, custom: u32) -> Option<(SkillTable, u8)> {
+    let skill = u8::try_from(skill).ok()?;
     let table = if custom == 0 {
         SkillTable::default()
     } else {
-        match scratch_copy(SKILL_SIZE).as_deref().and_then(skill_of) {
-            Some(t) => t,
-            None => return ERROR_ARGUMENT,
-        }
+        scratch_copy(SKILL_SIZE).as_deref().and_then(skill_of)?
     };
-    to_i32(discipline(skill, &table))
+    Some((table, skill))
+}
+
+/// One number of the skill table at `skill`'s level: `which` 0 think ticks,
+/// 1 timing spread, 2 hold bonus, 3 give-up ticks, 4 spot rank error. With
+/// `custom` not 0 the table is read from the scratch buffer, else the
+/// default. Writes the number to scratch[0] (as `u32` bits) and returns 0;
+/// -1 for a bad argument or table.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_skill_for(which: u32, skill: u32, custom: u32) -> i32 {
+    let Some((t, s)) = table_and_skill(skill, custom) else {
+        return ERROR_ARGUMENT;
+    };
+    let value = match which {
+        0 => t.think_ticks_for(s),
+        1 => t.timing_spread_for(s),
+        2 => t.hold_bonus_for(s),
+        3 => t.give_up_ticks_for(s),
+        4 => u32::from(t.spot_rank_error_for(s)),
+        _ => return ERROR_ARGUMENT,
+    };
+    scratch_put(&[value as i32]);
+    0
+}
+
+/// The pick at `skill`'s level to scratch[0..2] (pick code, top), read as
+/// for [`sx_skill_for`]. Returns 0; -1 for a bad argument or table.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_skill_pick_for(skill: u32, custom: u32) -> i32 {
+    let Some((t, s)) = table_and_skill(skill, custom) else {
+        return ERROR_ARGUMENT;
+    };
+    let record = skill_record(&t);
+    let level = SkillTable::level(s);
+    scratch_put(&[record[level], record[4 + level]]);
+    0
+}
+
+/// A member's discipline at `skill` (0 .. 255), the old name of
+/// [`sx_skill_for`] with `which` 2 (`custom` as there). Returns it, or -1.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_discipline(skill: u32, custom: u32) -> i32 {
+    if sx_skill_for(2, skill, custom) != 0 {
+        return ERROR_ARGUMENT;
+    }
+    scratch_copy(1).map_or(ERROR_ARGUMENT, |v| to_i32(v[0] as u32))
 }
 
 /// A squad with its own memory, an out buffer and the orders that are due
@@ -3769,8 +3807,8 @@ pub unsafe extern "C" fn sx_keeper_clear(k: *mut WasmKeeper) -> i32 {
 /// # Safety
 /// `k` from [`sx_keeper_new`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_keeper_postpone(k: *mut WasmKeeper, now: u32) -> i32 {
-    keeper!(k).keeper.postpone(now);
+pub unsafe extern "C" fn sx_keeper_goal_postponed(k: *mut WasmKeeper, now: u32) -> i32 {
+    keeper!(k).keeper.goal_postponed(now);
     0
 }
 
@@ -3779,8 +3817,8 @@ pub unsafe extern "C" fn sx_keeper_postpone(k: *mut WasmKeeper, now: u32) -> i32
 /// # Safety
 /// `k` from [`sx_keeper_new`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_keeper_resume(k: *mut WasmKeeper, now: u32) -> i32 {
-    keeper!(k).keeper.resume(now);
+pub unsafe extern "C" fn sx_keeper_goal_won(k: *mut WasmKeeper, now: u32) -> i32 {
+    keeper!(k).keeper.goal_won(now);
     0
 }
 
@@ -3842,4 +3880,63 @@ pub unsafe extern "C" fn sx_keeper_inputs(
     w.out.clear();
     w.out.extend_from_slice(&inputs);
     0
+}
+
+/// Adds the keeper's ready-made goal option to decider `d`. Returns its
+/// number, or -1.
+///
+/// # Safety
+/// `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_add_goal_option(d: *mut WasmDecider, weight: u32) -> i32 {
+    to_i32(GoalKeeper::add_goal_option(
+        &mut decider!(d, ERROR_ARGUMENT).decider,
+        weight,
+    ))
+}
+
+/// Tells decider `d` that the goal option `option` is the action going on
+/// while the keeper holds a goal that is not postponed. Returns 0, or -1.
+///
+/// # Safety
+/// `k` from [`sx_keeper_new`]; `d` from [`sx_decider_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_set_current(
+    k: *mut WasmKeeper,
+    d: *mut WasmDecider,
+    option: u32,
+    discipline: u32,
+) -> i32 {
+    let w = keeper!(k);
+    w.keeper
+        .set_current(&mut decider!(d, ERROR_ARGUMENT).decider, option, discipline);
+    0
+}
+
+/// The tick the goal record (20 numbers) in the scratch buffer starts at,
+/// for an order that arrived at `received`: 1 with the tick in scratch[0]
+/// (as `u32` bits), 0 for a goal that starts on the signal, -1 for a bad
+/// goal.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_goal_start_tick(received: u32) -> i32 {
+    let Some(goal) = scratch_copy(GOAL_SIZE).as_deref().and_then(goal_of) else {
+        return ERROR_ARGUMENT;
+    };
+    match goal.start_tick(received) {
+        Some(tick) => {
+            scratch_put(&[tick as i32]);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// 1 if the goal record (20 numbers) in the scratch buffer awaits its
+/// arrival report, else 0; -1 for a bad goal.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_goal_awaits_arrival() -> i32 {
+    scratch_copy(GOAL_SIZE)
+        .as_deref()
+        .and_then(goal_of)
+        .map_or(ERROR_ARGUMENT, |g| i32::from(g.awaits_arrival()))
 }
