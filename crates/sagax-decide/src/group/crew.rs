@@ -1,0 +1,559 @@
+//! The [`Crew`]: a [`Squad`] with one [`GoalKeeper`] per member, run as one
+//! loop per tick that reports what happened as [`CrewEvent`]s.
+
+use super::keeper::{GoalKeeper, KeeperInputs};
+use super::members::{Member, MemberState};
+use super::orders::{Order, Status};
+use super::spots::Spot;
+use super::squad::{Goal, PlanError, PlanId, Squad, SquadConfig};
+use crate::memory::{Fact, Message, Metric, Pos, distance};
+use sagax_core::HexLayout;
+
+/// Capacities and options of a [`Crew`] (see [`Crew::new`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CrewConfig {
+    /// The squad's capacities and metric.
+    pub squad: SquadConfig,
+    /// How far from its first spot a member counts as arrived, in the
+    /// squad's metric (for [`Metric::Euclid`] the squared distance is
+    /// compared with the radius squared). Default 0: on the spot.
+    pub arrive_radius: u32,
+    /// The map's hex layout: the crew takes and returns offset coordinates
+    /// in this layout and keeps the squad in axial ones (needs
+    /// [`Metric::Hex`]). Default `None`: positions pass unchanged.
+    pub hex_layout: Option<HexLayout>,
+}
+
+impl Default for CrewConfig {
+    /// [`SquadConfig::default`], arrive radius 0, no hex layout.
+    fn default() -> Self {
+        Self {
+            squad: SquadConfig::default(),
+            arrive_radius: 0,
+            hex_layout: None,
+        }
+    }
+}
+
+/// Why [`Crew::new`] refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CrewError {
+    /// A capacity of the squad config is 0.
+    ZeroCapacity,
+    /// A hex layout is set but the squad's metric is not [`Metric::Hex`].
+    HexNeedsHexMetric,
+}
+
+impl std::fmt::Display for CrewError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroCapacity => write!(f, "a crew capacity is 0"),
+            Self::HexNeedsHexMetric => write!(f, "a hex layout needs the hex metric"),
+        }
+    }
+}
+
+impl std::error::Error for CrewError {}
+
+/// What happened in one [`Crew::tick`], in the order of the tick's steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CrewEvent {
+    /// A new plan is pending (the first one or a replacement).
+    Planned(PlanId),
+    /// That plan became active (its think time is over).
+    Activated(PlanId),
+    /// The leader gave the signal.
+    Signal,
+    /// An order reached a member; its keeper holds the goal now.
+    Order {
+        /// The member's id.
+        member: u32,
+        /// The goal (offset coordinates with a hex layout).
+        goal: Goal,
+        /// The tick it starts ([`Goal::start_tick`] of the arrival tick);
+        /// `None` when it starts on the signal.
+        start_at: Option<u32>,
+    },
+    /// A member's start tick has come (once per order).
+    Start {
+        /// The member's id.
+        member: u32,
+    },
+    /// A member stands on its first spot and sent the leader a
+    /// [`Message::arrived`] (once per goal); the leader learns it later.
+    Arrived {
+        /// The member's id.
+        member: u32,
+    },
+    /// A member gave its goal up and sent the leader a
+    /// [`Message::goal_broken`] (once per goal).
+    Broken {
+        /// The member's id.
+        member: u32,
+    },
+    /// No plan is active and none could be made.
+    NoPlan,
+}
+
+/// One member's keeper and what the crew already told about its goal.
+#[derive(Clone, Copy, Debug)]
+struct Seat {
+    id: u32,
+    keeper: GoalKeeper,
+    /// The keeper is suspended (its member is not active).
+    paused: bool,
+    start_at: Option<u32>,
+    started: bool,
+    arrived: bool,
+    broken: bool,
+}
+
+impl Seat {
+    const fn new(id: u32) -> Self {
+        Self {
+            id,
+            keeper: GoalKeeper::new(),
+            paused: false,
+            start_at: None,
+            started: false,
+            arrived: false,
+            broken: false,
+        }
+    }
+
+    /// Suspends or resumes the keeper when that changes.
+    fn set_paused(&mut self, paused: bool, now: u32) {
+        if paused == self.paused {
+            return;
+        }
+        self.paused = paused;
+        if paused {
+            self.keeper.suspend();
+        } else {
+            self.keeper.unsuspend(now);
+        }
+    }
+}
+
+/// A [`Squad`] with one [`GoalKeeper`] per member: the whole group loop in
+/// one call per tick.
+///
+/// Per tick the game sets where its members are ([`Crew::set_pos`]), calls
+/// [`Crew::tick`], reads the events, and for each member asks
+/// [`Crew::member_inputs`] for its own decider row and, once the member
+/// decided, calls [`Crew::member_chose`]. The crew moves nobody.
+///
+/// Every step is a public call of [`Squad`] or [`GoalKeeper`] (see
+/// [`Crew::tick`]); both stay reachable ([`Crew::squad_mut`],
+/// [`Crew::keeper_mut`]) for whatever the crew does not wrap: channels,
+/// tactics, skill, leader, member reports.
+///
+/// **Hex:** with [`CrewConfig::hex_layout`] the crew's own calls take and
+/// return offset coordinates; the squad and the keepers hold axial ones.
+/// Calls on [`Crew::squad_mut`] or [`Crew::keeper`] go around the
+/// conversion and use axial coordinates.
+///
+/// Capacities are fixed at [`Crew::new`]; after the first ticks (the spot
+/// buffer for hex grows to the largest spot list once) the crew allocates
+/// nothing beyond what the squad does.
+#[derive(Clone, Debug)]
+pub struct Crew {
+    squad: Squad,
+    seats: Vec<Seat>,
+    metric: Metric,
+    arrive_radius: u32,
+    hex: Option<HexLayout>,
+    orders: Vec<Order>,
+    spots: Vec<Spot>,
+}
+
+impl Crew {
+    /// A crew with an empty squad of `config.squad`. Errors on a capacity
+    /// of 0 or on a hex layout without [`Metric::Hex`].
+    pub fn new(config: CrewConfig) -> Result<Self, CrewError> {
+        if config.hex_layout.is_some() && config.squad.metric != Metric::Hex {
+            return Err(CrewError::HexNeedsHexMetric);
+        }
+        let squad = Squad::new(config.squad).map_err(|_| CrewError::ZeroCapacity)?;
+        Ok(Self {
+            squad,
+            seats: Vec::with_capacity(config.squad.members),
+            metric: config.squad.metric,
+            arrive_radius: config.arrive_radius,
+            hex: config.hex_layout,
+            orders: Vec::with_capacity(config.squad.members),
+            spots: Vec::new(),
+        })
+    }
+
+    /// The squad.
+    pub fn squad(&self) -> &Squad {
+        &self.squad
+    }
+
+    /// The squad, for what the crew does not wrap (channels, tactics,
+    /// skill, leader, member reports). Positions here are axial with a hex
+    /// layout. Members added or removed here get or lose their keeper at
+    /// the next [`Crew::tick`].
+    ///
+    /// Do not call [`Squad::orders_due`] on a crew's squad: the crew takes
+    /// the orders in [`Crew::tick`], and orders taken elsewhere never reach
+    /// the keepers.
+    pub fn squad_mut(&mut self) -> &mut Squad {
+        &mut self.squad
+    }
+
+    /// The keeper of the member with this id (its goal in axial
+    /// coordinates with a hex layout; [`Crew::goal`] converts).
+    pub fn keeper(&self, id: u32) -> Option<&GoalKeeper> {
+        self.seat(id).map(|s| &s.keeper)
+    }
+
+    /// The keeper of the member with this id, to change it by hand.
+    pub fn keeper_mut(&mut self, id: u32) -> Option<&mut GoalKeeper> {
+        self.seats
+            .iter_mut()
+            .find(|s| s.id == id)
+            .map(|s| &mut s.keeper)
+    }
+
+    /// Adds a member (position in offset coordinates with a hex layout)
+    /// with an empty keeper; its index in the group, or `None` when the
+    /// group is full or the id is taken.
+    pub fn add_member(&mut self, member: Member) -> Option<usize> {
+        let pos = self.pos_in(member.pos);
+        let i = self.squad.group_mut().add(Member { pos, ..member })?;
+        self.sync_seats();
+        Some(i)
+    }
+
+    /// Removes a member and its keeper; false when the id is unknown.
+    pub fn remove_member(&mut self, id: u32) -> bool {
+        let known = self.squad.group_mut().remove(id);
+        self.sync_seats();
+        known
+    }
+
+    /// Moves a member (offset coordinates with a hex layout); false when
+    /// the id is unknown.
+    pub fn set_pos(&mut self, id: u32, pos: Pos) -> bool {
+        let pos = self.pos_in(pos);
+        self.squad.group_mut().set_pos(id, pos)
+    }
+
+    /// Takes a member out of play: suspended in the group, its keeper
+    /// paused (never broken). False when the id is unknown.
+    pub fn suspend(&mut self, id: u32) -> bool {
+        if !self.squad.group_mut().suspend(id) {
+            return false;
+        }
+        self.pause(id, true, 0);
+        true
+    }
+
+    /// Puts a member back into play ([`Squad::reinstate`]: it gets its
+    /// current goal again) and restarts its keeper's clock at `now`. False
+    /// when the id is unknown.
+    pub fn reinstate(&mut self, id: u32, now: u32) -> bool {
+        if !self.squad.reinstate(id, now) {
+            return false;
+        }
+        self.pause(id, false, now);
+        true
+    }
+
+    /// Marks a member gone ([`Squad::set_gone`]); its keeper stays paused.
+    /// False when the id is unknown.
+    pub fn set_gone(&mut self, id: u32) -> bool {
+        if !self.squad.set_gone(id) {
+            return false;
+        }
+        self.pause(id, true, 0);
+        true
+    }
+
+    /// The leader's own sighting ([`Squad::observe`]; offset coordinates
+    /// with a hex layout). Returns the fact dropped to make room, if any.
+    pub fn observe(&mut self, now: u32, fact: Fact) -> Option<Fact> {
+        let fact = Fact {
+            pos: self.pos_in(fact.pos),
+            ..fact
+        };
+        let dropped = self.squad.observe(now, fact)?;
+        Some(Fact {
+            pos: self.pos_out(dropped.pos),
+            ..dropped
+        })
+    }
+
+    /// A danger report on its way to the leader ([`Squad::report_danger`];
+    /// offset coordinates with a hex layout). False when the danger queue
+    /// is full.
+    #[must_use]
+    pub fn report_danger(
+        &mut self,
+        sender: u32,
+        centre: Pos,
+        shooter: Option<Pos>,
+        arrive_at: u32,
+    ) -> bool {
+        let centre = self.pos_in(centre);
+        let shooter = shooter.map(|p| self.pos_in(p));
+        self.squad.report_danger(sender, centre, shooter, arrive_at)
+    }
+
+    /// Runs the group at `now`; `events` is cleared first and gets what
+    /// happened, in this order:
+    ///
+    /// 1. Members added or removed through [`Crew::squad_mut`] get or lose
+    ///    their keeper; a keeper is paused while its member is not active.
+    /// 2. [`Squad::check`] with `extra`, `spots` (offset coordinates with a
+    ///    hex layout) and `seed`: [`CrewEvent::Planned`] on
+    ///    [`Status::Replan`], [`CrewEvent::Signal`],
+    ///    [`CrewEvent::NoPlan`].
+    /// 3. [`CrewEvent::Activated`] from [`Squad::take_activated`].
+    /// 4. [`Squad::orders_due`]: each order goes into its member's keeper
+    ///    ([`GoalKeeper::set`]); [`CrewEvent::Order`] with
+    ///    [`Goal::start_tick`] of `now`.
+    /// 5. [`CrewEvent::Start`] once per order when `now` reaches its start
+    ///    tick (wrap-safe), for an active member.
+    /// 6. An active member whose goal [`awaits_arrival`](Goal::awaits_arrival)
+    ///    and that stands within the arrive radius of the goal's `pos` (on
+    ///    the same level) sends [`Message::arrived`] over its channel
+    ///    ([`Squad::report`] at [`Squad::report_arrives_at`]):
+    ///    [`CrewEvent::Arrived`], once per goal. Without a way to the
+    ///    leader nothing is sent and the event still comes; when the inbox
+    ///    refuses the report, there is no event and it is tried again next
+    ///    tick.
+    /// 7. An active member whose keeper is [`broken`](GoalKeeper::broken)
+    ///    (give-up ticks from its own skill) sends [`Message::goal_broken`]
+    ///    the same way: [`CrewEvent::Broken`], once per goal.
+    ///
+    /// Members are visited in group order. Errors only from
+    /// [`Squad::check`]; nothing after it is done then.
+    pub fn tick(
+        &mut self,
+        now: u32,
+        extra: &[i32],
+        spots: &[Spot],
+        seed: u64,
+        events: &mut Vec<CrewEvent>,
+    ) -> Result<(), PlanError> {
+        events.clear();
+        self.sync_seats();
+        self.pause_inactive(now);
+
+        let status = match self.hex {
+            Some(layout) => {
+                self.spots.clear();
+                self.spots.extend(spots.iter().map(|s| Spot {
+                    pos: layout.to_axial_pos(s.pos),
+                    ..*s
+                }));
+                self.squad.check(now, extra, &self.spots, seed)?
+            }
+            None => self.squad.check(now, extra, spots, seed)?,
+        };
+        match status {
+            Status::Replan(id) => events.push(CrewEvent::Planned(id)),
+            Status::Signal => events.push(CrewEvent::Signal),
+            Status::NoPlan => events.push(CrewEvent::NoPlan),
+            Status::Keep => {}
+        }
+
+        if let Some(id) = self.squad.take_activated() {
+            events.push(CrewEvent::Activated(id));
+        }
+
+        self.squad.orders_due(now, &mut self.orders);
+        for i in 0..self.orders.len() {
+            let order = self.orders[i];
+            let start_at = order.goal.start_tick(now);
+            if let Some(seat) = self.seats.iter_mut().find(|s| s.id == order.member) {
+                seat.keeper.set(now, order.goal);
+                seat.start_at = start_at;
+                seat.started = false;
+                seat.arrived = false;
+                seat.broken = false;
+            }
+            events.push(CrewEvent::Order {
+                member: order.member,
+                goal: self.goal_out(order.goal),
+                start_at,
+            });
+        }
+        self.orders.clear();
+
+        for seat in &mut self.seats {
+            let Some(s) = seat.start_at else { continue };
+            if !seat.started && now.wrapping_sub(s) < 1 << 31 && is_active(&self.squad, seat.id) {
+                seat.started = true;
+                events.push(CrewEvent::Start { member: seat.id });
+            }
+        }
+
+        for i in 0..self.seats.len() {
+            let seat = self.seats[i];
+            let Some(goal) = seat.keeper.goal().copied() else {
+                continue;
+            };
+            let Some(member) = active_member(&self.squad, seat.id) else {
+                continue;
+            };
+            if !seat.arrived
+                && goal.awaits_arrival()
+                && goal.pos.is_some_and(|p| self.within_radius(member.pos, p))
+                && self.send(Message::arrived(seat.id, goal.plan), seat.id, now)
+            {
+                self.seats[i].arrived = true;
+                events.push(CrewEvent::Arrived { member: seat.id });
+            }
+        }
+
+        for i in 0..self.seats.len() {
+            let seat = self.seats[i];
+            let Some(goal) = seat.keeper.goal().copied() else {
+                continue;
+            };
+            let Some(member) = active_member(&self.squad, seat.id) else {
+                continue;
+            };
+            let give_up = self.squad.skill_table().give_up_ticks_for(member.skill);
+            if !seat.broken
+                && seat.keeper.broken(now, give_up)
+                && self.send(Message::goal_broken(seat.id, goal.plan), seat.id, now)
+            {
+                self.seats[i].broken = true;
+                events.push(CrewEvent::Broken { member: seat.id });
+            }
+        }
+        Ok(())
+    }
+
+    /// The member's decider inputs at `now` ([`GoalKeeper::inputs`] from
+    /// its position, the squad's metric, [`Squad::signal_given`] and the
+    /// [`hold_bonus`](super::SkillTable::hold_bonus_for) of its own skill
+    /// as discipline). `None` when the id is unknown.
+    pub fn member_inputs(&self, id: u32, now: u32) -> Option<KeeperInputs> {
+        let seat = self.seat(id)?;
+        let g = self.squad.group();
+        let m = g.get(g.index(id)?)?;
+        let discipline = self.squad.skill_table().hold_bonus_for(m.skill);
+        let row = seat.keeper.inputs(
+            now,
+            m.pos,
+            self.metric,
+            self.squad.signal_given(),
+            discipline,
+        );
+        Some(KeeperInputs::from(row))
+    }
+
+    /// What the member chose at `now`: its goal (`goal_won`,
+    /// [`GoalKeeper::goal_won`]) or something else
+    /// ([`GoalKeeper::goal_postponed`]). False when the id is unknown.
+    pub fn member_chose(&mut self, id: u32, now: u32, goal_won: bool) -> bool {
+        let Some(k) = self.keeper_mut(id) else {
+            return false;
+        };
+        if goal_won {
+            k.goal_won(now);
+        } else {
+            k.goal_postponed(now);
+        }
+        true
+    }
+
+    /// The member's current goal (offset coordinates with a hex layout).
+    pub fn goal(&self, id: u32) -> Option<Goal> {
+        let goal = *self.seat(id)?.keeper.goal()?;
+        Some(self.goal_out(goal))
+    }
+
+    /// Pauses or resumes (at `now`) the keeper of `id`, if it has one.
+    fn pause(&mut self, id: u32, paused: bool, now: u32) {
+        if let Some(seat) = self.seats.iter_mut().find(|s| s.id == id) {
+            seat.set_paused(paused, now);
+        }
+    }
+
+    fn seat(&self, id: u32) -> Option<&Seat> {
+        self.seats.iter().find(|s| s.id == id)
+    }
+
+    /// One seat per group member, in group order.
+    fn sync_seats(&mut self) {
+        let group = self.squad.group();
+        self.seats.retain(|s| group.index(s.id).is_some());
+        for (i, m) in group.iter().enumerate() {
+            match self.seats.iter().position(|s| s.id == m.id) {
+                Some(j) if j == i => {}
+                Some(j) => self.seats.swap(i, j),
+                None => self.seats.insert(i, Seat::new(m.id)),
+            }
+        }
+    }
+
+    /// Keepers follow their member's state (also when it changed through
+    /// the squad): paused while it is not active, resumed at `now`.
+    fn pause_inactive(&mut self, now: u32) {
+        for i in 0..self.seats.len() {
+            let active = is_active(&self.squad, self.seats[i].id);
+            self.seats[i].set_paused(!active, now);
+        }
+    }
+
+    /// Sends a member report at the time it reaches the leader; true when
+    /// it is on its way, or when it can never arrive (nothing to send).
+    fn send(&mut self, msg: Message, id: u32, now: u32) -> bool {
+        match self.squad.report_arrives_at(id, now) {
+            Some(at) => self.squad.report(msg, at),
+            None => true,
+        }
+    }
+
+    fn within_radius(&self, at: Pos, spot: Pos) -> bool {
+        if at[2] != spot[2] {
+            return false;
+        }
+        let d = distance(
+            self.metric,
+            i64::from(spot[0]) - i64::from(at[0]),
+            i64::from(spot[1]) - i64::from(at[1]),
+        );
+        let r = i128::from(self.arrive_radius);
+        let limit = if self.metric == Metric::Euclid {
+            r * r
+        } else {
+            r
+        };
+        d <= limit
+    }
+
+    fn pos_in(&self, p: Pos) -> Pos {
+        self.hex.map_or(p, |l| l.to_axial_pos(p))
+    }
+
+    fn pos_out(&self, p: Pos) -> Pos {
+        self.hex.map_or(p, |l| l.from_axial_pos(p))
+    }
+
+    fn goal_out(&self, goal: Goal) -> Goal {
+        Goal {
+            pos: goal.pos.map(|p| self.pos_out(p)),
+            then_pos: goal.then_pos.map(|p| self.pos_out(p)),
+            ..goal
+        }
+    }
+}
+
+fn active_member(squad: &Squad, id: u32) -> Option<Member> {
+    let g = squad.group();
+    g.get(g.index(id)?)
+        .filter(|m| m.state == MemberState::Active)
+        .copied()
+}
+
+fn is_active(squad: &Squad, id: u32) -> bool {
+    active_member(squad, id).is_some()
+}

@@ -20,10 +20,14 @@
 //!   the trigger, [`Squad::signal`] starts the "on signal" goals, and
 //!   members [`Squad::report`] back through the leader's inbox (and
 //!   [`Squad::report_danger`] for shots).
+//! - [`Crew`]: a squad with one [`GoalKeeper`] per member, run as one call
+//!   per tick ([`Crew::tick`]) that reports [`CrewEvent`]s; every step is
+//!   also a public squad or keeper call.
 //!
 //! Everything is integer only and deterministic. On equal distance the
 //! lower id (or index) wins.
 
+mod crew;
 pub mod keeper;
 mod members;
 mod orders;
@@ -33,8 +37,11 @@ mod squad;
 mod tactic;
 
 #[cfg(test)]
+mod crew_tests;
+#[cfg(test)]
 mod tests;
 
+pub use crew::{Crew, CrewConfig, CrewError, CrewEvent};
 #[allow(deprecated)]
 pub use keeper::discipline;
 pub use keeper::{GOAL_OPTION_RANGE, GoalKeeper, KeeperInputs};

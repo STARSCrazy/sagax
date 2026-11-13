@@ -2770,6 +2770,30 @@ fn danger_without_shooter_has_no_source() {
 }
 
 #[test]
+fn danger_queue_wraps_near_max() {
+    let fresh = || {
+        let mut sq = squad_of(Metric::Euclid, &four());
+        sq.add_tactic(tactics::fall_back());
+        sq.set_skill(255);
+        assert!(sq.set_gone(3) && sq.set_gone(4));
+        sq
+    };
+    let mut sq = fresh();
+    assert!(sq.report_danger(3, [20, 0, 0], None, u32::MAX));
+    sq.plan(u32::MAX - 1, &[], &[], 0).unwrap().unwrap();
+    assert!(sq.areas().is_empty(), "not there at MAX - 1");
+    sq.plan(u32::MAX, &[], &[], 0).unwrap().unwrap();
+    assert_eq!(sq.areas().iter().count(), 1, "there at MAX");
+
+    let mut sq = fresh();
+    assert!(sq.report_danger(3, [20, 0, 0], None, 0));
+    sq.plan(u32::MAX, &[], &[], 0).unwrap().unwrap();
+    assert!(sq.areas().is_empty(), "0 comes after MAX");
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
+    assert_eq!(sq.areas().iter().count(), 1, "there at 0");
+}
+
+#[test]
 fn danger_queue_full_refuses() {
     let mut sq = Squad::new(SquadConfig {
         dangers: 1,
