@@ -50,6 +50,13 @@ typedef struct sx_point {
 	int32_t x, y, level;
 } sx_point;
 
+/* A position as three integers [x, y, z] (the z of a position is the level of
+ * a cell). Fixed-size arrays of positions are int32_t[3]. These convert
+ * between that and sx_point. Both return 0, or SX_ERROR_ARGUMENT for a null
+ * pointer. out: 3 integers. */
+int32_t sx_point_to_pos(sx_point point, int32_t *out);
+int32_t sx_pos_to_point(const int32_t *pos, sx_point *out);
+
 /* ---- the game's map ------------------------------------------------------ */
 
 /* Can a walker go from cell x, y on level into the neighbour x + dx, y + dy
@@ -87,6 +94,13 @@ typedef struct sx_map {
 #define SX_GRID_HEX_EVEN_R  2   /* pointy top, even rows shifted right */
 #define SX_GRID_HEX_ODD_Q   3   /* flat top, odd columns shifted down */
 #define SX_GRID_HEX_EVEN_Q  4   /* flat top, even columns shifted down */
+
+/* Hex converters: an offset position [x, y, z] of a hex grid (grid is one of
+ * SX_GRID_HEX_*) to axial [q, r, z] and back; z is kept. pos and out: 3
+ * integers each. Return 0, or SX_ERROR_ARGUMENT for a null pointer or a grid
+ * that is not hex. */
+int32_t sx_hex_to_axial(uint32_t grid, const int32_t *pos, int32_t *out);
+int32_t sx_hex_from_axial(uint32_t grid, const int32_t *pos, int32_t *out);
 
 #define SX_FOUR_WAYS    1u  /* square: only straight moves */
 #define SX_CUT_CORNERS  2u  /* square: diagonal past a blocked side neighbour */
@@ -730,7 +744,8 @@ int32_t sx_areas_blocks(sx_areas *a, const int32_t *cell, const int32_t *start,
  * (0 if there is none; a negative value is SX_ERROR_*). */
 int64_t sx_areas_cost(sx_areas *a, const int32_t *cell, const int32_t *start,
                       const int32_t *goal);
-/* An sx_move_cost_fn over areas: set map.move_cost = sx_areas_move_cost and
+/* The one way to feed danger areas to the path search: an sx_move_cost_fn
+ * over areas: set map.move_cost = sx_areas_move_cost and
  * map.context = a pointer to this. Only the cell moved to is judged: a move
  * into a blocking area (one holding neither start nor goal) returns -1,
  * else the extra cost of sx_areas_cost, at most INT32_MAX - 1. A null

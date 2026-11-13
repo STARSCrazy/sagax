@@ -42,8 +42,7 @@ pub use progress::Progress;
 pub use route::{Metric, Route, distance, route};
 pub use timers::Timers;
 
-/// A place: three integer coordinates in the game's own units.
-pub type Pos = [i32; 3];
+pub use sagax_core::Pos;
 
 /// A memory was asked for with capacity 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

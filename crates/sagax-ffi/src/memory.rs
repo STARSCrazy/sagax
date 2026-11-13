@@ -8,6 +8,7 @@ use sagax_decide::memory::{
 };
 
 use super::{ERROR_ARGUMENT, create, destroy, slice_of, to_i32};
+use sagax_nav::grid::Cell;
 
 /// `sx_fact`.
 pub type SxFact = Fact;
@@ -858,10 +859,12 @@ pub unsafe extern "C" fn sx_areas_move_cost(
     let Some(areas) = (unsafe { ctx.areas.as_ref() }) else {
         return 0;
     };
-    match areas
-        .0
-        .move_cost([x, y, level], [to_x, to_y, to_level], ctx.start, ctx.goal)
-    {
+    let _ = (x, y, level);
+    match areas.0.cell_cost(
+        Cell::new(to_x, to_y, to_level),
+        Cell::from(ctx.start),
+        Cell::from(ctx.goal),
+    ) {
         None => -1,
         Some(c) => c.min(i32::MAX as u32 - 1) as i32,
     }

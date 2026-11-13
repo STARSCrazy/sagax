@@ -7,23 +7,7 @@
 
 use crate::search::{Cost, Goal, Graph};
 
-/// A grid cell on a level.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
-pub struct Cell {
-    /// Column.
-    pub x: i32,
-    /// Row.
-    pub y: i32,
-    /// Level (floor, height layer, …), chosen by the game.
-    pub level: i32,
-}
-
-impl Cell {
-    /// A cell.
-    pub const fn new(x: i32, y: i32, level: i32) -> Self {
-        Self { x, y, level }
-    }
-}
+pub use sagax_core::Cell;
 
 /// The game's map as the grid search sees it.
 pub trait CellMap {

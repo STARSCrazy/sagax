@@ -48,6 +48,13 @@ The same rules hold in Rust, C and JavaScript.
   `sx_nav_free`, `sx_flow_new` / `sx_flow_free`, `sx_dstar_new` /
   `sx_dstar_free`. The old `_create` / `_destroy` names are macros for 0.9
   and gone in 0.10.
+- **Positions.** A position is `[x, y, z]` (Rust `sagax_core::Pos`; `z` is
+  the level of a cell, `Cell::from(pos)`, `cell.pos()`). C passes it as
+  `int32_t[3]`; `sx_point_to_pos` and `sx_pos_to_point` convert from and to
+  `sx_point`. JavaScript takes `[x, y, z]`, `{x, y, z}` and `{x, y, level}`
+  wherever a position goes into an AI block. Hex converters keep `z`:
+  `HexLayout::to_axial_pos`, `sx_hex_to_axial`, `lib.hex.toAxial(pos,
+  'oddR')` give `[q, r, z]`, and the `from` forms give offset cells back.
 
 ## 1. Which building block?
 

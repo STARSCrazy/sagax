@@ -111,11 +111,7 @@ fn topology_of(kind: i32, straight: i32, diagonal: i32, flags: u32) -> Option<To
     let straight = positive(straight)?;
     let layout = match kind {
         0 => None,
-        1 => Some(HexLayout::OddR),
-        2 => Some(HexLayout::EvenR),
-        3 => Some(HexLayout::OddQ),
-        4 => Some(HexLayout::EvenQ),
-        _ => return None,
+        kind => Some(hex_layout_of(u32::try_from(kind).ok()?)?),
     };
     Some(match layout {
         Some(layout) => Topology::Hex {
@@ -2751,13 +2747,49 @@ pub unsafe extern "C" fn sx_areas_move_cost(a: *mut WasmAreas) -> i32 {
     let Some(p) = scratch_copy(12) else {
         return ERROR_ARGUMENT;
     };
-    let cell = |i: usize| [p[i], p[i + 1], p[i + 2]];
-    match w.areas.move_cost(cell(0), cell(3), cell(6), cell(9)) {
+    let cell = |i: usize| Cell::new(p[i], p[i + 1], p[i + 2]);
+    match w.areas.cell_cost(cell(3), cell(6), cell(9)) {
         Some(cost) => {
             scratch_put(&[cost.min(i32::MAX as u32 - 1) as i32]);
             1
         }
         None => 0,
+    }
+}
+
+/// Offset `x`, `y` of a hex grid to axial `q`, `r`, written as two integers
+/// to the scratch buffer. `layout` is 1..4 as in `sx_rules.grid` (odd rows,
+/// even rows, odd columns, even columns). Returns 0, or -1 for another layout.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_hex_to_axial(layout: u32, x: i32, y: i32) -> i32 {
+    let Some(layout) = hex_layout_of(layout) else {
+        return ERROR_ARGUMENT;
+    };
+    let (q, r) = layout.to_axial(x, y);
+    scratch_put(&[q, r]);
+    0
+}
+
+/// Axial `q`, `r` to offset `x`, `y` (two integers in the scratch buffer);
+/// see [`sx_hex_to_axial`].
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_hex_from_axial(layout: u32, q: i32, r: i32) -> i32 {
+    let Some(layout) = hex_layout_of(layout) else {
+        return ERROR_ARGUMENT;
+    };
+    let (x, y) = layout.from_axial(q, r);
+    scratch_put(&[x, y]);
+    0
+}
+
+/// The hex layout of `sx_rules.grid` 1..4.
+fn hex_layout_of(layout: u32) -> Option<HexLayout> {
+    match layout {
+        1 => Some(HexLayout::OddR),
+        2 => Some(HexLayout::EvenR),
+        3 => Some(HexLayout::OddQ),
+        4 => Some(HexLayout::EvenQ),
+        _ => None,
     }
 }
 

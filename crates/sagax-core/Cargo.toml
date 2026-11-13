@@ -1,6 +1,6 @@
 [package]
 name = "sagax-core"
-description = "Shared building blocks of Sagax: diagnostic event sinks."
+description = "Shared types and diagnostic sinks"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

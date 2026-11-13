@@ -1,4 +1,5 @@
 use super::{Pos, ZeroCapacity};
+use sagax_core::Cell;
 
 /// A remembered or announced area: a centre and radius, how long it lasts,
 /// whether it can be walked through, and a little data.
@@ -143,7 +144,23 @@ impl Areas {
     /// not used yet. The cells are compared with the areas as they are: keep
     /// both in the same (cell) coordinates, or convert the cell first and
     /// call [`Areas::blocks`] and [`Areas::cost`] yourself.
+    #[deprecated(note = "use cell_cost")]
     pub fn move_cost(&self, _from: Pos, to: Pos, start: Pos, goal: Pos) -> Option<u32> {
+        if self.blocks(to, start, goal) {
+            None
+        } else {
+            Some(self.cost(to, start, goal))
+        }
+    }
+
+    /// Extra cost of entering `to` for a path search from `start` to `goal`:
+    /// `None` if `to` is blocked (see [`Areas::blocks`]), else `Some` of its
+    /// cost (see [`Areas::cost`]). The same rule as the deprecated
+    /// `move_cost`, without the unused `from`. Keep the areas and the cells in
+    /// the same (cell) coordinates, or convert first and call
+    /// [`Areas::blocks`] and [`Areas::cost`] yourself.
+    pub fn cell_cost(&self, to: Cell, start: Cell, goal: Cell) -> Option<u32> {
+        let (to, start, goal) = (to.pos(), start.pos(), goal.pos());
         if self.blocks(to, start, goal) {
             None
         } else {

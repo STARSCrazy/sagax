@@ -2,7 +2,14 @@
 //!
 //! Deliberately small: only what more than one module needs. Today that is the
 //! diagnostic [`Sink`], through which algorithms report what they do without
-//! depending on any debug UI or log format.
+//! depending on any debug UI or log format, and the shared places: [`Pos`],
+//! [`Cell`] and [`HexLayout`].
+
+mod cell;
+mod hex;
+
+pub use cell::{Cell, Pos};
+pub use hex::{HexLayout, axial_step};
 
 /// Receives diagnostic events of an algorithm.
 ///

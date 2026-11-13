@@ -2064,3 +2064,50 @@ mod conventions {
         }
     }
 }
+
+mod positions {
+    use super::*;
+    use std::ptr::{null, null_mut};
+
+    #[test]
+    fn hex_converters() {
+        unsafe {
+            let mut out = [0i32; 3];
+            assert_eq!(sx_hex_to_axial(1, [3, 3, 2].as_ptr(), out.as_mut_ptr()), 0);
+            assert_eq!(out, [2, 3, 2]);
+            assert_eq!(
+                sx_hex_from_axial(1, [2, 3, 2].as_ptr(), out.as_mut_ptr()),
+                0
+            );
+            assert_eq!(out, [3, 3, 2]);
+            // EvenR and OddQ differ from OddR
+            assert_eq!(sx_hex_to_axial(2, [3, 1, 0].as_ptr(), out.as_mut_ptr()), 0);
+            assert_eq!(out, [2, 1, 0]);
+            assert_eq!(sx_hex_to_axial(3, [3, 3, 0].as_ptr(), out.as_mut_ptr()), 0);
+            assert_eq!(out, [3, 2, 0]);
+            // square and unknown grids, null pointers
+            assert_eq!(sx_hex_to_axial(0, [3, 3, 2].as_ptr(), out.as_mut_ptr()), -1);
+            assert_eq!(
+                sx_hex_from_axial(5, [3, 3, 2].as_ptr(), out.as_mut_ptr()),
+                -1
+            );
+            assert_eq!(sx_hex_to_axial(1, null(), out.as_mut_ptr()), -1);
+            assert_eq!(sx_hex_to_axial(1, [0, 0, 0].as_ptr(), null_mut()), -1);
+        }
+    }
+
+    #[test]
+    fn point_pos_bridges() {
+        unsafe {
+            let mut pos = [0i32; 3];
+            assert_eq!(sx_point_to_pos(Point::new(4, 5, 6), pos.as_mut_ptr()), 0);
+            assert_eq!(pos, [4, 5, 6]);
+            let mut point = Point::default();
+            assert_eq!(sx_pos_to_point(pos.as_ptr(), &mut point), 0);
+            assert_eq!(point, Point::new(4, 5, 6));
+            assert_eq!(sx_point_to_pos(Point::default(), null_mut()), -1);
+            assert_eq!(sx_pos_to_point(null(), &mut point), -1);
+            assert_eq!(sx_pos_to_point(pos.as_ptr(), null_mut()), -1);
+        }
+    }
+}

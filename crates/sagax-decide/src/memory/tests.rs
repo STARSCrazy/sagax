@@ -1,4 +1,5 @@
 use super::*;
+use sagax_core::Cell;
 
 #[test]
 fn interval_first_due_then_every() {
@@ -1232,6 +1233,29 @@ fn inbox_take_due_max_leaves_the_rest() {
 }
 
 #[test]
+fn cell_cost_matches_move_cost() {
+    let mut z = Areas::new(4).unwrap();
+    let mut mud = area(2, 5, 2);
+    mud.pos = [5, 5, 0];
+    mud.strength = 7;
+    z.add(0, mud);
+    let (start, goal) = (Cell::new(0, 0, 0), Cell::new(9, 9, 0));
+    assert_eq!(z.cell_cost(Cell::new(5, 5, 0), start, goal), Some(7));
+    assert_eq!(z.cell_cost(Cell::new(8, 8, 0), start, goal), Some(0));
+    // goal inside the area: it costs nothing
+    assert_eq!(
+        z.cell_cost(Cell::new(5, 5, 0), start, Cell::new(5, 5, 0)),
+        Some(0)
+    );
+    let mut wall = area(1, 5, 2);
+    wall.pos = [5, 5, 0];
+    wall.blocking = 1;
+    z.add(0, wall);
+    assert_eq!(z.cell_cost(Cell::new(5, 5, 0), start, goal), None);
+}
+
+#[test]
+#[allow(deprecated)]
 fn areas_move_cost_matches_cost_and_blocks() {
     let mut z = Areas::new(4).unwrap();
     let mut wall = area(1, 0, 100);

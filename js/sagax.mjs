@@ -709,7 +709,7 @@ const MESSAGE_SIZE = 10;
 const AREA_SIZE = 14;
 
 function factValues(f) {
-  const [px, py, pz] = f.pos ?? [0, 0, 0];
+  const [px, py, pz] = posOf(f.pos ?? [0, 0, 0]);
   return [u32(f.subject), u32(f.kind), u32(px), u32(py), u32(pz), u32(f.seenAt), u32(f.strength ?? 0), u32(f.data ?? 0), u32(f.source ?? 0) & 0xff];
 }
 
@@ -718,7 +718,7 @@ function factOf(r) {
 }
 
 function messageValues(m) {
-  const [px, py, pz] = m.pos ?? [0, 0, 0];
+  const [px, py, pz] = posOf(m.pos ?? [0, 0, 0]);
   return [u32(m.kind), u32(m.subject), u32(px), u32(py), u32(pz), u32(m.seenAt), u32(m.strength ?? 0), u32(m.data ?? 0), u32(m.sender ?? 0), m.keepIfSenderGone ? 1 : 0];
 }
 
@@ -727,8 +727,8 @@ function messageOf(r) {
 }
 
 function areaValues(a) {
-  const [px, py, pz] = a.pos ?? [0, 0, 0];
-  const [sx, sy, sz] = a.source ?? [0, 0, 0];
+  const [px, py, pz] = posOf(a.pos ?? [0, 0, 0]);
+  const [sx, sy, sz] = posOf(a.source ?? [0, 0, 0], 'source');
   return [u32(a.kind ?? 0), u32(px), u32(py), u32(pz), u32(a.radius), u32(a.strength ?? 0), u32(a.since ?? 0), u32(a.lifetime), u32(a.data ?? 0), u32(sx), u32(sy), u32(sz), a.blocking ? 1 : 0, a.source ? 1 : 0];
 }
 
@@ -851,7 +851,8 @@ export class Knowledge extends Table {
   }
 
   /** Sets the place of a fact. False if unknown. */
-  setPos(subject, kind, [px, py, pz]) {
+  setPos(subject, kind, pos) {
+    const [px, py, pz] = posOf(pos);
     return this.x.sx_knowledge_set_pos(this.h, u32(subject), u32(kind), i32(px), i32(py), i32(pz)) === 1;
   }
 
@@ -1013,7 +1014,7 @@ export class Inbox extends Table {
 /** The 9 integers of cell, start, goal in the scratch buffer; returns the pointer. */
 function cellsScratch(x, cell, start, goal) {
   const ptr = x.sx_scratch(9);
-  new Int32Array(x.memory.buffer, ptr, 9).set([...cell, ...start, ...goal].map(i32));
+  new Int32Array(x.memory.buffer, ptr, 9).set([...posOf(cell, 'cell'), ...posOf(start, 'start'), ...posOf(goal, 'goal')]);
   return ptr;
 }
 
@@ -1049,13 +1050,15 @@ export class Areas extends Table {
   }
 
   /** Index of the first area containing pos, or null. */
-  contains([px, py, pz]) {
+  contains(pos) {
+    const [px, py, pz] = posOf(pos);
     const i = this.x.sx_areas_contains(this.h, i32(px), i32(py), i32(pz));
     return i >= 0 ? i : null;
   }
 
   /** Like contains, for areas of one kind. */
-  containsKind([px, py, pz], kind) {
+  containsKind(pos, kind) {
+    const [px, py, pz] = posOf(pos);
     const i = this.x.sx_areas_contains_kind(this.h, i32(px), i32(py), i32(pz), u32(kind));
     return i >= 0 ? i : null;
   }
@@ -1070,6 +1073,11 @@ export class Areas extends Table {
   cost(cell, start, goal) {
     const h = this.h;
     return u32(this.x.sx_areas_cost(h, cellsScratch(this.x, cell, start, goal)));
+  }
+
+  /** The extra cost of entering cell on the way from start to goal: null if it is blocked, else as cost(). */
+  cellCost(cell, start, goal) {
+    return this.blocks(cell, start, goal) ? null : this.cost(cell, start, goal);
   }
 
   /** All areas in slot order. */
@@ -1334,7 +1342,8 @@ const POINT_DEFAULT = {
 };
 
 /** Point of an agent around a place: [x, y, z] or null past the last step. */
-function pointsAroundOf(x, agent, step, [cx, cy, cz], pattern) {
+function pointsAroundOf(x, agent, step, centre, pattern) {
+  const [cx, cy, cz] = posOf(centre, 'centre');
   const p = { ...POINT_DEFAULT, ...pattern };
   const sine = choice(SINE, p.sine, 'sine');
   let custom = 0;
@@ -1495,10 +1504,23 @@ const u8Of = (v, what) => intIn(v, 0, 255, what);
 const timeOf = (v) => u32Of(v, 'time');
 const safeOf = (v, what) => intIn(v, Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, what);
 
-/** [x, y, z] as checked i32s. */
+/**
+ * A position as checked i32s [x, y, z]. Accepts [x, y, z], {x, y, z} and
+ * {x, y, level} (z / level optional, 0 by default; both given must agree).
+ */
 function posOf(p, what = 'pos') {
-  if (!Array.isArray(p) || p.length !== 3) throw new RangeError(`Sagax: ${what} must be [x, y, z]`);
-  return p.map((c) => i32Of(c, what));
+  if (Array.isArray(p)) {
+    if (p.length !== 3) throw new RangeError(`Sagax: ${what} must be [x, y, z] or {x, y, z}`);
+    return p.map((c) => i32Of(c, what));
+  }
+  if (p !== null && typeof p === 'object') {
+    const { x, y, z, level } = p;
+    if (z !== undefined && level !== undefined && z !== level) {
+      throw new RangeError(`Sagax: ${what} has z ${String(z)} and level ${String(level)}, which differ`);
+    }
+    return [i32Of(x, what), i32Of(y, what), i32Of(z ?? level ?? 0, what)];
+  }
+  throw new RangeError(`Sagax: ${what} must be [x, y, z] or {x, y, z}`);
 }
 
 /** Four numbers of a skill table row, checked. */
@@ -2132,6 +2154,42 @@ Object.assign(Sagax.prototype, {
     const r = this.x.sx_areas_move_cost(h);
     if (r < 0) throw new RangeError('Sagax: bad areas');
     return r === 1 ? u32(takeInts(this.x, ptr, 1)[0]) : null;
+  },
+});
+
+/** A hex layout, 'oddR' | 'evenR' | 'oddQ' | 'evenQ' or HEX.*, as the number the module takes. */
+function layoutOf(layout) {
+  const n = typeof layout === 'string' ? HEX[layout] : layout;
+  if (!Object.values(HEX).includes(n)) {
+    throw new RangeError(`Sagax: hex layout must be one of ${Object.keys(HEX).join(', ')} (or HEX.*), not ${String(layout)}`);
+  }
+  return n;
+}
+
+Object.defineProperty(Sagax.prototype, 'hex', {
+  /**
+   * Hex converters between offset cells and axial coordinates:
+   * toAxial(pos, layout) -> [q, r, z]; fromAxial(pos, layout) -> {x, y, level}.
+   * pos takes the shapes of every position; layout is 'oddR' | 'evenR' |
+   * 'oddQ' | 'evenQ' or HEX.*. The level (z) is kept.
+   */
+  get() {
+    const x = this.x;
+    const convert = (call, pos, layout) => {
+      const [a, b, z] = posOf(pos);
+      const l = layoutOf(layout);
+      const ptr = x.sx_scratch(2);
+      if (call(l, a, b) !== 0) throw new RangeError('Sagax: bad hex layout');
+      const [c, d] = takeInts(x, ptr, 2);
+      return [c, d, z];
+    };
+    return {
+      toAxial: (pos, layout) => convert(x.sx_hex_to_axial, pos, layout),
+      fromAxial: (pos, layout) => {
+        const [px, py, z] = convert(x.sx_hex_from_axial, pos, layout);
+        return { x: px, y: py, level: z };
+      },
+    };
   },
 });
 

@@ -112,6 +112,96 @@ impl Point {
     }
 }
 
+/// The hex layout of an `SX_GRID_HEX_*` value; `None` for square or unknown.
+fn hex_layout(grid: u32) -> Option<HexLayout> {
+    match grid {
+        1 => Some(HexLayout::OddR),
+        2 => Some(HexLayout::EvenR),
+        3 => Some(HexLayout::OddQ),
+        4 => Some(HexLayout::EvenQ),
+        _ => None,
+    }
+}
+
+/// `sx_point_to_pos`: the point as `[x, y, level]` in `out` (3 integers).
+/// Returns 0, or `SX_ERROR_ARGUMENT` if `out` is null.
+///
+/// # Safety
+/// `out` is null or has room for 3 integers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_point_to_pos(point: Point, out: *mut i32) -> i32 {
+    if out.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: not null; the caller gives room for 3 integers.
+    unsafe { out.cast::<[i32; 3]>().write_unaligned(point.cell().pos()) };
+    0
+}
+
+/// `sx_pos_to_point`: the position `[x, y, z]` as a point (z is the level).
+/// Returns 0, or `SX_ERROR_ARGUMENT` if a pointer is null.
+///
+/// # Safety
+/// `pos` is null or holds 3 integers; `out` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_pos_to_point(pos: *const i32, out: *mut Point) -> i32 {
+    if pos.is_null() || out.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: not null; the caller gives 3 integers.
+    let pos = unsafe { pos.cast::<[i32; 3]>().read_unaligned() };
+    // SAFETY: not null and valid.
+    unsafe { *out = Point::of(Cell::from(pos)) };
+    0
+}
+
+/// Shared body of the two hex converters.
+///
+/// # Safety
+/// `pos` is null or holds 3 integers; `out` is null or has room for 3.
+unsafe fn hex_convert(
+    grid: u32,
+    pos: *const i32,
+    out: *mut i32,
+    f: fn(HexLayout, [i32; 3]) -> [i32; 3],
+) -> i32 {
+    let Some(layout) = hex_layout(grid) else {
+        return ERROR_ARGUMENT;
+    };
+    if pos.is_null() || out.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: not null; the caller gives 3 integers and room for 3.
+    unsafe {
+        let p = pos.cast::<[i32; 3]>().read_unaligned();
+        out.cast::<[i32; 3]>().write_unaligned(f(layout, p));
+    }
+    0
+}
+
+/// `sx_hex_to_axial`: the offset position `[x, y, z]` as axial `[q, r, z]`.
+/// `grid` is `SX_GRID_HEX_*`. Returns 0, or `SX_ERROR_ARGUMENT` for a null
+/// pointer or a grid that is not hex.
+///
+/// # Safety
+/// `pos` is null or holds 3 integers; `out` is null or has room for 3.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_hex_to_axial(grid: u32, pos: *const i32, out: *mut i32) -> i32 {
+    // SAFETY: see above.
+    unsafe { hex_convert(grid, pos, out, HexLayout::to_axial_pos) }
+}
+
+/// `sx_hex_from_axial`: the axial position `[q, r, z]` as offset `[x, y, z]`;
+/// see [`sx_hex_to_axial`].
+///
+/// # Safety
+/// `pos` is null or holds 3 integers; `out` is null or has room for 3.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_hex_from_axial(grid: u32, pos: *const i32, out: *mut i32) -> i32 {
+    // SAFETY: see above.
+    unsafe { hex_convert(grid, pos, out, HexLayout::from_axial_pos) }
+}
+
 /// `sx_map`.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -329,11 +419,7 @@ fn rules_of(rules: *const SxRules) -> Option<(Topology, usize, Cost)> {
     let tolerance = Cost::try_from(rules.smooth_max_extra).ok()?;
     let layout = match rules.grid {
         0 => None,
-        1 => Some(HexLayout::OddR),
-        2 => Some(HexLayout::EvenR),
-        3 => Some(HexLayout::OddQ),
-        4 => Some(HexLayout::EvenQ),
-        _ => return None,
+        grid => Some(hex_layout(grid)?),
     };
     let topology = match layout {
         Some(layout) => Topology::Hex {

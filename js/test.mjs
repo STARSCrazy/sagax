@@ -1548,4 +1548,40 @@ test('three levels: flank gathers, one signal at 49, all attack at 55', () => {
   assert.deepEqual(attacks, [[55, 1], [55, 2], [55, 3], [55, 4]], 'all aligned');
 });
 
+test('hex converters', () => {
+  assert.deepEqual(lib.hex.toAxial({ x: 3, y: 3, level: 2 }, 'oddR'), [2, 3, 2]);
+  assert.deepEqual(lib.hex.fromAxial([2, 3, 2], HEX.oddR), { x: 3, y: 3, level: 2 });
+  assert.deepEqual(lib.hex.toAxial([3, 1, 0], 'evenR'), [2, 1, 0]);
+  assert.deepEqual(lib.hex.toAxial({ x: 3, y: 3, z: 0 }, 'oddQ'), [3, 2, 0]);
+  for (const layout of ['oddR', 'evenR', 'oddQ', 'evenQ']) {
+    for (const [x, y] of [[3, 3], [-2, 5], [4, -3]]) {
+      assert.deepEqual(lib.hex.fromAxial(lib.hex.toAxial([x, y, 1], layout), layout), { x, y, level: 1 }, layout);
+    }
+  }
+  assert.throws(() => lib.hex.toAxial([0, 0, 0], 'square'), RangeError);
+  assert.throws(() => lib.hex.toAxial([0, 0, 0], 0), RangeError);
+  assert.throws(() => lib.hex.toAxial({ x: 0, y: 0, z: 1, level: 2 }, 'oddR'), RangeError);
+});
+
+test('AI blocks take both shapes', () => {
+  const k = lib.knowledge(4);
+  k.learn(0, { subject: 1, kind: 1, pos: { x: 4, y: 5 } });
+  assert.deepEqual(k.get(1, 1).pos, [4, 5, 0]);
+  k.learn(0, { subject: 2, kind: 1, pos: { x: 1, y: 2, level: 3 } });
+  assert.deepEqual(k.get(2, 1).pos, [1, 2, 3]);
+  k.learn(0, { subject: 3, kind: 1, pos: { x: 1, y: 2, z: 4 } });
+  assert.deepEqual(k.get(3, 1).pos, [1, 2, 4]);
+  k.learn(0, { subject: 4, kind: 1, pos: [7, 8, 9] });
+  assert.deepEqual(k.get(4, 1).pos, [7, 8, 9]);
+  const a = lib.areas(4);
+  a.add(0, { kind: 1, pos: { x: 5, y: 5 }, radius: 2, strength: 7, lifetime: 100 });
+  assert.equal(a.cellCost({ x: 5, y: 5 }, { x: 0, y: 0 }, [9, 9, 0]), 7);
+  assert.equal(a.cellCost([8, 8, 0], [0, 0, 0], [9, 9, 0]), 0);
+  a.add(0, { kind: 2, pos: [5, 5, 0], radius: 2, lifetime: 100, blocking: true });
+  assert.equal(a.cellCost([5, 5, 0], [0, 0, 0], [9, 9, 0]), null);
+  assert.equal(a.contains({ x: 5, y: 5 }), 0);
+  assert.throws(() => k.learn(0, { subject: 5, kind: 1, pos: { x: 1 } }), RangeError);
+  assert.throws(() => k.learn(0, { subject: 5, kind: 1, pos: [1, 2] }), RangeError);
+});
+
 console.log(`${passed} tests passed`);
