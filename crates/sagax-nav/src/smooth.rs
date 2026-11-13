@@ -192,12 +192,12 @@ fn step_ok<M: CellMap>(map: &mut M, from: Cell, dx: i32, dy: i32, max_extra: Cos
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::{CellGoal, DenseGrid, GridGraph, GridRules};
+    use crate::grid::{CellGoal, DenseGrid, GridGraph, GridRules, Preset};
     use crate::search::{Limits, find_path};
 
     #[test]
     fn open_ground_becomes_one_straight_line() {
-        let rules = GridRules::default();
+        let rules = GridRules::preset(Preset::Octile);
         let mut g = GridGraph::new(DenseGrid::new(20, 20), rules, None);
         let r = find_path(
             &mut g,
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn corners_forced_by_walls_stay() {
         // wall along x = 10 from y = 0..15, gap below
-        let rules = GridRules::default();
+        let rules = GridRules::preset(Preset::Octile);
         let mut map = DenseGrid::new(20, 20);
         for y in 0..15 {
             map.set(10, y, DenseGrid::BLOCKED);

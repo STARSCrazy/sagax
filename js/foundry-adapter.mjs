@@ -4,8 +4,8 @@
 //   * cells are Foundry grid offsets (x = column j, y = row i), so square and
 //     hex grids use Foundry's own conversions; cells outside the scene
 //     rectangle (padding) are blocked
-//   * square: straight and diagonal step 1 (Foundry counts grid spaces);
-//     hex: step 1
+//   * preset 'tabletop': square straight and diagonal step 1 (Foundry counts
+//     grid spaces); hex: step 1
 //   * walls: moves between neighbouring cell centres blocked for movement
 //     ('move' collision) become wall bits, so walls between cells work
 //   * other tokens block their cells
@@ -37,7 +37,7 @@ export function buildCombatGrid(lib, { walker, enemies = [], reachOf = () => 1, 
   const fgrid = canvas.grid;
   const hex = fgrid.isHexagonal ? HEX_LAYOUT_BY_GRID_TYPE[fgrid.type] : null;
   if (!fgrid.isSquare && hex === undefined) throw new Error(`Sagax: grid type ${fgrid.type} not supported`);
-  const rules = hex === null ? { straight: 1, diagonal: 1 } : { hex, step: 1 };
+  const rules = hex === null ? { preset: 'tabletop' } : { preset: 'tabletop', hex };
 
   const rect = canvas.dimensions.sceneRect;
   const corner = fgrid.getOffset({ x: rect.x + rect.width - 1, y: rect.y + rect.height - 1 });

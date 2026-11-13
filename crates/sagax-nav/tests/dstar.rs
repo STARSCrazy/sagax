@@ -1,7 +1,7 @@
 //! Correctness tests of D* Lite against fresh A* searches.
 
 use sagax_nav::dstar::{DStarLite, DStarStatus, HexHeuristic};
-use sagax_nav::grid::{Cell, CellGoal, DenseGrid, GridGraph, GridRules, Moves};
+use sagax_nav::grid::{Cell, CellGoal, DenseGrid, GridGraph, GridRules, Moves, Preset};
 use sagax_nav::hex::{HexGoal, HexGraph, HexLayout};
 use sagax_nav::{Cost, Graph, Limits, find_path};
 
@@ -48,7 +48,7 @@ fn random_open_cell(rng: &mut Rng, g: &DenseGrid) -> Cell {
 fn rules(four: bool) -> GridRules {
     GridRules {
         moves: if four { Moves::Four } else { Moves::Eight },
-        ..GridRules::default()
+        ..GridRules::preset(Preset::Octile)
     }
 }
 

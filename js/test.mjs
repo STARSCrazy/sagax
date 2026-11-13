@@ -16,18 +16,18 @@ function test(name, fn) {
 }
 
 test('open ground: diagonal counts as one step', () => {
-  const g = lib.grid(20, 20);
+  const g = lib.grid(20, 20, { preset: 'tabletop' });
   const way = g.findPath({ x: 0, y: 0 }, { x: 5, y: 3 });
   assert.equal(way.reached, true);
   assert.equal(way.cost, 5);
-  assert.deepEqual(way.cells[0], { x: 0, y: 0 });
-  assert.deepEqual(way.cells.at(-1), { x: 5, y: 3 });
+  assert.deepEqual(way.cells[0], { x: 0, y: 0, level: 0 });
+  assert.deepEqual(way.cells.at(-1), { x: 5, y: 3, level: 0 });
   g.free();
 });
 
 test('walls between cells force a way through the door', () => {
   // a wall along x = 5|6 from y = 0 to 9, door at y = 9
-  const g = lib.grid(12, 10);
+  const g = lib.grid(12, 10, { preset: 'tabletop' });
   for (let y = 0; y < 9; y++) {
     g.addWall(5, y, 1, 0);
     g.addWall(5, y, 1, 1);
@@ -46,7 +46,7 @@ test('walls between cells force a way through the door', () => {
 
 test('leaving an enemy reach costs extra: the way goes around', () => {
   // enemy at (5, 5) with reach 1; walker starts outside and must not cross the reach
-  const g = lib.grid(11, 11);
+  const g = lib.grid(11, 11, { preset: 'tabletop' });
   g.setLeaveCost(10);
   for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) g.addZone(5 + dx, 5 + dy, 0);
   g.block(5, 5); // the enemy itself
@@ -58,7 +58,7 @@ test('leaving an enemy reach costs extra: the way goes around', () => {
 
 test('in a corridor past an enemy the leave cost is paid once', () => {
   // corridor 1 cell wide (y = 1), enemy reach covers x = 4..6
-  const g = lib.grid(12, 3);
+  const g = lib.grid(12, 3, { preset: 'tabletop' });
   for (let x = 0; x < 12; x++) {
     g.block(x, 0);
     g.block(x, 2);
@@ -72,7 +72,7 @@ test('in a corridor past an enemy the leave cost is paid once', () => {
 });
 
 test('reachable cells within the movement budget (GS + 2)', () => {
-  const g = lib.grid(30, 30);
+  const g = lib.grid(30, 30, { preset: 'tabletop' });
   const area = g.reachable({ x: 15, y: 15 }, 6).cells;
   assert.equal(area.length, 13 * 13);
   assert.ok(area.every((c) => c.cost <= 6));
@@ -83,16 +83,16 @@ test('reachable cells within the movement budget (GS + 2)', () => {
 });
 
 test('unreachable goal gives the closest cell', () => {
-  const g = lib.grid(10, 10);
+  const g = lib.grid(10, 10, { preset: 'tabletop' });
   for (let y = 0; y < 10; y++) g.block(5, y);
   const way = g.findPath({ x: 0, y: 5 }, { x: 9, y: 5 });
   assert.equal(way.status, 'partial');
-  assert.deepEqual(way.cells.at(-1), { x: 4, y: 5 });
+  assert.deepEqual(way.cells.at(-1), { x: 4, y: 5, level: 0 });
   g.free();
 });
 
 test('hex grid: distance, walls between hexes, reachable', () => {
-  const g = lib.grid(20, 20, { hex: HEX.oddR });
+  const g = lib.grid(20, 20, { preset: 'tabletop', hex: HEX.oddR });
   const open = g.findPath({ x: 2, y: 2 }, { x: 10, y: 2 });
   assert.equal(open.reached, true);
   assert.equal(open.cost, 8);
@@ -110,7 +110,7 @@ test('hex grid: distance, walls between hexes, reachable', () => {
 });
 
 test('hex walls: raw bits throw', () => {
-  const g = lib.grid(5, 5, { hex: HEX.oddR });
+  const g = lib.grid(5, 5, { preset: 'tabletop', hex: HEX.oddR });
   const hexMsg = /hex wall bits changed in 0\.9/;
   assert.throws(() => g.walls(), (e) => e instanceof TypeError && hexMsg.test(e.message));
   assert.throws(() => g.setWalls(new Uint8Array(25)), (e) => e instanceof TypeError && hexMsg.test(e.message));
@@ -121,13 +121,13 @@ test('hex walls: raw bits throw', () => {
   assert.equal(area.length, 1 + 5);
   assert.ok(!area.some((c) => c.x === n.x && c.y === n.y));
   g.free();
-  const square = lib.grid(3, 3);
+  const square = lib.grid(3, 3, { preset: 'tabletop' });
   assert.equal(square.walls().length, 9);
   square.free();
 });
 
 test('speed on a 60 x 60 battle map', () => {
-  const g = lib.grid(60, 60);
+  const g = lib.grid(60, 60, { preset: 'tabletop' });
   for (let i = 0; i < 600; i++) g.block((i * 37) % 60, (i * 91) % 60);
   const t = performance.now();
   for (let i = 0; i < 200; i++) g.findPath({ x: 0, y: 0 }, { x: 59, y: 59 });
@@ -141,34 +141,34 @@ test('speed on a 60 x 60 battle map', () => {
 });
 
 test('flow field: every walker finds the nearest goal', () => {
-  const g = lib.grid(20, 10);
+  const g = lib.grid(20, 10, { preset: 'tabletop' });
   const n = g.buildFlow([{ x: 0, y: 5 }, { x: 19, y: 5 }]);
   assert.equal(n, 200);
   assert.equal(g.flowCost(4, 5), 4);
   assert.equal(g.flowCost(16, 5), 3);
   const [a, b, c] = g.flowNext([{ x: 16, y: 5 }, { x: 0, y: 5 }, { x: 3, y: 5 }]);
-  assert.deepEqual(a, { x: 17, y: 5, cost: 3 });
-  assert.deepEqual(b, { x: 0, y: 5, cost: 0 });
-  assert.deepEqual(c, { x: 2, y: 5, cost: 3 });
+  assert.deepEqual(a, { x: 17, y: 5, level: 0, cost: 3 });
+  assert.deepEqual(b, { x: 0, y: 5, level: 0, cost: 0 });
+  assert.deepEqual(c, { x: 2, y: 5, level: 0, cost: 3 });
   assert.equal(g.findPath({ x: 1, y: 1 }, { x: 3, y: 1 }).cells.length, 3, 'flow keeps paths apart');
   g.free();
 });
 
 test('smoothing and formation after findPath', () => {
-  const g = lib.grid(30, 10);
+  const g = lib.grid(30, 10, { preset: 'tabletop' });
   g.findPath({ x: 0, y: 0 }, { x: 20, y: 4 });
-  assert.deepEqual(g.way('smooth'), [{ x: 0, y: 0 }, { x: 20, y: 4 }]);
+  assert.deepEqual(g.way('smooth'), [{ x: 0, y: 0, level: 0 }, { x: 20, y: 4, level: 0 }]);
   g.findPath({ x: 2, y: 4 }, { x: 20, y: 4 });
   const f = g.formation();
   assert.equal(f.members.length, 3);
-  assert.deepEqual(f.leader.at(-1), { x: 20, y: 4 });
-  assert.deepEqual(f.members[0].at(-1), { x: 20, y: 5 });
-  assert.deepEqual(f.members[1].at(-1), { x: 19, y: 4 });
+  assert.deepEqual(f.leader.at(-1), { x: 20, y: 4, level: 0 });
+  assert.deepEqual(f.members[0].at(-1), { x: 20, y: 5, level: 0 });
+  assert.deepEqual(f.members[1].at(-1), { x: 19, y: 4, level: 0 });
   g.free();
 });
 
 test('D* Lite repairs the way when a cell gets blocked (square and hex)', () => {
-  const g = lib.grid(20, 10);
+  const g = lib.grid(20, 10, { preset: 'tabletop' });
   g.dstarBegin({ x: 0, y: 5 }, { x: 10, y: 5 });
   assert.equal(g.dstarCompute().status, 'found');
   assert.equal(g.dstarCompute().cost, 10);
@@ -181,7 +181,7 @@ test('D* Lite repairs the way when a cell gets blocked (square and hex)', () => 
   assert.equal(way.cost, g.findPath({ x: 2, y: 5 }, { x: 10, y: 5 }).cost);
   g.free();
 
-  const h = lib.grid(15, 15, { hex: HEX.oddR });
+  const h = lib.grid(15, 15, { preset: 'tabletop', hex: HEX.oddR });
   h.dstarBegin({ x: 2, y: 7 }, { x: 12, y: 7 });
   assert.equal(h.dstarCompute().status, 'found');
   h.block(7, 7);
@@ -194,9 +194,9 @@ test('D* Lite repairs the way when a cell gets blocked (square and hex)', () => 
 
 test('hex: smoothing and formation work on every layout', () => {
   for (const hex of Object.values(HEX)) {
-    const g = lib.grid(30, 20, { hex });
+    const g = lib.grid(30, 20, { preset: 'tabletop', hex });
     g.findPath({ x: 2, y: 12 }, { x: 20, y: 4 });
-    assert.deepEqual(g.way('smooth'), [{ x: 2, y: 12 }, { x: 20, y: 4 }], `layout ${hex}`);
+    assert.deepEqual(g.way('smooth'), [{ x: 2, y: 12, level: 0 }, { x: 20, y: 4, level: 0 }], `layout ${hex}`);
     for (let y = 0; y < 20; y++) if (y !== 10) g.block(15, y);
     const way = g.findPath({ x: 5, y: 10 }, { x: 25, y: 10 });
     assert.equal(way.reached, true);
@@ -212,13 +212,13 @@ test('hex: smoothing and formation work on every layout', () => {
 });
 
 test('continue before any search is idle', () => {
-  const g = lib.grid(10, 10);
+  const g = lib.grid(10, 10, { preset: 'tabletop' });
   assert.equal(g.continue().status, 'idle');
   g.free();
 });
 
 test('small budgets, continue, outputs, bulk filling', () => {
-  const g = lib.grid(30, 30);
+  const g = lib.grid(30, 30, { preset: 'tabletop' });
   const costs = new Uint32Array(30 * 30);
   for (let y = 0; y < 25; y++) costs[y * 30 + 15] = 0xffffffff;
   g.setCosts(costs);
@@ -229,14 +229,14 @@ test('small budgets, continue, outputs, bulk filling', () => {
   assert.ok(calls > 10);
   assert.deepEqual(part, whole);
   const turns = g.way('turns');
-  assert.deepEqual(turns[0], { x: 1, y: 1 });
-  assert.deepEqual(turns.at(-1), { x: 28, y: 1 });
+  assert.deepEqual(turns[0], { x: 1, y: 1, level: 0 });
+  assert.deepEqual(turns.at(-1), { x: 28, y: 1, level: 0 });
   assert.ok(g.way('smooth').length <= turns.length);
   g.free();
 });
 
 test('tracing: every step, same result, off again', () => {
-  const g = lib.grid(20, 20);
+  const g = lib.grid(20, 20, { preset: 'tabletop' });
   for (let y = 0; y < 15; y++) g.block(10, y);
   const plain = g.findPath({ x: 2, y: 2 }, { x: 18, y: 2 });
   g.setTrace(true);
@@ -259,18 +259,18 @@ test('tracing: every step, same result, off again', () => {
 });
 
 test('flee from threats, flee to the nearest exit', () => {
-  const g = lib.grid(20, 5);
+  const g = lib.grid(20, 5, { preset: 'tabletop' });
   const away = g.flee({ x: 5, y: 2 }, [{ x: 3, y: 2 }], 8);
   assert.equal(away.status, 'found');
-  assert.deepEqual(away.cells[0], { x: 5, y: 2 });
+  assert.deepEqual(away.cells[0], { x: 5, y: 2, level: 0 });
   assert.ok(away.cells.at(-1).x >= 9);
   const exit = g.findPath({ x: 15, y: 2 }, [{ x: 0, y: 2 }, { x: 19, y: 2 }]);
-  assert.deepEqual(exit.cells.at(-1), { x: 19, y: 2 });
+  assert.deepEqual(exit.cells.at(-1), { x: 19, y: 2, level: 0 });
   g.free();
 });
 
 test('ways split walking cost and zone penalty', () => {
-  const g = lib.grid(10, 1);
+  const g = lib.grid(10, 1, { preset: 'tabletop' });
   for (let x = 0; x <= 3; x++) g.addZone(x, 0, 0);
   g.setLeaveCost(5);
   const way = g.findPath({ x: 2, y: 0 }, { x: 7, y: 0 });
@@ -282,6 +282,58 @@ test('ways split walking cost and zone penalty', () => {
   assert.deepEqual([back.steps, back.zonesLeft], [4, 1]);
   g.setLeaveCost(0);
   assert.deepEqual([g.findPath({ x: 2, y: 0 }, { x: 7, y: 0 }).steps, g.findPath({ x: 2, y: 0 }, { x: 7, y: 0 }).zonesLeft], [5, 0]);
+  g.free();
+});
+
+test('grid needs rules or a preset', () => {
+  assert.throws(() => lib.grid(5, 5), TypeError);
+  assert.throws(() => lib.grid(5, 5, { hex: HEX.oddR }), TypeError);
+  assert.throws(() => lib.grid(5, 5, { diagonal: 14 }), TypeError);
+  assert.throws(() => lib.grid(5, 5, { preset: 'chess' }), RangeError);
+  const explicit = lib.grid(5, 5, { straight: 2, diagonal: 3 });
+  assert.equal(explicit.findPath({ x: 0, y: 0 }, { x: 3, y: 1 }).cost, 3 + 2 + 2);
+  explicit.free();
+  const hex = lib.grid(5, 5, { hex: HEX.oddR, step: 4 });
+  assert.equal(hex.findPath({ x: 0, y: 0 }, { x: 3, y: 0 }).cost, 12);
+  hex.free();
+});
+
+test('presets', () => {
+  const octile = lib.grid(10, 10, { preset: 'octile' });
+  assert.equal(octile.findPath({ x: 0, y: 0 }, { x: 3, y: 1 }).cost, 34);
+  octile.free();
+  const tabletop = lib.grid(10, 10, { preset: 'tabletop' });
+  assert.equal(tabletop.findPath({ x: 0, y: 0 }, { x: 3, y: 1 }).cost, 3);
+  tabletop.free();
+  const hex = lib.grid(10, 10, { preset: 'octile', hex: HEX.oddR });
+  assert.equal(hex.findPath({ x: 0, y: 0 }, { x: 3, y: 0 }).cost, 30);
+  hex.free();
+});
+
+test('levels and links', () => {
+  // 5 x 1 x 2: level 0 blocked at x = 2, level 1 open only at x = 2
+  const g = lib.grid(5, 1, { preset: 'tabletop', levels: 2 });
+  g.block({ x: 2, y: 0, level: 0 });
+  for (const x of [0, 1, 3, 4]) g.block({ x, y: 0, level: 1 });
+  assert.equal(g.findPath({ x: 0, y: 0 }, { x: 4, y: 0 }).reached, false);
+  assert.equal(g.link({ x: 1, y: 0, level: 0 }, { x: 2, y: 0, level: 1 }), true);
+  assert.equal(g.link([2, 0, 1], [3, 0, 0]), true);
+  assert.equal(g.link({ x: 0, y: 0, level: 0 }, { x: 2, y: 0, level: 1 }), false);
+  assert.equal(g.link({ x: 1, y: 0, level: 0 }, { x: 2, y: 0, level: 2 }), false);
+  const way = g.findPath({ x: 0, y: 0 }, { x: 4, y: 0 });
+  assert.equal(way.reached, true);
+  assert.equal(way.cost, 4);
+  assert.deepEqual(way.cells.map((c) => c.level), [0, 0, 1, 0, 0]);
+  assert.deepEqual(way.cells[2], { x: 2, y: 0, level: 1 });
+  // a start on level 1, an area over both levels
+  const back = g.findPath({ x: 2, y: 0, level: 1 }, { x: 0, y: 0 });
+  assert.deepEqual(back.cells.map((c) => c.level), [1, 0, 0]);
+  const area = g.reachable({ x: 0, y: 0 }, 10).cells;
+  assert.equal(area.length, 5);
+  assert.ok(area.some((c) => c.x === 2 && c.level === 1 && c.cost === 2));
+  assert.equal(g.costs().length, 10);
+  g.setCost({ x: 3, y: 0, level: 0 }, 5);
+  assert.equal(g.costs()[3], 5);
   g.free();
 });
 

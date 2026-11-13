@@ -2,7 +2,7 @@
 
 use sagax_core::{NoopSink, Sink};
 use sagax_debug::{Collector, Overflow};
-use sagax_nav::grid::{Cell, CellGoal, CellMap, DenseGrid, GridGraph, GridRules, Moves};
+use sagax_nav::grid::{Cell, CellGoal, CellMap, DenseGrid, GridGraph, GridRules, Moves, Preset};
 use sagax_nav::{Cost, Goal, Graph, Limits, NoGoal, Search, SearchEvent, SearchStatus, find_path};
 
 /// Small deterministic random numbers for test maps.
@@ -86,7 +86,7 @@ fn assert_valid_path<G: Graph<Node = Cell>>(graph: &mut G, path: &[Cell], start:
 }
 
 fn rules8() -> GridRules {
-    GridRules::default()
+    GridRules::preset(Preset::Octile)
 }
 
 #[test]

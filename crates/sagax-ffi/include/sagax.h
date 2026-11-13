@@ -11,6 +11,8 @@
  *   sx_nav    paths, areas, smoothing, formations
  *   sx_flow   one search for many walkers with the same goals
  *   sx_dstar  one walker's way, repaired while the map changes
+ * and, for games without their own map structure, a ready map:
+ *   sx_grid   cells with costs, walls and levels; sx_grid_map gives its sx_map
  *
  * Conventions (the same in every part of this header):
  *   - Names: every handle has sx_<name>_new and sx_<name>_free. The old
@@ -114,6 +116,42 @@ typedef struct sx_rules {
 	int32_t smooth_max_extra;   /* smoothing may cross cells whose move_cost is
 	                             * at most this (0: only cells without extra) */
 } sx_rules;
+
+/* Ready-made costs (since 9). There is no default: every game picks one. */
+#define SX_PRESET_OCTILE    1u  /* straight 10, diagonal 14 (hex: every step 10) */
+#define SX_PRESET_TABLETOP  2u  /* straight 1, diagonal 1 (hex: every step 1) */
+
+/* Fills out with rules for grid (SX_GRID_*) and the costs of preset
+ * (SX_PRESET_*; 0 is no preset): flags 0, node_capacity 32768,
+ * smooth_max_extra 0. Returns 0, or SX_ERROR_ARGUMENT for an unknown grid or
+ * preset or a null out. */
+int32_t sx_rules_default(uint32_t grid, uint32_t preset, sx_rules *out);
+
+/* ---- sx_grid: a ready map with levels (since 9) -------------------------- */
+
+/* For games without their own map structure: width x height cells on each
+ * of levels levels, all open (extra cost 0, no walls). sx_grid_map gives the
+ * sx_map for every search; it is valid while the grid lives. A move keeps
+ * its level unless a link (a stair, a ramp) sends it to another one. Square
+ * and hex grids alike: on hex grids dx, dy is the hex neighbour's offset. */
+typedef struct sx_grid sx_grid;
+
+sx_grid *sx_grid_new(int32_t width, int32_t height, int32_t levels); /* 0 if a size is <= 0 */
+void sx_grid_free(sx_grid *grid);
+/* Extra cost of entering cell; cost < 0 blocks it. Returns 0, or
+ * SX_ERROR_ARGUMENT for a null grid or a cell off the grid. */
+int32_t sx_grid_set(sx_grid *grid, sx_point cell, int32_t cost);
+/* A wall between cell and its neighbour dx, dy away on the same level, both
+ * ways. Returns 0, or SX_ERROR_ARGUMENT for a null grid, a cell off the grid
+ * or an offset that is no neighbour. */
+int32_t sx_grid_add_wall(sx_grid *grid, sx_point cell, int32_t dx, int32_t dy);
+/* A move from a toward b arrives on b's level, and back. Returns 1, or 0
+ * (nothing changed) unless a and b are neighbours on the grid;
+ * SX_ERROR_ARGUMENT for a null grid. */
+int32_t sx_grid_link(sx_grid *grid, sx_point a, sx_point b);
+/* Writes the grid's map to out. Returns 0, or SX_ERROR_ARGUMENT for a null
+ * pointer. */
+int32_t sx_grid_map(sx_grid *grid, sx_map *out);
 
 /* ---- results ------------------------------------------------------------- */
 

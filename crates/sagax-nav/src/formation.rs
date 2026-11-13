@@ -228,7 +228,7 @@ fn place<M, D: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::{CellGoal, DenseGrid, GridGraph, GridRules};
+    use crate::grid::{CellGoal, DenseGrid, GridGraph, GridRules, Preset};
     use crate::search::{Limits, find_path};
 
     #[test]
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn a_door_turns_the_block_into_a_line_and_back() {
         // wall at x = 15 with a one-cell door at y = 4
-        let rules = GridRules::default();
+        let rules = GridRules::preset(Preset::Octile);
         let mut map = DenseGrid::new(30, 10);
         for y in 0..10 {
             if y != 4 {

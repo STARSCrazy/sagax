@@ -7,7 +7,7 @@
 
 use crate::dstar::{DStarLite, Heuristic, HexHeuristic};
 use crate::formation::{Formation, place_members, place_members_hex};
-use crate::grid::{Cell, CellMap, GridGraph, GridRules, turning_points};
+use crate::grid::{Cell, CellMap, GridGraph, GridRules, Preset, turning_points};
 use crate::hex::{HexGraph, HexLayout, hex_turning_points};
 use crate::search::{Cost, Graph};
 use crate::smooth::{hex_line_clear_within, line_clear_within, smooth_path};
@@ -27,6 +27,14 @@ pub enum Topology {
 }
 
 impl Topology {
+    /// A hex grid whose every step costs `preset`'s straight cost.
+    pub const fn hex(layout: HexLayout, preset: Preset) -> Self {
+        Self::Hex {
+            layout,
+            step_cost: preset.straight(),
+        }
+    }
+
     /// The turning points of `path` (see [`turning_points`] and
     /// [`hex_turning_points`]).
     pub fn turning_points(&self, path: &[Cell], first_always: bool, out: &mut Vec<Cell>) {
@@ -208,6 +216,19 @@ mod tests {
     use crate::search::{Limits, find_path};
 
     #[test]
+    fn hex_preset_sets_the_step_cost() {
+        for (preset, step_cost) in [(Preset::Octile, 10), (Preset::Tabletop, 1)] {
+            assert_eq!(
+                Topology::hex(HexLayout::EvenQ, preset),
+                Topology::Hex {
+                    layout: HexLayout::EvenQ,
+                    step_cost,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn hex_paths_smooth_and_turn_on_every_layout() {
         for layout in [
             HexLayout::OddR,
@@ -215,10 +236,7 @@ mod tests {
             HexLayout::OddQ,
             HexLayout::EvenQ,
         ] {
-            let topo = Topology::Hex {
-                layout,
-                step_cost: 1,
-            };
+            let topo = Topology::hex(layout, Preset::Tabletop);
             let mut grid = DenseGrid::new(20, 20);
             let goal = AnyGoal {
                 x: 15,
@@ -281,10 +299,7 @@ mod tests {
             HexLayout::OddQ,
             HexLayout::EvenQ,
         ] {
-            let topo = Topology::Hex {
-                layout,
-                step_cost: 1,
-            };
+            let topo = Topology::hex(layout, Preset::Tabletop);
             let mut grid = DenseGrid::new(30, 20);
             // a wall across column 15, door at row 10
             for y in 0..20 {

@@ -6,12 +6,12 @@
 //! cells that always begin with the start.
 //!
 //! ```
-//! use sagax_nav::grid::{Cell, DenseGrid, GridRules};
+//! use sagax_nav::grid::{Cell, DenseGrid, GridRules, Preset};
 //! use sagax_nav::nav::{ANY_LEVEL, Budget, Navigator, Output, Status};
 //! use sagax_nav::topology::Topology;
 //!
 //! let mut map = DenseGrid::new(20, 10);
-//! let mut nav = Navigator::new(Topology::Square(GridRules::default()), 1000);
+//! let mut nav = Navigator::new(Topology::Square(GridRules::preset(Preset::Octile)), 1000);
 //! let report = nav.find_path(&mut map, Cell::new(0, 0, 0), &[Cell::new(15, 3, ANY_LEVEL)], Budget::UNLIMITED);
 //! assert_eq!(report.status, Status::Found);
 //! let corners = nav.output(&mut map, Output::Smooth);
@@ -235,12 +235,12 @@ impl Navigator {
     /// `budget` is a [`Budget`]; a plain number is refused at compile time:
     ///
     /// ```compile_fail
-    /// use sagax_nav::grid::{Cell, DenseGrid, GridRules};
+    /// use sagax_nav::grid::{Cell, DenseGrid, GridRules, Preset};
     /// use sagax_nav::nav::Navigator;
     /// use sagax_nav::topology::Topology;
     ///
     /// let mut map = DenseGrid::new(10, 10);
-    /// let mut nav = Navigator::new(Topology::Square(GridRules::default()), 100);
+    /// let mut nav = Navigator::new(Topology::Square(GridRules::preset(Preset::Octile)), 100);
     /// let (s, g) = (Cell::new(0, 0, 0), [Cell::new(5, 5, 0)]);
     /// nav.find_path(&mut map, s, &g, 5usize);
     /// ```
@@ -527,11 +527,11 @@ pub fn write_way<M: CellMap>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::{DenseGrid, GridRules};
+    use crate::grid::{DenseGrid, GridRules, Preset};
     use crate::hex::HexLayout;
 
     fn square() -> Navigator {
-        Navigator::new(Topology::Square(GridRules::default()), 10_000)
+        Navigator::new(Topology::Square(GridRules::preset(Preset::Octile)), 10_000)
     }
 
     fn wall(map: &mut DenseGrid, x: i32, from: i32, to: i32) {

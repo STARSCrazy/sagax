@@ -7,8 +7,8 @@
 //! as often as it likes.
 //!
 //! * Lists go in through the input buffer ([`sx_input`]) and come out of the
-//!   output buffer ([`sx_out`]), both `Int32Array`s of `x, y` pairs (areas and
-//!   flow answers: `x, y, cost` triples).
+//!   output buffer ([`sx_out`]), both `Int32Array`s of `x, y, level` triples
+//!   (areas and flow answers: `x, y, level, cost`).
 //! * Every search also fills the result ([`sx_result`]): status, cells, cost,
 //!   expanded, node limit hit, as in `sx_result` of the C interface.
 //! * Functions that write a list return its length, others 0; -1 means bad
@@ -176,12 +176,12 @@ fn status_code(status: Status) -> i32 {
 }
 
 impl WasmGrid {
-    fn new(width: i32, height: i32, topology: Topology) -> Self {
-        let capacity = width as usize * height as usize;
+    fn new(mut grid: DenseGrid, topology: Topology) -> Self {
+        let capacity = grid.costs_mut().len();
         let mut dstar = DStarLite::with_capacity(capacity);
         dstar.set_max_nodes(capacity);
         Self {
-            grid: DenseGrid::new(width, height),
+            grid,
             topology,
             nav: Navigator::new(topology, capacity),
             flow: FlowField::with_capacity(capacity),
@@ -191,7 +191,7 @@ impl WasmGrid {
             smooth_max_extra: 0,
             result: [0; 5],
             input: Vec::new(),
-            out: Vec::with_capacity(capacity * 3),
+            out: Vec::with_capacity(capacity * 4),
             cells: Vec::new(),
             path: Vec::new(),
             list: Vec::new(),
@@ -214,7 +214,7 @@ impl WasmGrid {
     fn write_cells(out: &mut Vec<i32>, cells: &[Cell]) -> i32 {
         out.clear();
         for c in cells {
-            out.extend_from_slice(&[c.x, c.y]);
+            out.extend_from_slice(&[c.x, c.y, c.level]);
         }
         to_i32(cells.len())
     }
@@ -226,24 +226,21 @@ impl WasmGrid {
     fn write_area(&mut self) -> i32 {
         self.out.clear();
         for (c, cost) in self.nav.area() {
-            self.out.extend_from_slice(&[c.x, c.y, to_i32(cost)]);
+            self.out
+                .extend_from_slice(&[c.x, c.y, c.level, to_i32(cost)]);
         }
-        to_i32(self.out.len() / 3)
+        to_i32(self.out.len() / 4)
     }
 
-    /// The first `count` cells of the input buffer into `self.cells`.
+    /// The first `count` cells (`x, y, level`) of the input buffer into
+    /// `self.cells`.
     fn input_cells(&mut self, count: usize) -> bool {
-        if self.input.len() < 2 * count {
+        let Some(numbers) = count.checked_mul(3).and_then(|n| self.input.get(..n)) else {
             return false;
-        }
+        };
         self.cells.clear();
-        self.cells.extend(
-            self.input[..2 * count]
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|&[x, y]| Cell::new(x, y, 0)),
-        );
+        self.cells
+            .extend(numbers.as_chunks::<3>().0.iter().map(|&c| Cell::from(c)));
         true
     }
 }
@@ -258,13 +255,15 @@ macro_rules! grid {
     };
 }
 
-/// A grid of `width` x `height` open cells with fixed rules: `kind` 0
-/// square (`straight`, `diagonal`, `flags` 1 four ways, 2 cut corners) or
-/// 1..4 hex (`straight` per step). Null on bad arguments.
+/// A grid of `width` x `height` open cells on each of `levels` levels with
+/// fixed rules: `kind` 0 square (`straight`, `diagonal`, `flags` 1 four
+/// ways, 2 cut corners) or 1..4 hex (`straight` per step). Null on bad
+/// arguments.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_grid_new(
     width: i32,
     height: i32,
+    levels: i32,
     kind: i32,
     straight: i32,
     diagonal: i32,
@@ -273,10 +272,11 @@ pub extern "C" fn sx_grid_new(
     let Some(topology) = topology_of(kind, straight, diagonal, flags) else {
         return std::ptr::null_mut();
     };
-    if width <= 0 || height <= 0 {
+    if width <= 0 || height <= 0 || levels <= 0 {
         return std::ptr::null_mut();
     }
-    Box::into_raw(Box::new(WasmGrid::new(width, height, topology)))
+    let grid = DenseGrid::with_levels(width, height, levels);
+    Box::into_raw(Box::new(WasmGrid::new(grid, topology)))
 }
 
 /// Frees a grid.
@@ -291,8 +291,9 @@ pub unsafe extern "C" fn sx_grid_free(g: *mut WasmGrid) {
     }
 }
 
-/// Extra cost per cell, `width * height` `u32`s row by row; `0xFFFFFFFF`
-/// blocks a cell.
+/// Extra cost per cell, `width * height * levels` `u32`s, level by level and
+/// row by row (`(level * height + y) * width + x`); `0xFFFFFFFF` blocks a
+/// cell.
 ///
 /// # Safety
 /// `g` from [`sx_grid_new`]. The pointer is valid until memory grows.
@@ -301,7 +302,8 @@ pub unsafe extern "C" fn sx_grid_costs(g: *mut WasmGrid) -> *mut u32 {
     grid!(g, std::ptr::null_mut()).grid.costs_mut().as_mut_ptr()
 }
 
-/// Wall bits per cell, `width * height` bytes; bit `i` blocks the move by
+/// Wall bits per cell, `width * height * levels` bytes in the order of
+/// [`sx_grid_costs`]; bit `i` blocks the move by
 /// the neighbour offset `i` (0 +x, 1 -x, 2 +y, 3 -y, 4 +x+y, 5 +x-y, 6 -x+y,
 /// 7 -x-y), on square and hex grids alike. On hex grids the offset is the
 /// neighbour (see [`sx_hex_neighbors`]) minus the cell; since 0.9 the bits no
@@ -317,7 +319,8 @@ pub unsafe extern "C" fn sx_grid_walls(g: *mut WasmGrid) -> *mut u8 {
         .as_mut_ptr()
 }
 
-/// Zone bits per cell, `width * height` `u32`s; leaving a zone costs
+/// Zone bits per cell, `width * height * levels` `u32`s in the order of
+/// [`sx_grid_costs`]; leaving a zone costs
 /// [`sx_grid_set_leave_cost`] per zone left.
 ///
 /// # Safety
@@ -325,6 +328,26 @@ pub unsafe extern "C" fn sx_grid_walls(g: *mut WasmGrid) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_grid_zones(g: *mut WasmGrid) -> *mut u32 {
     grid!(g, std::ptr::null_mut()).grid.zones_mut().as_mut_ptr()
+}
+
+/// Links the neighbours `ax, ay, al` and `bx, by, bl`: a move from one
+/// toward the other arrives on the level of the other. Returns 1, or 0
+/// (nothing changed) unless they are neighbours on the grid.
+///
+/// # Safety
+/// `g` from [`sx_grid_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_grid_link(
+    g: *mut WasmGrid,
+    ax: i32,
+    ay: i32,
+    al: i32,
+    bx: i32,
+    by: i32,
+    bl: i32,
+) -> i32 {
+    let w = grid!(g, ERROR_ARGUMENT);
+    i32::from(w.grid.link(Cell::new(ax, ay, al), Cell::new(bx, by, bl)))
 }
 
 /// Sets the cost of leaving one zone.
@@ -404,9 +427,10 @@ pub unsafe extern "C" fn sx_hex_neighbors(g: *mut WasmGrid, x: i32, y: i32) -> i
     6
 }
 
-/// Cheapest way from `sx, sy` to the cheapest of `count` goals (`x, y`
-/// pairs in the input buffer; on failure to the reachable cell closest to
-/// one), written as `output` (0 cells, 1 turning points, 2 smoothed).
+/// Cheapest way from `sx, sy, sl` to the cheapest of `count` goals (`x, y,
+/// level` triples in the input buffer; on failure to the reachable cell
+/// closest to one), written as `output` (0 cells, 1 turning points, 2
+/// smoothed).
 /// `budget` 0: no limit.
 ///
 /// # Safety
@@ -416,6 +440,7 @@ pub unsafe extern "C" fn sx_find_path(
     g: *mut WasmGrid,
     sx: i32,
     sy: i32,
+    sl: i32,
     count: i32,
     budget: i32,
     output: i32,
@@ -433,14 +458,14 @@ pub unsafe extern "C" fn sx_find_path(
     }
     let report = w
         .nav
-        .find_path(&mut w.grid, Cell::new(sx, sy, 0), &w.cells, budget);
+        .find_path(&mut w.grid, Cell::new(sx, sy, sl), &w.cells, budget);
     w.report(report);
     w.begun = Begun::Path(output);
     w.write_way(output)
 }
 
-/// A way from `sx, sy` away from `count` threats (`x, y` pairs in the input
-/// buffer), within `max_cost`, written as `output`. See
+/// A way from `sx, sy, sl` away from `count` threats (`x, y, level` triples
+/// in the input buffer), within `max_cost`, written as `output`. See
 /// `Navigator::flee`.
 ///
 /// # Safety
@@ -450,6 +475,7 @@ pub unsafe extern "C" fn sx_flee(
     g: *mut WasmGrid,
     sx: i32,
     sy: i32,
+    sl: i32,
     count: i32,
     max_cost: i32,
     output: i32,
@@ -467,14 +493,14 @@ pub unsafe extern "C" fn sx_flee(
     }
     let report = w
         .nav
-        .flee(&mut w.grid, Cell::new(sx, sy, 0), &w.cells, max_cost);
+        .flee(&mut w.grid, Cell::new(sx, sy, sl), &w.cells, max_cost);
     w.report(report);
     w.begun = Begun::Path(output);
     w.write_way(output)
 }
 
-/// Every cell reachable from `sx, sy` at a cost of at most `max_cost`, as
-/// `x, y, cost` triples.
+/// Every cell reachable from `sx, sy, sl` at a cost of at most `max_cost`,
+/// as `x, y, level, cost` quadruples.
 ///
 /// # Safety
 /// `g` from [`sx_grid_new`].
@@ -483,6 +509,7 @@ pub unsafe extern "C" fn sx_reachable(
     g: *mut WasmGrid,
     sx: i32,
     sy: i32,
+    sl: i32,
     max_cost: i32,
     budget: i32,
 ) -> i32 {
@@ -492,7 +519,7 @@ pub unsafe extern "C" fn sx_reachable(
     };
     let report = w
         .nav
-        .reachable(&mut w.grid, Cell::new(sx, sy, 0), max_cost, budget);
+        .reachable(&mut w.grid, Cell::new(sx, sy, sl), max_cost, budget);
     w.report(report);
     w.begun = Begun::Area;
     w.write_area()
@@ -518,18 +545,24 @@ pub unsafe extern "C" fn sx_continue(g: *mut WasmGrid, budget: i32) -> i32 {
     }
 }
 
-/// After a search: the way from its start to `x, y` becomes the current way
-/// and is written. Status found, or unreachable (nothing written).
+/// After a search: the way from its start to `x, y, level` becomes the
+/// current way and is written. Status found, or unreachable (nothing written).
 ///
 /// # Safety
 /// `g` from [`sx_grid_new`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_path_to(g: *mut WasmGrid, x: i32, y: i32, output: i32) -> i32 {
+pub unsafe extern "C" fn sx_path_to(
+    g: *mut WasmGrid,
+    x: i32,
+    y: i32,
+    level: i32,
+    output: i32,
+) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
     let Some(output) = output_of(output) else {
         return ERROR_ARGUMENT;
     };
-    match w.nav.path_to(Cell::new(x, y, 0)) {
+    match w.nav.path_to(Cell::new(x, y, level)) {
         None => {
             w.result = [UNREACHABLE, 0, 0, 0, 0];
             w.out.clear();
@@ -583,7 +616,7 @@ pub unsafe extern "C" fn sx_formation(g: *mut WasmGrid, members: i32) -> i32 {
     w.out.clear();
     for row in std::iter::once(w.nav.path()).chain(w.nav.members().iter().map(Vec::as_slice)) {
         for c in row {
-            w.out.extend_from_slice(&[c.x, c.y]);
+            w.out.extend_from_slice(&[c.x, c.y, c.level]);
         }
     }
     to_i32(w.nav.path().len())
@@ -619,7 +652,7 @@ pub unsafe extern "C" fn sx_flow_build(g: *mut WasmGrid, count: i32, max_cost: i
     to_i32(w.flow.len())
 }
 
-/// For the `count` walkers in the input buffer: `x, y, cost` triples of the
+/// For the `count` walkers in the input buffer: `x, y, level, cost` of the
 /// next cell towards the nearest goal (the walker's own cell at a goal,
 /// outside the field or stuck) and the walker's cost to that goal (-1
 /// outside). Returns how many walkers got a next cell.
@@ -644,12 +677,13 @@ pub unsafe extern "C" fn sx_flow_next(g: *mut WasmGrid, count: i32) -> i32 {
         moved += i32::from(next.is_some());
         let n = next.unwrap_or(cell);
         w.out
-            .extend_from_slice(&[n.x, n.y, cost.map_or(-1, to_i32)]);
+            .extend_from_slice(&[n.x, n.y, n.level, cost.map_or(-1, to_i32)]);
     }
     moved
 }
 
-/// D* Lite: plans from `sx, sy` to `gx, gy`; nothing is searched yet.
+/// D* Lite: plans from `sx, sy, sl` to `gx, gy, gl`; nothing is searched
+/// yet.
 ///
 /// # Safety
 /// `g` from [`sx_grid_new`].
@@ -658,12 +692,14 @@ pub unsafe extern "C" fn sx_dstar_begin(
     g: *mut WasmGrid,
     sx: i32,
     sy: i32,
+    sl: i32,
     gx: i32,
     gy: i32,
+    gl: i32,
 ) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
     w.dstar
-        .begin(Cell::new(sx, sy, 0), Cell::new(gx, gy, 0), w.topology);
+        .begin(Cell::new(sx, sy, sl), Cell::new(gx, gy, gl), w.topology);
     w.path.clear();
     0
 }
@@ -727,15 +763,15 @@ pub unsafe extern "C" fn sx_dstar_compute(g: *mut WasmGrid, budget: i32, output:
     WasmGrid::write_cells(&mut w.out, &w.list)
 }
 
-/// D* Lite: the walker now stands on `x, y`.
+/// D* Lite: the walker now stands on `x, y, level`.
 ///
 /// # Safety
 /// `g` from [`sx_grid_new`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_dstar_move_start(g: *mut WasmGrid, x: i32, y: i32) -> i32 {
+pub unsafe extern "C" fn sx_dstar_move_start(g: *mut WasmGrid, x: i32, y: i32, level: i32) -> i32 {
     grid!(g, ERROR_ARGUMENT)
         .dstar
-        .move_start(Cell::new(x, y, 0));
+        .move_start(Cell::new(x, y, level));
     0
 }
 

@@ -68,6 +68,15 @@ pub enum Moves {
 }
 
 /// Movement rules and base costs of a grid.
+///
+/// There is no default on purpose: every game states its costs once, with
+/// [`GridRules::preset`] or by filling the fields.
+///
+/// ```compile_fail
+/// use sagax_nav::grid::GridRules;
+///
+/// let rules = GridRules::preset(Preset::Octile);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GridRules {
     /// Four or eight directions.
@@ -80,19 +89,46 @@ pub struct GridRules {
     pub diagonal: Cost,
 }
 
-impl Default for GridRules {
-    /// Eight directions, no cut corners, costs 10 and 14.
-    fn default() -> Self {
-        Self {
-            moves: Moves::Eight,
-            cut_corners: false,
-            straight: 10,
-            diagonal: 14,
+/// Ready-made move costs, for [`GridRules::preset`] and
+/// [`Topology::hex`](crate::topology::Topology::hex).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Preset {
+    /// Straight 10, diagonal 14 (close to the real length, 1.4).
+    Octile,
+    /// Straight 1, diagonal 1: every step counts one square, as on many
+    /// tabletop maps.
+    Tabletop,
+}
+
+impl Preset {
+    /// Cost of a straight move (on hex grids: of every move).
+    pub const fn straight(self) -> Cost {
+        match self {
+            Self::Octile => 10,
+            Self::Tabletop => 1,
+        }
+    }
+
+    /// Cost of a diagonal move.
+    pub const fn diagonal(self) -> Cost {
+        match self {
+            Self::Octile => 14,
+            Self::Tabletop => 1,
         }
     }
 }
 
 impl GridRules {
+    /// Eight directions, no cut corners, the costs of `preset`.
+    pub const fn preset(preset: Preset) -> Self {
+        Self {
+            moves: Moves::Eight,
+            cut_corners: false,
+            straight: preset.straight(),
+            diagonal: preset.diagonal(),
+        }
+    }
+
     /// The least cost of getting from one cell to another `dx`, `dy` away on
     /// open ground. Never more than the real cost, so A* stays exact.
     pub fn distance(&self, dx: i32, dy: i32) -> Cost {
@@ -246,11 +282,11 @@ pub fn turning_points(path: &[Cell], first_always: bool, out: &mut Vec<Cell>) {
     }
 }
 
-/// A simple one-level grid owned by the library: compact, cache friendly,
-/// for games without their own map structure (or that copy theirs once per
-/// turn), for tests and benchmarks.
+/// A simple grid owned by the library: compact, cache friendly, for games
+/// without their own map structure (or that copy theirs once per turn), for
+/// tests and benchmarks. It has one or more levels of the same size.
 ///
-/// Per cell it holds:
+/// Per cell (x, y and level) it holds:
 /// * an extra cost of entering it, or [`BLOCKED`](Self::BLOCKED);
 /// * walls: 8 bits, bit `i` forbids the move by the offset in entry `i` of
 ///   [`DenseGrid::DIRECTIONS`] out of this cell (walls between cells). This
@@ -259,13 +295,20 @@ pub fn turning_points(path: &[Cell], first_always: bool, out: &mut Vec<Cell>) {
 ///   [`add_wall`](Self::add_wall);
 /// * zones: 32 bits, one per zone (e.g. an enemy's reach). A move that leaves
 ///   zones costs [`leave_cost`](Self::set_leave_cost) for each zone left.
+///
+/// A move keeps its level, unless a [`link`](Self::link) (a stair, a ramp)
+/// sends it to another one. The accessors that take `x`, `y` mean level 0;
+/// the `_at` ones take a [`Cell`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DenseGrid {
     width: i32,
     height: i32,
+    levels: i32,
     cells: Vec<Cost>,
     walls: Vec<u8>,
     zones: Vec<u32>,
+    /// `(slot * 8 + direction, level arrived on)`, sorted; usually empty.
+    links: Vec<(usize, i32)>,
     leave_cost: Cost,
 }
 
@@ -277,18 +320,33 @@ impl DenseGrid {
     /// (on square and hex grids).
     pub const DIRECTIONS: [(i32, i32); 8] = DIRECTIONS;
 
-    /// A `width` x `height` grid of open cells with extra cost 0, no walls and
-    /// no zones. Negative sizes count as 0.
+    /// A `width` x `height` grid with one level of open cells with extra cost
+    /// 0, no walls and no zones. Negative sizes count as 0.
     pub fn new(width: i32, height: i32) -> Self {
+        Self::with_levels(width, height, 1)
+    }
+
+    /// As [`new`](Self::new), with `levels` levels (0 to `levels - 1`) of
+    /// `width` x `height` cells each.
+    ///
+    /// # Panics
+    /// If the number of cells does not fit `usize`.
+    pub fn with_levels(width: i32, height: i32, levels: i32) -> Self {
         let width = width.max(0);
         let height = height.max(0);
-        let n = width as usize * height as usize;
+        let levels = levels.max(0);
+        let n = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(levels as usize))
+            .expect("DenseGrid: more cells than memory can address");
         Self {
             width,
             height,
+            levels,
             cells: vec![0; n],
             walls: vec![0; n],
             zones: vec![0; n],
+            links: Vec::new(),
             leave_cost: 0,
         }
     }
@@ -303,71 +361,154 @@ impl DenseGrid {
         self.height
     }
 
-    /// `true` if `x`, `y` lies on the grid.
+    /// Number of levels.
+    pub fn levels(&self) -> i32 {
+        self.levels
+    }
+
+    /// `true` if `x`, `y` lies on the grid (on level 0).
     pub fn contains(&self, x: i32, y: i32) -> bool {
-        x >= 0 && y >= 0 && x < self.width && y < self.height
+        self.slot(Cell::new(x, y, 0)).is_some()
     }
 
-    fn slot(&self, x: i32, y: i32) -> Option<usize> {
-        self.contains(x, y)
-            .then(|| y as usize * self.width as usize + x as usize)
+    fn slot(&self, c: Cell) -> Option<usize> {
+        let inside = c.x >= 0
+            && c.y >= 0
+            && c.level >= 0
+            && c.x < self.width
+            && c.y < self.height
+            && c.level < self.levels;
+        inside.then(|| {
+            (c.level as usize * self.height as usize + c.y as usize) * self.width as usize
+                + c.x as usize
+        })
     }
 
-    /// The extra cost of `x`, `y`, [`BLOCKED`](Self::BLOCKED), or `None` off the grid.
+    /// The extra cost of `x`, `y` on level 0, [`BLOCKED`](Self::BLOCKED), or
+    /// `None` off the grid.
     pub fn get(&self, x: i32, y: i32) -> Option<Cost> {
-        self.slot(x, y).map(|i| self.cells[i])
+        self.get_at(Cell::new(x, y, 0))
     }
 
-    /// Sets the extra cost of `x`, `y` ([`BLOCKED`](Self::BLOCKED) blocks it).
-    /// Ignored off the grid.
+    /// Sets the extra cost of `x`, `y` on level 0 ([`BLOCKED`](Self::BLOCKED)
+    /// blocks it). Ignored off the grid.
     pub fn set(&mut self, x: i32, y: i32, cost: Cost) {
-        if let Some(i) = self.slot(x, y) {
+        self.set_at(Cell::new(x, y, 0), cost);
+    }
+
+    /// The extra cost of cell `c`, [`BLOCKED`](Self::BLOCKED), or `None` off
+    /// the grid (also on a level it does not have).
+    pub fn get_at(&self, c: Cell) -> Option<Cost> {
+        self.slot(c).map(|i| self.cells[i])
+    }
+
+    /// Sets the extra cost of cell `c` ([`BLOCKED`](Self::BLOCKED) blocks
+    /// it). Ignored off the grid.
+    pub fn set_at(&mut self, c: Cell, cost: Cost) {
+        if let Some(i) = self.slot(c) {
             self.cells[i] = cost;
         }
     }
 
-    /// `true` if `x`, `y` is on the grid and not blocked.
+    /// `true` if `x`, `y` on level 0 is on the grid and not blocked.
     pub fn open(&self, x: i32, y: i32) -> bool {
-        self.get(x, y).is_some_and(|c| c != Self::BLOCKED)
+        self.open_at(Cell::new(x, y, 0))
     }
 
-    /// The wall bits of `x`, `y` (0 off the grid): bit `i` blocks the offset
-    /// in entry `i` of [`DIRECTIONS`](Self::DIRECTIONS).
+    fn open_at(&self, c: Cell) -> bool {
+        self.get_at(c).is_some_and(|cost| cost != Self::BLOCKED)
+    }
+
+    /// The wall bits of `x`, `y` on level 0 (0 off the grid): bit `i` blocks
+    /// the offset in entry `i` of [`DIRECTIONS`](Self::DIRECTIONS).
     pub fn wall_bits(&self, x: i32, y: i32) -> u8 {
-        self.slot(x, y).map_or(0, |i| self.walls[i])
+        self.wall_bits_at(Cell::new(x, y, 0))
     }
 
-    /// Sets all wall bits of `x`, `y` (see [`wall_bits`](Self::wall_bits)).
-    /// Ignored off the grid.
+    fn wall_bits_at(&self, c: Cell) -> u8 {
+        self.slot(c).map_or(0, |i| self.walls[i])
+    }
+
+    /// Sets all wall bits of `x`, `y` on level 0 (see
+    /// [`wall_bits`](Self::wall_bits)). Ignored off the grid.
     pub fn set_wall_bits(&mut self, x: i32, y: i32, walls: u8) {
-        if let Some(i) = self.slot(x, y) {
+        if let Some(i) = self.slot(Cell::new(x, y, 0)) {
             self.walls[i] = walls;
         }
     }
 
-    /// Puts a wall between `x`, `y` and its neighbour `dx`, `dy` away, in both
-    /// directions; on hex grids `dx`, `dy` is the hex neighbour's offset.
-    /// Not a neighbour or off the grid: ignored.
+    /// Puts a wall between `x`, `y` on level 0 and its neighbour `dx`, `dy`
+    /// away, in both directions; on hex grids `dx`, `dy` is the hex
+    /// neighbour's offset. Not a neighbour or off the grid: ignored.
     pub fn add_wall(&mut self, x: i32, y: i32, dx: i32, dy: i32) {
+        self.add_wall_at(Cell::new(x, y, 0), dx, dy);
+    }
+
+    /// As [`add_wall`](Self::add_wall), on the level of `c`. Returns `false`
+    /// (nothing changed) if `dx`, `dy` is not a neighbour offset or `c` is off
+    /// the grid; a neighbour off the grid gets no wall bit.
+    pub fn add_wall_at(&mut self, c: Cell, dx: i32, dy: i32) -> bool {
         let (Some(there), Some(back)) = (direction_index(dx, dy), direction_index(-dx, -dy)) else {
-            return;
+            return false;
         };
-        if let Some(i) = self.slot(x, y) {
-            self.walls[i] |= 1 << there;
-        }
-        if let Some(i) = self.slot(x + dx, y + dy) {
+        let Some(i) = self.slot(c) else {
+            return false;
+        };
+        self.walls[i] |= 1 << there;
+        if let Some(i) = self.slot(Cell::new(c.x + dx, c.y + dy, c.level)) {
             self.walls[i] |= 1 << back;
         }
+        true
     }
 
-    /// The zone bits of `x`, `y` (0 off the grid).
+    /// Links two neighbouring cells, usually on different levels (a stair, a
+    /// ramp): a move from `a` toward `b`'s x, y arrives on `b.level`, and a
+    /// move from `b` toward `a`'s x, y on `a.level`. Walls and blocked cells
+    /// still apply. Returns `false` (nothing changed) unless `b` is `a`'s
+    /// neighbour (`dx`, `dy` each in -1..=1, not both 0) and both are on the
+    /// grid.
+    pub fn link(&mut self, a: Cell, b: Cell) -> bool {
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let (Some(there), Some(back)) = (direction_index(dx, dy), direction_index(-dx, -dy)) else {
+            return false;
+        };
+        let (Some(sa), Some(sb)) = (self.slot(a), self.slot(b)) else {
+            return false;
+        };
+        self.put_link(sa * 8 + there, b.level);
+        self.put_link(sb * 8 + back, a.level);
+        true
+    }
+
+    fn put_link(&mut self, key: usize, level: i32) {
+        match self.links.binary_search_by_key(&key, |&(k, _)| k) {
+            Ok(i) => self.links[i].1 = level,
+            Err(i) => self.links.insert(i, (key, level)),
+        }
+    }
+
+    /// The level a move from `from` by direction `dir` arrives on, if linked.
+    fn link_of(&self, from: Cell, dir: usize) -> Option<i32> {
+        if self.links.is_empty() {
+            return None;
+        }
+        let key = self.slot(from)? * 8 + dir;
+        let i = self.links.binary_search_by_key(&key, |&(k, _)| k).ok()?;
+        Some(self.links[i].1)
+    }
+
+    /// The zone bits of `x`, `y` on level 0 (0 off the grid).
     pub fn zones(&self, x: i32, y: i32) -> u32 {
-        self.slot(x, y).map_or(0, |i| self.zones[i])
+        self.zones_at(Cell::new(x, y, 0))
     }
 
-    /// Sets the zone bits of `x`, `y`. Ignored off the grid.
+    fn zones_at(&self, c: Cell) -> u32 {
+        self.slot(c).map_or(0, |i| self.zones[i])
+    }
+
+    /// Sets the zone bits of `x`, `y` on level 0. Ignored off the grid.
     pub fn set_zones(&mut self, x: i32, y: i32, zones: u32) {
-        if let Some(i) = self.slot(x, y) {
+        if let Some(i) = self.slot(Cell::new(x, y, 0)) {
             self.zones[i] = zones;
         }
     }
@@ -382,7 +523,7 @@ impl DenseGrid {
     /// walking and terrain cost alone.
     pub fn zones_left(&self, path: &[Cell]) -> u32 {
         path.windows(2)
-            .map(|w| (self.zones(w[0].x, w[0].y) & !self.zones(w[1].x, w[1].y)).count_ones())
+            .map(|w| (self.zones_at(w[0]) & !self.zones_at(w[1])).count_ones())
             .sum()
     }
 
@@ -391,18 +532,20 @@ impl DenseGrid {
         self.zones.fill(0);
     }
 
-    /// All extra costs, row by row (`y * width + x`), for bulk filling.
+    /// All extra costs, level by level and row by row
+    /// (`(level * height + y) * width + x`), for bulk filling.
     pub fn costs_mut(&mut self) -> &mut [Cost] {
         &mut self.cells
     }
 
-    /// All wall bits (see [`wall_bits`](Self::wall_bits)), row by row, for
-    /// bulk filling.
+    /// All wall bits (see [`wall_bits`](Self::wall_bits)), in the order of
+    /// [`costs_mut`](Self::costs_mut), for bulk filling.
     pub fn wall_bits_mut(&mut self) -> &mut [u8] {
         &mut self.walls
     }
 
-    /// All zone bits, row by row, for bulk filling.
+    /// All zone bits, in the order of [`costs_mut`](Self::costs_mut), for
+    /// bulk filling.
     pub fn zones_mut(&mut self) -> &mut [u32] {
         &mut self.zones
     }
@@ -414,14 +557,20 @@ fn direction_index(dx: i32, dy: i32) -> Option<usize> {
 
 impl CellMap for DenseGrid {
     fn step(&mut self, from: Cell, dx: i32, dy: i32) -> Option<i32> {
-        let blocked_by_wall =
-            direction_index(dx, dy).is_some_and(|i| self.wall_bits(from.x, from.y) & (1 << i) != 0);
-        (!blocked_by_wall && self.open(from.x + dx, from.y + dy)).then_some(from.level)
+        let dir = direction_index(dx, dy);
+        if dir.is_some_and(|i| self.wall_bits_at(from) & (1 << i) != 0) {
+            return None;
+        }
+        let level = dir
+            .and_then(|i| self.link_of(from, i))
+            .unwrap_or(from.level);
+        self.open_at(Cell::new(from.x + dx, from.y + dy, level))
+            .then_some(level)
     }
 
     fn move_cost(&mut self, from: Cell, to: Cell) -> Option<Cost> {
-        let enter = self.get(to.x, to.y).filter(|&c| c != Self::BLOCKED)?;
-        let left = self.zones(from.x, from.y) & !self.zones(to.x, to.y);
+        let enter = self.get_at(to).filter(|&c| c != Self::BLOCKED)?;
+        let left = self.zones_at(from) & !self.zones_at(to);
         let leave = self.leave_cost.saturating_mul(left.count_ones());
         Some(enter.saturating_add(leave))
     }
@@ -454,10 +603,11 @@ impl<M: CellMap + ?Sized> CellMap for &mut M {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::{Limits, PathResult, find_path};
 
     #[test]
     fn distance_is_octile() {
-        let r = GridRules::default();
+        let r = GridRules::preset(Preset::Octile);
         assert_eq!(r.distance(0, 0), 0);
         assert_eq!(r.distance(3, 0), 30);
         assert_eq!(r.distance(3, -3), 42);
@@ -468,7 +618,7 @@ mod tests {
     fn distance_with_four_moves_is_manhattan() {
         let r = GridRules {
             moves: Moves::Four,
-            ..GridRules::default()
+            ..GridRules::preset(Preset::Octile)
         };
         assert_eq!(r.distance(3, -2), 50);
     }
@@ -505,6 +655,110 @@ mod tests {
         assert_eq!(g.zones_left(&[c(0), c(1), c(2)]), 2);
         assert_eq!(g.zones_left(&[c(0)]), 0);
         assert_eq!(g.move_cost(c(1), c(0)), Some(0)); // enters only
+    }
+
+    #[test]
+    fn presets_pin_costs() {
+        assert_eq!(
+            GridRules::preset(Preset::Octile),
+            GridRules {
+                moves: Moves::Eight,
+                cut_corners: false,
+                straight: 10,
+                diagonal: 14,
+            }
+        );
+        assert_eq!(
+            GridRules::preset(Preset::Tabletop),
+            GridRules {
+                moves: Moves::Eight,
+                cut_corners: false,
+                straight: 1,
+                diagonal: 1,
+            }
+        );
+        assert_eq!(
+            (Preset::Octile.straight(), Preset::Octile.diagonal()),
+            (10, 14)
+        );
+        assert_eq!(
+            (Preset::Tabletop.straight(), Preset::Tabletop.diagonal()),
+            (1, 1)
+        );
+    }
+
+    /// 5 x 1 x 2: level 0 blocked at x = 2, level 1 open only at x = 2, a
+    /// ramp up from (1, 0, 0) and one down to (3, 0, 0).
+    fn bridge() -> DenseGrid {
+        let mut g = DenseGrid::with_levels(5, 1, 2);
+        g.set_at(Cell::new(2, 0, 0), DenseGrid::BLOCKED);
+        for x in [0, 1, 3, 4] {
+            g.set_at(Cell::new(x, 0, 1), DenseGrid::BLOCKED);
+        }
+        g
+    }
+
+    fn way(g: &mut DenseGrid) -> PathResult<Cell> {
+        let rules = GridRules::preset(Preset::Tabletop);
+        find_path(
+            &mut GridGraph::new(g, rules, None),
+            Cell::new(0, 0, 0),
+            &CellGoal::new(4, 0, Some(0), rules),
+            Limits::default(),
+            usize::MAX,
+        )
+    }
+
+    #[test]
+    fn link_changes_level_both_ways() {
+        let mut g = bridge();
+        assert_eq!(g.levels(), 2);
+        assert!(!way(&mut g).reached(), "no way without the ramps");
+        assert!(g.link(Cell::new(1, 0, 0), Cell::new(2, 0, 1)));
+        assert!(g.link(Cell::new(2, 0, 1), Cell::new(3, 0, 0)));
+        let r = way(&mut g);
+        assert!(r.reached());
+        assert_eq!(
+            r.path.iter().map(|c| c.level).collect::<Vec<_>>(),
+            [0, 0, 1, 0, 0]
+        );
+        assert_eq!(r.cost, 4);
+        // and back
+        assert_eq!(g.step(Cell::new(3, 0, 0), -1, 0), Some(1));
+        assert_eq!(g.step(Cell::new(2, 0, 1), -1, 0), Some(0));
+        assert_eq!(g.get_at(Cell::new(2, 0, 1)), Some(0));
+        assert_eq!(g.get_at(Cell::new(2, 0, 2)), None);
+    }
+
+    #[test]
+    fn link_refuses_non_neighbours() {
+        let mut g = bridge();
+        let before = way(&mut g);
+        assert!(!g.link(Cell::new(0, 0, 0), Cell::new(2, 0, 1)), "two apart");
+        assert!(!g.link(Cell::new(1, 0, 0), Cell::new(1, 0, 1)), "same x, y");
+        assert!(
+            !g.link(Cell::new(4, 0, 0), Cell::new(5, 0, 1)),
+            "off the grid"
+        );
+        assert!(
+            !g.link(Cell::new(1, 0, 0), Cell::new(2, 0, 2)),
+            "no level 2"
+        );
+        assert!(
+            !g.link(Cell::new(1, 0, -1), Cell::new(2, 0, 0)),
+            "no level -1"
+        );
+        assert_eq!(way(&mut g), before, "the search is unchanged");
+    }
+
+    #[test]
+    fn bulk_views_are_level_major() {
+        let mut g = DenseGrid::with_levels(3, 2, 2);
+        assert_eq!(g.costs_mut().len(), 12);
+        g.costs_mut()[(2 + 1) * 3 + 1] = 7; // level 1, y 1, x 1
+        assert_eq!(g.get_at(Cell::new(1, 1, 1)), Some(7));
+        assert_eq!(g.get(1, 1), Some(0), "x, y accessors mean level 0");
+        assert_eq!(DenseGrid::new(3, 2).levels(), 1);
     }
 
     #[test]

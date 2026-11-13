@@ -151,7 +151,7 @@ fn next_step<N: Copy + Eq + Hash, G: Graph<Node = N>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::{Cell, CellGoal, DenseGrid, GridGraph, GridRules};
+    use crate::grid::{Cell, CellGoal, DenseGrid, GridGraph, GridRules, Preset};
     use crate::search::find_path;
 
     #[test]
@@ -161,7 +161,7 @@ mod tests {
             map.set(15, y, DenseGrid::BLOCKED);
         }
         map.set(5, 5, 40);
-        let rules = GridRules::default();
+        let rules = GridRules::preset(Preset::Octile);
         let mut g = GridGraph::new(map, rules, None);
         let goal = Cell::new(25, 3, 0);
         let mut field = FlowField::with_capacity(600);
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn several_goals_lead_to_the_nearest() {
-        let rules = GridRules::default();
+        let rules = GridRules::preset(Preset::Octile);
         let mut g = GridGraph::new(DenseGrid::new(20, 1), rules, None);
         let mut field = FlowField::default();
         field.build(
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn cells_outside_the_range_or_cut_off_are_not_in_the_field() {
-        let rules = GridRules::default();
+        let rules = GridRules::preset(Preset::Octile);
         let mut map = DenseGrid::new(20, 3);
         for y in 0..3 {
             map.set(10, y, DenseGrid::BLOCKED);

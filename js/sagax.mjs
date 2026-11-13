@@ -2,12 +2,14 @@
 // Works in the browser (Foundry) and in Node. No dependencies.
 //
 //   const lib = await loadSagax(url or bytes);
-//   const grid = lib.grid(30, 20);                       // square, a diagonal step costs 1
-//   const hexGrid = lib.grid(30, 20, { hex: HEX.oddR });  // hex
+//   const grid = lib.grid(30, 20, { preset: 'tabletop' });             // square, a diagonal step costs 1
+//   const hexGrid = lib.grid(30, 20, { preset: 'tabletop', hex: HEX.oddR });
 //   grid.block(5, 5); grid.addWall(3, 3, 1, 0); grid.addZone(4, 4, 0); grid.setLeaveCost(100);
-//   const way = grid.findPath({x: 0, y: 0}, {x: 10, y: 4});  // {cells, status, reached, cost, ...}
-//   const area = grid.reachable({x: 0, y: 0}, 6);            // {cells: [{x, y, cost}], ...}
+//   const way = grid.findPath({x: 0, y: 0}, {x: 10, y: 4});  // {cells: [{x, y, level}], status, reached, cost, ...}
+//   const area = grid.reachable({x: 0, y: 0}, 6);            // {cells: [{x, y, level, cost}], ...}
 //   grid.free();
+//
+// Positions are {x, y}, {x, y, level} or [x, y, level] (level 0 if left out).
 //
 // Every search answers with the same object:
 //   {cells, status, reached, cost, steps, zonesLeft, total, expanded, nodeLimitHit}
@@ -23,8 +25,26 @@ const STATUS = ['idle', 'running', 'found', 'partial', 'unreachable', 'done'];
 const OUTPUT = { cells: 0, turns: 1, smooth: 2 };
 const TRACE = [null, 'started', 'expanded', 'improved', 'paused', 'finished'];
 
-/** Default rules: tabletop style, a diagonal step costs as much as a straight one. */
-const DEFAULT_RULES = { straight: 1, diagonal: 1, fourWays: false, cutCorners: false, hex: null, step: 1 };
+/** Ready-made costs for rules.preset. There is no default: every game picks one. */
+const PRESETS = {
+  octile: { straight: 10, diagonal: 14, step: 10 }, // close to the real length (1.4)
+  tabletop: { straight: 1, diagonal: 1, step: 1 }, // every step counts one square
+};
+
+/** The full rules of lib.grid: a preset, explicit costs, or both (explicit wins). */
+function rulesOf(rules) {
+  const preset = rules.preset === undefined ? {} : PRESETS[rules.preset];
+  if (preset === undefined) throw new RangeError(`Sagax: preset must be octile or tabletop, not ${rules.preset}`);
+  const r = { fourWays: false, cutCorners: false, levels: 1, ...preset, ...rules };
+  r.hex = r.hex ?? null;
+  const own = r.hex === null ? rules.straight : rules.step;
+  if (rules.preset === undefined && own === undefined) {
+    throw new TypeError(
+      "Sagax: lib.grid needs rules: { preset: 'octile' | 'tabletop' } or explicit costs (straight and diagonal, on hex step)",
+    );
+  }
+  return r;
+}
 
 /** Hex layouts for rules.hex (Foundry grid types 2..5 in this order). */
 export const HEX = { oddR: 1, evenR: 2, oddQ: 3, evenQ: 4 };
@@ -62,12 +82,14 @@ class Sagax {
   }
 
   /**
-   * A grid of open cells with fixed rules:
-   * square {straight, diagonal, fourWays, cutCorners} or hex {hex: HEX.*, step}.
+   * A grid of open cells on `levels` levels (1) with fixed rules, given as
+   * a preset {preset: 'octile' | 'tabletop'} and/or explicit costs: square
+   * {straight, diagonal, fourWays, cutCorners} or hex {hex: HEX.*, step}.
+   * Without either it throws a TypeError.
    * smoothMaxExtra: smoothing may cross cells with at most this extra cost (0).
    */
   grid(width, height, rules = {}) {
-    return new Grid(this.x, width, height, { ...DEFAULT_RULES, ...rules });
+    return new Grid(this.x, width, height, rulesOf(rules));
   }
 
   /** A decider (utility AI) without options; see Decider. */
@@ -90,25 +112,40 @@ function outputOf(output) {
   return o;
 }
 
+/** Positions as one flat list of x, y, level triples (the WebAssembly input). */
+function triples(list, what) {
+  return list.flatMap((p) => posOf(p, what));
+}
+
+/** Loose (x, y, ...rest) or (position, ...rest) as [[x, y, level], ...rest]. */
+function cellArgs(args) {
+  if (args[0] !== null && typeof args[0] === 'object') return [posOf(args[0], 'cell'), ...args.slice(1)];
+  return [[args[0], args[1], 0], ...args.slice(2)];
+}
+
 export class Grid {
   constructor(x, width, height, rules) {
-    if (!(width > 0 && height > 0)) throw new RangeError(`bad grid size ${width} x ${height}`);
+    const levels = rules.levels;
+    if (!(width > 0 && height > 0 && levels > 0)) throw new RangeError(`bad grid size ${width} x ${height} x ${levels}`);
     this.x = x;
     this.width = width;
     this.height = height;
+    this.levels = levels;
     this.rules = rules;
     this.hex = rules.hex;
     const flags = (rules.fourWays ? 1 : 0) | (rules.cutCorners ? 2 : 0);
     this.handle = rules.hex === null
-      ? x.sx_grid_new(width, height, 0, rules.straight, rules.diagonal, flags)
-      : x.sx_grid_new(width, height, rules.hex, rules.step, 0, 0);
+      ? x.sx_grid_new(width, height, levels, 0, rules.straight, rules.diagonal, flags)
+      : x.sx_grid_new(width, height, levels, rules.hex, rules.step, 0, 0);
     if (!this.handle) throw new RangeError('Sagax: bad grid size or rules');
     if (rules.smoothMaxExtra) this.x.sx_grid_set_smooth_max_extra(this.handle, rules.smoothMaxExtra);
   }
 
   // Views are made fresh for every use: they die when the WebAssembly memory grows.
+  // Each has width * height * levels entries, level by level and row by row:
+  // (level * height + y) * width + x.
   costs() {
-    return new Uint32Array(this.x.memory.buffer, this.x.sx_grid_costs(this.handle), this.width * this.height);
+    return new Uint32Array(this.x.memory.buffer, this.x.sx_grid_costs(this.handle), this.#cells());
   }
   /** Raw wall bits, square grids only: bit i blocks the move by DIRECTIONS[i]. */
   walls() {
@@ -116,13 +153,21 @@ export class Grid {
     return this.#wallBits();
   }
   #wallBits() {
-    return new Uint8Array(this.x.memory.buffer, this.x.sx_grid_walls(this.handle), this.width * this.height);
+    return new Uint8Array(this.x.memory.buffer, this.x.sx_grid_walls(this.handle), this.#cells());
   }
   zones() {
-    return new Uint32Array(this.x.memory.buffer, this.x.sx_grid_zones(this.handle), this.width * this.height);
+    return new Uint32Array(this.x.memory.buffer, this.x.sx_grid_zones(this.handle), this.#cells());
+  }
+  #cells() {
+    return this.width * this.height * this.levels;
+  }
+  /** Index of [x, y, level] in the views, or -1 off the grid. */
+  #index([x, y, level]) {
+    const inside = this.contains(x, y) && level >= 0 && level < this.levels;
+    return inside ? (level * this.height + y) * this.width + x : -1;
   }
 
-  /** Bulk filling, row by row (width * height entries each). */
+  /** Bulk filling, in the order of the views (width * height * levels entries each). */
   setCosts(array) { this.costs().set(array); }
   setWalls(array) { this.walls().set(array); } // square grids only
   setAllZones(array) { this.zones().set(array); }
@@ -131,12 +176,31 @@ export class Grid {
     return x >= 0 && y >= 0 && x < this.width && y < this.height;
   }
 
-  /** Extra cost of entering x, y (on top of the step cost). */
-  setCost(x, y, cost) {
-    if (this.contains(x, y)) this.costs()[y * this.width + x] = cost;
+  /**
+   * Extra cost of entering a cell (on top of the step cost):
+   * setCost(x, y, cost) on level 0, or setCost({x, y, level}, cost).
+   */
+  setCost(...args) {
+    const [cell, cost] = cellArgs(args);
+    const i = this.#index(cell);
+    if (i >= 0) this.costs()[i] = cost;
   }
-  block(x, y) {
-    this.setCost(x, y, BLOCKED);
+  /** block(x, y) on level 0, or block({x, y, level}). */
+  block(...args) {
+    const [cell] = cellArgs(args);
+    this.setCost(cell, BLOCKED);
+  }
+
+  /**
+   * Links two neighbouring cells, usually on different levels (a stair, a
+   * ramp): a move from a toward b arrives on b's level, and back. Walls and
+   * blocked cells still apply. false (nothing changed) unless they are
+   * neighbours on the grid.
+   */
+  link(a, b) {
+    const [ax, ay, al] = posOf(a, 'a');
+    const [bx, by, bl] = posOf(b, 'b');
+    return this.x.sx_grid_link(this.handle, ax, ay, al, bx, by, bl) === 1;
   }
 
   /** A wall between x, y and its neighbour dx, dy away (both ways); on hex grids dx, dy is the neighbour's offset. */
@@ -186,22 +250,25 @@ export class Grid {
   zonesLeft(cells) {
     const zones = this.zones();
     let left = 0;
+    const at = (c) => zones[this.#index([c.x, c.y, c.level ?? 0])] ?? 0;
     for (let i = 1; i < cells.length; i++) {
-      const a = zones[cells[i - 1].y * this.width + cells[i - 1].x];
-      const b = zones[cells[i].y * this.width + cells[i].x];
+      const a = at(cells[i - 1]);
+      const b = at(cells[i]);
       let bits = (a & ~b) >>> 0;
       while (bits) { bits = (bits & (bits - 1)) >>> 0; left++; }
     }
     return left;
   }
 
+  /** stride 3: cells {x, y, level}; 4: {x, y, level, cost}; 2: {x, y} (hex neighbours). */
   readCells(count, stride) {
     const out = new Int32Array(this.x.memory.buffer, this.x.sx_out(this.handle), count * stride);
     const cells = new Array(count);
     for (let i = 0; i < count; i++) {
-      cells[i] = stride === 3
-        ? { x: out[i * 3], y: out[i * 3 + 1], cost: out[i * 3 + 2] }
-        : { x: out[i * 2], y: out[i * 2 + 1] };
+      const o = i * stride;
+      if (stride === 4) cells[i] = { x: out[o], y: out[o + 1], level: out[o + 2], cost: out[o + 3] };
+      else if (stride === 3) cells[i] = { x: out[o], y: out[o + 1], level: out[o + 2] };
+      else cells[i] = { x: out[o], y: out[o + 1] };
     }
     return cells;
   }
@@ -220,7 +287,7 @@ export class Grid {
     let zonesLeft = 0;
     if (split && this.leaveCost && n > 1) {
       const whole = this.x.sx_way(this.handle, 0);
-      if (whole > 1) zonesLeft = this.zonesLeft(this.readCells(whole, 2));
+      if (whole > 1) zonesLeft = this.zonesLeft(this.readCells(whole, 3));
     }
     return {
       cells,
@@ -242,10 +309,12 @@ export class Grid {
    * @param {{budget?: number, output?: 'cells'|'turns'|'smooth'}} options  budget 0: no limit
    */
   findPath(start, goal, { budget = 0, output = 'cells' } = {}) {
-    const goals = Array.isArray(goal) ? goal : [goal];
-    this.writeInput(goals.flatMap((g) => [g.x, g.y]));
-    this.last = 2;
-    return this.answer(this.x.sx_find_path(this.handle, start.x, start.y, goals.length, budget, outputOf(output)), 2, true);
+    // one goal may itself be an array position [x, y, level]
+    const goals = Array.isArray(goal) && typeof goal[0] !== 'number' ? goal : [goal];
+    const [sx, sy, sl] = posOf(start, 'start');
+    this.writeInput(triples(goals, 'goal'));
+    this.last = 3;
+    return this.answer(this.x.sx_find_path(this.handle, sx, sy, sl, goals.length, budget, outputOf(output)), 3, true);
   }
 
   /**
@@ -255,25 +324,28 @@ export class Grid {
    * off the map, use findPath with the exits as goals.
    */
   flee(start, threats, maxCost, { output = 'cells' } = {}) {
-    this.writeInput(threats.flatMap((t) => [t.x, t.y]));
-    this.last = 2;
-    return this.answer(this.x.sx_flee(this.handle, start.x, start.y, threats.length, maxCost, outputOf(output)), 2, true);
+    const [sx, sy, sl] = posOf(start, 'start');
+    this.writeInput(triples(threats, 'threat'));
+    this.last = 3;
+    return this.answer(this.x.sx_flee(this.handle, sx, sy, sl, threats.length, maxCost, outputOf(output)), 3, true);
   }
 
-  /** Every cell reachable from start at a cost of at most maxCost: cells [{x, y, cost}]. */
+  /** Every cell reachable from start at a cost of at most maxCost: cells [{x, y, level, cost}]. */
   reachable(start, maxCost, { budget = 0 } = {}) {
-    this.last = 3;
-    return this.answer(this.x.sx_reachable(this.handle, start.x, start.y, maxCost, budget), 3);
+    const [sx, sy, sl] = posOf(start, 'start');
+    this.last = 4;
+    return this.answer(this.x.sx_reachable(this.handle, sx, sy, sl, maxCost, budget), 4);
   }
 
   /** After status 'running': goes on with the last findPath / reachable. */
   continue(budget = 0) {
-    return this.answer(this.x.sx_continue(this.handle, budget), this.last ?? 2, (this.last ?? 2) === 2);
+    const stride = this.last ?? 3;
+    return this.answer(this.x.sx_continue(this.handle, budget), stride, stride === 3);
   }
 
-  /** After reachable() or findPath(): the way from that start to x, y, or null. */
+  /** After reachable() or findPath(): the way from that start to x, y (level 0), or null. */
   pathTo(x, y, output = 'cells') {
-    const a = this.answer(this.x.sx_path_to(this.handle, x, y, outputOf(output)), 2, true);
+    const a = this.answer(this.x.sx_path_to(this.handle, x, y, 0, outputOf(output)), 3, true);
     return a.reached ? a : null;
   }
 
@@ -281,7 +353,7 @@ export class Grid {
   way(output = 'cells') {
     const n = this.x.sx_way(this.handle, outputOf(output));
     if (n < 0) throw new RangeError('Sagax: bad arguments');
-    return this.readCells(n, 2);
+    return this.readCells(n, 3);
   }
 
   /**
@@ -289,13 +361,13 @@ export class Grid {
    * slots: [[forward, right], ...] relative to the walking direction
    * (default: 2 x 2 block; on hex 'right' is 60 degrees clockwise, so the
    * default is a compact group of four; FORMATION.wedgeHex is the hex wedge).
-   * @returns {{leader: {x,y}[], members: {x,y}[][]}}
+   * @returns {{leader: {x,y,level}[], members: {x,y,level}[][]}}
    */
   formation(slots = FORMATION.block) {
     this.writeInput(slots.flat());
     const n = this.x.sx_formation(this.handle, slots.length);
     if (n < 0) throw new RangeError('Sagax: bad arguments');
-    const rows = this.readCells(n * (slots.length + 1), 2);
+    const rows = this.readCells(n * (slots.length + 1), 3);
     const members = slots.map((_, k) => rows.slice((k + 1) * n, (k + 2) * n));
     return { leader: rows.slice(0, n), members };
   }
@@ -307,7 +379,7 @@ export class Grid {
    * current way. @returns {number} cells in the field
    */
   buildFlow(goals, maxCost = 0x7fffffff) {
-    this.writeInput(goals.flatMap((g) => [g.x, g.y]));
+    this.writeInput(triples(goals, 'goal'));
     const n = this.x.sx_flow_build(this.handle, goals.length, maxCost);
     if (n < 0) throw new RangeError('Sagax: bad arguments');
     return n;
@@ -315,13 +387,13 @@ export class Grid {
 
   /**
    * For each walker the next cell towards the nearest goal and the walker's
-   * cost to it: [{x, y, cost}]. At a goal, outside the field (cost -1) or
-   * stuck the walker's own cell.
+   * cost to it: [{x, y, level, cost}]. At a goal, outside the field (cost -1)
+   * or stuck the walker's own cell.
    */
   flowNext(walkers) {
-    this.writeInput(walkers.flatMap((w) => [w.x, w.y]));
+    this.writeInput(triples(walkers, 'walker'));
     if (this.x.sx_flow_next(this.handle, walkers.length) < 0) throw new RangeError('Sagax: bad arguments');
-    return this.readCells(walkers.length, 3);
+    return this.readCells(walkers.length, 4);
   }
 
   /** Cost from x, y to the nearest goal of the flow field, or null. */
@@ -338,21 +410,21 @@ export class Grid {
    * Needs steps that are possible both ways (no zones).
    */
   dstarBegin(start, goal) {
-    this.x.sx_dstar_begin(this.handle, start.x, start.y, goal.x, goal.y);
+    this.x.sx_dstar_begin(this.handle, ...posOf(start, 'start'), ...posOf(goal, 'goal'));
   }
 
   /** Works on the plan; on 'found' the way from the walker to the goal. */
   dstarCompute({ budget = 0, output = 'cells' } = {}) {
-    return this.answer(this.x.sx_dstar_compute(this.handle, budget, outputOf(output)), 2);
+    return this.answer(this.x.sx_dstar_compute(this.handle, budget, outputOf(output)), 3);
   }
 
   dstarMoveStart(cell) {
-    this.x.sx_dstar_move_start(this.handle, cell.x, cell.y);
+    this.x.sx_dstar_move_start(this.handle, ...posOf(cell, 'cell'));
   }
 
   /** Tell D* Lite which cells changed (after setCost / block / addWall). */
   dstarCellsChanged(cells) {
-    this.writeInput(cells.flatMap((c) => [c.x, c.y]));
+    this.writeInput(triples(cells, 'cell'));
     return this.x.sx_dstar_cells_changed(this.handle, cells.length);
   }
 

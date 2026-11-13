@@ -92,6 +92,38 @@ fn bad_rules_give_null() {
 }
 
 #[test]
+fn rules_default_presets() {
+    let header = include_str!("../include/sagax.h");
+    for (name, value) in [("SX_PRESET_OCTILE", "1u"), ("SX_PRESET_TABLETOP", "2u")] {
+        assert!(
+            header
+                .lines()
+                .any(|l| l.split_whitespace().take(3).eq(["#define", name, value])),
+            "{name} is {value} in sagax.h"
+        );
+    }
+    let mut r = SxRules::default();
+    assert_eq!(unsafe { sx_rules_default(0, 1, &mut r) }, 0);
+    assert_eq!(
+        (r.grid, r.flags, r.cost_straight, r.cost_diagonal),
+        (0, 0, 10, 14)
+    );
+    assert_eq!((r.node_capacity, r.smooth_max_extra), (32768, 0));
+    assert_eq!(unsafe { sx_rules_default(1, 2, &mut r) }, 0);
+    assert_eq!((r.grid, r.cost_straight), (1, 1));
+    let nav = unsafe { sx_nav_new(&r) };
+    assert!(!nav.is_null(), "preset rules are valid rules");
+    unsafe { sx_nav_free(nav) };
+    assert_eq!(unsafe { sx_rules_default(0, 0, &mut r) }, ERROR_ARGUMENT);
+    assert_eq!(unsafe { sx_rules_default(0, 3, &mut r) }, ERROR_ARGUMENT);
+    assert_eq!(unsafe { sx_rules_default(5, 1, &mut r) }, ERROR_ARGUMENT);
+    assert_eq!(
+        unsafe { sx_rules_default(0, 1, std::ptr::null_mut()) },
+        ERROR_ARGUMENT
+    );
+}
+
+#[test]
 fn continue_on_fresh_nav_is_idle() {
     let mut w = walls(&[]);
     let map = map_of(&mut w);
@@ -1950,8 +1982,9 @@ mod conventions {
     use std::ptr::null_mut;
 
     const HEADER: &str = include_str!("../include/sagax.h");
-    const SOURCES: [&str; 5] = [
+    const SOURCES: [&str; 6] = [
         include_str!("lib.rs"),
+        include_str!("grid.rs"),
         include_str!("memory.rs"),
         include_str!("decide.rs"),
         include_str!("machine.rs"),

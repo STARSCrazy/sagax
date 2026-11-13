@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use sagax::{Point, SxMap, SxResult, SxRules, sx_nav_find_path, sx_nav_new};
 use sagax_core::NoopSink;
-use sagax_nav::grid::{Cell, CellGoal, CellMap, GridGraph, GridRules};
+use sagax_nav::grid::{Cell, CellGoal, CellMap, GridGraph, GridRules, Preset};
 use sagax_nav::{Limits, Search};
 
 const W: i32 = 128;
@@ -113,7 +113,7 @@ unsafe extern "C" fn c_steps(
 #[allow(static_mut_refs)]
 fn main() {
     let mut rng = Rng(12345);
-    let rules = GridRules::default();
+    let rules = GridRules::preset(Preset::Octile);
     let mut jobs = Vec::new();
     let mut maps = Vec::new();
     for round in 0..400 {

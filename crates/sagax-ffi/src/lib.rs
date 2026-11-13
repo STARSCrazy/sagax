@@ -14,7 +14,7 @@ use sagax_nav::Limits;
 use sagax_nav::dstar::{DStarLite, DStarStatus};
 use sagax_nav::flow::FlowField;
 use sagax_nav::formation::Formation;
-use sagax_nav::grid::{Cell, CellMap, GridRules, Moves};
+use sagax_nav::grid::{Cell, CellMap, GridRules, Moves, Preset};
 use sagax_nav::hex::HexLayout;
 use sagax_nav::nav::{Budget, Navigator, Output, Report, Status, WayOptions, write_way};
 use sagax_nav::topology::Topology;
@@ -403,6 +403,45 @@ fn rules_of(rules: *const SxRules) -> Option<(Topology, usize, Cost)> {
         }),
     };
     Some((topology, capacity, tolerance))
+}
+
+/// The preset of an `SX_PRESET_*` value; `None` for 0 or unknown.
+fn preset_of(preset: u32) -> Option<Preset> {
+    match preset {
+        1 => Some(Preset::Octile),
+        2 => Some(Preset::Tabletop),
+        _ => None,
+    }
+}
+
+/// `sx_rules_default`: rules for `grid` (`SX_GRID_*`) with the costs of
+/// `preset` (`SX_PRESET_*`), no flags, node capacity 32768, smoothing only
+/// over cells without extra cost. Returns 0, or `SX_ERROR_ARGUMENT` for an
+/// unknown grid or preset or a null `out`.
+///
+/// # Safety
+/// `out` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_rules_default(grid: u32, preset: u32, out: *mut SxRules) -> i32 {
+    let Some(preset) = preset_of(preset) else {
+        return ERROR_ARGUMENT;
+    };
+    if grid != 0 && hex_layout(grid).is_none() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: the caller passes null or valid rules.
+    let Some(out) = (unsafe { out.as_mut() }) else {
+        return ERROR_ARGUMENT;
+    };
+    *out = SxRules {
+        grid,
+        flags: 0,
+        cost_straight: to_i32(preset.straight()),
+        cost_diagonal: to_i32(preset.diagonal()),
+        node_capacity: 32768,
+        smooth_max_extra: 0,
+    };
+    0
 }
 
 /// Budget 0 means unlimited; negative budgets are refused.
@@ -1257,6 +1296,7 @@ pub unsafe extern "C" fn sx_dstar_set_trace(
 mod tests;
 
 pub mod decide;
+pub mod grid;
 pub mod machine;
 #[macro_use]
 pub mod memory;

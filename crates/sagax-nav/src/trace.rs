@@ -6,7 +6,7 @@
 //! interfaces pass on.
 //!
 //! ```
-//! use sagax_nav::grid::{Cell, DenseGrid, GridRules};
+//! use sagax_nav::grid::{Cell, DenseGrid, GridRules, Preset};
 //! use sagax_nav::nav::{Budget, Navigator};
 //! use sagax_nav::topology::Topology;
 //! use sagax_nav::trace::{TraceEvent, TraceKind};
@@ -14,7 +14,7 @@
 //!
 //! let events = Arc::new(Mutex::new(Vec::new()));
 //! let sink = Arc::clone(&events);
-//! let mut nav = Navigator::new(Topology::Square(GridRules::default()), 1000);
+//! let mut nav = Navigator::new(Topology::Square(GridRules::preset(Preset::Octile)), 1000);
 //! nav.set_tracer(Some(Box::new(move |e: &TraceEvent| sink.lock().unwrap().push(*e))));
 //! let mut map = DenseGrid::new(10, 10);
 //! nav.find_path(&mut map, Cell::new(0, 0, 0), &[Cell::new(5, 0, 0)], Budget::UNLIMITED);
