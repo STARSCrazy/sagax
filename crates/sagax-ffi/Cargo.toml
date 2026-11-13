@@ -12,7 +12,8 @@ repository.workspace = true
 
 [lib]
 name = "sagax"
-crate-type = ["cdylib", "staticlib", "rlib"]
+crate-type = ["cdylib", "staticlib"]
+doc = false
 
 [dependencies]
 sagax-core = { path = "../sagax-core" }

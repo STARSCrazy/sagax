@@ -383,6 +383,9 @@ pub enum DecideError {
     },
     /// `inputs` is shorter than `candidates.len() * stride`.
     InputsTooShort,
+    /// [`Decider::choose`]: the rows differ in length, or there is not one
+    /// row per candidate.
+    RowLengths,
 }
 
 impl std::fmt::Display for DecideError {
@@ -395,6 +398,7 @@ impl std::fmt::Display for DecideError {
                 write!(f, "candidate {candidate} has no input {input}")
             }
             Self::InputsTooShort => write!(f, "fewer inputs than candidates times stride"),
+            Self::RowLengths => write!(f, "rows differ in length or are not one per candidate"),
         }
     }
 }
@@ -462,6 +466,8 @@ pub struct Decider {
     order: Vec<usize>,
     values: RefCell<Vec<u32>>,
     ranked: Vec<u32>,
+    flat: Vec<i32>,
+    scored: Vec<u32>,
 }
 
 impl Decider {
@@ -485,12 +491,14 @@ impl Decider {
 
     /// Adds a consideration to `option` (pull [`ONE`], [`Apply::Combine`]).
     /// `false` if the option does not exist.
+    #[must_use]
     pub fn add_consideration(&mut self, option: u32, consideration: Consideration) -> bool {
         self.add_weighted(option, consideration, ONE, Apply::Combine)
     }
 
     /// Adds a consideration with its [`pull`] and where it goes. `false` if
     /// the option does not exist.
+    #[must_use]
     pub fn add_weighted(
         &mut self,
         option: u32,
@@ -519,6 +527,7 @@ impl Decider {
 
     /// `option` puts its factors together its own way; `None` follows the
     /// decider. `false` if the option does not exist.
+    #[must_use]
     pub fn set_option_combine(&mut self, option: u32, combine: Option<Combine>) -> bool {
         self.options
             .get_mut(option as usize)
@@ -529,6 +538,7 @@ impl Decider {
     /// Priority of `option` (default 0). Only candidates of the highest rank
     /// that still scores above 0 take part in the choice: e.g. 2 emergency,
     /// 1 combat, 0 idle. `false` if the option does not exist.
+    #[must_use]
     pub fn set_rank(&mut self, option: u32, rank: u32) -> bool {
         self.options
             .get_mut(option as usize)
@@ -572,6 +582,7 @@ impl Decider {
     /// After `option` was done (any target), it scores 0 until `time` has
     /// passed: a hard cooldown, e.g. a rule "once every 3 turns". 0: none.
     /// `false` if the option does not exist.
+    #[must_use]
     pub fn set_cooldown(&mut self, option: u32, time: u32) -> bool {
         self.options
             .get_mut(option as usize)
@@ -718,6 +729,36 @@ impl Decider {
             scores,
             &mut NoopSink,
         )
+    }
+
+    /// [`Decider::decide`] from one row per candidate, without the flat
+    /// buffers: the rows may be arrays, slices or vectors. Fails with
+    /// [`DecideError::RowLengths`] unless there is one row per candidate and
+    /// all rows are equally long. The buffers it uses grow at warm-up only.
+    pub fn choose<R: AsRef<[i32]>>(
+        &mut self,
+        candidates: &[Candidate],
+        rows: &[R],
+        pick: Pick,
+        seed: u64,
+    ) -> Result<Option<Choice>, DecideError> {
+        if rows.len() != candidates.len() {
+            return Err(DecideError::RowLengths);
+        }
+        let stride = rows.first().map_or(0, |r| r.as_ref().len());
+        if rows.iter().any(|r| r.as_ref().len() != stride) {
+            return Err(DecideError::RowLengths);
+        }
+        let mut flat = std::mem::take(&mut self.flat);
+        let mut scores = std::mem::take(&mut self.scored);
+        flat.clear();
+        for r in rows {
+            flat.extend_from_slice(r.as_ref());
+        }
+        let result = self.decide(candidates, &flat, stride, pick, seed, &mut scores);
+        self.flat = flat;
+        self.scored = scores;
+        result
     }
 
     /// [`Decider::decide`] with events.

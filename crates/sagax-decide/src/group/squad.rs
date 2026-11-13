@@ -405,7 +405,8 @@ impl Squad {
     pub fn add_tactic(&mut self, tactic: Tactic) -> usize {
         let option = self.decider.add_option(tactic.weight);
         for &c in &tactic.considerations {
-            self.decider.add_consideration(option, c);
+            // The option was just added, so it exists.
+            let _ = self.decider.add_consideration(option, c);
         }
         self.tactics.push(tactic);
         self.tactics.len() - 1
@@ -438,6 +439,7 @@ impl Squad {
 
     /// Makes the member with this id the leader; false if it is not in the
     /// group.
+    #[must_use]
     pub fn set_leader(&mut self, id: u32) -> bool {
         let known = self.group.index(id).is_some();
         if known {
@@ -472,6 +474,7 @@ impl Squad {
     /// How orders reach the member with this id (default
     /// [`Channel::default`]: at once). The leader always has its own orders
     /// at once. False when the id is not in the group.
+    #[must_use]
     pub fn set_channel(&mut self, id: u32, channel: Channel) -> bool {
         if self.group.index(id).is_none() {
             return false;
@@ -564,6 +567,7 @@ impl Squad {
     /// (from [`IN_EXTRA`] on; default 0). See [`Squad::plan`] for the
     /// layout of `extra`. False (nothing changes) above
     /// [`MAX_EXTRA_COLUMNS`].
+    #[must_use]
     pub fn set_extra_columns(&mut self, count: usize) -> bool {
         if count > MAX_EXTRA_COLUMNS {
             return false;

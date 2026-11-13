@@ -1218,7 +1218,7 @@ pub unsafe extern "C" fn sx_decider_trace(d: *mut WasmDecider, on: i32) -> i32 {
 }
 
 /// Moves the waiting decision events to the output buffer (6 numbers each,
-/// see [`DECIDE_STRIDE`]) and returns how many.
+/// see `DECIDE_STRIDE`) and returns how many.
 ///
 /// # Safety
 /// `d` from [`sx_decider_new`].
@@ -3085,7 +3085,7 @@ fn table_and_skill(skill: u32, custom: u32) -> Option<(SkillTable, u8)> {
 /// One number of the skill table at `skill`'s level: `which` 0 think ticks,
 /// 1 timing spread, 2 hold bonus, 3 give-up ticks, 4 spot rank error. With
 /// `custom` not 0 the table is read from the scratch buffer, else the
-/// default. Writes the number to scratch[0] (as `u32` bits) and returns 0;
+/// default. Writes the number to `scratch[0]` (as `u32` bits) and returns 0;
 /// -1 for a bad argument or table.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_skill_for(which: u32, skill: u32, custom: u32) -> i32 {
@@ -3699,7 +3699,7 @@ fn plan_error_to(out: &mut Vec<i32>, e: PlanError) -> i32 {
     ERROR_PLAN
 }
 
-/// Checks the tactics' columns. Returns 0, or [`ERROR_PLAN`] with the
+/// Checks the tactics' columns. Returns 0, or `ERROR_PLAN` with the
 /// tactic's index and the column in the out buffer.
 ///
 /// # Safety
@@ -3734,9 +3734,9 @@ fn plan_input(extra_count: u32, spot_count: u32) -> Option<(Vec<i32>, Vec<Spot>)
 }
 
 /// Makes a new plan (see `sx_squad_plan`) from the extra numbers and spots
-/// in the scratch buffer (see [`plan_input`]); the seed comes in two
+/// in the scratch buffer (see `plan_input`); the seed comes in two
 /// halves. Returns 1 with the plan's id in the out buffer, 0 if nothing
-/// scores, [`ERROR_PLAN`] (details in the out buffer) or -1.
+/// scores, `ERROR_PLAN` (details in the out buffer) or -1.
 ///
 /// # Safety
 /// `s` from [`sx_squad_new`].
@@ -3767,7 +3767,7 @@ pub unsafe extern "C" fn sx_squad_plan(
 
 /// Watches the plans at `now` (see `sx_squad_check`), with the same
 /// inputs as [`sx_squad_plan`]. Returns 0 keep, 1 replan (the new plan's
-/// id in the out buffer), 2 signal, 3 no plan, [`ERROR_PLAN`] or -1.
+/// id in the out buffer), 2 signal, 3 no plan, `ERROR_PLAN` or -1.
 ///
 /// # Safety
 /// `s` from [`sx_squad_new`].
@@ -4120,7 +4120,7 @@ pub unsafe extern "C" fn sx_keeper_set_current(
 }
 
 /// The tick the goal record (20 numbers) in the scratch buffer starts at,
-/// for an order that arrived at `received`: 1 with the tick in scratch[0]
+/// for an order that arrived at `received`: 1 with the tick in `scratch[0]`
 /// (as `u32` bits), 0 for a goal that starts on the signal, -1 for a bad
 /// goal.
 #[unsafe(no_mangle)]

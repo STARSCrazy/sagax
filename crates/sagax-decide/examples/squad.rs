@@ -112,10 +112,10 @@ fn run_scene(end: u32) -> Vec<Event> {
             state: MemberState::Active,
         });
         if id != 1 {
-            sq.set_channel(id, RADIO);
+            assert!(sq.set_channel(id, RADIO));
         }
     }
-    sq.set_leader(1);
+    assert!(sq.set_leader(1));
     sq.set_skill(192);
     sq.set_target_kind(ENEMY);
     sq.add_tactic(tactics::rush());
@@ -149,7 +149,7 @@ fn run_scene(end: u32) -> Vec<Event> {
             ..Fact::default()
         },
     );
-    sq.report(
+    assert!(sq.report(
         Message {
             kind: REPORT_ENEMY,
             subject: 11,
@@ -158,7 +158,7 @@ fn run_scene(end: u32) -> Vec<Event> {
             ..Message::default()
         },
         0,
-    );
+    ));
 
     let mut walkers: Vec<Walker> = members
         .iter()

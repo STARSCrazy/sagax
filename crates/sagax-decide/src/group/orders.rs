@@ -148,6 +148,7 @@ impl Squad {
     /// [`Squad::arrived`] for the plan it names, if active); other kinds are
     /// dropped when read.
     /// False when the inbox refused it (see [`Inbox::push`](crate::memory::Inbox::push)).
+    #[must_use]
     pub fn report(&mut self, msg: Message, arrive_at: u32) -> bool {
         self.inbox.push(msg, arrive_at)
     }

@@ -136,11 +136,12 @@ impl GoalKeeper {
     /// from [`IN_EXTRA`].
     pub fn add_goal_option(decider: &mut Decider, weight: u32) -> u32 {
         let option = decider.add_option(weight);
-        decider.add_consideration(
+        // The option was just added, so both calls find it.
+        let _ = decider.add_consideration(
             option,
             Consideration::new(IN_HAS_GOAL as u32, Curve::Step, 1, 1),
         );
-        decider.add_consideration(
+        let _ = decider.add_consideration(
             option,
             Consideration::new(IN_DIST as u32, Curve::Inverse, 0, GOAL_OPTION_RANGE),
         );

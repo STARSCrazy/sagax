@@ -310,20 +310,20 @@ fn multiply_stays_a_true_factor() {
     let mut d = Decider::new();
     d.set_combine(Combine::Average);
     let shoot = d.add_option(ONE);
-    d.add_consideration(shoot, Consideration::new(0, Curve::Linear, 0, 10));
-    d.add_weighted(
+    assert!(d.add_consideration(shoot, Consideration::new(0, Curve::Linear, 0, 10)));
+    assert!(d.add_weighted(
         shoot,
         Consideration::new(1, Curve::Step, 1, 0),
         ONE,
         Apply::Multiply,
-    );
+    ));
     let c = [Candidate::new(shoot, 0)];
     assert!(d.score(c[0], &[10, 1]).unwrap() == ONE);
     assert_eq!(d.score(c[0], &[10, 0]).unwrap(), 0);
     // an option can follow its own combine
     let other = d.add_option(ONE);
-    d.add_consideration(other, Consideration::new(0, Curve::Linear, 0, 10));
-    d.add_consideration(other, Consideration::new(1, Curve::Linear, 0, 10));
+    assert!(d.add_consideration(other, Consideration::new(0, Curve::Linear, 0, 10)));
+    assert!(d.add_consideration(other, Consideration::new(1, Curve::Linear, 0, 10)));
     assert_eq!(d.score(Candidate::new(other, 0), &[10, 0]).unwrap(), H);
     assert!(d.set_option_combine(other, Some(Combine::Minimum)));
     assert_eq!(d.score(Candidate::new(other, 0), &[10, 0]).unwrap(), 0);
@@ -335,7 +335,7 @@ fn rank_and_inertia() {
     let mut d = Decider::new();
     let idle = d.add_option(ONE);
     let flee = d.add_option(ONE / 10);
-    d.add_consideration(flee, Consideration::new(0, Curve::Step, 1, 0));
+    assert!(d.add_consideration(flee, Consideration::new(0, Curve::Step, 1, 0)));
     assert!(d.set_rank(flee, 1));
     let cands = [Candidate::new(idle, 0), Candidate::new(flee, 0)];
     let mut s = Vec::new();
@@ -377,10 +377,10 @@ fn memory_cooldown_and_dislike() {
     let strike = d.add_option(ONE);
     let other = d.add_option(ONE / 2);
     // soft dislike: the longer ago, the better (full again after 10)
-    d.add_consideration(
+    assert!(d.add_consideration(
         strike,
         Consideration::new(INPUT_SINCE_PAIR, Curve::Linear, 0, 10),
-    );
+    ));
     let cands = [
         Candidate::new(strike, 1),
         Candidate::new(strike, 2),

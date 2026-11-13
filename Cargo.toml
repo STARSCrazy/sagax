@@ -5,6 +5,7 @@ members = [
     "crates/sagax-nav",
     "crates/sagax-decide",
     "crates/sagax-debug",
+    "crates/sagax",
     "crates/sagax-ffi",
     "crates/sagax-wasm",
 ]

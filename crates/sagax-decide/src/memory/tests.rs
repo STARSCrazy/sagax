@@ -954,7 +954,7 @@ fn inbox_take_due_in_push_order() {
     assert_eq!(out.len(), 1);
     assert_eq!(arrival(u32::MAX - 1, 2, 3, 4), 12);
     assert_eq!(arrival(10, 0, 0, 0), 10);
-    b.push(msg(5, 1), 1);
+    assert!(b.push(msg(5, 1), 1));
     b.clear();
     assert_eq!(b.len(), 0);
 }
@@ -962,9 +962,9 @@ fn inbox_take_due_in_push_order() {
 #[test]
 fn inbox_full_replaces_latest_if_earlier() {
     let mut b = Inbox::new(3).unwrap();
-    b.push(msg(1, 1), 10);
-    b.push(msg(2, 1), 30);
-    b.push(msg(3, 1), 30);
+    assert!(b.push(msg(1, 1), 10));
+    assert!(b.push(msg(2, 1), 30));
+    assert!(b.push(msg(3, 1), 30));
     // Equal to the latest: refused.
     assert!(!b.push(msg(4, 1), 30));
     // Earlier: the later of the two latest (slot 2) goes.
@@ -1150,9 +1150,9 @@ fn message_to_knowledge() {
 #[test]
 fn inbox_full_orders_across_wrap() {
     let mut b = Inbox::new(3).unwrap();
-    b.push(msg(1, 1), u32::MAX - 5);
-    b.push(msg(2, 1), 3);
-    b.push(msg(3, 1), u32::MAX);
+    assert!(b.push(msg(1, 1), u32::MAX - 5));
+    assert!(b.push(msg(2, 1), 3));
+    assert!(b.push(msg(3, 1), u32::MAX));
     // Latest is arrival 3 (after the wrap); MAX - 2 is earlier: replaces it.
     assert!(b.push(msg(4, 1), u32::MAX - 2));
     // Latest is now MAX; 1 (after the wrap) is later: refused.

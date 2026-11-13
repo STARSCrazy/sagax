@@ -1295,6 +1295,9 @@ pub unsafe extern "C" fn sx_dstar_set_trace(
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod bench;
+
 pub mod decide;
 pub mod grid;
 pub mod machine;

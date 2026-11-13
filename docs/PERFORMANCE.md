@@ -6,7 +6,7 @@ blocked cells, budget 30000, costs 10/14, about 2800 cells expanded per
 search:
 
 ```sh
-cargo run --release -p sagax-ffi --example bench_parts
+cargo test -p sagax-ffi --release -- --ignored --nocapture bench_parts
 ```
 
 | Variant | µs / search |

@@ -631,7 +631,7 @@ fn per_target_scoring() {
         .push(Consideration::new(IN_EXTRA as u32, Curve::Inverse, 0, 10));
     let f = sq.add_tactic(focus);
     sq.set_skill(255);
-    sq.set_extra_columns(1);
+    assert!(sq.set_extra_columns(1));
     see(&mut sq, 10, 60, 0, 0);
     see(&mut sq, 11, 20, 0, 0);
     // Rows: no target, then the targets in memory order (10, 11).
@@ -656,7 +656,7 @@ fn isolate_picks_farthest_from_friends() {
         .push(Consideration::new(IN_EXTRA as u32, Curve::Linear, 0, 50));
     sq.add_tactic(iso);
     sq.set_skill(255);
-    sq.set_extra_columns(1);
+    assert!(sq.set_extra_columns(1));
     see(&mut sq, 10, 20, 0, 0);
     see(&mut sq, 11, 22, 0, 0);
     see(&mut sq, 12, 20, 30, 0);
@@ -836,7 +836,7 @@ fn plan_rejects_column_beyond_row() {
     // Also with nothing to plan for.
     sq.knowledge_mut().clear();
     assert_eq!(sq.plan(0, &[], &[], 0), Err(err));
-    sq.set_extra_columns(1);
+    assert!(sq.set_extra_columns(1));
     assert_eq!(sq.validate(), Ok(()));
     see(&mut sq, 10, 20, 0, 0);
     assert!(sq.plan(0, &[0, 10], &[], 0).unwrap().is_some());
@@ -1070,9 +1070,9 @@ fn shout_out_of_range_not_delivered() {
     sq.add_tactic(tactics::rush());
     sq.set_skill(255);
     see(&mut sq, 10, 20, 0, 0);
-    sq.set_channel(2, Channel::Shout { range: 5 });
-    sq.set_channel(3, Channel::Shout { range: 5 });
-    sq.set_channel(4, Channel::None);
+    assert!(sq.set_channel(2, Channel::Shout { range: 5 }));
+    assert!(sq.set_channel(3, Channel::Shout { range: 5 }));
+    assert!(sq.set_channel(4, Channel::None));
     sq.plan(0, &[], &[], 0).unwrap().unwrap();
     let at = sq.pending_plan().unwrap().active_at;
     let mut out = Vec::new();
@@ -1099,7 +1099,7 @@ fn hold_bonus_prevents_flicker() {
             weight: ONE,
             ..tactics::rush()
         });
-        sq.set_extra_columns(1);
+        assert!(sq.set_extra_columns(1));
         sq.set_skill_table(table);
         sq.set_skill(255);
         see(&mut sq, 10, 20, 0, 0);
@@ -1219,7 +1219,7 @@ fn report_only_after_arrival() {
         sender: 2,
         ..Message::default()
     };
-    sq.report(enemy, 60);
+    assert!(sq.report(enemy, 60));
     sq.plan(59, &[], &[], 0).unwrap().unwrap();
     assert_eq!(sq.targets().count(), 0);
     sq.plan(60, &[], &[], 0).unwrap().unwrap();
@@ -1311,8 +1311,8 @@ fn suspended_member_gets_no_order() {
     sq.orders_due(5, &mut out);
     assert_eq!(members_of(&out), [1, 2, 4]);
     // Its broken report does not count as off plan.
-    sq.report(broken(3, id), 6);
-    sq.report(broken(2, id), 6);
+    assert!(sq.report(broken(3, id), 6));
+    assert!(sq.report(broken(2, id), 6));
     assert_eq!(sq.check(6, &[], &[], 0), Ok(Status::Keep));
     // All active members arrived: the signal, nothing for 3.
     for m in [1, 2, 4] {
@@ -1458,7 +1458,7 @@ fn better_replan_never_restarts_same_pair() {
             weight: ONE,
             ..tactics::rush()
         });
-        sq.set_extra_columns(1);
+        assert!(sq.set_extra_columns(1));
         sq.set_skill(0);
         see(&mut sq, 10, 20, 0, 0);
         // The second tactic scores 0 at first: the weak pick must take rush.
@@ -1524,7 +1524,7 @@ fn no_better_replan_after_signal() {
             weight: ONE,
             ..tactics::rush()
         });
-        sq.set_extra_columns(1);
+        assert!(sq.set_extra_columns(1));
         sq.set_skill(255);
         see(&mut sq, 10, 20, 0, 0);
         sq.check(0, &[0, 40], &[], 0).unwrap();
@@ -2274,7 +2274,8 @@ fn no_cheat() {
                             sender: m.id,
                             ..Message::default()
                         };
-                        s.sq.report(msg, at);
+                        // The inbox may be full; a refused report is part of the scene.
+                        let _ = s.sq.report(msg, at);
                     }
                 }
             }
@@ -2349,7 +2350,7 @@ fn better_replan_takes_only_clearly_better() {
         };
         let b = sq.add_tactic(column(0));
         sq.add_tactic(column(1));
-        sq.set_extra_columns(2);
+        assert!(sq.set_extra_columns(2));
         sq.set_skill(0);
         see(&mut sq, 10, 20, 0, 0);
         assert!(matches!(

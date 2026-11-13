@@ -289,7 +289,7 @@ pub(crate) fn run_scene(end: u32) -> Vec<Event> {
                         let o = &mut guards[j as usize];
                         // One round per cell.
                         let when = arrival(t, 0, hex(at, o.pos) as u32, 1);
-                        o.inbox.push(shout, when);
+                        assert!(o.inbox.push(shout, when));
                     }
                 }
             }

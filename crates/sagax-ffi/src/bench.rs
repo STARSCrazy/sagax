@@ -4,12 +4,12 @@
 //!   2. core search, map behind an `extern "C"` function pointer (as from C)
 //!   3. the same through sx_nav_find_path (step per neighbour, and batched)
 //!
-//! Run: cargo run --release -p sagax-ffi --example bench_parts
+//! Run: cargo test -p sagax-ffi --release -- --ignored --nocapture bench_parts
 
 use std::ffi::c_void;
 use std::time::Instant;
 
-use sagax::{Point, SxMap, SxResult, SxRules, sx_nav_find_path, sx_nav_new};
+use crate::{Point, SxMap, SxResult, SxRules, sx_nav_find_path, sx_nav_new};
 use sagax_core::NoopSink;
 use sagax_nav::grid::{Cell, CellGoal, CellMap, GridGraph, GridRules, Preset};
 use sagax_nav::{Limits, Search};
@@ -111,7 +111,9 @@ unsafe extern "C" fn c_steps(
 }
 
 #[allow(static_mut_refs)]
-fn main() {
+#[test]
+#[ignore = "benchmark: run in release mode"]
+fn bench_parts() {
     let mut rng = Rng(12345);
     let rules = GridRules::preset(Preset::Octile);
     let mut jobs = Vec::new();
@@ -186,7 +188,7 @@ fn main() {
                 step: Some(c_step),
                 start_step: None,
                 move_cost: None,
-                steps: batch.then_some(c_steps as sagax::StepsFn),
+                steps: batch.then_some(c_steps as crate::StepsFn),
                 context: std::ptr::null_mut(),
             };
             let mut points = vec![Point::default(); 4096];
