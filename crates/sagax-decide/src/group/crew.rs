@@ -252,13 +252,18 @@ impl Crew {
     }
 
     /// Puts a member back into play ([`Squad::reinstate`]: it gets its
-    /// current goal again) and restarts its keeper's clock at `now`. False
-    /// when the id is unknown.
+    /// current goal again) and restarts its keeper's clock at `now`. When
+    /// the active plan has no goal for it (none is active, or the plan was
+    /// made without it), its keeper is cleared: it has no goal until an
+    /// order comes. False when the id is unknown.
     pub fn reinstate(&mut self, id: u32, now: u32) -> bool {
         if !self.squad.reinstate(id, now) {
             return false;
         }
         self.pause(id, false, now);
+        if !self.in_active_plan(id) {
+            self.drop_goal(id);
+        }
         true
     }
 
@@ -311,7 +316,9 @@ impl Crew {
     ///    hex layout) and `seed`: [`CrewEvent::Planned`] on
     ///    [`Status::Replan`], [`CrewEvent::Signal`],
     ///    [`CrewEvent::NoPlan`].
-    /// 3. [`CrewEvent::Activated`] from [`Squad::take_activated`].
+    /// 3. [`CrewEvent::Activated`] from [`Squad::take_activated`]; the
+    ///    keeper of every member without a goal in the new plan is cleared
+    ///    (no goal, [`Crew::goal`] `None`, `has_goal` 0).
     /// 4. [`Squad::orders_due`]: each order goes into its member's keeper
     ///    ([`GoalKeeper::set`]); [`CrewEvent::Order`] with
     ///    [`Goal::start_tick`] of `now`.
@@ -328,6 +335,10 @@ impl Crew {
     /// 7. An active member whose keeper is [`broken`](GoalKeeper::broken)
     ///    (give-up ticks from its own skill) sends [`Message::goal_broken`]
     ///    the same way: [`CrewEvent::Broken`], once per goal.
+    ///
+    /// Steps 5 to 7 only look at a keeper whose goal belongs to the active
+    /// plan: a goal of a dead plan (still held while the new order is on
+    /// its way) gets no `Start`, no report and no event.
     ///
     /// Members are visited in group order. Errors only from
     /// [`Squad::check`]; nothing after it is done then.
@@ -363,7 +374,14 @@ impl Crew {
 
         if let Some(id) = self.squad.take_activated() {
             events.push(CrewEvent::Activated(id));
+            for i in 0..self.seats.len() {
+                let member = self.seats[i].id;
+                if !self.in_active_plan(member) {
+                    self.drop_goal(member);
+                }
+            }
         }
+        let live = self.squad.active_plan().map(|p| p.id);
 
         self.squad.orders_due(now, &mut self.orders);
         for i in 0..self.orders.len() {
@@ -386,7 +404,12 @@ impl Crew {
 
         for seat in &mut self.seats {
             let Some(s) = seat.start_at else { continue };
-            if !seat.started && now.wrapping_sub(s) < 1 << 31 && is_active(&self.squad, seat.id) {
+            let goal_live = seat.keeper.goal().is_some_and(|g| Some(g.plan) == live);
+            if !seat.started
+                && goal_live
+                && now.wrapping_sub(s) < 1 << 31
+                && is_active(&self.squad, seat.id)
+            {
                 seat.started = true;
                 events.push(CrewEvent::Start { member: seat.id });
             }
@@ -394,7 +417,7 @@ impl Crew {
 
         for i in 0..self.seats.len() {
             let seat = self.seats[i];
-            let Some(goal) = seat.keeper.goal().copied() else {
+            let Some(goal) = seat.keeper.goal().copied().filter(|g| Some(g.plan) == live) else {
                 continue;
             };
             let Some(member) = active_member(&self.squad, seat.id) else {
@@ -412,7 +435,7 @@ impl Crew {
 
         for i in 0..self.seats.len() {
             let seat = self.seats[i];
-            let Some(goal) = seat.keeper.goal().copied() else {
+            let Some(goal) = seat.keeper.goal().copied().filter(|g| Some(g.plan) == live) else {
                 continue;
             };
             let Some(member) = active_member(&self.squad, seat.id) else {
@@ -468,6 +491,24 @@ impl Crew {
     pub fn goal(&self, id: u32) -> Option<Goal> {
         let goal = *self.seat(id)?.keeper.goal()?;
         Some(self.goal_out(goal))
+    }
+
+    /// True when the active plan has a goal for `id`.
+    fn in_active_plan(&self, id: u32) -> bool {
+        self.squad
+            .active_plan()
+            .is_some_and(|p| p.goals.iter().any(|(m, _)| *m == id))
+    }
+
+    /// Clears the keeper of `id` and what was told about its goal.
+    fn drop_goal(&mut self, id: u32) {
+        if let Some(seat) = self.seats.iter_mut().find(|s| s.id == id) {
+            seat.keeper.clear();
+            seat.start_at = None;
+            seat.started = false;
+            seat.arrived = false;
+            seat.broken = false;
+        }
     }
 
     /// Pauses or resumes (at `now`) the keeper of `id`, if it has one.

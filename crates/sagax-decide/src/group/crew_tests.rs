@@ -592,20 +592,133 @@ fn crew_suspended_member_never_broken() {
         assert!(!crew.keeper(2).unwrap().broken(t, 0));
         assert!(!crew.keeper(3).unwrap().broken(t, 0));
     }
-    // Back in play (the squad replanned without it, so no order comes):
-    // the goal it still holds was put off at 11, its clock starts anew.
+    // The squad replanned without it (plan 2, active at 16): its keeper was
+    // cleared then. Back in play it gets no order and holds no goal.
+    assert!(crew.goal(2).is_none());
     assert!(crew.reinstate(2, 301));
-    let give_up = crew.squad().skill_table().give_up_ticks_for(SKILL);
-    let mut broken = Vec::new();
+    assert!(crew.goal(2).is_none());
     for t in 301..=500 {
         crew.member_chose(2, t, false);
         crew.tick(t, &[], &flank_spots(), SEED, &mut events)
             .unwrap();
-        if events.contains(&CrewEvent::Broken { member: 2 }) {
-            broken.push(t);
+        assert!(
+            !events.contains(&CrewEvent::Broken { member: 2 }),
+            "tick {t}"
+        );
+        assert_eq!(crew.member_inputs(2, t).unwrap().has_goal, 0);
+    }
+}
+
+/// True when `events` holds an order, start, arrival or break of `id`.
+fn about(events: &[CrewEvent], id: u32) -> bool {
+    events.iter().any(|e| {
+        matches!(e,
+            CrewEvent::Order { member, .. }
+            | CrewEvent::Start { member }
+            | CrewEvent::Arrived { member }
+            | CrewEvent::Broken { member } if *member == id)
+    })
+}
+
+#[test]
+fn crew_drops_the_goal_of_a_member_the_new_plan_left_out() {
+    let mut crew = crew_with_orders(0);
+    let mut events = Vec::new();
+    // Member 2 is out while the squad replans (member 3 lost), then back
+    // by the low-level call (no order) before the plan becomes active.
+    assert!(crew.suspend(2));
+    assert!(crew.set_gone(3));
+    crew.tick(11, &[], &flank_spots(), SEED, &mut events)
+        .unwrap();
+    assert!(matches!(events[..], [CrewEvent::Planned(_)]));
+    assert!(crew.squad_mut().group_mut().resume(2));
+    let old = crew.goal(2).unwrap();
+    let mut activated = None;
+    for t in 12..=250 {
+        crew.member_chose(2, t, false);
+        crew.tick(t, &[], &flank_spots(), SEED, &mut events)
+            .unwrap();
+        if activated.is_none() {
+            if !events.iter().any(|e| matches!(e, CrewEvent::Activated(_))) {
+                continue;
+            }
+            activated = Some(t);
+            assert!(crew.goal(2).is_none(), "cleared at activation");
+            // It stands where the dead plan sent it.
+            assert!(crew.set_pos(2, old.pos.unwrap()));
+            continue;
+        }
+        if events
+            .iter()
+            .any(|e| matches!(e, CrewEvent::Order { member: 2, .. }))
+        {
+            // A later plan takes it again (here at 43): from then on its
+            // events are real.
+            assert!(t > 30, "{t}");
+            break;
+        }
+        assert!(!about(&events, 2), "tick {t}: {events:?}");
+        assert!(crew.goal(2).is_none());
+        assert_eq!(crew.member_inputs(2, t).unwrap().has_goal, 0);
+    }
+    assert_eq!(activated, Some(16));
+}
+
+#[test]
+fn crew_ignores_a_dead_plans_goal_while_the_new_order_travels() {
+    let mut crew = crew_with_orders(0);
+    let mut events = Vec::new();
+    // Member 3 lost, member 4 out: plan 2 (active at 16) gives member 2 a
+    // new goal by radio, which takes a while. Until it comes, member 2
+    // still holds its plan-1 goal: standing on that spot and putting it
+    // off counts for nothing.
+    assert!(crew.set_gone(3));
+    assert!(crew.suspend(4));
+    let old = crew.goal(2).unwrap();
+    let mut order_at = None;
+    for t in 11..=40 {
+        crew.member_chose(2, t, false);
+        if t == 16 {
+            assert!(crew.set_pos(2, old.pos.unwrap()));
+        }
+        crew.tick(t, &[], &flank_spots(), SEED, &mut events)
+            .unwrap();
+        if events
+            .iter()
+            .any(|e| matches!(e, CrewEvent::Order { member: 2, .. }))
+        {
+            order_at = Some(t);
+            break;
+        }
+        if t >= 16 {
+            let live = crew.squad().active_plan().map(|p| p.id);
+            assert!(live.is_some() && live != Some(old.plan), "tick {t}");
+            assert_eq!(crew.goal(2).map(|g| g.plan), Some(old.plan));
+            assert!(!about(&events, 2), "tick {t}: {events:?}");
         }
     }
-    assert_eq!(broken, [301 + give_up]);
+    assert!(order_at.unwrap() > 16, "the new order travels");
+}
+
+#[test]
+fn crew_reinstate_without_a_goal_clears_the_keeper() {
+    let mut crew = crew_with_orders(0);
+    let mut events = Vec::new();
+    assert!(crew.suspend(2));
+    assert!(crew.set_gone(3));
+    crew.tick(11, &[], &flank_spots(), SEED, &mut events)
+        .unwrap();
+    assert!(crew.goal(2).is_some(), "still the old plan's goal");
+    // Back at 16: the reinstate itself makes plan 2 (without member 2)
+    // active, before any tick saw it.
+    assert!(crew.reinstate(2, 16));
+    assert!(crew.goal(2).is_none());
+    assert_eq!(crew.member_inputs(2, 16).unwrap().has_goal, 0);
+    crew.tick(16, &[], &flank_spots(), SEED, &mut events)
+        .unwrap();
+    assert!(events.iter().any(|e| matches!(e, CrewEvent::Activated(_))));
+    assert!(!about(&events, 2));
+    assert!(!crew.reinstate(99, 16));
 }
 
 #[test]
