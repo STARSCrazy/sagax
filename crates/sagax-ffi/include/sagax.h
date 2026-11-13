@@ -1460,6 +1460,118 @@ int32_t sx_keeper_add_goal_option(sx_decider *decider, uint32_t weight);
 int32_t sx_keeper_set_current(const sx_keeper *keeper, sx_decider *decider,
                               uint32_t option, uint32_t discipline);
 
+/* -- crew: a squad with one keeper per member, one call per tick -- */
+
+/* The whole group loop: per tick the game sets where its members are
+ * (sx_crew_set_pos), calls sx_crew_tick, reads the events, and for each
+ * member asks sx_crew_member_inputs for its decider row and, once it
+ * decided, calls sx_crew_member_chose. The crew moves nobody. Channels,
+ * tactics, skill and leader are set on the crew's own squad
+ * (sx_crew_squad). With hex_grid the crew's own calls take and return
+ * offset coordinates of that layout (the squad and keepers hold axial
+ * ones: calls on sx_crew_squad and sx_crew_keeper use axial coordinates).
+ * The functions without their own note return 1, or 0 for an unknown id;
+ * SX_ERROR_ARGUMENT for a null crew or a null required pointer. */
+typedef struct sx_crew sx_crew;
+
+typedef struct sx_crew_config {
+	sx_squad_config squad;
+	uint32_t arrive_radius;     /* how far from its first spot a member counts as
+	                             * arrived, in the squad's metric (Euclid: compared
+	                             * squared) */
+	uint32_t hex_grid;          /* 0 none, else SX_GRID_HEX_* (needs SX_METRIC_HEX) */
+} sx_crew_config;
+
+/* The squad defaults (sx_squad_config_default), arrive radius 0, no hex.
+ * Returns 0; SX_ERROR_ARGUMENT for a null out. */
+int32_t sx_crew_config_default(sx_crew_config *out);
+
+/* What happened in one sx_crew_tick, in the order of its steps. */
+#define SX_CREW_PLANNED   1 /* a new plan is pending (plan) */
+#define SX_CREW_ACTIVATED 2 /* that plan became active (plan); members without a
+                             * goal in it have none now */
+#define SX_CREW_SIGNAL    3 /* the leader gave the signal */
+#define SX_CREW_ORDER     4 /* an order reached member; its keeper holds goal now
+                             * (plan = goal.plan); start_at: the tick it starts,
+                             * unless it starts on the signal (has_start_at 0) */
+#define SX_CREW_START     5 /* member's start tick has come (once per order) */
+#define SX_CREW_ARRIVED   6 /* member stands on its first spot and sent the leader
+                             * SX_REPORT_ARRIVED (once per goal) */
+#define SX_CREW_BROKEN    7 /* member gave its goal up and sent the leader
+                             * SX_REPORT_GOAL_BROKEN (once per goal) */
+#define SX_CREW_NO_PLAN   8 /* no plan is active and none could be made; when the
+                             * active plan ended, no member has a goal now */
+
+typedef struct sx_crew_event {
+	uint32_t kind;              /* SX_CREW_* */
+	uint32_t member;            /* ORDER, START, ARRIVED, BROKEN; else 0 */
+	uint32_t plan;              /* PLANNED, ACTIVATED, ORDER; else 0 */
+	uint32_t start_at;          /* valid if has_start_at */
+	sx_goal goal;               /* ORDER only */
+	uint8_t has_start_at;
+} sx_crew_event;
+
+/* A crew with an empty squad as configured. Null if config is null, a
+ * capacity is 0, the metric or hex_grid is unknown, or hex_grid is set
+ * without SX_METRIC_HEX. */
+sx_crew *sx_crew_new(const sx_crew_config *config);
+/* Frees the crew and ends every handle it lent. */
+void sx_crew_free(sx_crew *crew);
+/* Add a member (with an empty keeper) at the end. Returns its index;
+ * SX_ERROR_ARGUMENT if the group is full, the id is taken or the state is
+ * unknown. */
+int32_t sx_crew_add_member(sx_crew *crew, const sx_member *member);
+/* Remove a member and its keeper. */
+int32_t sx_crew_remove_member(sx_crew *crew, uint32_t id);
+/* Out of play: suspended in the group, its keeper paused (never broken). */
+int32_t sx_crew_suspend(sx_crew *crew, uint32_t id);
+/* Back in play (as sx_squad_reinstate); its keeper's clock restarts at now.
+ * Without a goal in the active plan its keeper is cleared. */
+int32_t sx_crew_reinstate(sx_crew *crew, uint32_t id, uint32_t now);
+/* Dead or lost (as sx_squad_set_gone); its keeper stays paused. */
+int32_t sx_crew_set_gone(sx_crew *crew, uint32_t id);
+/* Where the member is now. pos: 3 values. */
+int32_t sx_crew_set_pos(sx_crew *crew, uint32_t id, const int32_t *pos);
+/* As sx_squad_observe. */
+int32_t sx_crew_observe(sx_crew *crew, uint32_t now, const sx_fact *fact, sx_fact *evicted);
+/* As sx_squad_report_danger. */
+int32_t sx_crew_report_danger(sx_crew *crew, uint32_t sender, const int32_t *centre,
+                              const int32_t *shooter, uint32_t arrive_at);
+/* Runs the group at now with extra, spots and seed as for sx_squad_check:
+ * syncs the keepers with the group (a keeper is paused while its member is
+ * not active), checks the plans, takes the activated plan, hands the due
+ * orders to the keepers, then notes starts, arrivals (an active member
+ * within arrive_radius of its goal's pos on the same level reports
+ * SX_REPORT_ARRIVED over its channel; a report the inbox refuses is tried
+ * again next tick) and broken goals (give_up_ticks of the member's skill).
+ * Only goals of the active plan count. Members in group order.
+ * The tick's events go to events, at most cap of them (events may be null
+ * if cap is 0); the rest are dropped, and nothing else depends on cap.
+ * *total (total may be null) gets the number of all events. Returns how
+ * many were written, SX_ERROR_PLAN (nothing after the check is done then)
+ * or SX_ERROR_ARGUMENT. */
+int32_t sx_crew_tick(sx_crew *crew, uint32_t now, const int32_t *extra, uint32_t extra_count,
+                     const sx_spot *spots, uint32_t spot_count, uint64_t seed,
+                     sx_crew_event *events, uint32_t cap, uint32_t *total);
+/* The member's decider inputs at now (its position, the squad's metric, the
+ * signal and the discipline of its own skill) to *out. */
+int32_t sx_crew_member_inputs(sx_crew *crew, uint32_t id, uint32_t now, sx_member_inputs *out);
+/* What the member chose at now: its goal (goal_won 1: the postpone clock is
+ * reset) or something else (goal_won 0: the goal is postponed). */
+int32_t sx_crew_member_chose(sx_crew *crew, uint32_t id, uint32_t now, uint32_t goal_won);
+/* The member's current goal to *out. Returns 1, or 0 for an unknown id or
+ * no goal. */
+int32_t sx_crew_goal(sx_crew *crew, uint32_t id, sx_goal *out);
+/* Handles lent by the crew: its own squad (valid until sx_crew_free) and
+ * the keeper of member id (valid until the next sx_crew_* call that changes
+ * the crew, i.e. any but sx_crew_member_inputs, sx_crew_goal, sx_crew_squad
+ * and sx_crew_keeper; after that every sx_keeper_* call on it returns
+ * SX_ERROR_ARGUMENT). sx_squad_free and sx_keeper_free do nothing to them.
+ * The crew takes its squad's orders itself: sx_squad_orders_due on a crew's
+ * squad returns SX_ERROR_ARGUMENT. Null for a null crew or an unknown id. */
+sx_squad *sx_crew_squad(sx_crew *crew);
+sx_keeper *sx_crew_keeper(sx_crew *crew, uint32_t id);
+
 /* -- goal and report helpers -- */
 
 /* The tick a goal starts when its order arrived at received: received +

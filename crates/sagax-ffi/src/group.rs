@@ -71,7 +71,7 @@ impl SxMember {
         }
     }
 
-    fn member(&self) -> Option<Member> {
+    pub(crate) fn member(&self) -> Option<Member> {
         let state = match self.state {
             0 => MemberState::Active,
             1 => MemberState::Suspended,
@@ -269,7 +269,7 @@ pub struct SxGoal {
 }
 
 impl SxGoal {
-    fn of(g: &Goal) -> Self {
+    pub(crate) fn of(g: &Goal) -> Self {
         let (kind, custom) = kind_code(g.kind);
         let (start, start_ticks) = start_code(g.start);
         Self {
@@ -586,11 +586,63 @@ pub unsafe extern "C" fn sx_tactic_trigger_manual(tactic: *mut SxTactic) -> i32 
 
 // ---- squad --------------------------------------------------------------------
 
+/// Where a handle keeps its value: its own, or one lent by a crew.
+pub(crate) enum Held<T> {
+    /// The handle owns the value and frees it with itself.
+    Own(T),
+    /// A pointer into a crew, which owns the value and outlives the handle
+    /// (see `sx_crew_squad`, `sx_crew_keeper`); null once the crew has made
+    /// it stale. Freeing the handle does nothing.
+    Lent(*mut T),
+}
+
+impl<T> Held<T> {
+    /// The value, or `None` for a stale lent handle.
+    pub(crate) fn get(&self) -> Option<&T> {
+        match self {
+            Self::Own(t) => Some(t),
+            // SAFETY: a lent pointer is null or points into its live crew
+            // (the crew nulls it before the value may move, and the C
+            // interface is single-threaded per handle, so no other reference
+            // into the crew is alive during this call).
+            Self::Lent(p) => unsafe { p.as_ref() },
+        }
+    }
+
+    /// The value, or `None` for a stale lent handle.
+    pub(crate) fn get_mut(&mut self) -> Option<&mut T> {
+        match self {
+            Self::Own(t) => Some(t),
+            // SAFETY: as in `get`.
+            Self::Lent(p) => unsafe { p.as_mut() },
+        }
+    }
+
+    pub(crate) const fn is_lent(&self) -> bool {
+        matches!(self, Self::Lent(_))
+    }
+}
+
+impl<T> std::ops::Deref for Held<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.get()
+            .expect("a lent handle used after its crew changed")
+    }
+}
+
+impl<T> std::ops::DerefMut for Held<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.get_mut()
+            .expect("a lent handle used after its crew changed")
+    }
+}
+
 /// `sx_squad`.
 pub struct SxSquad {
-    squad: Squad,
+    pub(crate) squad: Held<Squad>,
     /// Orders taken from the squad and not yet handed out (beyond a cap).
-    due: Vec<Order>,
+    pub(crate) due: Vec<Order>,
 }
 
 /// `sx_squad_config`.
@@ -666,18 +718,23 @@ pub unsafe extern "C" fn sx_squad_new(config: *const SxSquadConfig) -> *mut SxSq
         })
         .ok()?;
         Some(SxSquad {
-            squad,
+            squad: Held::Own(squad),
             due: Vec::new(),
         })
     })
 }
 
-/// `sx_squad_free`.
+/// `sx_squad_free`: does nothing for a squad lent by a crew.
 ///
 /// # Safety
-/// `squad` is null or from [`sx_squad_new`] and not used again.
+/// `squad` is null, from [`sx_squad_new`] and not used again, or lent by
+/// `sx_crew_squad`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_free(squad: *mut SxSquad) {
+    // SAFETY: null or valid (see above).
+    if unsafe { squad.as_ref() }.is_some_and(|s| s.squad.is_lent()) {
+        return;
+    }
     // SAFETY: see above.
     unsafe { destroy(squad) }
 }
@@ -685,7 +742,7 @@ pub unsafe extern "C" fn sx_squad_free(squad: *mut SxSquad) {
 /// The squad behind a handle (a place), or `ERROR_ARGUMENT`.
 macro_rules! squad {
     ($p:expr) => {
-        get!($p).squad
+        (*get!($p).squad)
     };
 }
 
@@ -1395,7 +1452,7 @@ pub unsafe extern "C" fn sx_squad_add_tactic(squad: *mut SxSquad, tactic: *mut S
 ///
 /// # Safety
 /// `tactic` and `input` are null or writable.
-unsafe fn plan_error(e: PlanError, tactic: *mut u32, input: *mut u32) -> i32 {
+pub(crate) unsafe fn plan_error(e: PlanError, tactic: *mut u32, input: *mut u32) -> i32 {
     let (t, i) = match e {
         PlanError::InputOutOfRange { tactic, input } => (tactic, input),
         PlanError::TooManySlots { tactic } => (tactic, u32::MAX),
@@ -1430,7 +1487,7 @@ pub unsafe extern "C" fn sx_squad_validate(
 ///
 /// # Safety
 /// Each list is null or holds its count.
-unsafe fn lists<'a>(
+pub(crate) unsafe fn lists<'a>(
     extra: *const i32,
     extra_count: u32,
     spots: *const SxSpot,
@@ -1529,7 +1586,8 @@ pub unsafe extern "C" fn sx_squad_orders_due(
     cap: u32,
 ) -> i32 {
     let s = get!(squad);
-    if out.is_null() && cap > 0 {
+    // A crew takes the orders of its own squad (sx_crew_tick).
+    if (out.is_null() && cap > 0) || s.squad.is_lent() {
         return ERROR_ARGUMENT;
     }
     s.squad.orders_due(now, &mut s.due);
@@ -1649,20 +1707,36 @@ pub unsafe extern "C" fn sx_squad_active_plan(
 // ---- keeper -------------------------------------------------------------------
 
 /// `sx_keeper`.
-pub struct SxKeeper(GoalKeeper);
+pub struct SxKeeper(pub(crate) Held<GoalKeeper>);
+
+/// The keeper behind a handle, or `ERROR_ARGUMENT` (also for a stale lent
+/// one).
+macro_rules! keeper {
+    ($p:expr) => {
+        match get!($p).0.get_mut() {
+            Some(k) => k,
+            None => return ERROR_ARGUMENT,
+        }
+    };
+}
 
 /// `sx_keeper_new`.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_keeper_new() -> *mut SxKeeper {
-    create(|| Some(SxKeeper(GoalKeeper::new())))
+    create(|| Some(SxKeeper(Held::Own(GoalKeeper::new()))))
 }
 
-/// `sx_keeper_free`.
+/// `sx_keeper_free`: does nothing for a keeper lent by a crew.
 ///
 /// # Safety
-/// `keeper` is null or from [`sx_keeper_new`] and not used again.
+/// `keeper` is null, from [`sx_keeper_new`] and not used again, or lent by
+/// `sx_crew_keeper`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_keeper_free(keeper: *mut SxKeeper) {
+    // SAFETY: null or valid (see above).
+    if unsafe { keeper.as_ref() }.is_some_and(|k| k.0.is_lent()) {
+        return;
+    }
     // SAFETY: see above.
     unsafe { destroy(keeper) }
 }
@@ -1677,11 +1751,11 @@ pub unsafe extern "C" fn sx_keeper_set(
     now: u32,
     goal: *const SxGoal,
 ) -> i32 {
-    let k = get!(keeper);
+    let k = keeper!(keeper);
     let Some(goal) = input!(goal).goal() else {
         return ERROR_ARGUMENT;
     };
-    k.0.set(now, goal);
+    k.set(now, goal);
     0
 }
 
@@ -1691,11 +1765,11 @@ pub unsafe extern "C" fn sx_keeper_set(
 /// `keeper` is null or valid; `out` is null or writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_keeper_goal(keeper: *mut SxKeeper, out: *mut SxGoal) -> i32 {
-    let k = get!(keeper);
+    let k = keeper!(keeper);
     if out.is_null() {
         return ERROR_ARGUMENT;
     }
-    match k.0.goal() {
+    match k.goal() {
         Some(g) => {
             // SAFETY: see above.
             unsafe { put(out, SxGoal::of(g)) };
@@ -1711,7 +1785,7 @@ pub unsafe extern "C" fn sx_keeper_goal(keeper: *mut SxKeeper, out: *mut SxGoal)
 /// `keeper` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_keeper_clear(keeper: *mut SxKeeper) -> i32 {
-    get!(keeper).0.clear();
+    keeper!(keeper).clear();
     0
 }
 
@@ -1721,7 +1795,7 @@ pub unsafe extern "C" fn sx_keeper_clear(keeper: *mut SxKeeper) -> i32 {
 /// `keeper` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_keeper_goal_postponed(keeper: *mut SxKeeper, now: u32) -> i32 {
-    get!(keeper).0.goal_postponed(now);
+    keeper!(keeper).goal_postponed(now);
     0
 }
 
@@ -1731,7 +1805,7 @@ pub unsafe extern "C" fn sx_keeper_goal_postponed(keeper: *mut SxKeeper, now: u3
 /// `keeper` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_keeper_goal_won(keeper: *mut SxKeeper, now: u32) -> i32 {
-    get!(keeper).0.goal_won(now);
+    keeper!(keeper).goal_won(now);
     0
 }
 
@@ -1741,7 +1815,7 @@ pub unsafe extern "C" fn sx_keeper_goal_won(keeper: *mut SxKeeper, now: u32) -> 
 /// `keeper` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_keeper_suspend(keeper: *mut SxKeeper) -> i32 {
-    get!(keeper).0.suspend();
+    keeper!(keeper).suspend();
     0
 }
 
@@ -1751,7 +1825,7 @@ pub unsafe extern "C" fn sx_keeper_suspend(keeper: *mut SxKeeper) -> i32 {
 /// `keeper` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_keeper_unsuspend(keeper: *mut SxKeeper, now: u32) -> i32 {
-    get!(keeper).0.unsuspend(now);
+    keeper!(keeper).unsuspend(now);
     0
 }
 
@@ -1765,7 +1839,7 @@ pub unsafe extern "C" fn sx_keeper_broken(
     now: u32,
     give_up_ticks: u32,
 ) -> i32 {
-    i32::from(get!(keeper).0.broken(now, give_up_ticks))
+    i32::from(keeper!(keeper).broken(now, give_up_ticks))
 }
 
 /// `sx_keeper_inputs`.
@@ -1785,15 +1859,14 @@ pub unsafe extern "C" fn sx_keeper_inputs(
     discipline: u32,
     out: *mut i32,
 ) -> i32 {
-    let k = get!(keeper);
+    let k = keeper!(keeper);
     let Some(metric) = metric_of(metric) else {
         return ERROR_ARGUMENT;
     };
     if out.is_null() {
         return ERROR_ARGUMENT;
     }
-    let inputs =
-        k.0.inputs(now, [x, y, z], metric, signal_given != 0, discipline);
+    let inputs = k.inputs(now, [x, y, z], metric, signal_given != 0, discipline);
     for (i, v) in inputs.iter().enumerate() {
         // SAFETY: room for 5 (see above).
         unsafe { out.add(i).write(*v) };
@@ -1829,7 +1902,10 @@ pub unsafe extern "C" fn sx_keeper_set_current(
     let (Some(k), Some(d)) = (unsafe { keeper.as_ref() }, unsafe { decider.as_mut() }) else {
         return ERROR_ARGUMENT;
     };
-    k.0.set_current(d.decider_mut(), option, discipline);
+    let Some(k) = k.0.get() else {
+        return ERROR_ARGUMENT;
+    };
+    k.set_current(d.decider_mut(), option, discipline);
     0
 }
 

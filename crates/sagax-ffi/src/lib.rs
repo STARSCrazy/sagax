@@ -1300,4 +1300,5 @@ pub mod grid;
 pub mod machine;
 #[macro_use]
 pub mod memory;
+pub mod crew;
 pub mod group;

@@ -898,7 +898,7 @@ mod squad {
     const CHEBYSHEV: u32 = 2;
 
     /// The value of `#define name value` in `sagax.h`.
-    fn define(name: &str) -> i64 {
+    pub(super) fn define(name: &str) -> i64 {
         let line = HEADER
             .lines()
             .find(|l| l.split_whitespace().take(2).eq(["#define", name]))
@@ -2305,13 +2305,14 @@ mod conventions {
     use std::ptr::null_mut;
 
     const HEADER: &str = include_str!("../include/sagax.h");
-    const SOURCES: [&str; 6] = [
+    const SOURCES: [&str; 7] = [
         include_str!("lib.rs"),
         include_str!("grid.rs"),
         include_str!("memory.rs"),
         include_str!("decide.rs"),
         include_str!("machine.rs"),
         include_str!("group.rs"),
+        include_str!("crew.rs"),
     ];
 
     /// Every `#[unsafe(no_mangle)]` function of the sources.
@@ -2529,5 +2530,563 @@ mod positions {
             assert_eq!(sx_pos_to_point(null(), &mut point), -1);
             assert_eq!(sx_pos_to_point(pos.as_ptr(), null_mut()), -1);
         }
+    }
+}
+
+mod crew {
+    //! `sx_crew_*` (C API 9): the Rust `Crew` through C.
+
+    use super::squad::define;
+    use crate::crew::*;
+    use crate::group::*;
+    use crate::memory::SxFact;
+    use crate::{ERROR_ARGUMENT, ERROR_PLAN};
+    use sagax_decide::group::{
+        Channel, Crew, CrewConfig, CrewEvent, Member, MemberState, Shape, Spot, SquadConfig,
+        TAG_COVER, TAG_HIGH, tactics,
+    };
+    use sagax_decide::memory::{Fact, Message, Metric};
+    use std::mem::{offset_of, size_of};
+    use std::ptr::{null, null_mut};
+
+    const ENEMY: u32 = 1;
+    const STEP: u32 = 2;
+    const SEED: u64 = 7;
+    const SKILL: u8 = 192;
+    const CHEBYSHEV: u32 = 2;
+    const MEMBERS: [(u32, i32, i32); 4] = [(1, 0, 0), (2, 0, 2), (3, 0, -2), (4, -3, 0)];
+
+    fn spots() -> [Spot; 4] {
+        [
+            Spot {
+                pos: [16, 0, 0],
+                tags: TAG_COVER,
+            },
+            Spot {
+                pos: [16, 2, 0],
+                tags: 0,
+            },
+            Spot {
+                pos: [20, 4, 0],
+                tags: TAG_HIGH,
+            },
+            Spot {
+                pos: [20, -4, 0],
+                tags: 0,
+            },
+        ]
+    }
+
+    fn sighting(subject: u32, x: i32, y: i32) -> Fact {
+        Fact {
+            subject,
+            kind: ENEMY,
+            pos: [x, y, 0],
+            ..Fact::default()
+        }
+    }
+
+    /// The flank scene of the Rust crew tests, in Rust.
+    fn rust_crew() -> Crew {
+        let mut crew = Crew::new(CrewConfig {
+            squad: SquadConfig {
+                members: 4,
+                memory: 8,
+                areas: 4,
+                inbox: 8,
+                metric: Metric::Chebyshev,
+                ..SquadConfig::default()
+            },
+            ..CrewConfig::default()
+        })
+        .unwrap();
+        for (id, x, y) in MEMBERS {
+            let m = Member {
+                id,
+                pos: [x, y, 0],
+                roles: 0,
+                skill: SKILL,
+                state: MemberState::Active,
+            };
+            assert!(crew.add_member(m).is_some());
+        }
+        let sq = crew.squad_mut();
+        for (id, ..) in &MEMBERS[1..] {
+            let radio = Channel::Radio {
+                base: 2,
+                per_unit: 1,
+            };
+            assert!(sq.set_channel(*id, radio));
+        }
+        assert!(sq.set_leader(1));
+        sq.set_skill(SKILL);
+        sq.set_target_kind(ENEMY);
+        sq.add_tactic(tactics::rush());
+        sq.add_tactic(tactics::formation(Shape::Line, 2));
+        sq.add_tactic(tactics::flank(3, 4));
+        assert!(sq.report(Message::enemy(2, sighting(11, 24, 10)), 0));
+        crew.observe(0, sighting(10, 20, 0));
+        crew
+    }
+
+    fn crew_config(members: u32, metric: u32, hex_grid: u32) -> SxCrewConfig {
+        let mut c = SxCrewConfig::default();
+        unsafe { assert_eq!(sx_crew_config_default(&mut c), 0) };
+        c.squad.members = members;
+        c.squad.memory = 8;
+        c.squad.areas = 4;
+        c.squad.inbox = 8;
+        c.squad.metric = metric;
+        c.hex_grid = hex_grid;
+        c
+    }
+
+    /// The same scene through `sx_crew_*`; the squad is set up through the
+    /// lent squad of the crew.
+    fn c_crew() -> *mut SxCrew {
+        unsafe {
+            let c = sx_crew_new(&crew_config(4, CHEBYSHEV, 0));
+            assert!(!c.is_null());
+            for (i, (id, x, y)) in MEMBERS.into_iter().enumerate() {
+                let m = SxMember {
+                    id,
+                    pos: [x, y, 0],
+                    skill: SKILL,
+                    ..SxMember::default()
+                };
+                assert_eq!(sx_crew_add_member(c, &m), i as i32);
+            }
+            let sq = sx_crew_squad(c);
+            assert!(!sq.is_null());
+            for (id, ..) in &MEMBERS[1..] {
+                assert_eq!(sx_squad_set_radio(sq, *id, 2, 1), 1);
+            }
+            assert_eq!(sx_squad_set_leader(sq, 1), 1);
+            assert_eq!(sx_squad_set_skill(sq, u32::from(SKILL)), 0);
+            assert_eq!(sx_squad_set_target_kind(sq, ENEMY), 0);
+            assert_eq!(sx_squad_add_rush(sq), 0);
+            assert_eq!(sx_squad_add_formation(sq, 0, 2), 1);
+            assert_eq!(sx_squad_add_flank(sq, 3, 4), 2);
+            let msg = Message::enemy(2, sighting(11, 24, 10));
+            assert_eq!(sx_squad_report(sq, &msg, 0), 1);
+            let seen: SxFact = sighting(10, 20, 0);
+            assert_eq!(sx_crew_observe(c, 0, &seen, null_mut()), 0);
+            c
+        }
+    }
+
+    /// One event as numbers: kind, member, plan, start tick, goal position.
+    type Key = (u32, u32, u32, Option<u32>, Option<[i32; 3]>);
+
+    fn kind(name: &str) -> u32 {
+        define(name) as u32
+    }
+
+    fn rust_key(e: &CrewEvent) -> Key {
+        match *e {
+            CrewEvent::Planned(p) => (kind("SX_CREW_PLANNED"), 0, p, None, None),
+            CrewEvent::Activated(p) => (kind("SX_CREW_ACTIVATED"), 0, p, None, None),
+            CrewEvent::Signal => (kind("SX_CREW_SIGNAL"), 0, 0, None, None),
+            CrewEvent::Order {
+                member,
+                goal,
+                start_at,
+            } => (kind("SX_CREW_ORDER"), member, goal.plan, start_at, goal.pos),
+            CrewEvent::Start { member } => (kind("SX_CREW_START"), member, 0, None, None),
+            CrewEvent::Arrived { member } => (kind("SX_CREW_ARRIVED"), member, 0, None, None),
+            CrewEvent::Broken { member } => (kind("SX_CREW_BROKEN"), member, 0, None, None),
+            CrewEvent::NoPlan => (kind("SX_CREW_NO_PLAN"), 0, 0, None, None),
+        }
+    }
+
+    fn c_key(e: &SxCrewEvent) -> Key {
+        (
+            e.kind,
+            e.member,
+            e.plan,
+            (e.has_start_at != 0).then_some(e.start_at),
+            (e.goal.has_pos != 0).then_some(e.goal.pos),
+        )
+    }
+
+    /// Where a member of the scripted walk goes and from which tick.
+    #[derive(Clone, Copy, Default)]
+    struct Walk {
+        to: Option<[i32; 3]>,
+        from: u32,
+    }
+
+    impl Walk {
+        fn next(&self, now: u32, at: [i32; 3]) -> Option<[i32; 3]> {
+            let to = self.to?;
+            let d = now.wrapping_sub(self.from);
+            let step = |a: i32, b: i32| a + (b - a).signum();
+            (d > 0 && d < 1 << 31 && d.is_multiple_of(STEP) && at != to)
+                .then(|| [step(at[0], to[0]), step(at[1], to[1]), at[2]])
+        }
+    }
+
+    fn walk_of(id: u32) -> usize {
+        MEMBERS.iter().position(|m| m.0 == id).unwrap()
+    }
+
+    fn note(walks: &mut [Walk; 4], now: u32, keys: &[Key]) {
+        for &(k, member, _, start_at, pos) in keys {
+            if k == kind("SX_CREW_ORDER") {
+                walks[walk_of(member)] = Walk {
+                    to: pos,
+                    from: start_at.unwrap_or(now),
+                };
+            }
+        }
+    }
+
+    fn run_rust(len: u32) -> Vec<Vec<Key>> {
+        let mut crew = rust_crew();
+        let spots = spots();
+        let mut walks = [Walk::default(); 4];
+        let mut events = Vec::new();
+        let mut all = Vec::new();
+        for t in 0..=len {
+            for (i, (id, ..)) in MEMBERS.iter().enumerate() {
+                let g = crew.squad().group();
+                let at = g.get(g.index(*id).unwrap()).unwrap().pos;
+                if let Some(p) = walks[i].next(t, at) {
+                    assert!(crew.set_pos(*id, p));
+                }
+            }
+            crew.tick(t, &[], &spots, SEED, &mut events).unwrap();
+            let keys: Vec<Key> = events.iter().map(rust_key).collect();
+            note(&mut walks, t, &keys);
+            all.push(keys);
+        }
+        all
+    }
+
+    fn member_pos(c: *mut SxCrew, index: u32) -> [i32; 3] {
+        let mut m = SxMember::default();
+        unsafe { assert_eq!(sx_squad_member_at(sx_crew_squad(c), index, &mut m), 1) };
+        m.pos
+    }
+
+    /// Moves the members of the C crew for tick `t` by the walks.
+    fn walk_c(c: *mut SxCrew, walks: &[Walk; 4], t: u32) {
+        for (i, (id, ..)) in MEMBERS.iter().enumerate() {
+            if let Some(p) = walks[i].next(t, member_pos(c, i as u32)) {
+                unsafe { assert_eq!(sx_crew_set_pos(c, *id, p.as_ptr()), 1) };
+            }
+        }
+    }
+
+    /// One tick of the C crew with room for `cap` events (null if 0):
+    /// (returned, total, keys of the written events).
+    fn tick_c(c: *mut SxCrew, t: u32, cap: u32) -> (i32, u32, Vec<Key>) {
+        let spots = spots();
+        let mut buf = vec![SxCrewEvent::default(); cap as usize];
+        let out = if cap == 0 {
+            null_mut()
+        } else {
+            buf.as_mut_ptr()
+        };
+        let mut total = u32::MAX;
+        let n = unsafe {
+            sx_crew_tick(
+                c,
+                t,
+                null(),
+                0,
+                spots.as_ptr(),
+                spots.len() as u32,
+                SEED,
+                out,
+                cap,
+                &mut total,
+            )
+        };
+        let written = usize::try_from(n).unwrap_or(0);
+        (n, total, buf[..written].iter().map(c_key).collect())
+    }
+
+    #[test]
+    fn crew_flank_scene_same_as_rust() {
+        let rust = run_rust(80);
+        let c = c_crew();
+        let mut walks = [Walk::default(); 4];
+        let mut all = Vec::new();
+        for t in 0..=80 {
+            walk_c(c, &walks, t);
+            let (n, total, keys) = tick_c(c, t, 16);
+            assert_eq!(n as u32, total, "tick {t}");
+            note(&mut walks, t, &keys);
+            all.push(keys);
+        }
+        unsafe { sx_crew_free(c) };
+        assert_eq!(all, rust);
+        let count = |name: &str| {
+            let k = kind(name);
+            rust.iter().flatten().filter(|e| e.0 == k).count()
+        };
+        assert_eq!(count("SX_CREW_ORDER"), 8);
+        assert_eq!(count("SX_CREW_ARRIVED"), 4);
+        assert_eq!(count("SX_CREW_SIGNAL"), 1);
+    }
+
+    /// Everything a game can read of the crew after a tick.
+    #[derive(Debug, PartialEq)]
+    struct State {
+        goals: Vec<Option<SxGoal>>,
+        inputs: Vec<SxMemberInputs>,
+        active: (i32, SxPlan),
+    }
+
+    fn state(c: *mut SxCrew, now: u32) -> State {
+        let mut goals = Vec::new();
+        let mut inputs = Vec::new();
+        for (id, ..) in MEMBERS {
+            let mut g = SxGoal::default();
+            let r = unsafe { sx_crew_goal(c, id, &mut g) };
+            goals.push((r == 1).then_some(g));
+            let mut row = SxMemberInputs::default();
+            unsafe { assert_eq!(sx_crew_member_inputs(c, id, now, &mut row), 1) };
+            inputs.push(row);
+        }
+        let mut plan = SxPlan::default();
+        let r = unsafe { sx_squad_active_plan(sx_crew_squad(c), &mut plan, null_mut(), 0) };
+        State {
+            goals,
+            inputs,
+            active: (r, plan),
+        }
+    }
+
+    #[test]
+    fn crew_tick_small_buffer_reports_total() {
+        // Crew `a` has room for every event and scripts the walk for both;
+        // `b` gets the same inputs but a short buffer at ticks 5 (Activated,
+        // Order, Start) and 9 (two orders, two starts).
+        let a = c_crew();
+        let b = c_crew();
+        let mut walks = [Walk::default(); 4];
+        let mut short = Vec::new();
+        for t in 0..=80 {
+            walk_c(a, &walks, t);
+            walk_c(b, &walks, t);
+            let (n, total, keys) = tick_c(a, t, 16);
+            assert_eq!(n as u32, total);
+            let (bn, btotal, bkeys) = match t {
+                5 => tick_c(b, t, 1),
+                9 => tick_c(b, t, 0),
+                _ => tick_c(b, t, 16),
+            };
+            assert_eq!(btotal, total, "tick {t}: total counts all");
+            assert_eq!(bkeys[..], keys[..bn as usize], "tick {t}: the first ones");
+            if t == 5 || t == 9 {
+                short.push((t, bn, btotal));
+            } else {
+                assert_eq!(bn, n, "tick {t}: the following ticks");
+            }
+            assert_eq!(state(b, t), state(a, t), "tick {t}: nothing else changes");
+            note(&mut walks, t, &keys);
+        }
+        assert_eq!(short, [(5, 1, 3), (9, 0, 4)]);
+        unsafe {
+            // A null total is fine; cap > 0 needs a buffer.
+            let n = sx_crew_tick(a, 81, null(), 0, null(), 0, SEED, null_mut(), 0, null_mut());
+            assert!(n >= 0);
+            let mut total = 0;
+            let bad = sx_crew_tick(a, 82, null(), 0, null(), 0, SEED, null_mut(), 1, &mut total);
+            assert_eq!(bad, ERROR_ARGUMENT);
+            sx_crew_free(a);
+            sx_crew_free(b);
+        }
+    }
+
+    #[test]
+    fn crew_lent_squad_and_keeper() {
+        let c = c_crew();
+        let mut walks = [Walk::default(); 4];
+        for t in 0..=12 {
+            walk_c(c, &walks, t);
+            let (_, _, keys) = tick_c(c, t, 16);
+            note(&mut walks, t, &keys);
+        }
+        unsafe {
+            let sq = sx_crew_squad(c);
+            assert_eq!(sq, sx_crew_squad(c), "one handle per crew");
+            let mut plan = SxPlan::default();
+            assert_eq!(sx_squad_active_plan(sq, &mut plan, null_mut(), 0), 1);
+            assert_eq!(plan.tactic, 2, "the flank");
+            // Freeing a lent squad does nothing.
+            sx_squad_free(sq);
+            assert_eq!(sx_squad_active_plan(sq, &mut plan, null_mut(), 0), 1);
+            // The crew takes the orders; on its squad this is refused.
+            let mut order = SxOrder::default();
+            assert_eq!(sx_squad_orders_due(sq, 12, &mut order, 1), ERROR_ARGUMENT);
+
+            let k = sx_crew_keeper(c, 2);
+            assert!(!k.is_null());
+            assert!(sx_crew_keeper(c, 99).is_null());
+            let mut by_keeper = SxGoal::default();
+            let mut by_crew = SxGoal::default();
+            assert_eq!(sx_keeper_goal(k, &mut by_keeper), 1);
+            assert_eq!(sx_crew_goal(c, 2, &mut by_crew), 1);
+            assert_eq!(by_keeper, by_crew);
+            // Two keepers at once; freeing a lent one does nothing.
+            let k3 = sx_crew_keeper(c, 3);
+            sx_keeper_free(k3);
+            assert_eq!(sx_keeper_goal(k3, &mut by_keeper), 1);
+            assert_eq!(by_keeper.plan, by_crew.plan);
+            assert_eq!(sx_keeper_goal(k, &mut by_keeper), 1);
+            assert_eq!(by_keeper, by_crew);
+            // Postponing through the lent keeper reaches the crew's keeper.
+            assert_eq!(sx_keeper_goal_postponed(k, 12), 0);
+            assert_eq!(sx_keeper_broken(k, 12 + 1000, 1000), 1);
+            // The next crew call makes lent keepers stale: refused, never
+            // another member's keeper.
+            assert_eq!(sx_crew_member_chose(c, 2, 13, 1), 1);
+            assert_eq!(sx_keeper_goal(k, &mut by_keeper), ERROR_ARGUMENT);
+            assert_eq!(sx_keeper_clear(k3), ERROR_ARGUMENT);
+            let k = sx_crew_keeper(c, 2);
+            assert_eq!(sx_keeper_broken(k, 12 + 1000, 1000), 0, "goal won at 13");
+            // The squad stays lent until the crew is freed.
+            assert_eq!(sx_squad_member_count(sq), 4);
+            sx_crew_free(c);
+        }
+    }
+
+    #[test]
+    fn crew_null_and_zero() {
+        unsafe {
+            assert!(sx_crew_new(null()).is_null());
+            let zero = crew_config(0, CHEBYSHEV, 0);
+            assert!(sx_crew_new(&zero).is_null(), "zero capacity");
+            let mut zero_inbox = crew_config(4, CHEBYSHEV, 0);
+            zero_inbox.squad.inbox = 0;
+            assert!(sx_crew_new(&zero_inbox).is_null());
+            assert!(sx_crew_new(&crew_config(4, 9, 0)).is_null(), "metric");
+            assert!(sx_crew_new(&crew_config(4, 0, 1)).is_null(), "hex, Euclid");
+            assert!(sx_crew_new(&crew_config(4, 3, 5)).is_null(), "grid");
+            let hex = sx_crew_new(&crew_config(4, 3, 1));
+            assert!(!hex.is_null());
+            sx_crew_free(hex);
+            sx_crew_free(null_mut());
+            assert_eq!(sx_crew_config_default(null_mut()), ERROR_ARGUMENT);
+
+            let n = null_mut::<SxCrew>();
+            let mut g = SxGoal::default();
+            let mut row = SxMemberInputs::default();
+            let mut total = 0;
+            let m = SxMember::default();
+            let centre = [0, 0, 0];
+            assert_eq!(sx_crew_add_member(n, &m), ERROR_ARGUMENT);
+            assert_eq!(sx_crew_remove_member(n, 1), ERROR_ARGUMENT);
+            assert_eq!(sx_crew_suspend(n, 1), ERROR_ARGUMENT);
+            assert_eq!(sx_crew_set_gone(n, 1), ERROR_ARGUMENT);
+            assert_eq!(sx_crew_reinstate(n, 1, 0), ERROR_ARGUMENT);
+            assert_eq!(sx_crew_set_pos(n, 1, centre.as_ptr()), ERROR_ARGUMENT);
+            let fact = Fact::default();
+            assert_eq!(sx_crew_observe(n, 0, &fact, null_mut()), ERROR_ARGUMENT);
+            let r = sx_crew_report_danger(n, 1, centre.as_ptr(), null(), 0);
+            assert_eq!(r, ERROR_ARGUMENT);
+            let r = sx_crew_tick(n, 0, null(), 0, null(), 0, 0, null_mut(), 0, &mut total);
+            assert_eq!(r, ERROR_ARGUMENT);
+            assert_eq!(sx_crew_member_inputs(n, 1, 0, &mut row), ERROR_ARGUMENT);
+            assert_eq!(sx_crew_member_chose(n, 1, 0, 1), ERROR_ARGUMENT);
+            assert_eq!(sx_crew_goal(n, 1, &mut g), ERROR_ARGUMENT);
+            assert!(sx_crew_squad(n).is_null());
+            assert!(sx_crew_keeper(n, 1).is_null());
+
+            // Unknown ids, null required pointers, a bad member.
+            let c = sx_crew_new(&crew_config(2, CHEBYSHEV, 0));
+            assert_eq!(sx_crew_add_member(c, null()), ERROR_ARGUMENT);
+            let bad = SxMember {
+                state: 7,
+                ..SxMember::default()
+            };
+            assert_eq!(sx_crew_add_member(c, &bad), ERROR_ARGUMENT);
+            assert_eq!(sx_crew_add_member(c, &m), 0);
+            assert_eq!(sx_crew_add_member(c, &m), ERROR_ARGUMENT, "id taken");
+            assert_eq!(sx_crew_remove_member(c, 9), 0);
+            assert_eq!(sx_crew_suspend(c, 9), 0);
+            assert_eq!(sx_crew_set_gone(c, 9), 0);
+            assert_eq!(sx_crew_reinstate(c, 9, 0), 0);
+            assert_eq!(sx_crew_set_pos(c, 9, centre.as_ptr()), 0);
+            assert_eq!(sx_crew_set_pos(c, 0, null()), ERROR_ARGUMENT);
+            assert_eq!(sx_crew_member_inputs(c, 9, 0, &mut row), 0);
+            assert_eq!(sx_crew_member_inputs(c, 0, 0, null_mut()), ERROR_ARGUMENT);
+            assert_eq!(sx_crew_member_chose(c, 9, 0, 1), 0);
+            assert_eq!(sx_crew_goal(c, 9, &mut g), 0);
+            assert_eq!(sx_crew_goal(c, 0, &mut g), 0, "no goal yet");
+            assert_eq!(sx_crew_goal(c, 0, null_mut()), ERROR_ARGUMENT);
+            assert_eq!(sx_crew_observe(c, 0, null(), null_mut()), ERROR_ARGUMENT);
+            let r = sx_crew_report_danger(c, 0, null(), null(), 0);
+            assert_eq!(r, ERROR_ARGUMENT);
+            let r = sx_crew_report_danger(c, 0, centre.as_ptr(), null(), 0);
+            assert_eq!(r, 1);
+            assert_eq!(sx_crew_member_inputs(c, 0, 0, &mut row), 1);
+            assert_eq!((row.has_goal, row.dist), (0, -1));
+            sx_crew_free(c);
+        }
+    }
+
+    #[test]
+    fn crew_plan_error_comes_through() {
+        unsafe {
+            let c = sx_crew_new(&crew_config(2, CHEBYSHEV, 0));
+            assert_eq!(sx_crew_add_member(c, &SxMember::default()), 0);
+            let sq = sx_crew_squad(c);
+            let t = sx_tactic_new(65535, 0, 0);
+            let cons = crate::decide::SxConsideration {
+                input: 99,
+                ..Default::default()
+            };
+            assert_eq!(sx_tactic_add_consideration(t, &cons), 0);
+            assert_eq!(sx_squad_add_tactic(sq, t), 0);
+            let mut total = 0;
+            let r = sx_crew_tick(c, 0, null(), 0, null(), 0, 0, null_mut(), 0, &mut total);
+            assert_eq!(r, ERROR_PLAN);
+            sx_crew_free(c);
+        }
+    }
+
+    #[test]
+    fn crew_layout() {
+        assert_eq!(size_of::<SxCrewEvent>(), 88);
+        assert_eq!(offset_of!(SxCrewEvent, kind), 0);
+        assert_eq!(offset_of!(SxCrewEvent, member), 4);
+        assert_eq!(offset_of!(SxCrewEvent, plan), 8);
+        assert_eq!(offset_of!(SxCrewEvent, start_at), 12);
+        assert_eq!(offset_of!(SxCrewEvent, goal), 16);
+        assert_eq!(offset_of!(SxCrewEvent, has_start_at), 84);
+        assert_eq!(size_of::<SxCrewConfig>(), 32);
+        assert_eq!(offset_of!(SxCrewConfig, squad), 0);
+        assert_eq!(offset_of!(SxCrewConfig, arrive_radius), 24);
+        assert_eq!(offset_of!(SxCrewConfig, hex_grid), 28);
+        assert_eq!(size_of::<SxMemberInputs>(), 20);
+        let names = [
+            "SX_CREW_PLANNED",
+            "SX_CREW_ACTIVATED",
+            "SX_CREW_SIGNAL",
+            "SX_CREW_ORDER",
+            "SX_CREW_START",
+            "SX_CREW_ARRIVED",
+            "SX_CREW_BROKEN",
+            "SX_CREW_NO_PLAN",
+        ];
+        for (i, name) in names.iter().enumerate() {
+            assert_eq!(define(name), i as i64 + 1, "{name}");
+        }
+        let mut c = SxCrewConfig {
+            arrive_radius: 9,
+            hex_grid: 9,
+            ..SxCrewConfig::default()
+        };
+        let mut squad = SxSquadConfig::default();
+        unsafe {
+            assert_eq!(sx_crew_config_default(&mut c), 0);
+            assert_eq!(sx_squad_config_default(&mut squad), 0);
+        }
+        assert_eq!(c.squad, squad);
+        assert_eq!((c.arrive_radius, c.hex_grid), (0, 0));
     }
 }

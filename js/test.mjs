@@ -3,7 +3,7 @@
 
 import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
-import { KEEPER, MEMORY, ONE, Report, SQUAD, loadSagax, HEX, FORMATION, Progress, Interval, Alertness } from './sagax.mjs';
+import { KEEPER, MEMORY, ONE, Report, SQUAD, loadSagax, HEX, FORMATION, Progress, Interval, Alertness, PlanError } from './sagax.mjs';
 
 const wasm = await readFile(new URL('../target/wasm32-unknown-unknown/release/sagax_wasm.wasm', import.meta.url));
 console.log(`wasm size ${(wasm.length / 1024).toFixed(0)} KB`);
@@ -1787,6 +1787,193 @@ test('AI blocks take both shapes', () => {
   assert.equal(a.contains({ x: 5, y: 5 }), 0);
   assert.throws(() => k.learn(0, { subject: 5, kind: 1, pos: { x: 1 } }), RangeError);
   assert.throws(() => k.learn(0, { subject: 5, kind: 1, pos: [1, 2] }), RangeError);
+});
+
+/** The flank scene of the crew tests (Rust and C) as a JS crew. */
+function flankCrew() {
+  const crew = lib.crew({ squad: { members: 4, memory: 8, areas: 4, inbox: 8, metric: 'chebyshev' } });
+  const members = [[1, 0, 0], [2, 0, 2], [3, 0, -2], [4, -3, 0]];
+  members.forEach(([id, x, y], i) => assert.equal(crew.addMember({ id, pos: [x, y, 0], skill: 192 }), i));
+  const sq = crew.squad();
+  for (const id of [2, 3, 4]) assert.equal(sq.setRadio(id, 2, 1), true);
+  assert.equal(sq.setLeader(1), true);
+  sq.setSkill(192);
+  sq.setTargetKind(ENEMY);
+  sq.addTactic(lib.tactics.rush());
+  sq.addTactic(lib.tactics.formation('line', 2));
+  sq.addTactic(lib.tactics.flank(3, 4));
+  assert.equal(sq.report(Report.enemy(2, { subject: 11, pos: [24, 10, 0], seenAt: 0 }), 0), true);
+  assert.equal(crew.observe(0, enemy(10, 20, 0)), null);
+  return crew;
+}
+
+const FLANK_SPOTS = [[16, 0, SQUAD.tagCover], [16, 2, 0], [20, 4, SQUAD.tagHigh], [20, -4, 0]].map(([x, y, tags]) => ({ pos: [x, y, 0], tags }));
+
+/** Runs the flank scene for ticks 0..len: each member walks one cell per 2 ticks toward its order from its start. */
+function runFlank(crew, len, each = () => {}) {
+  const walks = new Map();
+  const all = [];
+  for (let t = 0; t <= len; t++) {
+    crew.squad().members().forEach((m) => {
+      const w = walks.get(m.id);
+      if (!w) return;
+      const d = t - w.from;
+      const [x, y, z] = m.pos;
+      if (d > 0 && d % 2 === 0 && (x !== w.to[0] || y !== w.to[1])) {
+        assert.equal(crew.setPos(m.id, [x + Math.sign(w.to[0] - x), y + Math.sign(w.to[1] - y), z]), true);
+      }
+    });
+    const events = crew.tick(t, { spots: FLANK_SPOTS, seed: 7 });
+    for (const e of events) {
+      if (e.kind === 'order') walks.set(e.member, { to: e.goal.pos, from: e.startAt ?? t });
+      all.push([t, e]);
+    }
+    each(t, events);
+  }
+  return all;
+}
+
+test('crew: flank scene', () => {
+  const crew = flankCrew();
+  const all = runFlank(crew, 80);
+  // The list of the Rust and C crew (crew_flank_scene_same_as_rust): tick, kind, member.
+  const want = [
+    [0, 'planned'], [5, 'activated'], [5, 'order', 1], [5, 'start', 1],
+    [9, 'order', 2], [9, 'order', 3], [9, 'start', 2], [9, 'start', 3], [10, 'order', 4], [10, 'start', 4],
+    [37, 'arrived', 1], [48, 'arrived', 4], [49, 'arrived', 2], [49, 'arrived', 3],
+    [55, 'signal'], [55, 'order', 1], [59, 'order', 4], [61, 'order', 2], [61, 'order', 3],
+    [61, 'start', 1], [61, 'start', 2], [61, 'start', 3], [61, 'start', 4],
+  ];
+  assert.deepEqual(all.map(([t, e]) => (e.member === undefined ? [t, e.kind] : [t, e.kind, e.member])), want);
+  const [, planned] = all[0];
+  assert.deepEqual(planned, { kind: 'planned', plan: planned.plan });
+  const [, order] = all[2];
+  assert.deepEqual(Object.keys(order).sort(), ['goal', 'kind', 'member', 'plan', 'startAt']);
+  assert.equal(order.plan, planned.plan);
+  assert.equal(order.goal.plan, planned.plan);
+  assert.deepEqual(order.goal.pos, [16, 0, 0]);
+  assert.equal(order.startAt, 5);
+  const second = all.find(([t, e]) => t === 55 && e.kind === 'order')[1];
+  assert.equal(second.startAt, 61);
+  assert.deepEqual(crew.goal(1), { ...second.goal, member: null });
+  assert.equal(crew.goal(99), null);
+  // The member's own row: the keeper's five columns.
+  const inputs = crew.memberInputs(1, 81);
+  assert.deepEqual(inputs.row, [inputs.hasGoal, inputs.dist, inputs.age, inputs.signal, inputs.discipline]);
+  assert.equal(inputs.hasGoal, 1);
+  assert.equal(inputs.signal, 1);
+  assert.equal(inputs.discipline, lib.holdBonusFor(null, 192));
+  assert.equal(crew.memberInputs(99, 81), null);
+  assert.deepEqual(crew.squad().activePlan().goals.map((g) => g.member), [1, 2, 3, 4]);
+  crew.free();
+});
+
+test('crew: members, choices, reports, errors', () => {
+  const crew = flankCrew();
+  runFlank(crew, 12);
+  // Postponing: broken after give-up ticks of the skill, once.
+  const giveUp = lib.giveUpTicksFor(null, 192);
+  assert.equal(crew.memberChose(2, 13, false), true);
+  assert.equal(crew.memberChose(99, 13, false), false);
+  const broken = [];
+  for (let t = 13; t <= 13 + giveUp + 2; t++) {
+    for (const e of crew.tick(t, { spots: FLANK_SPOTS, seed: 7 })) if (e.kind === 'broken') broken.push([t, e.member]);
+  }
+  assert.deepEqual(broken, [[13 + giveUp, 2]]);
+  assert.equal(crew.suspend(3), true);
+  assert.equal(crew.reinstate(3, 40), true);
+  assert.equal(crew.setGone(4), true);
+  assert.equal(crew.suspend(99), false);
+  assert.equal(crew.reportDanger({ sender: 2, centre: [5, 5, 0] }, 41), true);
+  assert.equal(crew.removeMember(3), true);
+  assert.equal(crew.removeMember(3), false);
+  assert.equal(crew.addMember({ id: 1, pos: [0, 0, 0] }), null, 'id taken');
+  assert.throws(() => crew.addMember({ id: 8, pos: [0, 0, 0], state: 'lost' }), RangeError);
+  assert.throws(() => crew.tick(50, { extra: [1.5] }), RangeError);
+  // The crew takes its squad's orders itself.
+  assert.throws(() => crew.squad().ordersDue(50), TypeError);
+  crew.free();
+  assert.throws(() => crew.tick(51), /after free/);
+  crew.free();
+  // Config checks.
+  assert.throws(() => lib.crew({ squad: { members: 0 } }), RangeError);
+  assert.throws(() => lib.crew({ squad: { metric: 'euclid' }, hex: 'oddR' }), RangeError);
+  assert.throws(() => lib.crew({ hex: 'square' }), RangeError);
+  assert.throws(() => lib.crew({ arriveRadius: -1 }), RangeError);
+  // A tactic reading a column beyond the row: PlanError from tick.
+  const bad = lib.crew({ squad: { members: 2 } });
+  bad.addMember({ id: 1, pos: [0, 0, 0] });
+  const t = lib.tactic({ needsTarget: false });
+  t.addConsideration({ input: 99, curve: 'linear', min: 0, max: 1 });
+  bad.squad().addTactic(t);
+  assert.throws(() => bad.tick(0), PlanError);
+  bad.free();
+});
+
+test('crew: lent handles throw when stale', () => {
+  const crew = flankCrew();
+  runFlank(crew, 12);
+  const k2 = crew.keeper(2);
+  const k3 = crew.keeper(3);
+  assert.equal(crew.keeper(99), null);
+  assert.deepEqual(k2.goal(), crew.goal(2), 'two keepers at once, reads in between');
+  assert.equal(crew.memberInputs(2, 12).hasGoal, 1);
+  k3.goalPostponed(12);
+  assert.equal(k3.broken(1012, 1000), true);
+  k2.free(); // lent: does nothing
+  assert.equal(k2.goal().plan, crew.goal(2).plan);
+  crew.tick(13, { spots: FLANK_SPOTS, seed: 7 });
+  assert.throws(() => k2.goal(), /stale/);
+  assert.throws(() => k3.broken(1012, 1000), /stale/);
+  assert.equal(crew.keeper(3).broken(1012, 1000), true, 'the postpone reached the crew');
+  crew.memberChose(3, 14, true);
+  const sq = crew.squad();
+  assert.equal(sq, crew.squad());
+  sq.free(); // lent: does nothing
+  assert.equal(sq.members().length, 4);
+  assert.equal(sq.knowledge().get(10, ENEMY).pos[0], 20, 'the lent squad lends its memory too');
+  const k = crew.keeper(1);
+  crew.free();
+  assert.throws(() => sq.activePlan(), /after free/);
+  assert.throws(() => sq.knowledge().count(), /after free/);
+  assert.throws(() => k.goal(), /after free/);
+});
+
+test('crew: hex positions in and out', () => {
+  const crew = lib.crew({ squad: { members: 4, memory: 8, areas: 4, inbox: 8, metric: 'hex' }, hex: 'oddR' });
+  for (const [id, x, y] of [[1, 0, 1], [2, 1, 3], [3, 1, -1], [4, -2, 1]]) {
+    crew.addMember({ id, pos: [0, 0, 0], skill: 192 });
+    assert.equal(crew.setPos(id, { x, y }), true);
+  }
+  const sq = crew.squad();
+  for (const id of [2, 3, 4]) sq.setRadio(id, 2, 1);
+  sq.setLeader(1);
+  sq.setSkill(192);
+  sq.setTargetKind(ENEMY);
+  sq.setSpotRadius(40);
+  sq.addTactic(lib.tactics.flank(3, 4));
+  crew.observe(0, enemy(10, 15, 1));
+  // Spots on odd rows only, three cells apart: a lost or doubled shift misses them.
+  const spots = [];
+  for (let y = -13; y <= 15; y += 2) for (let x = -3; x <= 33; x += 3) spots.push({ pos: [x, y, 0], tags: 0 });
+  const isSpot = (p) => spots.some((s) => s.pos[0] === p[0] && s.pos[1] === p[1] && s.pos[2] === p[2]);
+  let checked = 0;
+  for (let t = 0; t <= 30; t++) {
+    for (const e of crew.tick(t, { spots, seed: 7 })) {
+      if (e.kind !== 'order') continue;
+      assert.deepEqual(crew.goal(e.member), { ...e.goal, member: null });
+      for (const [p, unchecked] of [[e.goal.pos, e.goal.unchecked], [e.goal.thenPos, e.goal.thenUnchecked]]) {
+        if (p === null) continue;
+        assert.equal(unchecked, false);
+        assert.ok(isSpot(p), `${p} is a given spot`);
+        checked++;
+      }
+    }
+  }
+  assert.ok(checked >= 8, `${checked} positions`);
+  // The squad itself holds axial positions.
+  assert.deepEqual(sq.members()[0].pos, lib.hex.toAxial([0, 1, 0], 'oddR'));
+  crew.free();
 });
 
 console.log(`${passed} tests passed`);

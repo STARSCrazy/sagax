@@ -829,11 +829,16 @@ function messagesOf(all, n) {
   return list;
 }
 
-/** A table a squad lends out (its own knowledge or areas): it lives and dies with the squad. */
+/**
+ * A handle an owner lends out (a squad its own knowledge or areas, a crew
+ * its squad and keepers): it lives and dies with the owner. With epoch set,
+ * it also goes stale once the owner's epoch moves on (a crew's keepers).
+ */
 class Lent {
-  constructor(handle, owner) {
+  constructor(handle, owner, epoch = null) {
     this.handle = handle;
     this.owner = owner;
+    this.epoch = epoch;
   }
 }
 
@@ -843,16 +848,23 @@ class Lent {
  * freed by its owner.
  */
 class Table {
-  constructor(x, prefix, handle, owner = null) {
+  constructor(x, prefix, handle, owner = null, epoch = null) {
     if (!handle) throw new RangeError('Sagax: capacity must be at least 1');
     this.x = x;
     this.prefix = prefix;
     this.handle = handle;
     this.owner = owner;
+    this.lentAt = epoch;
   }
 
   get h() {
-    if (!this.handle || (this.owner && !this.owner.handle)) throw new Error('Sagax: used after free()');
+    if (!this.handle) throw new Error('Sagax: used after free()');
+    if (this.owner) {
+      void this.owner.h; // throws after the owner (or its owner) was freed
+      if (this.lentAt !== null && this.owner.epoch !== this.lentAt) {
+        throw new Error('Sagax: this lent keeper is stale: the crew changed since crew.keeper(); ask for it again');
+      }
+    }
     return this.handle;
   }
 
@@ -1848,24 +1860,33 @@ export class Tactic extends Table {
  * metric 'euclid'. The old keys groupCap, memoryCap, areaCap and inboxCap
  * still work (0.9 only); an old and a new key for the same field is a TypeError.
  */
+/** The numbers sx_squad_new takes for a squad config (see Squad). */
+function squadConfigOf(config) {
+  const field = (name, old, fallback) => {
+    if (config[name] !== undefined && config[old] !== undefined) {
+      throw new TypeError(`Sagax: squad config has both ${name} and its old name ${old}`);
+    }
+    return capacityOf(config[name] ?? config[old] ?? fallback);
+  };
+  const members = field('members', 'groupCap', 8);
+  const memory = field('memory', 'memoryCap', 32);
+  const areas = field('areas', 'areaCap', 8);
+  const inbox = field('inbox', 'inboxCap', 16);
+  const dangers = capacityOf(config.dangers ?? 8);
+  const m = choice(METRIC, config.metric ?? 'euclid', 'metric');
+  return [members, memory, areas, inbox, dangers, m];
+}
+
 export class Squad extends Table {
   #knowledge = null;
   #areas = null;
 
   constructor(x, config = {}) {
-    const field = (name, old, fallback) => {
-      if (config[name] !== undefined && config[old] !== undefined) {
-        throw new TypeError(`Sagax: squad config has both ${name} and its old name ${old}`);
-      }
-      return capacityOf(config[name] ?? config[old] ?? fallback);
-    };
-    const members = field('members', 'groupCap', 8);
-    const memory = field('memory', 'memoryCap', 32);
-    const areas = field('areas', 'areaCap', 8);
-    const inbox = field('inbox', 'inboxCap', 16);
-    const dangers = capacityOf(config.dangers ?? 8);
-    const m = choice(METRIC, config.metric ?? 'euclid', 'metric');
-    super(x, 'sx_squad', x.sx_squad_new(members, memory, areas, inbox, dangers, m));
+    if (config instanceof Lent) {
+      super(x, 'sx_squad', config.handle, config.owner);
+      return;
+    }
+    super(x, 'sx_squad', x.sx_squad_new(...squadConfigOf(config)));
   }
 
   #out(count) {
@@ -2135,9 +2156,11 @@ export class Squad extends Table {
     return { status: SQUAD_STATUS[r], plan: r === 1 ? u32(this.#out(1)[0]) : null };
   }
 
-  /** Takes (at most max of) the orders whose arrival time has come, in the order they were sent. */
+  /** Takes (at most max of) the orders whose arrival time has come, in the order they were sent. Not on a crew's squad (crew.tick takes them). */
   ordersDue(now, max = ALL) {
+    if (this.owner instanceof Crew) throw new TypeError("Sagax: a crew takes its squad's orders itself (crew.tick)");
     const n = this.x.sx_squad_orders_due(this.h, timeOf(now), u32Of(max, 'max'));
+    if (n < 0) throw new RangeError('Sagax: bad squad arguments');
     return ordersOf(this.#out(n * ORDER_SIZE), n);
   }
 
@@ -2187,7 +2210,11 @@ export class Squad extends Table {
  * While suspended the clock does not run.
  */
 export class Keeper extends Table {
-  constructor(x) {
+  constructor(x, lent = null) {
+    if (lent instanceof Lent) {
+      super(x, 'sx_keeper', lent.handle, lent.owner, lent.epoch);
+      return;
+    }
     super(x, 'sx_keeper', x.sx_keeper_new());
   }
 
@@ -2285,6 +2312,197 @@ export class Keeper extends Table {
   }
 }
 
+const CREW_KINDS = [null, 'planned', 'activated', 'signal', 'order', 'start', 'arrived', 'broken', 'noPlan'];
+const CREW_EVENT_SIZE = 5 + GOAL_SIZE;
+
+function crewEventOf(r) {
+  const kind = CREW_KINDS[r[0]];
+  switch (kind) {
+    case 'planned':
+    case 'activated':
+      return { kind, plan: u32(r[2]) };
+    case 'order': {
+      const member = u32(r[1]);
+      return { kind, member, plan: u32(r[2]), goal: goalOf(r.slice(5), member), startAt: r[4] ? u32(r[3]) : null };
+    }
+    case 'start':
+    case 'arrived':
+    case 'broken':
+      return { kind, member: u32(r[1]) };
+    default:
+      return { kind };
+  }
+}
+
+/**
+ * A squad with one goal keeper per member: the whole group loop in one call
+ * per tick. The crew moves nobody; it says what happened.
+ *
+ *   const crew = lib.crew({ squad: { members: 4, metric: 'chebyshev' } });
+ *   crew.addMember({ id: 1, pos: [0, 0, 0] }); ...
+ *   crew.squad().setLeader(1); crew.squad().addTactic(lib.tactics.flank(3, 4));
+ *   // every tick:
+ *   crew.setPos(id, pos);                       // where each member is
+ *   for (const e of crew.tick(now, { spots, seed })) ...  // {kind, plan?, member?, goal?, startAt?}
+ *   const { row } = crew.memberInputs(id, now);  // the member's decider row starts with it
+ *   crew.memberChose(id, now, goalWon);          // what it decided
+ *
+ * Event kinds, in the order of the tick's steps: 'planned' (plan), 'activated'
+ * (plan; members without a goal in it have none now), 'signal', 'order'
+ * (member, plan, goal, startAt: the tick it starts or null on the signal),
+ * 'start', 'arrived' (the member reported its arrival at its first spot),
+ * 'broken' (it gave its goal up and reported it), 'noPlan'.
+ *
+ * Channels, tactics, skill and leader go on crew.squad() (it lives until
+ * crew.free(); its ordersDue throws: the crew takes the orders). crew.keeper(id)
+ * is the member's keeper until the next call that changes the crew (anything
+ * but memberInputs, goal, squad and keeper); after that it throws. With hex
+ * (a layout as for lib.hex, needs squad metric 'hex') the crew's own calls
+ * take and return offset positions; the squad and keepers hold axial ones.
+ */
+export class Crew extends Table {
+  #squad = null;
+
+  constructor(x, { squad = {}, arriveRadius = 0, hex = null } = {}) {
+    const config = squadConfigOf(squad);
+    const layout = hex === null ? 0 : layoutOf(hex);
+    if (layout !== 0 && config[5] !== METRIC.hex) throw new RangeError("Sagax: a hex crew needs squad metric 'hex'");
+    super(x, 'sx_crew', x.sx_crew_new(...config, u32Of(arriveRadius, 'arriveRadius'), layout));
+    /** Moves on with every call that changes the crew (lent keepers go stale). */
+    this.epoch = 0;
+  }
+
+  /** The handle for a call that changes the crew. */
+  get #changed() {
+    const h = this.h;
+    this.epoch++;
+    return h;
+  }
+
+  #out(count) {
+    return takeInts(this.x, this.x.sx_crew_out(this.h), count);
+  }
+
+  /** Adds a member {id, pos, roles = 0, skill = 0, state = 'active'} with an empty keeper. Returns its index, or null if the group is full or the id is there. */
+  addMember(member) {
+    const values = memberValues(member);
+    const h = this.#changed;
+    putScratch(this.x, values);
+    const r = this.x.sx_crew_add_member(h);
+    if (r === -1) throw new RangeError('Sagax: bad member');
+    return r >= 0 ? r : null;
+  }
+
+  /** Removes a member and its keeper. False if unknown. */
+  removeMember(id) {
+    return this.x.sx_crew_remove_member(this.#changed, u32Of(id, 'id')) === 1;
+  }
+
+  /** Where the member is now. False if unknown. */
+  setPos(id, pos) {
+    const [px, py, pz] = posOf(pos);
+    return this.x.sx_crew_set_pos(this.#changed, u32Of(id, 'id'), px, py, pz) === 1;
+  }
+
+  /** Out of play: suspended in the group, its keeper paused (never broken). False if unknown. */
+  suspend(id) {
+    return this.x.sx_crew_suspend(this.#changed, u32Of(id, 'id')) === 1;
+  }
+
+  /** Back in play (as Squad.reinstate); its keeper's clock restarts at now. False if unknown. */
+  reinstate(id, now) {
+    const i = u32Of(id, 'id');
+    return this.x.sx_crew_reinstate(this.#changed, i, timeOf(now)) === 1;
+  }
+
+  /** Dead or lost (as Squad.setGone). False if unknown. */
+  setGone(id) {
+    return this.x.sx_crew_set_gone(this.#changed, u32Of(id, 'id')) === 1;
+  }
+
+  /** The leader's own sighting (as Squad.observe). Returns the evicted fact, or null. */
+  observe(now, fact) {
+    const t = timeOf(now);
+    const values = factValues(fact);
+    const h = this.#changed;
+    putScratch(this.x, values);
+    return this.x.sx_crew_observe(h, t) === 1 ? factOf(this.#out(FACT_SIZE).map(u32)) : null;
+  }
+
+  /** A danger report on its way to the leader (as Squad.reportDanger). False when the danger queue is full. */
+  reportDanger({ sender, centre, shooter = null }, arriveAt) {
+    const s = u32Of(sender, 'sender');
+    const [cx, cy, cz] = posOf(centre, 'centre');
+    const [sx, sy, sz] = shooter === null ? [0, 0, 0] : posOf(shooter, 'shooter');
+    const t = timeOf(arriveAt);
+    return this.x.sx_crew_report_danger(this.#changed, s, cx, cy, cz, shooter === null ? 0 : 1, sx, sy, sz, t) === 1;
+  }
+
+  /**
+   * Runs the group at now with the options of Squad.check ({extra, spots,
+   * seed}) and returns what happened (see the class). Throws PlanError if a
+   * tactic reads a column the rows do not have.
+   */
+  tick(now, { extra = [], spots = [], seed = 0 } = {}) {
+    const t = timeOf(now);
+    const [low, high] = seedOf(seed);
+    const values = [
+      ...extra.map((v) => i32Of(v, 'extra')),
+      ...spots.flatMap((s) => [...posOf(s.pos, 'spot'), i32(u32Of(s.tags ?? 0, 'tags'))]),
+    ];
+    const h = this.#changed;
+    putScratch(this.x, values);
+    const n = this.x.sx_crew_tick(h, t, extra.length, spots.length, low, high);
+    if (n === ERROR_PLAN) {
+      const [tactic, input] = this.#out(2);
+      throw new PlanError(tactic, u32(input));
+    }
+    if (n < 0) throw new RangeError('Sagax: bad crew arguments');
+    const all = this.#out(n * CREW_EVENT_SIZE);
+    const events = [];
+    for (let i = 0; i < n; i++) events.push(crewEventOf(all.slice(i * CREW_EVENT_SIZE, (i + 1) * CREW_EVENT_SIZE)));
+    return events;
+  }
+
+  /**
+   * The member's decider inputs at now: {hasGoal, dist, age, signal,
+   * discipline} (the KEEPER columns, numbers as in Keeper.inputs) and row,
+   * the same five as an array (a member's decider row starts with it); null
+   * if the id is unknown.
+   */
+  memberInputs(id, now) {
+    const i = u32Of(id, 'id');
+    if (this.x.sx_crew_member_inputs(this.h, i, timeOf(now)) !== 1) return null;
+    const row = this.#out(5);
+    const [hasGoal, dist, age, signal, discipline] = row;
+    return { hasGoal, dist, age, signal, discipline, row };
+  }
+
+  /** What the member chose at now: its goal (goalWon true: the postpone clock is reset) or something else (the goal is postponed). False if unknown. */
+  memberChose(id, now, goalWon) {
+    const i = u32Of(id, 'id');
+    const t = timeOf(now);
+    return this.x.sx_crew_member_chose(this.#changed, i, t, goalWon ? 1 : 0) === 1;
+  }
+
+  /** The member's current goal (member null), or null. */
+  goal(id) {
+    return this.x.sx_crew_goal(this.h, u32Of(id, 'id')) === 1 ? goalOf(this.#out(GOAL_SIZE)) : null;
+  }
+
+  /** The crew's own squad (a Squad; freed with the crew). */
+  squad() {
+    this.#squad ??= new Squad(this.x, new Lent(this.x.sx_crew_squad(this.h), this));
+    return this.#squad;
+  }
+
+  /** The member's keeper (a Keeper) until the next call that changes the crew, or null if the id is unknown. */
+  keeper(id) {
+    const k = this.x.sx_crew_keeper(this.h, u32Of(id, 'id'));
+    return k ? new Keeper(this.x, new Lent(k, this, this.epoch)) : null;
+  }
+}
+
 /** One number of a skill table at skill's level (which: see sx_skill_for); table null: the default. */
 function skillEntry(x, which, table, skill) {
   const s = u8Of(skill, 'skill');
@@ -2306,6 +2524,10 @@ Object.assign(Sagax.prototype, {
   /** A member's goal keeper; see Keeper. */
   keeper() {
     return new Keeper(this.x);
+  },
+  /** A squad with one keeper per member {squad: {...as for squad}, arriveRadius = 0, hex = null}; see Crew. */
+  crew(options) {
+    return new Crew(this.x, options);
   },
   /** An empty tactic {weight = 1 (1.0), minSkill = 0 (0 .. 255), needsTarget = true}; see Tactic. */
   tactic({ weight = 1, minSkill = 0, needsTarget = true } = {}) {

@@ -1503,18 +1503,35 @@ fn area_of(r: &[u32; AREA_SIZE]) -> Area {
     }
 }
 
-/// Where a memory handle keeps its table: its own, or one lent by a squad
-/// (the squad's own memory, see [`sx_squad_knowledge`]).
+/// Where a handle keeps its value: its own, one lent by a squad (the
+/// squad's own memory, see [`sx_squad_knowledge`]), or one lent by a crew
+/// (its squad and keepers, see [`sx_crew_squad`] and [`sx_crew_keeper`]).
 enum Held<T> {
     Own(T),
     /// Lent by a [`WasmSquad`], which outlives the handle (it frees it).
     /// Only the squad's root pointer is kept: the table is reached through
     /// it anew on every call, so no pointer into the squad is held across
     /// calls that borrow the squad itself.
-    Lent {
+    Via {
         root: *mut WasmSquad,
         get: fn(&mut Squad) -> &mut T,
     },
+    /// Lent by a [`WasmCrew`]: a pointer into it. The crew outlives the
+    /// handle (it frees it) and sets the pointer to null before the value
+    /// may move (a stale handle: every call on it returns -1).
+    Lent(*mut T),
+}
+
+impl<T> Held<T> {
+    /// False for a handle a crew made stale.
+    fn is_live(&self) -> bool {
+        !matches!(self, Self::Lent(p) if p.is_null())
+    }
+
+    /// True for a value lent by a crew (freeing the handle does nothing).
+    const fn is_lent(&self) -> bool {
+        matches!(self, Self::Lent(_))
+    }
 }
 
 impl<T> std::ops::Deref for Held<T> {
@@ -1525,7 +1542,11 @@ impl<T> std::ops::Deref for Held<T> {
             // SAFETY: the root is valid while its squad lives, and the squad
             // frees the handle with itself; JS is single threaded, so no
             // other reference into the squad is alive during a call.
-            Self::Lent { root, get } => get(unsafe { &mut (**root).squad }),
+            Self::Via { root, get } => get(unsafe { &mut (**root).squad }),
+            // SAFETY: null or pointing into the live crew that lent it (see
+            // `Lent`); JS is single threaded, so no other reference into the
+            // crew is alive during a call. Callers check `is_live` first.
+            Self::Lent(p) => unsafe { p.as_ref() }.expect("a stale lent handle"),
         }
     }
 }
@@ -1535,7 +1556,9 @@ impl<T> std::ops::DerefMut for Held<T> {
         match self {
             Self::Own(t) => t,
             // SAFETY: as in `deref`.
-            Self::Lent { root, get } => get(unsafe { &mut (**root).squad }),
+            Self::Via { root, get } => get(unsafe { &mut (**root).squad }),
+            // SAFETY: as in `deref`.
+            Self::Lent(p) => unsafe { p.as_mut() }.expect("a stale lent handle"),
         }
     }
 }
@@ -1588,7 +1611,7 @@ pub unsafe extern "C" fn sx_knowledge_free(k: *mut WasmKnowledge) {
         // A squad's own memory is freed with the squad.
         None
         | Some(WasmKnowledge {
-            knowledge: Held::Lent { .. },
+            knowledge: Held::Via { .. },
             ..
         }) => {}
         // SAFETY: see above.
@@ -2100,7 +2123,7 @@ pub unsafe extern "C" fn sx_areas_free(a: *mut WasmAreas) {
         // A squad's own memory is freed with the squad.
         None
         | Some(WasmAreas {
-            areas: Held::Lent { .. },
+            areas: Held::Via { .. },
             ..
         }) => {}
         // SAFETY: see above.
@@ -3077,7 +3100,7 @@ pub extern "C" fn sx_discipline(skill: u32, custom: u32) -> i32 {
 /// A squad with its own memory, an out buffer and the orders that are due
 /// but not taken yet.
 pub struct WasmSquad {
-    squad: Squad,
+    squad: Held<Squad>,
     out: Vec<i32>,
     due: Vec<Order>,
     /// Handles onto the squad's own knowledge and areas, freed with it.
@@ -3119,6 +3142,12 @@ pub extern "C" fn sx_squad_new(
     }) else {
         return std::ptr::null_mut();
     };
+    boxed_squad(Held::Own(squad))
+}
+
+/// A squad handle with its knowledge and areas handles (freed by
+/// [`drop_squad`]).
+fn boxed_squad(squad: Held<Squad>) -> *mut WasmSquad {
     let s = Box::into_raw(Box::new(WasmSquad {
         squad,
         out: Vec::new(),
@@ -3127,10 +3156,10 @@ pub extern "C" fn sx_squad_new(
         areas: std::ptr::null_mut(),
     }));
     // SAFETY: `s` was just made; the squad stays at this address until
-    // sx_squad_free, which frees the two handles first.
+    // drop_squad, which frees the two handles first.
     unsafe {
         (*s).knowledge = Box::into_raw(Box::new(WasmKnowledge {
-            knowledge: Held::Lent {
+            knowledge: Held::Via {
                 root: s,
                 get: Squad::knowledge_mut,
             },
@@ -3138,7 +3167,7 @@ pub extern "C" fn sx_squad_new(
             out: Vec::new(),
         }));
         (*s).areas = Box::into_raw(Box::new(WasmAreas {
-            areas: Held::Lent {
+            areas: Held::Via {
                 root: s,
                 get: Squad::areas_mut,
             },
@@ -3148,19 +3177,33 @@ pub extern "C" fn sx_squad_new(
     s
 }
 
-/// Frees a squad with its own knowledge and areas.
+/// Frees a squad handle from [`boxed_squad`] with its two handles.
 ///
 /// # Safety
-/// `s` is null or from [`sx_squad_new`] and not used again.
+/// `s` is from [`boxed_squad`] and not used again.
+unsafe fn drop_squad(s: *mut WasmSquad) {
+    // SAFETY: see above; the two handles were made by boxed_squad.
+    unsafe {
+        let w = Box::from_raw(s);
+        drop(Box::from_raw(w.knowledge));
+        drop(Box::from_raw(w.areas));
+    }
+}
+
+/// Frees a squad with its own knowledge and areas; does nothing for a
+/// squad lent by a crew (the crew frees it).
+///
+/// # Safety
+/// `s` is null, from [`sx_squad_new`] and not used again, or from
+/// [`sx_crew_squad`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_free(s: *mut WasmSquad) {
-    if !s.is_null() {
-        // SAFETY: see above; the two handles were made by sx_squad_new.
-        unsafe {
-            let w = Box::from_raw(s);
-            drop(Box::from_raw(w.knowledge));
-            drop(Box::from_raw(w.areas));
-        }
+    // SAFETY: null or valid (see above).
+    match unsafe { s.as_ref() } {
+        None => {}
+        Some(w) if w.squad.is_lent() => {}
+        // SAFETY: from sx_squad_new (see above).
+        Some(_) => unsafe { drop_squad(s) },
     }
 }
 
@@ -3611,13 +3654,18 @@ pub unsafe extern "C" fn sx_squad_add_tactic(s: *mut WasmSquad, t: *mut WasmTact
 
 /// [`ERROR_PLAN`] with the tactic and column in the out buffer.
 fn plan_error(w: &mut WasmSquad, e: PlanError) -> i32 {
+    plan_error_to(&mut w.out, e)
+}
+
+/// [`ERROR_PLAN`] with the tactic and column in `out`.
+fn plan_error_to(out: &mut Vec<i32>, e: PlanError) -> i32 {
     let (tactic, input) = match e {
         PlanError::InputOutOfRange { tactic, input } => (tactic, input),
         // No column: -1 in the out buffer.
         PlanError::TooManySlots { tactic } => (tactic, u32::MAX),
     };
-    w.out.clear();
-    w.out.extend([to_i32(tactic), input as i32]);
+    out.clear();
+    out.extend([to_i32(tactic), input as i32]);
     ERROR_PLAN
 }
 
@@ -3729,6 +3777,10 @@ pub unsafe extern "C" fn sx_squad_check(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_orders_due(s: *mut WasmSquad, now: u32, max: u32) -> i32 {
     let w = squad!(s);
+    // A crew takes the orders of its own squad (sx_crew_tick).
+    if w.squad.is_lent() {
+        return ERROR_ARGUMENT;
+    }
     w.squad.orders_due(now, &mut w.due);
     // Orders held back from an earlier call may be stale by now: drop those
     // of another plan and of members no longer active.
@@ -3822,16 +3874,17 @@ pub unsafe extern "C" fn sx_squad_active_plan(s: *mut WasmSquad) -> i32 {
 
 /// One member's goal with its postpone state, and an out buffer.
 pub struct WasmKeeper {
-    keeper: GoalKeeper,
+    keeper: Held<GoalKeeper>,
     out: Vec<i32>,
 }
 
 macro_rules! keeper {
     ($k:expr) => {
-        // SAFETY: JS passes a handle from sx_keeper_new (wrapper guarantees it).
+        // SAFETY: JS passes a handle from sx_keeper_new or sx_crew_keeper
+        // (wrapper guarantees it); a stale lent one is refused here.
         match unsafe { $k.as_mut() } {
-            Some(k) => k,
-            None => return ERROR_ARGUMENT,
+            Some(k) if k.keeper.is_live() => k,
+            _ => return ERROR_ARGUMENT,
         }
     };
 }
@@ -3840,20 +3893,25 @@ macro_rules! keeper {
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_keeper_new() -> *mut WasmKeeper {
     Box::into_raw(Box::new(WasmKeeper {
-        keeper: GoalKeeper::new(),
+        keeper: Held::Own(GoalKeeper::new()),
         out: Vec::new(),
     }))
 }
 
-/// Frees a keeper.
+/// Frees a keeper; does nothing for a keeper lent by a crew (the crew
+/// frees it).
 ///
 /// # Safety
-/// `k` is null or from [`sx_keeper_new`] and not used again.
+/// `k` is null, from [`sx_keeper_new`] and not used again, or from
+/// [`sx_crew_keeper`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_keeper_free(k: *mut WasmKeeper) {
-    if !k.is_null() {
-        // SAFETY: see above.
-        drop(unsafe { Box::from_raw(k) });
+    // SAFETY: null or valid (see above).
+    match unsafe { k.as_ref() } {
+        None => {}
+        Some(w) if w.keeper.is_lent() => {}
+        // SAFETY: from sx_keeper_new (see above).
+        Some(_) => drop(unsafe { Box::from_raw(k) }),
     }
 }
 
@@ -4047,3 +4105,6 @@ pub extern "C" fn sx_goal_awaits_arrival() -> i32 {
         .and_then(goal_of)
         .map_or(ERROR_ARGUMENT, |g| i32::from(g.awaits_arrival()))
 }
+
+mod crew;
+pub use crew::*;
