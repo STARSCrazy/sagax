@@ -315,7 +315,10 @@ impl Crew {
     /// 2. [`Squad::check`] with `extra`, `spots` (offset coordinates with a
     ///    hex layout) and `seed`: [`CrewEvent::Planned`] on
     ///    [`Status::Replan`], [`CrewEvent::Signal`],
-    ///    [`CrewEvent::NoPlan`].
+    ///    [`CrewEvent::NoPlan`]. When the check ends the active plan (an
+    ///    abort with nothing to replan: `NoPlan`), every keeper is cleared
+    ///    (no goal, `has_goal` 0); a `NoPlan` while no plan was active
+    ///    leaves the keepers alone.
     /// 3. [`CrewEvent::Activated`] from [`Squad::take_activated`]; the
     ///    keeper of every member without a goal in the new plan is cleared
     ///    (no goal, [`Crew::goal`] `None`, `has_goal` 0).
@@ -353,6 +356,7 @@ impl Crew {
         events.clear();
         self.sync_seats();
         self.pause_inactive(now);
+        let had_plan = self.squad.active_plan().is_some();
 
         let status = match self.hex {
             Some(layout) => {
@@ -370,6 +374,12 @@ impl Crew {
             Status::Signal => events.push(CrewEvent::Signal),
             Status::NoPlan => events.push(CrewEvent::NoPlan),
             Status::Keep => {}
+        }
+        if had_plan && self.squad.active_plan().is_none() {
+            for i in 0..self.seats.len() {
+                let member = self.seats[i].id;
+                self.drop_goal(member);
+            }
         }
 
         if let Some(id) = self.squad.take_activated() {

@@ -987,3 +987,58 @@ fn crew_member_inputs_match_keeper() {
     }
     assert_eq!(crew.member_inputs(99, 70), None);
 }
+
+#[test]
+fn crew_clears_goals_when_the_plan_ends() {
+    let mut crew = crew_with_orders(0);
+    let mut events = Vec::new();
+    for (id, ..) in MEMBERS {
+        assert!(crew.goal(id).is_some());
+    }
+    // The leader forgets every target: the plan aborts with nothing to
+    // replan.
+    crew.squad_mut().knowledge_mut().clear();
+    crew.tick(11, &[], &flank_spots(), SEED, &mut events)
+        .unwrap();
+    assert_eq!(events, [CrewEvent::NoPlan]);
+    assert!(crew.squad().active_plan().is_none());
+    for t in 12..=200 {
+        for (id, ..) in MEMBERS {
+            assert!(crew.goal(id).is_none());
+            assert_eq!(crew.member_inputs(id, t).unwrap().has_goal, 0);
+            crew.member_chose(id, t, false);
+        }
+        crew.tick(t, &[], &flank_spots(), SEED, &mut events)
+            .unwrap();
+        assert_eq!(events, [CrewEvent::NoPlan], "tick {t}");
+    }
+}
+
+#[test]
+fn crew_no_plan_without_a_plan_leaves_keepers_alone() {
+    let mut crew = Crew::new(CrewConfig {
+        squad: scene_config(8),
+        ..CrewConfig::default()
+    })
+    .unwrap();
+    assert!(crew.add_member(scene_member(1, 0, 0)).is_some());
+    crew.squad_mut().add_tactic(tactics::rush());
+    let goal = Goal {
+        kind: GoalKind::Move,
+        pos: Some([3, 0, 0]),
+        unchecked: false,
+        then_pos: None,
+        then_unchecked: false,
+        target: None,
+        start: Start::Now,
+        slot: 0,
+        plan: 0,
+        issued_at: 0,
+        start_delay: 0,
+    };
+    crew.keeper_mut(1).unwrap().set(0, goal);
+    let mut events = Vec::new();
+    crew.tick(0, &[], &[], SEED, &mut events).unwrap();
+    assert_eq!(events, [CrewEvent::NoPlan]);
+    assert_eq!(crew.goal(1), Some(goal), "no plan went away");
+}
