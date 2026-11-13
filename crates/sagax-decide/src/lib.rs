@@ -551,7 +551,7 @@ impl Decider {
 
     /// Remembers that `candidate` was done at `now`. Only the game knows
     /// whether the chosen action really happened, so it records it.
-    pub fn record(&mut self, candidate: Candidate, now: u32) {
+    pub fn record(&mut self, now: u32, candidate: Candidate) {
         if self.memory.len() == MEMORY_LIMIT {
             self.memory.pop_front();
         }

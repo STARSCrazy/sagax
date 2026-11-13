@@ -133,7 +133,7 @@ pub struct SxMap {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SxRules {
     /// `SX_GRID_*`.
-    pub grid: i32,
+    pub grid: u32,
     /// `SX_FOUR_WAYS`, `SX_CUT_CORNERS`.
     pub flags: u32,
     /// Cost of a straight move (hex: of every move).
@@ -361,7 +361,7 @@ fn budget_of(budget: i32) -> Option<usize> {
     }
 }
 
-fn output_of(output: i32) -> Option<Output> {
+fn output_of(output: u32) -> Option<Output> {
     match output {
         0 => Some(Output::Cells),
         1 => Some(Output::Turns),
@@ -506,12 +506,12 @@ impl SxNav {
     }
 }
 
-/// `sx_nav_create`.
+/// `sx_nav_new`.
 ///
 /// # Safety
 /// `rules` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_nav_create(rules: *const SxRules) -> *mut SxNav {
+pub unsafe extern "C" fn sx_nav_new(rules: *const SxRules) -> *mut SxNav {
     create(|| {
         let (topology, capacity, tolerance) = rules_of(rules)?;
         let mut nav = Navigator::new(topology, capacity);
@@ -524,12 +524,12 @@ pub unsafe extern "C" fn sx_nav_create(rules: *const SxRules) -> *mut SxNav {
     })
 }
 
-/// `sx_nav_destroy`.
+/// `sx_nav_free`.
 ///
 /// # Safety
-/// `nav` is null or came from `sx_nav_create` and is not used again.
+/// `nav` is null or came from `sx_nav_new` and is not used again.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_nav_destroy(nav: *mut SxNav) {
+pub unsafe extern "C" fn sx_nav_free(nav: *mut SxNav) {
     // SAFETY: see above.
     unsafe { destroy(nav) }
 }
@@ -548,7 +548,7 @@ pub unsafe extern "C" fn sx_nav_find_path(
     goals: *const Point,
     goal_count: i32,
     budget: i32,
-    output: i32,
+    output: u32,
     points: *mut Point,
     max_points: i32,
     result: *mut SxResult,
@@ -589,7 +589,7 @@ pub unsafe extern "C" fn sx_nav_flee(
     threats: *const Point,
     threat_count: i32,
     max_cost: i32,
-    output: i32,
+    output: u32,
     points: *mut Point,
     max_points: i32,
     result: *mut SxResult,
@@ -693,7 +693,7 @@ pub unsafe extern "C" fn sx_nav_path_to(
     nav: *mut SxNav,
     map: *const SxMap,
     cell: Point,
-    output: i32,
+    output: u32,
     points: *mut Point,
     max_points: i32,
     result: *mut SxResult,
@@ -738,7 +738,7 @@ pub unsafe extern "C" fn sx_nav_path_to(
 pub unsafe extern "C" fn sx_nav_way(
     nav: *mut SxNav,
     map: *const SxMap,
-    output: i32,
+    output: u32,
     points: *mut Point,
     max_points: i32,
 ) -> i32 {
@@ -821,12 +821,12 @@ pub struct SxFlow {
     goals: Vec<Cell>,
 }
 
-/// `sx_flow_create`.
+/// `sx_flow_new`.
 ///
 /// # Safety
 /// `rules` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_flow_create(rules: *const SxRules) -> *mut SxFlow {
+pub unsafe extern "C" fn sx_flow_new(rules: *const SxRules) -> *mut SxFlow {
     create(|| {
         let (topology, capacity, _) = rules_of(rules)?;
         Some(SxFlow {
@@ -839,12 +839,12 @@ pub unsafe extern "C" fn sx_flow_create(rules: *const SxRules) -> *mut SxFlow {
     })
 }
 
-/// `sx_flow_destroy`.
+/// `sx_flow_free`.
 ///
 /// # Safety
-/// `flow` is null or came from `sx_flow_create` and is not used again.
+/// `flow` is null or came from `sx_flow_new` and is not used again.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_flow_destroy(flow: *mut SxFlow) {
+pub unsafe extern "C" fn sx_flow_free(flow: *mut SxFlow) {
     // SAFETY: see above.
     unsafe { destroy(flow) }
 }
@@ -958,12 +958,12 @@ pub struct SxDStar {
     scratch: Vec<Cell>,
 }
 
-/// `sx_dstar_create`.
+/// `sx_dstar_new`.
 ///
 /// # Safety
 /// `rules` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_dstar_create(rules: *const SxRules) -> *mut SxDStar {
+pub unsafe extern "C" fn sx_dstar_new(rules: *const SxRules) -> *mut SxDStar {
     create(|| {
         let (topology, capacity, tolerance) = rules_of(rules)?;
         let mut planner = DStarLite::with_capacity(capacity);
@@ -980,12 +980,12 @@ pub unsafe extern "C" fn sx_dstar_create(rules: *const SxRules) -> *mut SxDStar 
     })
 }
 
-/// `sx_dstar_destroy`.
+/// `sx_dstar_free`.
 ///
 /// # Safety
-/// `dstar` is null or came from `sx_dstar_create` and is not used again.
+/// `dstar` is null or came from `sx_dstar_new` and is not used again.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_dstar_destroy(dstar: *mut SxDStar) {
+pub unsafe extern "C" fn sx_dstar_free(dstar: *mut SxDStar) {
     // SAFETY: see above.
     unsafe { destroy(dstar) }
 }
@@ -1020,7 +1020,7 @@ pub unsafe extern "C" fn sx_dstar_compute(
     dstar: *mut SxDStar,
     map: *const SxMap,
     budget: i32,
-    output: i32,
+    output: u32,
     points: *mut Point,
     max_points: i32,
     result: *mut SxResult,

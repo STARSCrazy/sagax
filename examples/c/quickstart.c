@@ -44,7 +44,7 @@ int main(void)
 	rules.cost_straight = 10;
 	rules.cost_diagonal = 14;
 	rules.node_capacity = W * H;
-	nav = sx_nav_create(&rules);
+	nav = sx_nav_new(&rules);
 	map.step = step;
 
 	n = sx_nav_find_path(nav, &map, start, &goal, 1, 0, SX_OUT_CELLS, way, 64, &result);
@@ -65,7 +65,7 @@ int main(void)
 	for (i = 0; i < n; i++)
 		printf(" (%d,%d)", way[i].x, way[i].y);
 	printf("\n");
-	sx_nav_destroy(nav);
+	sx_nav_free(nav);
 
 	/* A decision: attack the nearer of two targets unless health is low. */
 	{

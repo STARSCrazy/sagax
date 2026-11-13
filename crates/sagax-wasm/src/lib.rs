@@ -991,7 +991,7 @@ pub unsafe extern "C" fn sx_decider_record(
 ) -> i32 {
     decider!(d, ERROR_ARGUMENT)
         .decider
-        .record(Candidate::new(option, target), now);
+        .record(now, Candidate::new(option, target));
     0
 }
 
@@ -1583,7 +1583,7 @@ fn evicted_out(w: &mut WasmKnowledge, evicted: Option<Fact>) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_learn(k: *mut WasmKnowledge, now: u32) -> i32 {
     let w = knowledge!(k);
-    let evicted = w.knowledge.learn(fact_of(&w.record), now);
+    let evicted = w.knowledge.learn(now, fact_of(&w.record));
     evicted_out(w, evicted)
 }
 
@@ -1595,7 +1595,7 @@ pub unsafe extern "C" fn sx_knowledge_learn(k: *mut WasmKnowledge, now: u32) -> 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_merge(k: *mut WasmKnowledge, now: u32) -> i32 {
     let w = knowledge!(k);
-    let evicted = w.knowledge.merge(fact_of(&w.record), now);
+    let evicted = w.knowledge.merge(now, fact_of(&w.record));
     evicted_out(w, evicted)
 }
 
@@ -1845,7 +1845,7 @@ pub unsafe extern "C" fn sx_outbox_post(
     cooldown: u32,
 ) -> i32 {
     let w = outbox!(o);
-    match w.outbox.post(message_of(&w.record), now, delay, cooldown) {
+    match w.outbox.post(now, message_of(&w.record), delay, cooldown) {
         Ok(()) => 0,
         Err(Refused::Full) => 1,
         Err(Refused::Cooldown) => 2,
@@ -2074,7 +2074,7 @@ pub unsafe extern "C" fn sx_areas_record(a: *mut WasmAreas) -> *mut u32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_areas_add(a: *mut WasmAreas, now: u32) -> i32 {
     let w = areas!(a);
-    to_i32(w.areas.add(area_of(&w.record), now))
+    to_i32(w.areas.add(now, area_of(&w.record)))
 }
 
 /// Removes expired areas; returns how many.
@@ -3317,7 +3317,7 @@ pub unsafe extern "C" fn sx_squad_observe(s: *mut WasmSquad, now: u32) -> i32 {
     };
     let r: [u32; FACT_SIZE] = std::array::from_fn(|i| r[i] as u32);
     w.out.clear();
-    match w.squad.observe(fact_of(&r), now) {
+    match w.squad.observe(now, fact_of(&r)) {
         Some(gone) => {
             w.out.extend(fact_record(&gone).map(|v| v as i32));
             1
@@ -3644,7 +3644,7 @@ pub unsafe extern "C" fn sx_keeper_set(k: *mut WasmKeeper, now: u32) -> i32 {
     let Some(goal) = scratch_copy(GOAL_SIZE).as_deref().and_then(goal_of) else {
         return ERROR_ARGUMENT;
     };
-    w.keeper.set(goal, now);
+    w.keeper.set(now, goal);
     0
 }
 

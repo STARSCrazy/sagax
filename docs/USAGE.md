@@ -4,6 +4,51 @@ What to use for which case, how to call it, and where the pitfalls are. The
 exact contracts are in `crates/sagax-ffi/include/sagax.h` (C),
 `js/sagax.mjs` (JavaScript) and the Rust docs (`cargo doc -p sagax-nav --open`).
 
+## Conventions
+
+The same rules hold in Rust, C and JavaScript.
+
+- **Time and seed.** `now` is the game's own count (frames, turns, seconds;
+  it may wrap around, ages are wrapping differences). It comes right after
+  the handle and after the ids that name what the call addresses; payloads
+  come after `now`; `seed` is always the last input, out parameters follow
+  it. So `known.learn(now, fact)`, `outbox.post(now, msg, delay, cooldown)`,
+  `areas.add(now, area)`, `decider.record(now, candidate)`,
+  `keeper.set(now, goal)`, `squad.observe(now, fact)`, but
+  `squad.resume(id, now)` and `timers.set(id, now, duration)`. The same
+  order in C: `sx_knowledge_learn(k, now, fact, evicted)`,
+  `sx_outbox_post(o, now, msg, delay, cooldown)`. A call written in the old
+  order (fact first, then time) does not compile in Rust and C, and throws
+  in JavaScript.
+  Three calls keep their order on purpose, because moving the time would
+  swap two numbers of the same type and compile silently:
+  `Alertness::stimulus(amount, now, cfg)`, `Progress::start(value, now)`
+  and `Progress::update(value, now, min_gain)` (C `sx_alertness_stimulus`,
+  `sx_progress_start`, `sx_progress_update`).
+- **C return values.** A yes/no question returns 1 or 0. A count or an index
+  is returned directly; a function with nothing to report returns 0. A
+  scalar answer is returned directly when it fits (`int64_t` for the times
+  and costs that do not fit `int32_t`: `sx_timers_left`,
+  `sx_alertness_value`, `sx_areas_cost`), structs come through out
+  parameters. A function that writes a list returns how many entries it
+  wrote and, where the full count matters, takes an optional
+  `uint32_t *total` (`sx_squad_targets`). Where a function may drop a stored
+  item (`sx_knowledge_learn`, `sx_knowledge_merge`), the return value is how
+  many were dropped (0 or 1). `sx_inbox_push` answers yes/no (1 stored, 0
+  refused); `sx_outbox_post` returns `SX_POSTED` (0) or the reason it was
+  refused.
+- **C errors** are negative and only the `SX_ERROR_*` constants (a null
+  pointer, a number out of range). The headers and this guide never say a
+  bare "-1" for an error.
+- **C enum parameters are `uint32_t`:** `SX_GRID_*`, `SX_OUT_*`,
+  `SX_METRIC_*`, `SX_EVICT_*`, `SX_ROUTE_*`, `SX_SINE_*`, `SX_COMBINE_*`.
+  "All options" and "follow the decider" of `sx_decider_set_combine` are
+  `SX_ALL_OPTIONS` and `SX_COMBINE_FOLLOW` (both `0xFFFFFFFFu`, what -1 was).
+- **C lifecycle.** Every handle has `_new` and `_free`: `sx_nav_new` /
+  `sx_nav_free`, `sx_flow_new` / `sx_flow_free`, `sx_dstar_new` /
+  `sx_dstar_free`. The old `_create` / `_destroy` names are macros for 0.9
+  and gone in 0.10.
+
 ## 1. Which building block?
 
 | The game asks | Building block | C | JavaScript |
@@ -66,7 +111,7 @@ sx_rules rules = {0};
 rules.grid = SX_GRID_SQUARE;            /* or SX_GRID_HEX_ODD_R ... */
 rules.cost_straight = 10;  rules.cost_diagonal = 14;
 rules.node_capacity = 32768;
-sx_nav *nav = sx_nav_create(&rules);    /* once, reuse; 0: invalid rules */
+sx_nav *nav = sx_nav_new(&rules);    /* once, reuse; 0: invalid rules */
 
 sx_map map = {0};
 map.step = my_step;              /* (ctx, x, y, level, dx, dy) -> level or -1 */
@@ -161,7 +206,7 @@ return afterwards.
 ### Flow field
 
 ```c
-sx_flow *flow = sx_flow_create(&rules);           /* its own handle */
+sx_flow *flow = sx_flow_new(&rules);           /* its own handle */
 sx_point goals[] = { { gx, gy, z } };
 sx_flow_build(flow, &map, goals, 1, 100000, &r);  /* once per goal or change */
 sx_point at[8], next[8]; int32_t cost[8];
@@ -175,7 +220,7 @@ to leave they are approximate; the next steps still use only legal moves.
 ### D* Lite
 
 ```c
-sx_dstar *d = sx_dstar_create(&rules);            /* one per walker */
+sx_dstar *d = sx_dstar_new(&rules);            /* one per walker */
 sx_dstar_begin(d, start, goal);                   /* goal.level >= 0 */
 n = sx_dstar_compute(d, &map, 0, SX_OUT_TURNS, pts, 64, &r);
 
@@ -402,7 +447,7 @@ const flee = d.addOption(1, [
 ```
 
 C: `sx_decider_add_weighted` (pull, `SX_APPLY_*`), `sx_decider_set_combine`
-(`SX_COMBINE_*`, option -1 for all), `sx_decider_set_rank`,
+(`SX_COMBINE_*`, option `SX_ALL_OPTIONS` for all), `sx_decider_set_rank`,
 `sx_decider_set_current`. Rust: `add_weighted`, `set_combine`,
 `set_option_combine`, `set_rank`, `set_current`.
 
@@ -429,7 +474,7 @@ d.setNow(turn);
 const taunt = d.addOption(1, [{ input: MEMORY.sincePair, curve: 'root', min: 0, max: 5 }]);
 d.setCooldown(heal, 3);
 const c = d.decide(candidates);
-if (c) { act(c); d.record(c, turn); }
+if (c) { act(c); d.record(turn, c); }
 ```
 
 C: `sx_decider_set_now`, `sx_decider_record`, `sx_decider_set_cooldown`,
@@ -490,8 +535,8 @@ game (`SEEN`, `NOISE`, `LIT`, ...) are your own numbers.
   let mut known = Knowledge::new(8, Evict::Oldest)?;
   let fact = Fact { subject: 7, kind: SEEN, pos: [4000, 4000, 0], seen_at: now,
                     strength: 100, data: 0, source: SOURCE_OWN };
-  let dropped = known.learn(fact, now);                  // Option<Fact>: the evicted one
-  known.merge(heard_about_7, now);                       // keeps a newer own fact
+  let dropped = known.learn(now, fact);                  // Option<Fact>: the evicted one
+  known.merge(now, heard_about_7);                       // keeps a newer own fact
   known.touch(7, SEEN, now);                             // seen again, same place
   known.set_pos(7, SEEN, [4100, 4000, 0]);               // false if unknown
   known.expire(now, 2040, |f| forget(f));                // age >= 2040 goes
@@ -515,7 +560,7 @@ game (`SEEN`, `NOISE`, `LIT`, ...) are your own numbers.
   let mut out = Outbox::new(4)?;
   let msg = Message { kind: SEEN, subject: 7, pos: [4000, 4000, 0], seen_at: now,
                       strength: 0, data: 0, sender: me, keep_if_sender_gone: 0 };
-  match out.post(msg, now, 102, 170) {                   // delay, cooldown
+  match out.post(now, msg, 102, 170) {                   // delay, cooldown
       Ok(()) => {}
       Err(Refused::Cooldown) | Err(Refused::Full) => {}
   }
@@ -544,7 +589,7 @@ game (`SEEN`, `NOISE`, `LIT`, ...) are your own numbers.
   arrival times by their wrapping difference, so all stored arrivals must
   lie within a window narrower than 2^31 ticks.
 
-  C `sx_outbox_*` (`sx_outbox_post` returns 0, `SX_REFUSED_FULL` or
+  C `sx_outbox_*` (`sx_outbox_post` returns `SX_POSTED`, `SX_REFUSED_FULL` or
   `SX_REFUSED_COOLDOWN`), `sx_inbox_*`, `sx_arrival`, `sx_route` (with
   `SX_ROUTE_*`, `SX_METRIC_*`, `sx_nearby`), `sx_message`. JS `lib.outbox(4)`
   (`post` gives `'ok'`, `'full'` or `'cooldown'`), `lib.inbox(4)`,
@@ -559,7 +604,7 @@ game (`SEEN`, `NOISE`, `LIT`, ...) are your own numbers.
   let mut areas = Areas::new(8)?;
   let lit = Area { kind: LIT, pos: [x, y, 0], radius: 600, strength: 20,
                    lifetime: 3000, blocking: 0, ..Area::default() };
-  let index = areas.add(lit, now);                       // since = now
+  let index = areas.add(now, lit);                       // since = now
   areas.expire(now);                                     // age >= lifetime goes
   let inside = areas.contains(pos);                      // Option<usize>
   let blocked = areas.blocks(cell, start, goal);         // for move_cost, see below
@@ -723,10 +768,10 @@ static int32_t move_cost(void *ctx, int32_t x, int32_t y, int32_t lv,
                          int32_t tx, int32_t ty, int32_t tl) {
 	struct game *g = ctx;
 	int32_t cell[3] = { tx * 256 + 128, ty * 256 + 128, 0 };
-	uint32_t extra = 0;
+	int64_t extra;
 	if (sx_areas_blocks(g->areas, cell, g->start, g->goal) == 1) return -1;
-	sx_areas_cost(g->areas, cell, g->start, g->goal, &extra);
-	return (int32_t)extra;
+	extra = sx_areas_cost(g->areas, cell, g->start, g->goal);   /* returned directly */
+	return extra > INT32_MAX - 1 ? INT32_MAX - 1 : (int32_t)extra;
 }
 ```
 
@@ -801,7 +846,7 @@ sq.add_tactic(tactics::rush());
 
 **The leader plans only with what it knows.** The squad keeps its own
 `Knowledge`, `Areas` and inbox. They are filled only by the leader's own
-sightings (`sq.observe(fact, now)`) and by member reports that *arrive*
+sightings (`sq.observe(now, fact)`) and by member reports that *arrive*
 (`sq.report(message, arrive_at)`, kinds `REPORT_ENEMY`, `REPORT_DANGER`,
 `REPORT_GOAL_BROKEN`, `REPORT_ARRIVED`). Targets are read from this memory
 (`sq.targets()`), never from the true world; the game's `extra` row only
@@ -989,7 +1034,7 @@ const sq = lib.squad({ groupCap: 8, memoryCap: 16, areaCap: 4, inboxCap: 8, metr
 sq.addMember({ id: 1, pos: [0, 0, 0], roles: SQUAD.roleRanged, skill: 192 });
 sq.setLeader(1); sq.setSkill(192); sq.setTargetKind(ENEMY);
 sq.addTactic(lib.tactics.flank(3, 4));
-sq.observe({ subject: 9, kind: ENEMY, pos: [20, 0, 0], seenAt: now }, now);
+sq.observe(now, { subject: 9, kind: ENEMY, pos: [20, 0, 0], seenAt: now });
 const { status } = sq.check(now, { spots, seed });        // 'keep' | 'replan' | 'signal' | 'noPlan'
 for (const order of sq.ordersDue(now)) give(order);
 ```

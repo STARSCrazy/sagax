@@ -24,12 +24,12 @@ fn area(kind: u32, x: i32, radius: i32) -> Area {
 #[test]
 fn area_renews_first_same_kind_within_radius() {
     let mut z = Areas::new(4).unwrap();
-    assert_eq!(z.add(area(1, 0, 0x200), 0), 0);
+    assert_eq!(z.add(0, area(1, 0, 0x200)), 0);
     let mut a = area(1, 0x1ff, 0x200);
     a.data = 2;
     a.source = [5, 6, 7];
     a.has_source = 1;
-    assert_eq!(z.add(a, 10), 0);
+    assert_eq!(z.add(10, a), 0);
     assert_eq!(z.len(), 1);
     let got = z.iter().next().unwrap();
     assert_eq!(got.pos, [0x1ff, 0, 0]);
@@ -42,16 +42,16 @@ fn area_renews_first_same_kind_within_radius() {
 #[test]
 fn area_at_exact_radius_is_new() {
     let mut z = Areas::new(4).unwrap();
-    z.add(area(1, 0, 0x200), 0);
-    assert_eq!(z.add(area(1, 0x200, 0x200), 1), 1);
+    z.add(0, area(1, 0, 0x200));
+    assert_eq!(z.add(1, area(1, 0x200, 0x200)), 1);
     assert_eq!(z.len(), 2);
 }
 
 #[test]
 fn areas_other_kind_not_merged() {
     let mut z = Areas::new(4).unwrap();
-    z.add(area(1, 0, 100), 0);
-    assert_eq!(z.add(area(2, 0, 100), 1), 1);
+    z.add(0, area(1, 0, 100));
+    assert_eq!(z.add(1, area(2, 0, 100)), 1);
     assert_eq!(z.len(), 2);
     assert_eq!(z.contains_kind([0, 0, 0], 2), Some(1));
     assert_eq!(z.contains_kind([0, 0, 0], 3), None);
@@ -60,11 +60,11 @@ fn areas_other_kind_not_merged() {
 #[test]
 fn area_renewal_uses_existing_radius() {
     let mut z = Areas::new(4).unwrap();
-    z.add(area(1, 0, 10), 0);
+    z.add(0, area(1, 0, 10));
     // New radius is big, but the existing one (10) decides.
-    assert_eq!(z.add(area(1, 50, 1000), 1), 1);
+    assert_eq!(z.add(1, area(1, 50, 1000)), 1);
     // Within the existing radius of 10: renewed, and radius replaced.
-    assert_eq!(z.add(area(1, 5, 20), 2), 0);
+    assert_eq!(z.add(2, area(1, 5, 20)), 0);
     assert_eq!(z.iter().next().unwrap().radius, 20);
 }
 
@@ -73,13 +73,13 @@ fn area_full_drops_oldest() {
     let mut z = Areas::new(2).unwrap();
     let mut a = area(1, 0, 10);
     a.data = 1;
-    z.add(a, 5);
+    z.add(5, a);
     a.pos[0] = 100;
     a.data = 2;
-    z.add(a, 2);
+    z.add(2, a);
     a.pos[0] = 200;
     a.data = 3;
-    assert_eq!(z.add(a, 6), 1);
+    assert_eq!(z.add(6, a), 1);
     let d: Vec<u32> = z.iter().map(|x| x.data).collect();
     assert_eq!(d, vec![1, 3]);
 }
@@ -89,11 +89,11 @@ fn area_expire_per_own_lifetime() {
     let mut z = Areas::new(4).unwrap();
     let mut a = area(1, 0, 10);
     a.lifetime = 100;
-    z.add(a, 0);
+    z.add(0, a);
     a.pos[0] = 100;
     a.lifetime = 300;
     a.data = 2;
-    z.add(a, 1);
+    z.add(1, a);
     assert_eq!(z.expire(99), 0);
     assert_eq!(z.expire(100), 1);
     assert_eq!(z.len(), 1);
@@ -108,7 +108,7 @@ fn areas_blocks_any_blocking() {
     let mut z = Areas::new(4).unwrap();
     let mut a = area(1, 0, 100);
     a.blocking = 1;
-    z.add(a, 0);
+    z.add(0, a);
     let out = [1000, 0, 0];
     assert!(z.blocks([10, 0, 0], out, [2000, 0, 0]));
     assert!(!z.blocks([10, 0, 0], [20, 0, 0], out));
@@ -117,17 +117,17 @@ fn areas_blocks_any_blocking() {
     // Overlapping blocking area of another kind: blocked if any qualifies.
     let mut b = area(2, 150, 100);
     b.blocking = 1;
-    z.add(b, 0);
+    z.add(0, b);
     assert_eq!(z.len(), 2);
     assert!(z.blocks([90, 0, 0], [-50, 0, 0], out));
     assert_eq!(z.contains([90, 0, 0]), Some(0));
     // Non-blocking areas never block.
     let mut n = Areas::new(1).unwrap();
-    n.add(area(1, 0, 100), 0);
+    n.add(0, area(1, 0, 100));
     assert!(!n.blocks([10, 0, 0], out, [2000, 0, 0]));
     // radius <= 0: nothing inside.
     let mut e = Areas::new(1).unwrap();
-    e.add(area(1, 0, 0), 0);
+    e.add(0, area(1, 0, 0));
     assert_eq!(e.contains([0, 0, 0]), None);
 }
 
@@ -136,14 +136,14 @@ fn areas_cost_sums_nonblocking_saturating() {
     let mut z = Areas::new(4).unwrap();
     let mut a = area(1, 0, 100);
     a.strength = 7;
-    z.add(a, 0);
+    z.add(0, a);
     a.kind = 2;
     a.strength = 5;
-    z.add(a, 0);
+    z.add(0, a);
     a.kind = 3;
     a.strength = 1000;
     a.blocking = 1;
-    z.add(a, 0);
+    z.add(0, a);
     let out = [1000, 0, 0];
     assert_eq!(z.cost([10, 0, 0], out, [2000, 0, 0]), 12);
     assert_eq!(z.cost([500, 0, 0], out, [2000, 0, 0]), 0);
@@ -152,10 +152,10 @@ fn areas_cost_sums_nonblocking_saturating() {
     let mut s = Areas::new(2).unwrap();
     let mut b = area(1, 0, 100);
     b.strength = u32::MAX;
-    s.add(b, 0);
+    s.add(0, b);
     b.kind = 2;
     b.strength = 9;
-    s.add(b, 0);
+    s.add(0, b);
     assert_eq!(s.cost([10, 0, 0], out, [2000, 0, 0]), u32::MAX);
 }
 
@@ -166,11 +166,11 @@ fn area_full_evicts_slot0_then_appends() {
     for (i, t) in [0u32, 5, 6].into_iter().enumerate() {
         a.pos[0] = 100 * i as i32;
         a.data = i as u32 + 1;
-        z.add(a, t);
+        z.add(t, a);
     }
     a.pos[0] = 300;
     a.data = 4;
-    assert_eq!(z.add(a, 7), 2);
+    assert_eq!(z.add(7, a), 2);
     let d: Vec<u32> = z.iter().map(|x| x.data).collect();
     assert_eq!(d, vec![2, 3, 4]);
 }
@@ -182,11 +182,11 @@ fn area_full_age_tie_evicts_earlier_slot() {
     for (i, t) in [5u32, 5, 6].into_iter().enumerate() {
         a.pos[0] = 100 * i as i32;
         a.data = i as u32 + 1;
-        z.add(a, t);
+        z.add(t, a);
     }
     a.pos[0] = 300;
     a.data = 4;
-    assert_eq!(z.add(a, 7), 2);
+    assert_eq!(z.add(7, a), 2);
     let d: Vec<u32> = z.iter().map(|x| x.data).collect();
     assert_eq!(d, vec![2, 3, 4]);
 }
@@ -196,7 +196,7 @@ fn area_expire_wraps() {
     let mut z = Areas::new(2).unwrap();
     let mut a = area(1, 0, 10);
     a.lifetime = 255;
-    z.add(a, u32::MAX - 10);
+    z.add(u32::MAX - 10, a);
     assert_eq!(z.expire(243), 0);
     assert_eq!(z.expire(245), 1);
 }
@@ -207,7 +207,7 @@ fn areas_extreme_coordinates_do_not_overflow() {
     let mut a = area(1, 0, i32::MAX);
     a.pos = [i32::MIN, i32::MIN, 0];
     a.blocking = 1;
-    z.add(a, 0);
+    z.add(0, a);
     assert_eq!(z.contains([i32::MIN, i32::MIN, 0]), Some(0));
     // dx and dy are 2^32 - 1: the squares do not fit in i64.
     assert_eq!(z.contains([i32::MAX, i32::MAX, 0]), None);
@@ -218,7 +218,7 @@ fn areas_extreme_coordinates_do_not_overflow() {
     // Renewal check with extreme centres does not overflow either.
     let mut b = a;
     b.pos = far;
-    assert_eq!(z.add(b, 1), 1);
+    assert_eq!(z.add(1, b), 1);
 }
 
 #[test]
@@ -547,14 +547,14 @@ fn keys(k: &Knowledge) -> Vec<(u32, u32)> {
 #[test]
 fn knowledge_key_is_subject_and_kind() {
     let mut k = Knowledge::new(4, Evict::Oldest).unwrap();
-    assert_eq!(k.learn(fact(1, 1, 0), 0), None);
-    assert_eq!(k.learn(fact(1, 2, 0), 0), None);
-    assert_eq!(k.learn(fact(2, 1, 0), 0), None);
+    assert_eq!(k.learn(0, fact(1, 1, 0)), None);
+    assert_eq!(k.learn(0, fact(1, 2, 0)), None);
+    assert_eq!(k.learn(0, fact(2, 1, 0)), None);
     assert_eq!(k.len(), 3);
     // Same key keeps its slot.
     let mut f = fact(1, 2, 5);
     f.pos = [1, 2, 3];
-    assert_eq!(k.learn(f, 5), None);
+    assert_eq!(k.learn(5, f), None);
     assert_eq!(keys(&k), vec![(1, 1), (1, 2), (2, 1)]);
     assert_eq!(k.get(1, 2).unwrap().pos, [1, 2, 3]);
     assert_eq!(k.get(2, 2), None);
@@ -565,23 +565,23 @@ fn knowledge_key_is_subject_and_kind() {
 #[test]
 fn knowledge_evict_oldest_tie_earlier() {
     let mut k = Knowledge::new(3, Evict::Oldest).unwrap();
-    k.learn(fact(1, 0, 0), 0);
-    k.learn(fact(2, 0, 1), 1);
-    k.learn(fact(3, 0, 2), 2);
+    k.learn(0, fact(1, 0, 0));
+    k.learn(1, fact(2, 0, 1));
+    k.learn(2, fact(3, 0, 2));
     assert!(k.touch(1, 0, 3));
     // At now=4 subject 2 is the oldest.
-    let out = k.learn(fact(4, 0, 4), 4).unwrap();
+    let out = k.learn(4, fact(4, 0, 4)).unwrap();
     assert_eq!(out.subject, 2);
     assert_eq!(keys(&k), vec![(1, 0), (3, 0), (4, 0)]);
     // Tie: all seen at 5, the earlier slot goes.
     let mut t = Knowledge::new(3, Evict::Oldest).unwrap();
     for s in 1..=3 {
-        t.learn(fact(s, 0, 5), 5);
+        t.learn(5, fact(s, 0, 5));
     }
-    assert_eq!(t.learn(fact(9, 0, 5), 5).unwrap().subject, 1);
+    assert_eq!(t.learn(5, fact(9, 0, 5)).unwrap().subject, 1);
     assert_eq!(keys(&t), vec![(2, 0), (3, 0), (9, 0)]);
     // A present key while full does not evict.
-    assert_eq!(t.learn(fact(2, 0, 6), 6), None);
+    assert_eq!(t.learn(6, fact(2, 0, 6)), None);
     assert_eq!(t.len(), 3);
 }
 
@@ -592,26 +592,26 @@ fn knowledge_evict_weakest_then_oldest() {
         ..fact(s, 0, at)
     };
     let mut k = Knowledge::new(4, Evict::Weakest).unwrap();
-    k.learn(with(1, 10, 5), 10);
-    k.learn(with(2, 0, 9), 10);
-    k.learn(with(3, 4, 5), 10);
-    k.learn(with(4, 4, 5), 10);
+    k.learn(10, with(1, 10, 5));
+    k.learn(10, with(2, 0, 9));
+    k.learn(10, with(3, 4, 5));
+    k.learn(10, with(4, 4, 5));
     // Smallest strength is 5 (slots 0, 2, 3); oldest of them: slots 2 and 3
     // (age 6), the earlier one (subject 3) goes.
-    assert_eq!(k.learn(with(5, 10, 7), 10).unwrap().subject, 3);
+    assert_eq!(k.learn(10, with(5, 10, 7)).unwrap().subject, 3);
     assert_eq!(keys(&k), vec![(1, 0), (2, 0), (4, 0), (5, 0)]);
     // Again strength 5: slot 0 (age 0) and subject 4 (age 6): subject 4 goes.
-    assert_eq!(k.learn(with(6, 10, 9), 10).unwrap().subject, 4);
+    assert_eq!(k.learn(10, with(6, 10, 9)).unwrap().subject, 4);
     // Equal strength and age: the earlier slot.
     let mut t = Knowledge::new(2, Evict::Weakest).unwrap();
-    t.learn(with(1, 0, 3), 0);
-    t.learn(with(2, 0, 3), 0);
-    assert_eq!(t.learn(with(3, 0, 3), 0).unwrap().subject, 1);
+    t.learn(0, with(1, 0, 3));
+    t.learn(0, with(2, 0, 3));
+    assert_eq!(t.learn(0, with(3, 0, 3)).unwrap().subject, 1);
     // Strength beats age.
     let mut w = Knowledge::new(2, Evict::Weakest).unwrap();
-    w.learn(with(1, 0, 8), 100);
-    w.learn(with(2, 99, 2), 100);
-    assert_eq!(w.learn(with(3, 100, 5), 100).unwrap().subject, 2);
+    w.learn(100, with(1, 0, 8));
+    w.learn(100, with(2, 99, 2));
+    assert_eq!(w.learn(100, with(3, 100, 5)).unwrap().subject, 2);
 }
 
 #[test]
@@ -619,53 +619,53 @@ fn knowledge_merge_keeps_newer() {
     let mut k = Knowledge::new(2, Evict::Oldest).unwrap();
     let mut a = fact(1, 0, 100);
     a.data = 1;
-    k.merge(a, 110);
+    k.merge(110, a);
     // An older fact does not overwrite.
     let mut old = fact(1, 0, 90);
     old.data = 2;
-    assert_eq!(k.merge(old, 110), None);
+    assert_eq!(k.merge(110, old), None);
     assert_eq!(k.get(1, 0).unwrap().data, 1);
     // Equal time overwrites ("not older").
     let mut same = fact(1, 0, 100);
     same.data = 3;
-    k.merge(same, 110);
+    k.merge(110, same);
     assert_eq!(k.get(1, 0).unwrap().data, 3);
     // A newer one overwrites.
     let mut newer = fact(1, 0, 105);
     newer.data = 4;
-    k.merge(newer, 110);
+    k.merge(110, newer);
     assert_eq!(
         (k.get(1, 0).unwrap().seen_at, k.get(1, 0).unwrap().data),
         (105, 4)
     );
     // Wrap: now = 5, stored seen_at = u32::MAX - 2 (age 8); seen_at = 2 (age 3) is newer.
     let mut w = Knowledge::new(1, Evict::Oldest).unwrap();
-    w.merge(fact(1, 0, u32::MAX - 2), 5);
+    w.merge(5, fact(1, 0, u32::MAX - 2));
     let mut n = fact(1, 0, 2);
     n.data = 9;
-    w.merge(n, 5);
+    w.merge(5, n);
     assert_eq!(w.get(1, 0).unwrap().data, 9);
     // seen_at = u32::MAX - 9 (age 15) is older and does not overwrite.
     let mut o = fact(1, 0, u32::MAX - 9);
     o.data = 7;
-    w.merge(o, 5);
+    w.merge(5, o);
     assert_eq!(w.get(1, 0).unwrap().data, 9);
     // An absent key inserts and evicts like learn.
     let mut f = Knowledge::new(1, Evict::Oldest).unwrap();
-    f.merge(fact(1, 0, 0), 1);
-    assert_eq!(f.merge(fact(2, 0, 1), 1).unwrap().subject, 1);
+    f.merge(1, fact(1, 0, 0));
+    assert_eq!(f.merge(1, fact(2, 0, 1)).unwrap().subject, 1);
 }
 
 #[test]
 fn knowledge_learn_overwrites() {
     let mut k = Knowledge::new(2, Evict::Oldest).unwrap();
-    k.learn(fact(1, 0, 100), 110);
+    k.learn(110, fact(1, 0, 100));
     let mut older = fact(1, 0, 50);
     older.source = SOURCE_TOLD;
     older.strength = 4;
     older.data = 5;
     older.pos = [7, 8, 9];
-    assert_eq!(k.learn(older, 110), None);
+    assert_eq!(k.learn(110, older), None);
     assert_eq!(*k.get(1, 0).unwrap(), older);
     // Setters.
     assert!(k.touch(1, 0, 120) && k.set_pos(1, 0, [1, 1, 1]) && k.set_data(1, 0, 6));
@@ -679,7 +679,7 @@ fn knowledge_learn_overwrites() {
     assert!(!k.set_strength(2, 0, 0) && !k.remove(2, 0));
     assert!(k.remove(1, 0));
     assert!(k.is_empty());
-    k.learn(fact(3, 0, 0), 0);
+    k.learn(0, fact(3, 0, 0));
     k.clear();
     assert_eq!(k.len(), 0);
 }
@@ -687,10 +687,10 @@ fn knowledge_learn_overwrites() {
 #[test]
 fn knowledge_remove_subject_all_kinds() {
     let mut k = Knowledge::new(5, Evict::Oldest).unwrap();
-    k.learn(fact(1, 1, 0), 0);
-    k.learn(fact(2, 1, 0), 0);
-    k.learn(fact(1, 2, 0), 0);
-    k.learn(fact(1, 3, 0), 0);
+    k.learn(0, fact(1, 1, 0));
+    k.learn(0, fact(2, 1, 0));
+    k.learn(0, fact(1, 2, 0));
+    k.learn(0, fact(1, 3, 0));
     assert_eq!(k.remove_subject(1), 3);
     assert_eq!(keys(&k), vec![(2, 1)]);
     assert_eq!(k.remove_subject(1), 0);
@@ -699,10 +699,10 @@ fn knowledge_remove_subject_all_kinds() {
 #[test]
 fn knowledge_expire_with_per_kind() {
     let mut k = Knowledge::new(5, Evict::Oldest).unwrap();
-    k.learn(fact(1, 1, 0), 0);
-    k.learn(fact(2, 2, 0), 0);
-    k.learn(fact(3, 1, 10), 10);
-    k.learn(fact(4, 2, 10), 10);
+    k.learn(0, fact(1, 1, 0));
+    k.learn(0, fact(2, 2, 0));
+    k.learn(10, fact(3, 1, 10));
+    k.learn(10, fact(4, 2, 10));
     let mut gone = Vec::new();
     // At now=20 the first two have age 20 (>= 20), the others 10.
     k.expire(20, 20, |f| gone.push(f.subject));
@@ -718,7 +718,7 @@ fn knowledge_expire_with_per_kind() {
     assert_eq!(keys(&k), vec![(4, 2)]);
     // Boundary with a wrapped clock: age 15 at now = 10.
     let mut w = Knowledge::new(1, Evict::Oldest).unwrap();
-    w.learn(fact(1, 0, u32::MAX - 4), 0);
+    w.learn(0, fact(1, 0, u32::MAX - 4));
     w.expire(10, 16, |_| {});
     assert_eq!(w.len(), 1);
     w.expire(10, 15, |_| {});
@@ -728,10 +728,10 @@ fn knowledge_expire_with_per_kind() {
 #[test]
 fn knowledge_expire_kind_only_that_kind() {
     let mut k = Knowledge::new(5, Evict::Oldest).unwrap();
-    k.learn(fact(1, 1, 0), 0);
-    k.learn(fact(2, 2, 0), 0);
-    k.learn(fact(3, 1, 0), 0);
-    k.learn(fact(4, 1, 8), 8);
+    k.learn(0, fact(1, 1, 0));
+    k.learn(0, fact(2, 2, 0));
+    k.learn(0, fact(3, 1, 0));
+    k.learn(8, fact(4, 1, 8));
     let mut gone = Vec::new();
     k.expire_kind(10, 1, 10, |f| gone.push(f.subject));
     assert_eq!(gone, vec![1, 3]);
@@ -851,40 +851,51 @@ fn msg(subject: u32, kind: u32) -> Message {
 }
 
 #[test]
+fn post_takes_now_first() {
+    let mut o = Outbox::new(2).unwrap();
+    assert_eq!(o.post(10, msg(1, 1), 5, 0), Ok(()));
+    let mut out = Vec::new();
+    o.due(14, &mut out);
+    assert!(out.is_empty());
+    o.due(15, &mut out);
+    assert_eq!(out.len(), 1);
+}
+
+#[test]
 fn outbox_cooldown_from_last_accepted_post() {
     let mut o = Outbox::new(4).unwrap();
-    assert_eq!(o.post(msg(1, 1), 0, 102, 170), Ok(()));
-    assert_eq!(o.post(msg(2, 1), 169, 102, 170), Err(Refused::Cooldown));
+    assert_eq!(o.post(0, msg(1, 1), 102, 170), Ok(()));
+    assert_eq!(o.post(169, msg(2, 1), 102, 170), Err(Refused::Cooldown));
     // A refused post does not move the cooldown start.
-    assert_eq!(o.post(msg(3, 1), 170, 102, 170), Ok(()));
-    assert_eq!(o.post(msg(4, 1), 339, 102, 170), Err(Refused::Cooldown));
-    assert_eq!(o.post(msg(5, 1), 340, 102, 170), Ok(()));
+    assert_eq!(o.post(170, msg(3, 1), 102, 170), Ok(()));
+    assert_eq!(o.post(339, msg(4, 1), 102, 170), Err(Refused::Cooldown));
+    assert_eq!(o.post(340, msg(5, 1), 102, 170), Ok(()));
     assert_eq!(o.pending(), 3);
     // Wrapped clock.
     let mut w = Outbox::new(2).unwrap();
-    assert_eq!(w.post(msg(1, 1), u32::MAX - 10, 0, 170), Ok(()));
-    assert_eq!(w.post(msg(1, 1), 158, 0, 170), Err(Refused::Cooldown));
-    assert_eq!(w.post(msg(1, 1), 159, 0, 170), Ok(()));
+    assert_eq!(w.post(u32::MAX - 10, msg(1, 1), 0, 170), Ok(()));
+    assert_eq!(w.post(158, msg(1, 1), 0, 170), Err(Refused::Cooldown));
+    assert_eq!(w.post(159, msg(1, 1), 0, 170), Ok(()));
 }
 
 #[test]
 fn outbox_full_refused() {
     let mut o = Outbox::new(2).unwrap();
-    assert_eq!(o.post(msg(1, 1), 0, 5, 0), Ok(()));
-    assert_eq!(o.post(msg(2, 1), 0, 5, 0), Ok(()));
-    assert_eq!(o.post(msg(3, 1), 0, 5, 0), Err(Refused::Full));
+    assert_eq!(o.post(0, msg(1, 1), 5, 0), Ok(()));
+    assert_eq!(o.post(0, msg(2, 1), 5, 0), Ok(()));
+    assert_eq!(o.post(0, msg(3, 1), 5, 0), Err(Refused::Full));
     let mut out = Vec::new();
     o.due(5, &mut out);
-    assert_eq!(o.post(msg(3, 1), 5, 5, 0), Ok(()));
+    assert_eq!(o.post(5, msg(3, 1), 5, 0), Ok(()));
     assert!(Outbox::new(0).is_err());
 }
 
 #[test]
 fn outbox_due_each_own_delay_in_post_order() {
     let mut o = Outbox::new(4).unwrap();
-    o.post(msg(1, 1), 0, 10, 0).unwrap();
-    o.post(msg(2, 1), 1, 2, 0).unwrap();
-    o.post(msg(3, 1), 2, 0, 0).unwrap();
+    o.post(0, msg(1, 1), 10, 0).unwrap();
+    o.post(1, msg(2, 1), 2, 0).unwrap();
+    o.post(2, msg(3, 1), 0, 0).unwrap();
     let mut out = vec![msg(99, 1)];
     o.due(3, &mut out);
     let ids: Vec<u32> = out.iter().map(|m| m.subject).collect();
@@ -902,19 +913,19 @@ fn outbox_sender_gone_keeps_marked() {
     let mut o = Outbox::new(4).unwrap();
     let mut keep = msg(2, 1);
     keep.keep_if_sender_gone = 1;
-    o.post(msg(1, 1), 0, 5, 0).unwrap();
-    o.post(keep, 0, 5, 0).unwrap();
+    o.post(0, msg(1, 1), 5, 0).unwrap();
+    o.post(0, keep, 5, 0).unwrap();
     o.sender_gone();
     assert_eq!(o.pending(), 1);
     let mut out = Vec::new();
     o.due(5, &mut out);
     assert_eq!(out[0].subject, 2);
-    o.post(msg(3, 1), 6, 5, 0).unwrap();
+    o.post(6, msg(3, 1), 5, 0).unwrap();
     o.clear();
     assert_eq!(o.pending(), 0);
     // The cooldown survives clear (last accepted post was at 6).
-    assert_eq!(o.post(msg(4, 1), 7, 5, 100), Err(Refused::Cooldown));
-    assert_eq!(o.post(msg(4, 1), 106, 5, 100), Ok(()));
+    assert_eq!(o.post(7, msg(4, 1), 5, 100), Err(Refused::Cooldown));
+    assert_eq!(o.post(106, msg(4, 1), 5, 100), Ok(()));
 }
 
 #[test]
@@ -1107,7 +1118,7 @@ fn hex_distance_axial() {
 fn message_to_knowledge() {
     let mut k = Knowledge::new(2, Evict::Oldest).unwrap();
     let m = msg(5, 3);
-    assert_eq!(k.learn_message(&m, SOURCE_TOLD, 20), None);
+    assert_eq!(k.learn_message(20, &m, SOURCE_TOLD), None);
     let f = *k.get(5, 3).unwrap();
     assert_eq!(
         f,
@@ -1125,12 +1136,12 @@ fn message_to_knowledge() {
     let mut old = msg(5, 3);
     old.seen_at = 6;
     old.data = 1;
-    k.merge_message(&old, SOURCE_HEARD, 20);
+    k.merge_message(20, &old, SOURCE_HEARD);
     assert_eq!(k.get(5, 3).unwrap().data, 9);
     let mut new = msg(5, 3);
     new.seen_at = 8;
     new.data = 2;
-    k.merge_message(&new, SOURCE_HEARD, 20);
+    k.merge_message(20, &new, SOURCE_HEARD);
     assert_eq!(k.get(5, 3).unwrap().data, 2);
     assert_eq!(k.get(5, 3).unwrap().source, SOURCE_HEARD);
 }
@@ -1187,9 +1198,9 @@ fn route_nearest_other_metrics_and_three_way_tie() {
 #[test]
 fn outbox_due_max_leaves_the_rest_pending() {
     let mut o = Outbox::new(4).unwrap();
-    o.post(msg(1, 1), 0, 0, 0).unwrap();
-    o.post(msg(2, 1), 0, 0, 0).unwrap();
-    o.post(msg(3, 1), 0, 0, 0).unwrap();
+    o.post(0, msg(1, 1), 0, 0).unwrap();
+    o.post(0, msg(2, 1), 0, 0).unwrap();
+    o.post(0, msg(3, 1), 0, 0).unwrap();
     let mut out = Vec::new();
     o.due_max(5, 2, &mut out);
     let ids: Vec<u32> = out.iter().map(|m| m.subject).collect();
@@ -1225,10 +1236,10 @@ fn areas_move_cost_matches_cost_and_blocks() {
     let mut z = Areas::new(4).unwrap();
     let mut wall = area(1, 0, 100);
     wall.blocking = 1;
-    z.add(wall, 0);
+    z.add(0, wall);
     let mut mud = area(2, 500, 100);
     mud.strength = 7;
-    z.add(mud, 0);
+    z.add(0, mud);
     let start = [1000, 0, 0];
     let goal = [2000, 0, 0];
     let any = [900, 0, 0];

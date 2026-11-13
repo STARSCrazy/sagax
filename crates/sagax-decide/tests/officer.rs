@@ -119,13 +119,13 @@ fn lost_by_age_on_sight_ticks_equals_counter() {
                         seen_at: t,
                         ..Fact::default()
                     };
-                    known.learn(fact(begin), begin);
+                    known.learn(begin, fact(begin));
                     let mut by_age = None;
                     for t in begin + 1..begin + 200 {
                         if (t + me) % EVERY == 0 {
                             if t <= visible_until {
                                 unseen = 0;
-                                known.learn(fact(t), t);
+                                known.learn(t, fact(t));
                             } else {
                                 unseen += EVERY;
                             }

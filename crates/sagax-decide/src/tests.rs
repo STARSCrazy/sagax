@@ -396,7 +396,7 @@ fn memory_cooldown_and_dislike() {
             .candidate,
         0
     );
-    d.record(cands[0], 100);
+    d.record(100, cands[0]);
     d.set_now(102);
     // target 1 was struck 2 ago: target 2 is preferred now
     assert_eq!(
@@ -429,8 +429,8 @@ fn memory_cooldown_and_dislike() {
     assert!(!d.set_cooldown(9, 1));
 
     // counting within a window
-    d.record(cands[1], 103);
-    d.record(cands[1], 104);
+    d.record(103, cands[1]);
+    d.record(104, cands[1]);
     d.set_now(105);
     assert_eq!(d.count(strike, None), 3);
     d.set_window(3);
@@ -439,7 +439,7 @@ fn memory_cooldown_and_dislike() {
     d.forget();
     assert_eq!(d.count(strike, None), 0);
     for i in 0..300 {
-        d.record(cands[2], i);
+        d.record(i, cands[2]);
     }
     d.set_window(0);
     d.set_now(300);

@@ -475,8 +475,8 @@ export class Decider {
   setNow(now) {
     this.x.sx_decider_set_now(this.handle, now >>> 0);
   }
-  record({ option, target = 0 }, now) {
-    this.x.sx_decider_record(this.handle, option, target >>> 0, now >>> 0);
+  record(now, { option, target = 0 }) {
+    this.x.sx_decider_record(this.handle, option, target >>> 0, timeOf(now));
   }
   forget() {
     this.x.sx_decider_forget(this.handle);
@@ -793,7 +793,7 @@ class Table {
  * `capacity` of them. When full, the oldest (or the weakest) goes.
  *
  *   const k = lib.knowledge(8, 'oldest');   // or 'weakest'
- *   k.learn({subject: 42, kind: 1, pos: [x, y, 0], seenAt: now}, now);  // null, or the evicted fact
+ *   k.learn(now, {subject: 42, kind: 1, pos: [x, y, 0], seenAt: now});  // null, or the evicted fact
  *   k.get(42, 1);     // {subject, kind, pos, seenAt, source, strength, data} or null
  *
  * source: 0 own, 1 heard, 2 told (more values are yours to use).
@@ -819,29 +819,30 @@ export class Knowledge extends Table {
     return facts;
   }
 
-  #put(fact, now, call) {
+  #put(now, fact, call) {
+    const t = timeOf(now);
     putRecord(this.x, this.x.sx_knowledge_record(this.h), factValues(fact));
-    return this.x[call](this.h, u32(now)) === 1 ? this.#facts(1)[0] : null;
+    return this.x[call](this.h, t) === 1 ? this.#facts(1)[0] : null;
   }
 
   /** Stores the fact, overwriting a known one. Returns the evicted fact, or null. */
-  learn(fact, now) {
-    return this.#put(fact, now, 'sx_knowledge_learn');
+  learn(now, fact) {
+    return this.#put(now, fact, 'sx_knowledge_learn');
   }
 
   /** Like learn, but a known fact is only overwritten by one that is not older. */
-  merge(fact, now) {
-    return this.#put(fact, now, 'sx_knowledge_merge');
+  merge(now, fact) {
+    return this.#put(now, fact, 'sx_knowledge_merge');
   }
 
   /** learn for a message {kind, subject, pos, seenAt, strength, data}, with the given source. */
-  learnMessage(message, source, now) {
-    return this.learn({ ...message, source }, now);
+  learnMessage(now, message, source) {
+    return this.learn(now, { ...message, source });
   }
 
   /** merge for a message. */
-  mergeMessage(message, source, now) {
-    return this.merge({ ...message, source }, now);
+  mergeMessage(now, message, source) {
+    return this.merge(now, { ...message, source });
   }
 
   /** Renews the time of a fact. False if unknown. */
@@ -931,7 +932,7 @@ export class Knowledge extends Table {
  * Messages one sender wants to send, for at most `capacity`.
  *
  *   const o = lib.outbox(4);
- *   o.post(msg, now, 102, 170);   // 'ok', 'full' or 'cooldown'
+ *   o.post(now, msg, 102, 170);   // 'ok', 'full' or 'cooldown'
  *   o.due(now);                   // messages whose delay is over, in post order
  *
  * A message: {kind, subject, pos, seenAt, strength, data, sender, keepIfSenderGone}.
@@ -946,9 +947,10 @@ export class Outbox extends Table {
    * room, or 'cooldown' if the last accepted post is younger than cooldown
    * (the first post is never held back).
    */
-  post(message, now, delay = 0, cooldown = 0) {
+  post(now, message, delay = 0, cooldown = 0) {
+    const t = timeOf(now);
     putRecord(this.x, this.x.sx_outbox_record(this.h), messageValues(message));
-    return POST[this.x.sx_outbox_post(this.h, u32(now), u32(delay), u32(cooldown))];
+    return POST[this.x.sx_outbox_post(this.h, t, u32(delay), u32(cooldown))];
   }
 
   /** Takes (at most max of) the messages whose own delay is over, in post order. */
@@ -1019,7 +1021,7 @@ function cellsScratch(x, cell, start, goal) {
  * Round areas (noise, light, danger) that fade after their lifetime.
  *
  *   const a = lib.areas(8);
- *   a.add({kind: 1, pos: [x, y, 0], radius: 600, strength: 5, lifetime: 3000, blocking: false}, now);
+ *   a.add(now, {kind: 1, pos: [x, y, 0], radius: 600, strength: 5, lifetime: 3000, blocking: false});
  *   a.cost(cell, start, goal);    // extra path cost for a cell
  *   a.blocks(cell, start, goal);  // for a path finder
  *
@@ -1035,9 +1037,10 @@ export class Areas extends Table {
   }
 
   /** Adds an area (since = now), or renews the first of the same kind whose centre is closer than its radius. Returns its index. */
-  add(area, now) {
+  add(now, area) {
+    const t = timeOf(now);
     putRecord(this.x, this.x.sx_areas_record(this.h), areaValues(area));
-    return this.x.sx_areas_add(this.h, u32(now));
+    return this.x.sx_areas_add(this.h, t);
   }
 
   /** Removes areas whose age is at least their lifetime. Returns how many. */
@@ -1701,7 +1704,7 @@ export class Tactic extends Table {
  *   const sq = lib.squad({ groupCap: 8, memoryCap: 16, areaCap: 4, inboxCap: 8, metric: 'chebyshev' });
  *   sq.addMember({ id: 1, pos: [0, 0, 0] }); sq.setLeader(1); sq.setTargetKind(ENEMY);
  *   sq.addTactic(lib.tactics.flank(3, 4)); sq.setSkill(192);
- *   sq.observe({ subject: 9, kind: ENEMY, pos: [20, 0, 0], seenAt: now }, now);
+ *   sq.observe(now, { subject: 9, kind: ENEMY, pos: [20, 0, 0], seenAt: now });
  *   const { status, plan } = sq.check(now, { spots, seed });   // every tick
  *   for (const order of sq.ordersDue(now)) give(order);        // goals, see above
  *
@@ -1877,7 +1880,7 @@ export class Squad extends Table {
   }
 
   /** The leader's own sighting, merged with source 0 (own). Returns the evicted fact, or null. */
-  observe(fact, now) {
+  observe(now, fact) {
     const t = timeOf(now);
     const h = this.h;
     putScratch(this.x, factValues(fact));
@@ -2011,9 +2014,9 @@ export class Keeper extends Table {
   }
 
   /** Takes a goal (from an order), replacing the old one and the postpone state. */
-  set(goal, now) {
-    const values = goalValues(goal);
+  set(now, goal) {
     const t = timeOf(now);
+    const values = goalValues(goal);
     const h = this.h;
     putScratch(this.x, values);
     if (this.x.sx_keeper_set(h, t) !== 0) throw new RangeError('Sagax: bad goal');

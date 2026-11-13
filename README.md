@@ -59,7 +59,7 @@ C:
 
 sx_rules rules = { .grid = SX_GRID_SQUARE, .cost_straight = 10,
                    .cost_diagonal = 14, .node_capacity = 32768 };
-sx_nav *nav = sx_nav_create(&rules);
+sx_nav *nav = sx_nav_new(&rules);
 sx_map map = { .step = my_step, .context = my_game };
 sx_point start = {2, 4, 0}, goal = {40, 9, SX_ANY_LEVEL}, way[256];
 sx_result r;

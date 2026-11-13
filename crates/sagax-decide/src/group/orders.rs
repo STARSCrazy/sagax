@@ -122,13 +122,13 @@ impl Squad {
     /// The leader's own sighting: merged into its knowledge
     /// ([`Knowledge::merge`](crate::memory::Knowledge::merge)) with source [`SOURCE_OWN`]. Returns the fact
     /// dropped to make room, if any.
-    pub fn observe(&mut self, fact: Fact, now: u32) -> Option<Fact> {
+    pub fn observe(&mut self, now: u32, fact: Fact) -> Option<Fact> {
         self.knowledge.merge(
+            now,
             Fact {
                 source: SOURCE_OWN,
                 ..fact
             },
-            now,
         )
     }
 
@@ -449,7 +449,7 @@ impl Squad {
                         kind: self.target_kind,
                         ..msg.to_fact(SOURCE_TOLD)
                     };
-                    self.knowledge.merge(fact, now);
+                    self.knowledge.merge(now, fact);
                 }
                 REPORT_ARRIVED => {
                     if let Some(a) = self.active.as_mut()
@@ -468,7 +468,7 @@ impl Squad {
                         data: msg.subject,
                         ..self.danger
                     };
-                    self.areas.add(area, now);
+                    self.areas.add(now, area);
                 }
                 _ => {}
             }

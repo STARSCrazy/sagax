@@ -53,7 +53,7 @@ fn map_of(w: &mut Walls) -> SxMap {
     }
 }
 
-fn rules(grid: i32) -> SxRules {
+fn rules(grid: u32) -> SxRules {
     SxRules {
         grid,
         flags: 0,
@@ -82,20 +82,20 @@ fn version_is_8() {
 fn bad_rules_give_null() {
     let mut r = rules(0);
     r.cost_straight = 0;
-    assert!(unsafe { sx_nav_create(&r) }.is_null());
+    assert!(unsafe { sx_nav_new(&r) }.is_null());
     let mut r = rules(9);
-    assert!(unsafe { sx_nav_create(&r) }.is_null());
+    assert!(unsafe { sx_nav_new(&r) }.is_null());
     r.grid = 0;
     r.node_capacity = 0;
-    assert!(unsafe { sx_flow_create(&r) }.is_null());
-    assert!(unsafe { sx_dstar_create(std::ptr::null()) }.is_null());
+    assert!(unsafe { sx_flow_new(&r) }.is_null());
+    assert!(unsafe { sx_dstar_new(std::ptr::null()) }.is_null());
 }
 
 #[test]
 fn find_path_writes_every_output_from_the_start() {
     let mut w = walls(&[]);
     let map = map_of(&mut w);
-    let nav = unsafe { sx_nav_create(&rules(0)) };
+    let nav = unsafe { sx_nav_new(&rules(0)) };
     let mut points = [Point::default(); 32];
     let mut result = SxResult::default();
     let n = unsafe {
@@ -137,14 +137,14 @@ fn find_path_writes_every_output_from_the_start() {
         )
     };
     assert_eq!((n, result.cells), (2, 6));
-    unsafe { sx_nav_destroy(nav) };
+    unsafe { sx_nav_free(nav) };
 }
 
 #[test]
 fn start_is_goal_is_found_with_one_cell() {
     let mut w = walls(&[]);
     let map = map_of(&mut w);
-    let nav = unsafe { sx_nav_create(&rules(0)) };
+    let nav = unsafe { sx_nav_new(&rules(0)) };
     let mut points = [Point::default(); 4];
     let mut result = SxResult::default();
     let n = unsafe {
@@ -162,14 +162,14 @@ fn start_is_goal_is_found_with_one_cell() {
         )
     };
     assert_eq!((n, result.status, result.cells), (1, FOUND, 1));
-    unsafe { sx_nav_destroy(nav) };
+    unsafe { sx_nav_free(nav) };
 }
 
 #[test]
 fn small_budgets_continue_to_the_same_way() {
     let mut w = wall_line();
     let map = map_of(&mut w);
-    let nav = unsafe { sx_nav_create(&rules(0)) };
+    let nav = unsafe { sx_nav_new(&rules(0)) };
     let mut whole = [Point::default(); 64];
     let mut expected = SxResult::default();
     let n_whole = unsafe {
@@ -220,14 +220,14 @@ fn small_budgets_continue_to_the_same_way() {
     assert!(calls > 5);
     assert_eq!(result, expected);
     assert_eq!(points[..n as usize], whole[..n_whole as usize]);
-    unsafe { sx_nav_destroy(nav) };
+    unsafe { sx_nav_free(nav) };
 }
 
 #[test]
 fn closed_off_goal_gives_partial_way() {
     let mut w = walls(&(0..20).map(|y| (10, y)).collect::<Vec<_>>());
     let map = map_of(&mut w);
-    let nav = unsafe { sx_nav_create(&rules(0)) };
+    let nav = unsafe { sx_nav_new(&rules(0)) };
     let mut points = [Point::default(); 32];
     let mut result = SxResult::default();
     let n = unsafe {
@@ -246,14 +246,14 @@ fn closed_off_goal_gives_partial_way() {
     };
     assert_eq!(result.status, PARTIAL);
     assert_eq!(points[n as usize - 1], p(9, 5));
-    unsafe { sx_nav_destroy(nav) };
+    unsafe { sx_nav_free(nav) };
 }
 
 #[test]
 fn reachable_then_path_to() {
     let mut w = walls(&[]);
     let map = map_of(&mut w);
-    let nav = unsafe { sx_nav_create(&rules(0)) };
+    let nav = unsafe { sx_nav_new(&rules(0)) };
     let mut cells = [Point::default(); 64];
     let mut costs = [0i32; 64];
     let mut result = SxResult::default();
@@ -278,12 +278,12 @@ fn reachable_then_path_to() {
     assert_eq!((result.status, result.cost), (FOUND, 10));
     let n = unsafe { sx_nav_path_to(nav, &map, p(9, 9), 0, points.as_mut_ptr(), 8, &mut result) };
     assert_eq!((n, result.status), (0, UNREACHABLE));
-    unsafe { sx_nav_destroy(nav) };
+    unsafe { sx_nav_free(nav) };
 }
 
 #[test]
 fn batch_callback_gives_the_same_way_with_fewer_calls() {
-    let nav = unsafe { sx_nav_create(&rules(0)) };
+    let nav = unsafe { sx_nav_new(&rules(0)) };
     let mut ways = Vec::new();
     for batch in [false, true] {
         let mut w = wall_line();
@@ -310,14 +310,14 @@ fn batch_callback_gives_the_same_way_with_fewer_calls() {
     }
     assert_eq!(ways[0].0, ways[1].0);
     assert!(ways[1].1 * 4 < ways[0].1, "{} vs {}", ways[1].1, ways[0].1);
-    unsafe { sx_nav_destroy(nav) };
+    unsafe { sx_nav_free(nav) };
 }
 
 #[test]
 fn formation_writes_leader_and_members() {
     let mut w = walls(&[]);
     let map = map_of(&mut w);
-    let nav = unsafe { sx_nav_create(&rules(0)) };
+    let nav = unsafe { sx_nav_new(&rules(0)) };
     let mut points = [Point::default(); 16];
     unsafe {
         sx_nav_find_path(
@@ -346,14 +346,14 @@ fn formation_writes_leader_and_members() {
         unsafe { sx_nav_formation(nav, &map, std::ptr::null(), 2, table.as_mut_ptr(), 16) },
         ERROR_ARGUMENT
     );
-    unsafe { sx_nav_destroy(nav) };
+    unsafe { sx_nav_free(nav) };
 }
 
 #[test]
 fn flow_serves_many_walkers() {
     let mut w = wall_line();
     let map = map_of(&mut w);
-    let flow = unsafe { sx_flow_create(&rules(0)) };
+    let flow = unsafe { sx_flow_new(&rules(0)) };
     let goals = [p(18, 2)];
     let mut result = SxResult::default();
     assert_eq!(
@@ -405,14 +405,14 @@ fn flow_serves_many_walkers() {
         assert!((0..3).all(|i| costs[i] <= before[i]));
     }
     assert!(walkers.iter().all(|&w| w == p(18, 2)));
-    unsafe { sx_flow_destroy(flow) };
+    unsafe { sx_flow_free(flow) };
 }
 
 #[test]
 fn dstar_repairs_after_a_change() {
     let mut w = walls(&[]);
     let map = map_of(&mut w);
-    let d = unsafe { sx_dstar_create(&rules(0)) };
+    let d = unsafe { sx_dstar_new(&rules(0)) };
     assert_eq!(
         unsafe { sx_dstar_begin(d, p(2, 5), Point::new(18, 5, ANY_LEVEL)) },
         ERROR_ARGUMENT
@@ -436,7 +436,7 @@ fn dstar_repairs_after_a_change() {
             .all(|q| !(q.x == 10 && q.y < 15))
     );
     assert_eq!(points[n as usize - 1], p(18, 5));
-    unsafe { sx_dstar_destroy(d) };
+    unsafe { sx_dstar_free(d) };
 }
 
 #[test]
@@ -444,7 +444,7 @@ fn hex_grids_work_everywhere() {
     for grid in 1..=4 {
         let mut w = wall_line();
         let map = map_of(&mut w);
-        let nav = unsafe { sx_nav_create(&rules(grid)) };
+        let nav = unsafe { sx_nav_new(&rules(grid)) };
         let mut points = [Point::default(); 64];
         let mut result = SxResult::default();
         let n = unsafe {
@@ -468,13 +468,13 @@ fn hex_grids_work_everywhere() {
         assert!(
             unsafe { sx_nav_formation(nav, &map, wedge.as_ptr(), 3, table.as_mut_ptr(), 64) } > 0
         );
-        unsafe { sx_nav_destroy(nav) };
+        unsafe { sx_nav_free(nav) };
 
-        let d = unsafe { sx_dstar_create(&rules(grid)) };
+        let d = unsafe { sx_dstar_new(&rules(grid)) };
         unsafe { sx_dstar_begin(d, p(2, 2), p(18, 2)) };
         unsafe { sx_dstar_compute(d, &map, 0, 0, points.as_mut_ptr(), 64, &mut result) };
         assert_eq!(result.status, FOUND, "grid {grid}");
-        unsafe { sx_dstar_destroy(d) };
+        unsafe { sx_dstar_free(d) };
     }
 }
 
@@ -487,7 +487,7 @@ unsafe extern "C" fn record(ctx: *mut c_void, event: *const SxEvent) {
 fn tracing_reports_steps_and_turns_off() {
     let mut w = wall_line();
     let map = map_of(&mut w);
-    let nav = unsafe { sx_nav_create(&rules(0)) };
+    let nav = unsafe { sx_nav_new(&rules(0)) };
     let mut events: Vec<SxEvent> = Vec::new();
     let ctx = (&mut events as *mut Vec<SxEvent>).cast();
     assert_eq!(unsafe { sx_nav_set_trace(nav, Some(record), ctx) }, 0);
@@ -530,9 +530,9 @@ fn tracing_reports_steps_and_turns_off() {
         )
     };
     assert_eq!(events.len(), before);
-    unsafe { sx_nav_destroy(nav) };
+    unsafe { sx_nav_free(nav) };
 
-    let d = unsafe { sx_dstar_create(&rules(0)) };
+    let d = unsafe { sx_dstar_new(&rules(0)) };
     let mut events: Vec<SxEvent> = Vec::new();
     unsafe { sx_dstar_set_trace(d, Some(record), (&mut events as *mut Vec<SxEvent>).cast()) };
     unsafe { sx_dstar_begin(d, p(2, 2), p(18, 2)) };
@@ -540,9 +540,9 @@ fn tracing_reports_steps_and_turns_off() {
     assert_eq!(result.status, FOUND);
     assert!(events.iter().filter(|e| e.kind == 2).count() > 10);
     assert_eq!(events.last().map(|e| (e.kind, e.found)), Some((5, 1)));
-    unsafe { sx_dstar_destroy(d) };
+    unsafe { sx_dstar_free(d) };
 
-    let flow = unsafe { sx_flow_create(&rules(0)) };
+    let flow = unsafe { sx_flow_new(&rules(0)) };
     let mut events: Vec<SxEvent> = Vec::new();
     unsafe {
         sx_flow_set_trace(
@@ -556,14 +556,14 @@ fn tracing_reports_steps_and_turns_off() {
         events.iter().filter(|e| e.kind == 2).count() as i32,
         result.cells
     );
-    unsafe { sx_flow_destroy(flow) };
+    unsafe { sx_flow_free(flow) };
 }
 
 #[test]
 fn flee_and_several_goals() {
     let mut w = walls(&[]);
     let map = map_of(&mut w);
-    let nav = unsafe { sx_nav_create(&rules(0)) };
+    let nav = unsafe { sx_nav_new(&rules(0)) };
     let mut points = [Point::default(); 64];
     let mut result = SxResult::default();
     let threats = [p(3, 5)];
@@ -602,7 +602,7 @@ fn flee_and_several_goals() {
     };
     assert_eq!(result.status, FOUND);
     assert_eq!(points[n as usize - 1], p(19, 5));
-    unsafe { sx_nav_destroy(nav) };
+    unsafe { sx_nav_free(nav) };
 }
 
 mod areas_cost {
@@ -628,7 +628,7 @@ mod areas_cost {
     fn way_with(area: Option<SxArea>) -> (Vec<Point>, i32) {
         let areas = sx_areas_new(4);
         if let Some(a) = area {
-            assert_eq!(unsafe { sx_areas_add(areas, &a, 0) }, 0);
+            assert_eq!(unsafe { sx_areas_add(areas, 0, &a) }, 0);
         }
         let mut ctx = SxAreasCostCtx {
             areas,
@@ -645,7 +645,7 @@ mod areas_cost {
         map.step = Some(shim_step);
         map.context = (&mut shim as *mut Shim).cast();
         map.move_cost = Some(shim_cost);
-        let nav = unsafe { sx_nav_create(&rules(0)) };
+        let nav = unsafe { sx_nav_new(&rules(0)) };
         let mut points = [Point::default(); 64];
         let mut result = SxResult::default();
         let n = unsafe {
@@ -663,7 +663,7 @@ mod areas_cost {
             )
         };
         assert_eq!(result.status, FOUND);
-        unsafe { sx_nav_destroy(nav) };
+        unsafe { sx_nav_free(nav) };
         unsafe { sx_areas_free(areas) };
         (points[..n as usize].to_vec(), result.cost)
     }
@@ -755,11 +755,11 @@ mod areas_cost {
         );
         let areas = sx_areas_new(2);
         let mut a = circle(1, 50, 50, 3, u32::MAX, 0);
-        assert_eq!(unsafe { sx_areas_add(areas, &a, 0) }, 0);
+        assert_eq!(unsafe { sx_areas_add(areas, 0, &a) }, 0);
         a.kind = 2;
         a.pos = [60, 50, 0];
         a.blocking = 1;
-        assert_eq!(unsafe { sx_areas_add(areas, &a, 0) }, 1);
+        assert_eq!(unsafe { sx_areas_add(areas, 0, &a) }, 1);
         ctx.areas = areas;
         ctx.goal = [0, 0, 0];
         let c = (&mut ctx as *mut SxAreasCostCtx).cast();
@@ -800,8 +800,8 @@ mod squad {
     const STEP: u32 = 2;
     /// 1.0 as a tactic weight.
     const ONE_WEIGHT: u32 = 65535;
-    const EUCLID: i32 = 0;
-    const CHEBYSHEV: i32 = 2;
+    const EUCLID: u32 = 0;
+    const CHEBYSHEV: u32 = 2;
 
     /// The value of `#define name value` in `sagax.h`.
     fn define(name: &str) -> i64 {
@@ -855,7 +855,7 @@ mod squad {
 
     /// A squad of `members` (the first leads) that sees enemies of kind
     /// [`ENEMY`]; the others hear by radio (2 ticks plus 1 per cell).
-    fn squad_of(metric: i32, members: &[(u32, i32, i32)]) -> *mut SxSquad {
+    fn squad_of(metric: u32, members: &[(u32, i32, i32)]) -> *mut SxSquad {
         let sq = sx_squad_new(8, 8, 4, 8, metric);
         assert!(!sq.is_null());
         unsafe {
@@ -1264,11 +1264,13 @@ mod squad {
             let mut id = 0;
             let made = sx_squad_plan(sq, 0, null(), 0, null(), 0, 0, &mut id);
             assert_eq!(made, 0, "nothing known yet");
-            assert_eq!(sx_squad_observe(sq, &enemy(E1, 20, 0), 0, null_mut()), 0);
+            assert_eq!(sx_squad_observe(sq, 0, &enemy(E1, 20, 0), null_mut()), 0);
             let mut targets = [SxFact::default(); 2];
-            assert_eq!(sx_squad_targets(sq, targets.as_mut_ptr(), 2), 1);
+            assert_eq!(sx_squad_targets(sq, targets.as_mut_ptr(), 2, null_mut()), 1);
             assert_eq!((targets[0].subject, targets[0].source), (E1, 0));
-            assert_eq!(sx_squad_targets(sq, null_mut(), 0), 1);
+            let mut total = 0u32;
+            assert_eq!(sx_squad_targets(sq, null_mut(), 0, &mut total), 0);
+            assert_eq!(total, 1);
             assert_eq!(sx_knowledge_count(sx_squad_knowledge(sq)), 1);
 
             assert_eq!(check(sq, 0, &mut id), SQUAD_REPLAN);
@@ -1360,7 +1362,7 @@ mod squad {
             assert_eq!(sx_squad_add_shipped(sq, TACTIC_RUSH, 0), 0);
             assert_eq!(sx_squad_add_shipped(sq, TACTIC_FLANK, 4), 1);
             assert_eq!(sx_squad_set_skill(sq, 255), 0);
-            assert_eq!(sx_squad_observe(sq, &enemy(E1, 20, 0), 0, null_mut()), 0);
+            assert_eq!(sx_squad_observe(sq, 0, &enemy(E1, 20, 0), null_mut()), 0);
             assert_eq!(check(sq, 0, &mut id), SQUAD_REPLAN);
             assert_eq!(check(sq, 5, &mut id), SQUAD_KEEP);
         }
@@ -1441,7 +1443,7 @@ mod squad {
             // larger radius.
             let sq = squad_of(EUCLID, &[(1, 0, 0)]);
             assert_eq!(sx_squad_add_shipped(sq, TACTIC_RUSH, 0), 0);
-            assert_eq!(sx_squad_observe(sq, &enemy(E1, 20, 0), 0, null_mut()), 0);
+            assert_eq!(sx_squad_observe(sq, 0, &enemy(E1, 20, 0), null_mut()), 0);
             let spots = [spot(14, 0, 0)];
             let mut plan = [SxOrder::default(); 1];
             for (radius, pos, unchecked) in [(-1, [19, 0, 0], 1), (5, [14, 0, 0], 0)] {
@@ -1456,6 +1458,29 @@ mod squad {
             }
             assert_eq!(sx_squad_set_spot_radius(sq, 1 << 32), ERROR_ARGUMENT);
             assert_eq!(sx_squad_set_spot_radius(sq, i64::from(u32::MAX)), 0);
+            sx_squad_free(sq);
+        }
+    }
+
+    #[test]
+    fn squad_targets_writes_cap_and_total() {
+        unsafe {
+            let sq = squad_of(EUCLID, &[(1, 0, 0)]);
+            for (i, id) in [E1, E2, 12].into_iter().enumerate() {
+                let fact = enemy(id, 20 + 10 * i as i32, 0);
+                assert_eq!(sx_squad_observe(sq, 0, &fact, null_mut()), 0);
+            }
+            let mut out = [SxFact::default(); 3];
+            let mut total = 99u32;
+            assert_eq!(sx_squad_targets(sq, out.as_mut_ptr(), 1, &mut total), 1);
+            assert_eq!(total, 3);
+            assert_eq!(sx_squad_targets(sq, out.as_mut_ptr(), 3, null_mut()), 3);
+            assert_eq!(sx_squad_targets(sq, null_mut(), 0, &mut total), 0);
+            assert_eq!(total, 3);
+            assert_eq!(
+                sx_squad_targets(sq, null_mut(), 1, &mut total),
+                ERROR_ARGUMENT
+            );
             sx_squad_free(sq);
         }
     }
@@ -1505,7 +1530,7 @@ mod squad {
             let mut id = 0;
             assert_eq!(check(sq, 0, &mut id), SQUAD_REPLAN);
             let mut fact = SxFact::default();
-            assert_eq!(sx_squad_targets(sq, &mut fact, 1), 1);
+            assert_eq!(sx_squad_targets(sq, &mut fact, 1, null_mut()), 1);
             assert_eq!((fact.subject, fact.pos, fact.source), (E1, [20, 0, 0], 2));
             let areas = sx_squad_areas(sq);
             assert_eq!(sx_areas_count(areas), 1);
@@ -1577,9 +1602,9 @@ mod squad {
                 start_ticks: 2,
                 ..SxGoal::default()
             };
-            assert_eq!(sx_keeper_set(k, &goal, 10), 0);
+            assert_eq!(sx_keeper_set(k, 10, &goal), 0);
             let bad = SxGoal { start: 7, ..goal };
-            assert_eq!(sx_keeper_set(k, &bad, 10), ERROR_ARGUMENT);
+            assert_eq!(sx_keeper_set(k, 10, &bad), ERROR_ARGUMENT);
             assert_eq!(sx_keeper_goal(k, &mut g), 1);
             assert_eq!(g, goal);
             assert_eq!(sx_keeper_inputs(k, 15, 1, 0, 0, CHEBYSHEV, 1, 9, i), 0);
@@ -1636,9 +1661,9 @@ mod squad {
             assert_eq!(sx_squad_set_extra_columns(n, 1), e);
             assert!(sx_squad_knowledge(n).is_null());
             assert!(sx_squad_areas(n).is_null());
-            assert_eq!(sx_squad_observe(sq, null(), 0, null_mut()), e);
+            assert_eq!(sx_squad_observe(sq, 0, null(), null_mut()), e);
             assert_eq!(sx_squad_report(sq, null(), 0), e);
-            assert_eq!(sx_squad_targets(sq, null_mut(), 1), e);
+            assert_eq!(sx_squad_targets(sq, null_mut(), 1, null_mut()), e);
             assert_eq!(sx_squad_validate(n, null_mut(), null_mut()), e);
             assert_eq!(sx_squad_plan(n, 0, null(), 0, null(), 0, 0, &mut id), e);
             assert_eq!(sx_squad_plan(sq, 0, null(), 1, null(), 0, 0, &mut id), e);
@@ -1656,9 +1681,9 @@ mod squad {
             assert_eq!(sx_tactic_add_abort(t, 0, 0), e);
             assert_eq!(sx_tactic_set_trigger(t, 0, 0), e);
             sx_tactic_free(real);
-            assert_eq!(sx_keeper_set(k, &SxGoal::default(), 0), e);
+            assert_eq!(sx_keeper_set(k, 0, &SxGoal::default()), e);
             let real = sx_keeper_new();
-            assert_eq!(sx_keeper_set(real, null(), 0), e);
+            assert_eq!(sx_keeper_set(real, 0, null()), e);
             assert_eq!(sx_keeper_goal(real, null_mut()), e);
             assert_eq!(sx_keeper_inputs(real, 0, 0, 0, 0, 0, 0, 0, null_mut()), e);
             assert_eq!(sx_keeper_clear(k), e);
@@ -1754,7 +1779,7 @@ mod squad {
             assert_eq!(sx_squad_add_shipped(sq, TACTIC_RUSH, 0), 0);
             assert_eq!(sx_squad_add_shipped(sq, TACTIC_LINE, 2), 1);
             assert_eq!(sx_squad_add_shipped(sq, TACTIC_FLANK_FRONT, 4), 2);
-            assert_eq!(sx_squad_observe(sq, &enemy(E1, 20, 0), 0, null_mut()), 0);
+            assert_eq!(sx_squad_observe(sq, 0, &enemy(E1, 20, 0), null_mut()), 0);
             let told = SxMessage {
                 kind: REPORT_ENEMY,
                 subject: E2,
@@ -1843,5 +1868,199 @@ mod squad {
         assert_eq!(signals, [49], "one signal");
         attacks.sort_unstable_by_key(|&(_, m)| m);
         assert_eq!(attacks, [(55, 1), (55, 2), (55, 3), (55, 4)], "all aligned");
+    }
+}
+
+mod conventions {
+    //! C API 9: exports match the header, handle names, return rules.
+
+    use crate::decide::{
+        sx_decider_add_option, sx_decider_free, sx_decider_new, sx_decider_set_combine,
+    };
+    use crate::memory::{
+        SxArea, sx_alertness_stimulus, sx_alertness_value, sx_areas_add, sx_areas_cost,
+        sx_areas_free, sx_areas_new, sx_timers_free, sx_timers_left, sx_timers_new, sx_timers_set,
+    };
+    use sagax_decide::memory::{AlertConfig, Alertness};
+    use std::collections::BTreeSet;
+    use std::ptr::null_mut;
+
+    const HEADER: &str = include_str!("../include/sagax.h");
+    const SOURCES: [&str; 5] = [
+        include_str!("lib.rs"),
+        include_str!("memory.rs"),
+        include_str!("decide.rs"),
+        include_str!("machine.rs"),
+        include_str!("group.rs"),
+    ];
+
+    /// Every `#[unsafe(no_mangle)]` function of the sources.
+    fn exports() -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        for source in SOURCES {
+            let mut lines = source.lines();
+            while let Some(line) = lines.next() {
+                if line.trim() != "#[unsafe(no_mangle)]" {
+                    continue;
+                }
+                for next in lines.by_ref() {
+                    if let Some(at) = next.find("fn sx_") {
+                        let rest = &next[at + 3..];
+                        let end = rest.find('(').expect("a function name ends at (");
+                        names.insert(rest[..end].trim().to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        names
+    }
+
+    /// The header without its comments.
+    fn header_code() -> String {
+        let mut code = String::new();
+        let mut rest = HEADER;
+        while let Some(start) = rest.find("/*") {
+            code.push_str(&rest[..start]);
+            let end = rest[start..].find("*/").expect("comment ends");
+            rest = &rest[start + end + 2..];
+        }
+        code.push_str(rest);
+        code
+    }
+
+    /// Names that are followed by `(`: the prototypes.
+    fn prototypes() -> BTreeSet<String> {
+        let code = header_code();
+        let bytes = code.as_bytes();
+        let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut names = BTreeSet::new();
+        let mut i = 0;
+        while let Some(at) = code[i..].find("sx_") {
+            let start = i + at;
+            let mut end = start;
+            while end < bytes.len() && is_word(bytes[end]) {
+                end += 1;
+            }
+            let word_start = start == 0 || !is_word(bytes[start - 1]);
+            if word_start && bytes.get(end) == Some(&b'(') {
+                names.insert(code[start..end].to_string());
+            }
+            i = end.max(start + 3);
+        }
+        names
+    }
+
+    #[test]
+    fn every_export_is_declared_in_the_header() {
+        let exports = exports();
+        assert!(exports.len() > 150, "found {} exports", exports.len());
+        for name in &exports {
+            assert!(
+                HEADER.contains(&format!("{name}(")),
+                "{name} is not declared in sagax.h"
+            );
+        }
+        for name in prototypes() {
+            assert!(
+                exports.contains(&name),
+                "{name} is declared in sagax.h but not exported"
+            );
+        }
+    }
+
+    #[test]
+    fn old_handle_names_are_macros() {
+        for kind in ["nav", "flow", "dstar"] {
+            for (old, new) in [("create", "new"), ("destroy", "free")] {
+                let line = format!("#define sx_{kind}_{old} sx_{kind}_{new}");
+                assert!(HEADER.contains(&line), "{line} missing in sagax.h");
+                assert!(!HEADER.contains(&format!("sx_{kind}_{old}(")));
+            }
+        }
+    }
+
+    #[test]
+    fn timers_left_returns_the_time() {
+        unsafe {
+            let t = sx_timers_new(4);
+            assert_eq!(sx_timers_set(t, 3, 10, 50), 0);
+            assert_eq!(sx_timers_left(t, 3, 20), 40);
+            assert_eq!(sx_timers_left(t, 9, 20), 0, "unknown id");
+            sx_timers_free(t);
+        }
+    }
+
+    #[test]
+    fn alertness_value_returns_it() {
+        let cfg = AlertConfig {
+            max: 100,
+            decay_per_tick: 1,
+            hold: 0,
+            hysteresis: 0,
+            count: 2,
+            thresholds: [30, 60, 0, 0, 0, 0, 0, 0],
+        };
+        let mut a = Alertness::default();
+        unsafe {
+            assert_eq!(sx_alertness_stimulus(&mut a, 30, 0, &cfg), 0);
+            assert_eq!(sx_alertness_value(&a), 30);
+        }
+    }
+
+    #[test]
+    fn areas_cost_returns_it() {
+        unsafe {
+            let a = sx_areas_new(4);
+            let base = SxArea {
+                kind: 1,
+                pos: [100, 100, 0],
+                radius: 10,
+                lifetime: 50,
+                ..SxArea::default()
+            };
+            let (cell, far) = ([100, 100, 0], [900, 900, 0]);
+            let blocking = SxArea {
+                blocking: 1,
+                strength: 99,
+                ..base
+            };
+            assert_eq!(sx_areas_add(a, 0, &blocking), 0);
+            assert_eq!(
+                sx_areas_cost(a, cell.as_ptr(), far.as_ptr(), far.as_ptr()),
+                0
+            );
+            let five = SxArea {
+                kind: 2,
+                strength: 5,
+                ..base
+            };
+            let seven = SxArea {
+                kind: 3,
+                strength: 7,
+                ..base
+            };
+            assert!(sx_areas_add(a, 0, &five) >= 0);
+            assert!(sx_areas_add(a, 0, &seven) >= 0);
+            assert_eq!(
+                sx_areas_cost(a, cell.as_ptr(), far.as_ptr(), far.as_ptr()),
+                12
+            );
+            sx_areas_free(a);
+        }
+    }
+
+    #[test]
+    fn set_combine_follow_bits() {
+        assert!(HEADER.contains("#define SX_COMBINE_FOLLOW 0xFFFFFFFFu"));
+        assert!(HEADER.contains("#define SX_ALL_OPTIONS 0xFFFFFFFFu"));
+        unsafe {
+            let d = sx_decider_new();
+            assert_eq!(sx_decider_add_option(d, 65535), 0);
+            assert_eq!(sx_decider_set_combine(d, 0, u32::MAX), 0);
+            assert_eq!(sx_decider_set_combine(d, u32::MAX, 1), 0);
+            sx_decider_free(d);
+            assert_eq!(sx_decider_set_combine(null_mut(), 0, 0), -1);
+        }
     }
 }

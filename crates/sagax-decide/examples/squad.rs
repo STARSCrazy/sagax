@@ -133,13 +133,13 @@ fn run_scene(end: u32) -> Vec<Event> {
     ];
     // The leader sees enemy 10; member 2 reports enemy 11.
     sq.observe(
+        0,
         Fact {
             subject: 10,
             kind: ENEMY,
             pos: [20, 0, 0],
             ..Fact::default()
         },
-        0,
     );
     sq.report(
         Message {

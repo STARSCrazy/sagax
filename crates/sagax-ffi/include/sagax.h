@@ -12,9 +12,24 @@
  *   sx_flow   one search for many walkers with the same goals
  *   sx_dstar  one walker's way, repaired while the map changes
  *
- * Return values: functions that write a list return how many entries they
- * wrote (>= 0); the others return 0. Errors are negative (SX_ERROR_*). How a
- * search ended is in sx_result.status, never in the return value.
+ * Conventions (the same in every part of this header):
+ *   - Names: every handle has sx_<name>_new and sx_<name>_free. The old
+ *     sx_nav_create / _destroy (and flow, dstar) are macros for 0.9, gone in
+ *     0.10.
+ *   - Return values: a yes/no question returns 1 or 0; a count or an index
+ *     returns it; a function that has nothing to report returns 0; a scalar
+ *     answer is returned directly when it fits (int64_t for values that do
+ *     not fit int32_t), else it goes to an out parameter; structs go to out
+ *     parameters; a function that writes a list returns how many entries it
+ *     wrote, and an optional uint32_t *total gives how many exist.
+ *   - Errors are negative and only the SX_ERROR_* constants (a null pointer,
+ *     a number out of range, ...). How a search ended is in
+ *     sx_result.status, never in the return value.
+ *   - Enum parameters (SX_GRID_*, SX_OUT_*, SX_METRIC_*, ...) are uint32_t.
+ *   - Time: now comes right after the handle and the ids that name what the
+ *     call addresses; payloads come after now; seed is the last input. The
+ *     exceptions are listed in USAGE (sx_alertness_stimulus, sx_progress_start,
+ *     sx_progress_update).
  * Lists of a way always begin with the start and end at the last cell.
  *
  * Memory: a handle reserves everything for rules.node_capacity cells when it
@@ -77,7 +92,7 @@ typedef struct sx_map {
 #define SX_CUT_CORNERS  2u  /* square: diagonal past a blocked side neighbour */
 
 typedef struct sx_rules {
-	int32_t grid;               /* SX_GRID_* */
+	uint32_t grid;              /* SX_GRID_* */
 	uint32_t flags;             /* SX_FOUR_WAYS, SX_CUT_CORNERS (square only) */
 	int32_t cost_straight;      /* > 0, e.g. 10 or 256; hex: every step */
 	int32_t cost_diagonal;      /* square: > 0, e.g. 14 or 362; hex: ignored */
@@ -129,8 +144,11 @@ uint32_t sx_api_version(void);
 typedef struct sx_nav sx_nav;
 
 /* 0 if the rules are invalid or memory is short. */
-sx_nav *sx_nav_create(const sx_rules *rules);
-void sx_nav_destroy(sx_nav *nav);
+sx_nav *sx_nav_new(const sx_rules *rules);
+void sx_nav_free(sx_nav *nav);
+/* Old names of 0.8, deprecated, gone in 0.10. */
+#define sx_nav_create sx_nav_new
+#define sx_nav_destroy sx_nav_free
 
 /* Searches a way from start to the cheapest of goal_count goals (a goal
  * level may be SX_ANY_LEVEL) and writes it as output into points. Several
@@ -140,7 +158,7 @@ void sx_nav_destroy(sx_nav *nav);
  * far is written; sx_nav_continue goes on. result may be 0. */
 int32_t sx_nav_find_path(sx_nav *nav, const sx_map *map, sx_point start,
 	const sx_point *goals, int32_t goal_count,
-	int32_t budget, int32_t output, sx_point *points, int32_t max_points, sx_result *result);
+	int32_t budget, uint32_t output, sx_point *points, int32_t max_points, sx_result *result);
 
 /* A way away from threat_count threats: to the cell within max_cost of
  * start that the nearest threat needs the longest walk to reach (cells no
@@ -150,7 +168,7 @@ int32_t sx_nav_find_path(sx_nav *nav, const sx_map *map, sx_point start,
  * as goals. The first call reserves a second search of node_capacity. */
 int32_t sx_nav_flee(sx_nav *nav, const sx_map *map, sx_point start,
 	const sx_point *threats, int32_t threat_count, int32_t max_cost,
-	int32_t output, sx_point *points, int32_t max_points, sx_result *result);
+	uint32_t output, sx_point *points, int32_t max_points, sx_result *result);
 
 /* Every cell reachable from start at a cost of at most max_cost, with its
  * cost (costs may be 0). Afterwards sx_nav_path_to gives the way to each. */
@@ -166,11 +184,11 @@ int32_t sx_nav_continue(sx_nav *nav, const sx_map *map, int32_t budget,
 /* Makes the way from the last search's start to cell the current way and
  * writes it. status SX_FOUND, or SX_UNREACHABLE (nothing written, current
  * way kept) if the search did not reach cell. */
-int32_t sx_nav_path_to(sx_nav *nav, const sx_map *map, sx_point cell, int32_t output,
+int32_t sx_nav_path_to(sx_nav *nav, const sx_map *map, sx_point cell, uint32_t output,
 	sx_point *points, int32_t max_points, sx_result *result);
 
 /* The current way once more, in another output (e.g. cells and smoothed). */
-int32_t sx_nav_way(sx_nav *nav, const sx_map *map, int32_t output,
+int32_t sx_nav_way(sx_nav *nav, const sx_map *map, uint32_t output,
 	sx_point *points, int32_t max_points);
 
 /* Formation along the current way (the leader's). slots holds members pairs
@@ -191,8 +209,11 @@ int32_t sx_nav_formation(sx_nav *nav, const sx_map *map, const int32_t *slots, i
 
 typedef struct sx_flow sx_flow;
 
-sx_flow *sx_flow_create(const sx_rules *rules);
-void sx_flow_destroy(sx_flow *flow);
+sx_flow *sx_flow_new(const sx_rules *rules);
+void sx_flow_free(sx_flow *flow);
+/* Old names of 0.8, deprecated, gone in 0.10. */
+#define sx_flow_create sx_flow_new
+#define sx_flow_destroy sx_flow_free
 
 /* Searches outward from goal_count goals up to max_cost. result->cells
  * counts the cells in the field. Exact when moves cost the same both ways
@@ -220,8 +241,11 @@ int32_t sx_flow_next(sx_flow *flow, const sx_map *map, const sx_point *from, int
  *       (costs may differ). start_step is not used. */
 typedef struct sx_dstar sx_dstar;
 
-sx_dstar *sx_dstar_create(const sx_rules *rules);
-void sx_dstar_destroy(sx_dstar *dstar);
+sx_dstar *sx_dstar_new(const sx_rules *rules);
+void sx_dstar_free(sx_dstar *dstar);
+/* Old names of 0.8, deprecated, gone in 0.10. */
+#define sx_dstar_create sx_dstar_new
+#define sx_dstar_destroy sx_dstar_free
 
 /* Plans from start to goal (goal.level >= 0) and forgets earlier work.
  * Nothing is searched yet. Returns 0. */
@@ -229,7 +253,7 @@ int32_t sx_dstar_begin(sx_dstar *dstar, sx_point start, sx_point goal);
 
 /* Works on the plan; on SX_FOUND writes the way from the walker to the goal
  * as output. SX_RUNNING: call again. SX_UNREACHABLE: no way. */
-int32_t sx_dstar_compute(sx_dstar *dstar, const sx_map *map, int32_t budget, int32_t output,
+int32_t sx_dstar_compute(sx_dstar *dstar, const sx_map *map, int32_t budget, uint32_t output,
 	sx_point *points, int32_t max_points, sx_result *result);
 
 /* The walker now stands on cell. Returns 0. */
@@ -320,8 +344,9 @@ int32_t sx_decider_add_consideration(sx_decider *decider, uint32_t option,
                                      const sx_consideration *consideration);
 /* inputs: one row of stride raw numbers per candidate. pick: SX_PICK_*,
  * top: how many of the best take part (0 all). scores (count, or 0) gets
- * every score. Returns 1 if chosen, 0 if every score is 0, -1 bad
- * arguments (also an option or input that does not exist). */
+ * every score. Returns 1 if chosen, 0 if every score is 0,
+ * SX_ERROR_ARGUMENT for bad arguments (also an option or input that does
+ * not exist). */
 int32_t sx_decider_decide(sx_decider *decider, const sx_candidate *candidates,
                           int32_t count, const int32_t *inputs, int32_t stride,
                           uint32_t pick, uint32_t top, uint64_t seed,
@@ -357,9 +382,12 @@ typedef struct sx_decide_event {
 int32_t sx_decider_add_weighted(sx_decider *decider, uint32_t option,
                                 const sx_consideration *consideration,
                                 uint32_t pull, uint32_t apply);
-/* option -1: for every option (default SX_COMBINE_PRODUCT); otherwise that
- * option only, combine -1 to follow the decider again. */
-int32_t sx_decider_set_combine(sx_decider *decider, int32_t option, int32_t combine);
+/* option SX_ALL_OPTIONS: for every option (default SX_COMBINE_PRODUCT);
+ * otherwise that option only, combine SX_COMBINE_FOLLOW to follow the decider
+ * again. Both are the all-ones number, what -1 was before 0.9. */
+#define SX_ALL_OPTIONS 0xFFFFFFFFu
+#define SX_COMBINE_FOLLOW 0xFFFFFFFFu
+int32_t sx_decider_set_combine(sx_decider *decider, uint32_t option, uint32_t combine);
 /* Only candidates of the highest rank that still scores above 0 are chosen
  * from (e.g. 2 emergency, 1 combat, 0 idle). Default 0. */
 int32_t sx_decider_set_rank(sx_decider *decider, uint32_t option, uint32_t rank);
@@ -378,7 +406,7 @@ int32_t sx_decider_set_current(sx_decider *decider, const sx_candidate *current,
 /* Time is the game's own count (frames, turns); it may wrap around. */
 int32_t sx_decider_set_now(sx_decider *decider, uint32_t now);
 /* The game says what it really did; the last 256 actions are kept. */
-int32_t sx_decider_record(sx_decider *decider, const sx_candidate *done, uint32_t now);
+int32_t sx_decider_record(sx_decider *decider, uint32_t now, const sx_candidate *done);
 int32_t sx_decider_forget(sx_decider *decider);
 /* Counts look back less than time (0: everything remembered). */
 int32_t sx_decider_set_window(sx_decider *decider, uint32_t time);
@@ -415,7 +443,8 @@ int32_t sx_machine_set_timeout(sx_machine *machine, uint32_t state, uint32_t tim
  * the state has run at least after. from -1: any state. Returns its index. */
 int32_t sx_machine_add_transition(sx_machine *machine, int32_t from, uint32_t to,
                                   uint64_t when, uint64_t unless, uint32_t after);
-/* Returns 1 if the state changed (change filled), 0 if not, -1 bad arguments. */
+/* Returns 1 if the state changed (change filled), 0 if not, SX_ERROR_ARGUMENT
+ * for bad arguments. */
 int32_t sx_machine_update(sx_machine *machine, uint32_t now, uint64_t flags, sx_change *change);
 int32_t sx_machine_state(sx_machine *machine);
 int32_t sx_machine_entered(sx_machine *machine, uint32_t *entered);
@@ -453,7 +482,8 @@ typedef struct sx_timers sx_timers;
 #define SX_EVICT_OLDEST  0  /* the fact seen longest ago */
 #define SX_EVICT_WEAKEST 1  /* the smallest strength; ties: the older one */
 
-/* Returned by sx_outbox_post when a message is refused (0 means accepted). */
+/* Returned by sx_outbox_post: SX_POSTED when accepted, else why not. */
+#define SX_POSTED           0
 #define SX_REFUSED_FULL     1
 #define SX_REFUSED_COOLDOWN 2
 
@@ -563,7 +593,7 @@ typedef struct sx_point_pattern {
 	uint32_t count;
 	int32_t offsets[8];         /* turn of each later step */
 	int32_t distances[8];       /* distance of each later step */
-	int32_t sine;               /* SX_SINE_*; the distances are in its units */
+	uint32_t sine;              /* SX_SINE_*; the distances are in its units */
 	int32_t min_x, min_y, max_x, max_y;  /* points are clamped to this box */
 } sx_point_pattern;
 
@@ -571,23 +601,23 @@ typedef struct sx_point_pattern {
 
 /* Null if capacity is 0 or evict is not SX_EVICT_*. The whole capacity is
  * reserved at once. */
-sx_knowledge *sx_knowledge_new(uint32_t capacity, int32_t evict);
+sx_knowledge *sx_knowledge_new(uint32_t capacity, uint32_t evict);
 void sx_knowledge_free(sx_knowledge *k);
 /* Store fact (a known subject and kind is replaced, whatever its time). A
  * new one is added; if the table is full, the one chosen by the eviction rule
- * is dropped, measured at now. Returns 1 if one was dropped (it goes to
- * *evicted, which may be null), else 0. */
-int32_t sx_knowledge_learn(sx_knowledge *k, const sx_fact *fact, uint32_t now,
+ * is dropped, measured at now. Returns how many facts were dropped (0 or 1;
+ * a dropped one goes to *evicted, which may be null). */
+int32_t sx_knowledge_learn(sx_knowledge *k, uint32_t now, const sx_fact *fact,
                            sx_fact *evicted);
 /* Like learn, but a known fact is only replaced if fact is at least as fresh
  * (age at now no larger). Returns as learn. */
-int32_t sx_knowledge_merge(sx_knowledge *k, const sx_fact *fact, uint32_t now,
+int32_t sx_knowledge_merge(sx_knowledge *k, uint32_t now, const sx_fact *fact,
                            sx_fact *evicted);
 /* learn and merge for the fact a message tells, with the given source. */
-int32_t sx_knowledge_learn_message(sx_knowledge *k, const sx_message *msg, uint8_t source,
-                                   uint32_t now, sx_fact *evicted);
-int32_t sx_knowledge_merge_message(sx_knowledge *k, const sx_message *msg, uint8_t source,
-                                   uint32_t now, sx_fact *evicted);
+int32_t sx_knowledge_learn_message(sx_knowledge *k, uint32_t now, const sx_message *msg,
+                                   uint8_t source, sx_fact *evicted);
+int32_t sx_knowledge_merge_message(sx_knowledge *k, uint32_t now, const sx_message *msg,
+                                   uint8_t source, sx_fact *evicted);
 /* Renew the time of a fact. Each of these returns 1, or 0 if unknown. */
 int32_t sx_knowledge_touch(sx_knowledge *k, uint32_t subject, uint32_t kind, uint32_t now);
 int32_t sx_knowledge_set_pos(sx_knowledge *k, uint32_t subject, uint32_t kind, int32_t x,
@@ -623,8 +653,8 @@ sx_outbox *sx_outbox_new(uint32_t capacity);
 void sx_outbox_free(sx_outbox *o);
 /* Post msg at now; it is due delay ticks later. Refused (nothing stored) if
  * the outbox is full or the last accepted post was less than cooldown ago.
- * Returns 0 (accepted), SX_REFUSED_FULL or SX_REFUSED_COOLDOWN. */
-int32_t sx_outbox_post(sx_outbox *o, const sx_message *msg, uint32_t now, uint32_t delay,
+ * Returns SX_POSTED, SX_REFUSED_FULL or SX_REFUSED_COOLDOWN. */
+int32_t sx_outbox_post(sx_outbox *o, uint32_t now, const sx_message *msg, uint32_t delay,
                        uint32_t cooldown);
 /* Move the messages whose delay has passed into out, oldest post first, at
  * most cap of them (out may be null if cap is 0); the rest stay pending.
@@ -642,7 +672,7 @@ sx_inbox *sx_inbox_new(uint32_t capacity);
 void sx_inbox_free(sx_inbox *b);
 /* msg arrives at arrive_at. When full, the message that arrives last goes if
  * the new one arrives strictly earlier; otherwise the new one is refused.
- * Returns 1 if msg was stored, 0 if refused. */
+ * Returns 1 if msg was stored, 0 if refused (a yes/no answer). */
 int32_t sx_inbox_push(sx_inbox *b, const sx_message *msg, uint32_t arrive_at);
 /* Move the messages whose arrival time has come into out, in push order, at
  * most cap of them; the rest stay. Returns how many were moved. */
@@ -665,10 +695,11 @@ uint32_t sx_arrival(uint32_t now, uint32_t base, uint32_t distance, uint32_t per
  * (dx / divisor, dy / divisor) with truncating division (SX_METRIC_HEX then
  * halves its sum, truncating, so an odd sum after a divisor loses a half); a
  * divisor <= 0 counts as 1. With n == 0 nothing is written and 0 is returned
- * (candidates and out may be null). Returns -1 for an unknown rule or metric, a negative arg for
- * NEAREST, or an arg outside 0 .. 2^32 - 1 for TO. */
-int32_t sx_route(int32_t rule, int64_t arg, int32_t ox, int32_t oy,
-                 const sx_nearby *candidates, uint32_t n, int32_t metric, int32_t divisor,
+ * (candidates and out may be null). Returns SX_ERROR_ARGUMENT for an unknown
+ * rule or metric, a negative arg for NEAREST, or an arg outside 0 .. 2^32 - 1
+ * for TO. */
+int32_t sx_route(uint32_t rule, int64_t arg, int32_t ox, int32_t oy,
+                 const sx_nearby *candidates, uint32_t n, uint32_t metric, int32_t divisor,
                  uint32_t *out);
 
 /* -- areas: places to stay out of or pay extra for -- */
@@ -680,7 +711,7 @@ void sx_areas_free(sx_areas *a);
  * an area of the same kind (the first in slot order), that area is replaced.
  * When full, the oldest area goes and the new one is last. Returns the index
  * of the area. */
-int32_t sx_areas_add(sx_areas *a, const sx_area *area, uint32_t now);
+int32_t sx_areas_add(sx_areas *a, uint32_t now, const sx_area *area);
 /* Remove areas whose age is at least lifetime. Returns how many. */
 int32_t sx_areas_expire(sx_areas *a, uint32_t now);
 /* Return 1 if x, y, z is inside an area (index of the first one goes to
@@ -695,10 +726,10 @@ int32_t sx_areas_contains_kind(sx_areas *a, int32_t x, int32_t y, int32_t z, uin
 int32_t sx_areas_blocks(sx_areas *a, const int32_t *cell, const int32_t *start,
                         const int32_t *goal);
 /* The extra cost of cell: the sum (saturating) of the strength of every
- * non-blocking area that holds cell but neither start nor goal. Goes to
- * *out; returns 0. */
-int32_t sx_areas_cost(sx_areas *a, const int32_t *cell, const int32_t *start,
-                      const int32_t *goal, uint32_t *out);
+ * non-blocking area that holds cell but neither start nor goal. Returns it
+ * (0 if there is none; a negative value is SX_ERROR_*). */
+int64_t sx_areas_cost(sx_areas *a, const int32_t *cell, const int32_t *start,
+                      const int32_t *goal);
 /* An sx_move_cost_fn over areas: set map.move_cost = sx_areas_move_cost and
  * map.context = a pointer to this. Only the cell moved to is judged: a move
  * into a blocking area (one holding neither start nor goal) returns -1,
@@ -732,8 +763,8 @@ void sx_timers_free(sx_timers *t);
 int32_t sx_timers_set(sx_timers *t, uint32_t id, uint32_t now, uint32_t duration);
 /* Return 1 if id has time left. */
 int32_t sx_timers_active(sx_timers *t, uint32_t id, uint32_t now);
-/* Time left of id (0 if none) goes to *out. Returns 0. */
-int32_t sx_timers_left(sx_timers *t, uint32_t id, uint32_t now, uint32_t *out);
+/* Returns the time left of id (0 if none; a negative value is SX_ERROR_*). */
+int64_t sx_timers_left(sx_timers *t, uint32_t id, uint32_t now);
 /* Return 1 if id was there. */
 int32_t sx_timers_remove(sx_timers *t, uint32_t id);
 int32_t sx_timers_count(sx_timers *t);
@@ -771,8 +802,8 @@ int32_t sx_alertness_stimulus(sx_alertness *a, uint32_t amount, uint32_t now,
  * whenever the level is needed; the decay is by elapsed time. */
 int32_t sx_alertness_update(sx_alertness *a, uint32_t now, const sx_alert_config *cfg,
                             int32_t *levels);
-/* The value goes to *out. Returns 0. */
-int32_t sx_alertness_value(sx_alertness *a, uint32_t *out);
+/* Returns the value (a negative value is SX_ERROR_*). */
+int64_t sx_alertness_value(const sx_alertness *a);
 /* The level as of the last update (0 .. cfg->count). */
 int32_t sx_alertness_level(sx_alertness *a);
 
@@ -781,7 +812,7 @@ int32_t sx_alertness_level(sx_alertness *a);
 /* Sine of a heading (256 = full turn; only the low 8 bits count): the fine
  * table scales to -65536 .. 65536, the coarse one to -256 .. 256. kind is
  * SX_SINE_*; any other value counts as SX_SINE_FINE. */
-int32_t sx_sine(int32_t heading, int32_t kind);
+int32_t sx_sine(int32_t heading, uint32_t kind);
 /* Point `step` of `agent` around cx, cy, cz, without random numbers: each
  * agent has its own heading (agent * heading_step); step 0 is first_distance
  * away along it, step n (1-based) turns by offsets[n-1] and goes
@@ -790,8 +821,9 @@ int32_t sx_sine(int32_t heading, int32_t kind);
  * 256, box INT32_MIN .. INT32_MAX on both axes, so no clamping). The ring is
  * Euclidean: on an axial hex grid it is skewed, so convert to the game's
  * world coordinates first or snap the result to the nearest hex. out: 3
- * integers. Returns 1, or 0 if step is past the last point; -1 if
- * pattern->count > 8 or pattern->sine is not SX_SINE_*. */
+ * integers. Returns 1, or 0 if step is past the last point;
+ * SX_ERROR_ARGUMENT if pattern->count > 8 or pattern->sine is not
+ * SX_SINE_*. */
 int32_t sx_points_around(uint32_t agent, uint32_t step, int32_t cx, int32_t cy, int32_t cz,
                          const sx_point_pattern *pattern, int32_t *out);
 /* Heading elapsed ticks into looking around from base: plus
@@ -900,9 +932,9 @@ typedef struct sx_gather_candidate {
  * metric SX_METRIC_*; for Euclid the squared distance is compared with
  * radius * radius), nearest first, ties to the lower id. free_only 1 skips
  * the candidates that are not free; a negative radius reaches nobody. Only
- * x and y count. The ids go to out (room for max). Returns how many; -1 for
- * an unknown metric or a null list with a count. */
-int32_t sx_gather(int32_t x, int32_t y, uint32_t faction, int64_t radius, int32_t metric,
+ * x and y count. The ids go to out (room for max). Returns how many;
+ * SX_ERROR_ARGUMENT for an unknown metric or a null list with a count. */
+int32_t sx_gather(int32_t x, int32_t y, uint32_t faction, int64_t radius, uint32_t metric,
                   uint32_t free_only, const sx_gather_candidate *candidates, uint32_t n,
                   uint32_t *out, uint32_t max);
 
@@ -1000,17 +1032,18 @@ typedef struct sx_slot {
 sx_tactic *sx_tactic_new(uint32_t weight, uint32_t min_skill, uint32_t needs_target);
 /* Only for a tactic not given to sx_squad_add_tactic. */
 void sx_tactic_free(sx_tactic *tactic);
-/* Slots are filled in the order added. Returns the slot's index; -1 for an
- * unknown place, side, kind or start, or a place of SX_PLACE_NONE. */
+/* Slots are filled in the order added. Returns the slot's index;
+ * SX_ERROR_ARGUMENT for an unknown place, side, kind or start, or a place of
+ * SX_PLACE_NONE. */
 int32_t sx_tactic_add_slot(sx_tactic *tactic, const sx_slot *slot);
 /* A factor over the scoring row (see SX_IN_*); the factors are multiplied.
- * Returns 0; -1 for an unknown curve. */
+ * Returns 0; SX_ERROR_ARGUMENT for an unknown curve. */
 int32_t sx_tactic_add_consideration(sx_tactic *tactic, const sx_consideration *consideration);
 /* The plan ends (a replan) when row[input] >= at_least; a column beyond the
  * row never fires. Returns 0. */
 int32_t sx_tactic_add_abort(sx_tactic *tactic, uint32_t input, int32_t at_least);
-/* kind SX_TRIGGER_*, value as given there. Returns 0; -1 for an unknown
- * kind or a max_wait outside 0 .. 2^32 - 1. */
+/* kind SX_TRIGGER_*, value as given there. Returns 0; SX_ERROR_ARGUMENT for
+ * an unknown kind or a max_wait outside 0 .. 2^32 - 1. */
 int32_t sx_tactic_set_trigger(sx_tactic *tactic, uint32_t kind, int64_t value);
 
 /* -- skill: how well a squad plans and acts -- */
@@ -1033,7 +1066,7 @@ typedef struct sx_skill_table {
  * squads pick the best, think 5 ticks and start together. Returns 0. */
 int32_t sx_skill_table_default(sx_skill_table *out);
 /* A member's discipline: hold_bonus at the level of its own skill (0 ..
- * 255); table null: the default. Returns it, or -1. */
+ * 255); table null: the default. Returns it, or SX_ERROR_ARGUMENT. */
 int32_t sx_discipline(uint32_t skill, const sx_skill_table *table);
 
 /* -- squad: the leader, its group, memory and plans -- */
@@ -1087,12 +1120,13 @@ typedef struct sx_plan {
  * in metric (SX_METRIC_*). Skill 0, the default skill table, target kind 0,
  * no tactics. Null if a capacity is 0 or the metric is unknown. */
 sx_squad *sx_squad_new(uint32_t group_cap, uint32_t memory_cap, uint32_t area_cap,
-                       uint32_t inbox_cap, int32_t metric);
+                       uint32_t inbox_cap, uint32_t metric);
 void sx_squad_free(sx_squad *squad);
 
-/* Add a member at the end. Returns its index; -1 if the group is full, the
- * id is already there or the state is unknown. (For every sx_squad_*
- * function: -1 for a null squad or a null required pointer.) */
+/* Add a member at the end. Returns its index; SX_ERROR_ARGUMENT if the group
+ * is full, the id is already there or the state is unknown. (For every
+ * sx_squad_* function: SX_ERROR_ARGUMENT for a null squad or a null required
+ * pointer.) */
 int32_t sx_squad_add_member(sx_squad *squad, const sx_member *member);
 /* Each of these returns 1, or 0 if the id is unknown. remove keeps the
  * order of the others; suspend takes a member out of play for now (no
@@ -1118,37 +1152,39 @@ int32_t sx_squad_set_leader(sx_squad *squad, uint32_t id);
  * first active member. Returns 1, or 0 if there is none. Orders are timed
  * from its position. */
 int32_t sx_squad_leader(sx_squad *squad, uint32_t *id);
-/* 0 weak .. 255 elite (default 0). Returns 0; -1 if skill > 255. */
+/* 0 weak .. 255 elite (default 0). Returns 0; SX_ERROR_ARGUMENT if skill > 255. */
 int32_t sx_squad_set_skill(sx_squad *squad, uint32_t skill);
 /* Returns the skill (0 .. 255). */
 int32_t sx_squad_skill(sx_squad *squad);
-/* Returns 0; -1 for an unknown pick (the table is then not changed). */
+/* Returns 0; SX_ERROR_ARGUMENT for an unknown pick (the table is then not
+ * changed). */
 int32_t sx_squad_set_skill_table(sx_squad *squad, const sx_skill_table *table);
-/* Fill *out with the squad's table. Returns 0; -1 for a null out. */
+/* Fill *out with the squad's table. Returns 0; SX_ERROR_ARGUMENT for a null
+ * out. */
 int32_t sx_squad_skill_table(sx_squad *squad, sx_skill_table *out);
 /* How orders reach the member: kind SX_CHANNEL_*, a and b as given there
  * (default: radio 0, 0, at once). The leader always has its own orders at
- * once. Returns 1, or 0 if the id is not in the group; -1 for an unknown
- * kind or a radio base outside 0 .. 2^32 - 1. */
+ * once. Returns 1, or 0 if the id is not in the group; SX_ERROR_ARGUMENT for
+ * an unknown kind or a radio base outside 0 .. 2^32 - 1. */
 int32_t sx_squad_set_channel(sx_squad *squad, uint32_t id, uint32_t kind, int64_t a, uint32_t b);
 /* The area an SX_REPORT_DANGER adds: its kind, radius, strength, lifetime
  * and blocking are used; centre, source and data come from the report.
  * Default: kind 0, radius 2, strength 1, lifetime 255, not blocking.
- * Return 0 (danger_area fills *out); -1 for a null pointer. */
+ * Return 0 (danger_area fills *out); SX_ERROR_ARGUMENT for a null pointer. */
 int32_t sx_squad_set_danger_area(sx_squad *squad, const sx_area *area);
 int32_t sx_squad_danger_area(sx_squad *squad, sx_area *out);
 /* The fact kind in the leader's knowledge that counts as a target (default
  * 0). Returns 0. */
 int32_t sx_squad_set_target_kind(sx_squad *squad, uint32_t kind);
 /* How many of the game's own columns each scoring row has from SX_IN_EXTRA
- * on (default 0, at most 1024). Returns 0; -1 above 1024 (nothing
- * changes). */
+ * on (default 0, at most 1024). Returns 0; SX_ERROR_ARGUMENT above 1024
+ * (nothing changes). */
 int32_t sx_squad_set_extra_columns(sx_squad *squad, uint32_t count);
 /* How far (inclusive, in the squad's metric, x and y; Euclid compares
  * squares) a spot may be from a slot's wish point to be taken, in both
  * phases; beyond it a spot does not count, and with none within the wish
  * point is used unchecked. Negative: the default, 3 * the slot's dist (at
- * least 1). Returns 0; -1 above 2^32 - 1. */
+ * least 1). Returns 0; SX_ERROR_ARGUMENT above 2^32 - 1. */
 int32_t sx_squad_set_spot_radius(sx_squad *squad, int64_t radius);
 
 /* The leader's own knowledge and danger areas, for every sx_knowledge_* and
@@ -1161,24 +1197,27 @@ int32_t sx_squad_set_spot_radius(sx_squad *squad, int64_t radius);
 sx_knowledge *sx_squad_knowledge(sx_squad *squad);
 sx_areas *sx_squad_areas(sx_squad *squad);
 /* The leader's own sighting: merged into its knowledge with source
- * SX_SOURCE_OWN. Returns 1 if a fact was dropped to make room (it goes to
- * *evicted, which may be null), else 0. */
-int32_t sx_squad_observe(sx_squad *squad, const sx_fact *fact, uint32_t now, sx_fact *evicted);
+ * SX_SOURCE_OWN. Returns how many facts were dropped to make room (0 or 1;
+ * a dropped one goes to *evicted, which may be null). */
+int32_t sx_squad_observe(sx_squad *squad, uint32_t now, const sx_fact *fact, sx_fact *evicted);
 /* A member's report (SX_REPORT_*) on its way to the leader, read from
  * arrive_at on by sx_squad_check and sx_squad_plan; other kinds are dropped
  * when read. Returns 1, or 0 if the inbox refused it (as sx_inbox_push). */
 int32_t sx_squad_report(sx_squad *squad, const sx_message *msg, uint32_t arrive_at);
 /* The known targets (facts of the target kind, in knowledge order; the
  * game's extra blocks follow this order): the first cap go to out (may be
- * null if cap is 0). Returns how many there are. */
-int32_t sx_squad_targets(sx_squad *squad, sx_fact *out, uint32_t cap);
+ * null if cap is 0). Returns how many were written; total (may be null) gets
+ * how many targets there are. */
+int32_t sx_squad_targets(sx_squad *squad, sx_fact *out, uint32_t cap, uint32_t *total);
 
 /* Add a shipped tactic (SX_TACTIC_*; param as given there, else ignored).
- * Returns its index (0, 1, ... in the order added); -1 for an unknown one. */
+ * Returns its index (0, 1, ... in the order added); SX_ERROR_ARGUMENT for an
+ * unknown one. */
 int32_t sx_squad_add_shipped(sx_squad *squad, uint32_t which, int32_t param);
 /* Add a tactic from sx_tactic_new. The squad takes it over in any case
- * (also on an error): do not use or free it again. Returns its index; -1
- * for a null squad or tactic (a non-null tactic is freed then). */
+ * (also on an error): do not use or free it again. Returns its index;
+ * SX_ERROR_ARGUMENT for a null squad or tactic (a non-null tactic is freed
+ * then). */
 int32_t sx_squad_add_tactic(sx_squad *squad, sx_tactic *tactic);
 /* Check that every consideration reads a column the rows have (SX_IN_EXTRA
  * + extra columns, or a decider memory input) and no tactic has more than
@@ -1204,7 +1243,7 @@ int32_t sx_squad_validate(sx_squad *squad, uint32_t *tactic, uint32_t *input);
  * past their lifetime are dropped first.
  * Returns 1 (the id goes to *plan, which may be null), 0 if nothing scores
  * above 0 or no member is active (the pending plan stays), SX_ERROR_PLAN
- * (see sx_squad_validate), or -1. */
+ * (see sx_squad_validate), or SX_ERROR_ARGUMENT. */
 int32_t sx_squad_plan(sx_squad *squad, uint32_t now, const int32_t *extra,
                       uint32_t extra_count, const sx_spot *spots, uint32_t spot_count,
                       uint64_t seed, uint32_t *plan);
@@ -1218,7 +1257,7 @@ int32_t sx_squad_plan(sx_squad *squad, uint32_t now, const int32_t *extra,
  * (not after the signal): REPLAN among the candidates scoring above that
  * bar only. The trigger fires: the signal is given (SIGNAL). Else KEEP.
  * Returns SX_SQUAD_* (a new plan's id to *plan, which may be null),
- * SX_ERROR_PLAN, or -1. */
+ * SX_ERROR_PLAN, or SX_ERROR_ARGUMENT. */
 int32_t sx_squad_check(sx_squad *squad, uint32_t now, const int32_t *extra,
                        uint32_t extra_count, const sx_spot *spots, uint32_t spot_count,
                        uint64_t seed, uint32_t *plan);
@@ -1261,12 +1300,14 @@ int32_t sx_squad_active_plan(sx_squad *squad, sx_plan *out, sx_order *goals, uin
 /* A member's current goal with its postpone state: once the goal stays
  * postponed for give_up_ticks it counts as broken (report it with
  * SX_REPORT_GOAL_BROKEN). While suspended the clock does not run. The
- * functions without their own note return 0, or -1 for a null keeper. */
+ * functions without their own note return 0, or SX_ERROR_ARGUMENT for a null
+ * keeper. */
 sx_keeper *sx_keeper_new(void);
 void sx_keeper_free(sx_keeper *keeper);
 /* Take goal (from an order), replacing the old one and the postpone state.
- * Returns 0; -1 for an unknown kind or start or a slot > 255. */
-int32_t sx_keeper_set(sx_keeper *keeper, const sx_goal *goal, uint32_t now);
+ * Returns 0; SX_ERROR_ARGUMENT for an unknown kind or start or a slot > 255.
+ * now is not used by the keeper itself; it is there for the common order. */
+int32_t sx_keeper_set(sx_keeper *keeper, uint32_t now, const sx_goal *goal);
 /* Fill *out. Return 1, or 0 without a goal. */
 int32_t sx_keeper_goal(sx_keeper *keeper, sx_goal *out);
 /* Drop the goal and the postpone state. */
@@ -1285,9 +1326,9 @@ int32_t sx_keeper_broken(sx_keeper *keeper, uint32_t now, uint32_t give_up_ticks
 /* The member's decider inputs at x, y, z to out (room for 5): has_goal,
  * dist_to_goal (in metric SX_METRIC_*, Euclid the root; -1 without a goal
  * or pos), goal_age (saturated), signal_given (0 or 1), discipline (see
- * sx_discipline). Returns 0; -1 for an unknown metric. */
+ * sx_discipline). Returns 0; SX_ERROR_ARGUMENT for an unknown metric. */
 int32_t sx_keeper_inputs(sx_keeper *keeper, uint32_t now, int32_t x, int32_t y, int32_t z,
-                         int32_t metric, uint32_t signal_given, uint32_t discipline,
+                         uint32_t metric, uint32_t signal_given, uint32_t discipline,
                          int32_t *out);
 
 #ifdef __cplusplus

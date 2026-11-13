@@ -9,7 +9,7 @@
 use std::ffi::c_void;
 use std::time::Instant;
 
-use sagax::{Point, SxMap, SxResult, SxRules, sx_nav_create, sx_nav_find_path};
+use sagax::{Point, SxMap, SxResult, SxRules, sx_nav_find_path, sx_nav_new};
 use sagax_core::NoopSink;
 use sagax_nav::grid::{Cell, CellGoal, CellMap, GridGraph, GridRules};
 use sagax_nav::{Limits, Search};
@@ -153,7 +153,7 @@ fn main() {
         node_capacity: 32768,
         smooth_max_extra: 0,
     };
-    let nav = unsafe { sx_nav_create(&rules_c) };
+    let nav = unsafe { sx_nav_new(&rules_c) };
     for pass in 0..5 {
         // 1. native
         let mut search = Search::with_capacity(32768);

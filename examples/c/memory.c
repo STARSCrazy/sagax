@@ -67,15 +67,15 @@ int main(void)
 		CHECK(k != NULL);
 		CHECK(sx_knowledge_new(0, SX_EVICT_OLDEST) == NULL);
 		CHECK(sx_knowledge_new(2, 7) == NULL);
-		CHECK(sx_knowledge_learn(k, &f1, 5, &evicted) == 0);
-		CHECK(sx_knowledge_learn(k, &f2, 6, &evicted) == 0);
-		CHECK(sx_knowledge_learn(k, &f3, 7, &evicted) == 1);
+		CHECK(sx_knowledge_learn(k, 5, &f1, &evicted) == 0);
+		CHECK(sx_knowledge_learn(k, 6, &f2, &evicted) == 0);
+		CHECK(sx_knowledge_learn(k, 7, &f3, &evicted) == 1);
 		CHECK(evicted.subject == 1);
 		CHECK(sx_knowledge_count(k) == 2);
 		/* merge: an older report does not replace a fresher fact. */
-		CHECK(sx_knowledge_merge(k, &old, 10, NULL) == 0);
+		CHECK(sx_knowledge_merge(k, 10, &old, NULL) == 0);
 		CHECK(sx_knowledge_get(k, 3, 1, &found) == 1 && found.strength == 1);
-		CHECK(sx_knowledge_merge(k, &fresh, 10, NULL) == 0);
+		CHECK(sx_knowledge_merge(k, 10, &fresh, NULL) == 0);
 		CHECK(sx_knowledge_get(k, 3, 1, &found) == 1 && found.strength == 9);
 		CHECK(sx_knowledge_set_data(k, 3, 1, 5) == 1);
 		CHECK(sx_knowledge_set_pos(k, 3, 1, 1, 2, 3) == 1);
@@ -86,13 +86,13 @@ int main(void)
 		CHECK(sx_knowledge_at(k, 0, &found) == 1 && found.subject == 2);
 		CHECK(sx_knowledge_at(k, 2, &found) == 0);
 		/* A fact of another kind: expire_kind leaves it alone. */
-		CHECK(sx_knowledge_learn(k, &other, 10, NULL) == 1);
+		CHECK(sx_knowledge_learn(k, 10, &other, NULL) == 1);
 		CHECK(sx_knowledge_expire_kind(k, 20, 1, 10, gone, 4) == 1 && gone[0].subject == 3);
 		CHECK(sx_knowledge_count(k) == 1); /* kind 2 stays */
 		CHECK(sx_knowledge_expire(k, 20, 10, gone, 4) == 1 && gone[0].subject == 8);
 		CHECK(sx_knowledge_count(k) == 0);
 		CHECK(sx_knowledge_count(NULL) == SX_ERROR_ARGUMENT);
-		CHECK(sx_knowledge_learn(k, NULL, 1, NULL) == SX_ERROR_ARGUMENT);
+		CHECK(sx_knowledge_learn(k, 1, NULL, NULL) == SX_ERROR_ARGUMENT);
 		printf("knowledge: ok\n");
 		sx_knowledge_free(k);
 	}
@@ -110,10 +110,10 @@ int main(void)
 
 		CHECK(o != NULL && b != NULL);
 		CHECK(sx_outbox_new(0) == NULL && sx_inbox_new(0) == NULL);
-		CHECK(sx_outbox_post(o, &m1, 0, 0, 10) == 0);
-		CHECK(sx_outbox_post(o, &m2, 5, 0, 10) == SX_REFUSED_COOLDOWN);
-		CHECK(sx_outbox_post(o, &m2, 10, 4, 10) == 0);
-		CHECK(sx_outbox_post(o, &m3, 30, 0, 10) == SX_REFUSED_FULL);
+		CHECK(sx_outbox_post(o, 0, &m1, 0, 10) == 0);
+		CHECK(sx_outbox_post(o, 5, &m2, 0, 10) == SX_REFUSED_COOLDOWN);
+		CHECK(sx_outbox_post(o, 10, &m2, 4, 10) == 0);
+		CHECK(sx_outbox_post(o, 30, &m3, 0, 10) == SX_REFUSED_FULL);
 		CHECK(sx_outbox_pending(o) == 2);
 		CHECK(sx_outbox_due(o, 11, out, 2) == 1 && out[0].subject == 1);
 		CHECK(sx_outbox_due(o, 11, out, 2) == 0); /* the second one is due at 14 */
@@ -154,8 +154,6 @@ int main(void)
 		int32_t cell[3] = {100, 100, 0};
 		int32_t far_away[3] = {900, 900, 0};
 		uint32_t index = 9;
-		uint32_t cost = 0;
-		uint32_t left = 0;
 
 		CHECK(a != NULL && t != NULL);
 		wall.kind = 1;
@@ -169,16 +167,16 @@ int main(void)
 		mud.blocking = 0;
 		mud.strength = 3;
 
-		CHECK(sx_areas_add(a, &wall, 5) == 0);
-		CHECK(sx_areas_add(a, &mud, 6) == 1);
-		CHECK(sx_areas_add(a, &wall, 8) == 0); /* the same kind in the same place: renewed */
+		CHECK(sx_areas_add(a, 5, &wall) == 0);
+		CHECK(sx_areas_add(a, 6, &mud) == 1);
+		CHECK(sx_areas_add(a, 8, &wall) == 0); /* the same kind in the same place: renewed */
 		CHECK(sx_areas_count(a) == 2);
 		CHECK(sx_areas_contains(a, 100, 105, 0, &index) == 1 && index == 0);
 		CHECK(sx_areas_contains_kind(a, 100, 105, 0, 2, &index) == 1 && index == 1);
 		CHECK(sx_areas_contains(a, 500, 0, 0, NULL) == 0);
 		CHECK(sx_areas_blocks(a, cell, far_away, far_away) == 1);
 		CHECK(sx_areas_blocks(a, cell, cell, far_away) == 0); /* the start is inside */
-		CHECK(sx_areas_cost(a, cell, far_away, far_away, &cost) == 0 && cost == 3);
+		CHECK(sx_areas_cost(a, cell, far_away, far_away) == 3);
 		CHECK(sx_areas_at(a, 1, &found) == 1 && found.kind == 2 && found.since == 6);
 		CHECK(sx_areas_at(a, 2, &found) == 0);
 		CHECK(sx_areas_expire(a, 100) == 2);
@@ -186,7 +184,7 @@ int main(void)
 
 		sx_timers_set(t, 4, 10, 10);
 		CHECK(sx_timers_active(t, 4, 15) == 1);
-		CHECK(sx_timers_left(t, 4, 15, &left) == 0 && left == 5);
+		CHECK(sx_timers_left(t, 4, 15) == 5);
 		CHECK(sx_timers_active(t, 4, 20) == 0);
 		CHECK(sx_timers_active(t, 5, 15) == 0);
 		CHECK(sx_timers_remove(t, 4) == 1);
@@ -203,7 +201,6 @@ int main(void)
 		sx_alertness al = {0};
 		sx_alert_config cfg = {100, 1, 0, 0, 2, {30, 60}};
 		int32_t levels[2] = {9, 9};
-		uint32_t value = 0;
 
 		sx_progress_start(&p, 50, 100);
 		CHECK(sx_progress_stalled(&p, 110, 10) == 1);
@@ -218,7 +215,7 @@ int main(void)
 		sx_alertness_stimulus(&al, 70, 0, &cfg);
 		CHECK(sx_alertness_update(&al, 0, &cfg, levels) == 1);
 		CHECK(levels[0] == 0 && levels[1] == 2);
-		CHECK(sx_alertness_value(&al, &value) == 0 && value == 70);
+		CHECK(sx_alertness_value(&al) == 70);
 		CHECK(sx_alertness_update(&al, 20, &cfg, NULL) == 1);
 		CHECK(sx_alertness_level(&al) == 1);
 		CHECK(sx_progress_reset(NULL) == SX_ERROR_ARGUMENT);

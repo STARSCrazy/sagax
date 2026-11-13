@@ -54,7 +54,7 @@ pub struct SxPointPattern {
     /// Distance of each later step.
     pub distances: [i32; PATTERN_MAX],
     /// `SX_SINE_*`.
-    pub sine: i32,
+    pub sine: u32,
     /// Smallest allowed x.
     pub min_x: i32,
     /// Smallest allowed y.
@@ -70,7 +70,7 @@ fn flag(b: bool) -> i32 {
 }
 
 /// The metric for its number (`SX_METRIC_*`).
-pub(crate) fn metric_of(code: i32) -> Option<Metric> {
+pub(crate) fn metric_of(code: u32) -> Option<Metric> {
     Some(match code {
         0 => Metric::Euclid,
         1 => Metric::Manhattan,
@@ -80,7 +80,7 @@ pub(crate) fn metric_of(code: i32) -> Option<Metric> {
     })
 }
 
-fn sine_of(code: i32) -> Option<Sine> {
+fn sine_of(code: u32) -> Option<Sine> {
     match code {
         0 => Some(Sine::Fine),
         1 => Some(Sine::Coarse),
@@ -151,7 +151,7 @@ pub struct SxKnowledge(Knowledge);
 
 /// `sx_knowledge_new`.
 #[unsafe(no_mangle)]
-pub extern "C" fn sx_knowledge_new(capacity: u32, evict: i32) -> *mut SxKnowledge {
+pub extern "C" fn sx_knowledge_new(capacity: u32, evict: u32) -> *mut SxKnowledge {
     create(|| {
         let evict = match evict {
             0 => Evict::Oldest,
@@ -181,13 +181,13 @@ pub unsafe extern "C" fn sx_knowledge_free(k: *mut SxKnowledge) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_learn(
     k: *mut SxKnowledge,
-    fact: *const SxFact,
     now: u32,
+    fact: *const SxFact,
     evicted: *mut SxFact,
 ) -> i32 {
     let k = get!(k);
     let fact = input!(fact);
-    match k.0.learn(*fact, now) {
+    match k.0.learn(now, *fact) {
         Some(gone) => {
             // SAFETY: see above.
             unsafe { put(evicted, gone) };
@@ -204,13 +204,13 @@ pub unsafe extern "C" fn sx_knowledge_learn(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_merge(
     k: *mut SxKnowledge,
-    fact: *const SxFact,
     now: u32,
+    fact: *const SxFact,
     evicted: *mut SxFact,
 ) -> i32 {
     let k = get!(k);
     let fact = input!(fact);
-    match k.0.merge(*fact, now) {
+    match k.0.merge(now, *fact) {
         Some(gone) => {
             // SAFETY: see above.
             unsafe { put(evicted, gone) };
@@ -227,14 +227,14 @@ pub unsafe extern "C" fn sx_knowledge_merge(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_learn_message(
     k: *mut SxKnowledge,
+    now: u32,
     msg: *const SxMessage,
     source: u8,
-    now: u32,
     evicted: *mut SxFact,
 ) -> i32 {
     let k = get!(k);
     let msg = input!(msg);
-    match k.0.learn_message(msg, source, now) {
+    match k.0.learn_message(now, msg, source) {
         Some(gone) => {
             // SAFETY: see above.
             unsafe { put(evicted, gone) };
@@ -251,14 +251,14 @@ pub unsafe extern "C" fn sx_knowledge_learn_message(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_merge_message(
     k: *mut SxKnowledge,
+    now: u32,
     msg: *const SxMessage,
     source: u8,
-    now: u32,
     evicted: *mut SxFact,
 ) -> i32 {
     let k = get!(k);
     let msg = input!(msg);
-    match k.0.merge_message(msg, source, now) {
+    match k.0.merge_message(now, msg, source) {
         Some(gone) => {
             // SAFETY: see above.
             unsafe { put(evicted, gone) };
@@ -491,14 +491,14 @@ pub unsafe extern "C" fn sx_outbox_free(o: *mut SxOutbox) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_outbox_post(
     o: *mut SxOutbox,
-    msg: *const SxMessage,
     now: u32,
+    msg: *const SxMessage,
     delay: u32,
     cooldown: u32,
 ) -> i32 {
     let o = get!(o);
     let msg = input!(msg);
-    match o.0.post(*msg, now, delay, cooldown) {
+    match o.0.post(now, *msg, delay, cooldown) {
         Ok(()) => 0,
         Err(Refused::Full) => 1,
         Err(Refused::Cooldown) => 2,
@@ -645,13 +645,13 @@ pub extern "C" fn sx_arrival(now: u32, base: u32, distance: u32, per_unit: u32) 
 /// `c` is null or points to `n` candidates; `out` is null or has room for `n`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_route(
-    rule: i32,
+    rule: u32,
     arg: i64,
     ox: i32,
     oy: i32,
     c: *const SxNearby,
     n: u32,
-    metric: i32,
+    metric: u32,
     divisor: i32,
     out: *mut u32,
 ) -> i32 {
@@ -715,10 +715,10 @@ pub unsafe extern "C" fn sx_areas_free(a: *mut SxAreas) {
 /// # Safety
 /// `a` is null or valid; `area` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_areas_add(a: *mut SxAreas, area: *const SxArea, now: u32) -> i32 {
+pub unsafe extern "C" fn sx_areas_add(a: *mut SxAreas, now: u32, area: *const SxArea) -> i32 {
     let a = get!(a);
     let area = input!(area);
-    to_i32(a.0.add(*area, now))
+    to_i32(a.0.add(now, *area))
 }
 
 /// `sx_areas_expire`.
@@ -798,22 +798,27 @@ pub unsafe extern "C" fn sx_areas_blocks(
 ///
 /// # Safety
 /// `a` is null or valid; `cell`, `start`, `goal` are null or point to 3
-/// integers; `out` is null or writable.
+/// integers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_areas_cost(
     a: *mut SxAreas,
     cell: *const i32,
     start: *const i32,
     goal: *const i32,
-    out: *mut u32,
-) -> i32 {
-    let a = get!(a);
-    if cell.is_null() || start.is_null() || goal.is_null() || out.is_null() {
-        return ERROR_ARGUMENT;
+) -> i64 {
+    // SAFETY: the caller passes null or a valid pointer (sagax.h).
+    let Some(a) = (unsafe { a.as_mut() }) else {
+        return i64::from(ERROR_ARGUMENT);
+    };
+    if cell.is_null() || start.is_null() || goal.is_null() {
+        return i64::from(ERROR_ARGUMENT);
     }
     // SAFETY: see above.
-    unsafe { put(out, a.0.cost(pos3(cell), pos3(start), pos3(goal))) };
-    0
+    let cost =
+        a.0.cost(unsafe { pos3(cell) }, unsafe { pos3(start) }, unsafe {
+            pos3(goal)
+        });
+    i64::from(cost)
 }
 
 /// `sx_areas_cost_ctx`: the context of [`sx_areas_move_cost`].
@@ -944,16 +949,14 @@ pub unsafe extern "C" fn sx_timers_active(t: *mut SxTimers, id: u32, now: u32) -
 /// `sx_timers_left`.
 ///
 /// # Safety
-/// `t` is null or valid; `out` is null or writable.
+/// `t` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_timers_left(t: *mut SxTimers, id: u32, now: u32, out: *mut u32) -> i32 {
-    let t = get!(t);
-    if out.is_null() {
-        return ERROR_ARGUMENT;
+pub unsafe extern "C" fn sx_timers_left(t: *mut SxTimers, id: u32, now: u32) -> i64 {
+    // SAFETY: the caller passes null or a valid pointer (sagax.h).
+    match unsafe { t.as_mut() } {
+        Some(t) => i64::from(t.0.left(id, now)),
+        None => i64::from(ERROR_ARGUMENT),
     }
-    // SAFETY: `out` is non-null and writable (see above).
-    unsafe { put(out, t.0.left(id, now)) };
-    0
 }
 
 /// `sx_timers_remove`.
@@ -1107,16 +1110,14 @@ pub unsafe extern "C" fn sx_alertness_update(
 /// `sx_alertness_value`.
 ///
 /// # Safety
-/// `a` is null or valid; `out` is null or writable.
+/// `a` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_alertness_value(a: *mut SxAlertness, out: *mut u32) -> i32 {
-    let a = get!(a);
-    if out.is_null() {
-        return ERROR_ARGUMENT;
+pub unsafe extern "C" fn sx_alertness_value(a: *const SxAlertness) -> i64 {
+    // SAFETY: the caller passes null or a valid pointer (sagax.h).
+    match unsafe { a.as_ref() } {
+        Some(a) => i64::from(a.value()),
+        None => i64::from(ERROR_ARGUMENT),
     }
-    // SAFETY: `out` is non-null and writable (see above).
-    unsafe { put(out, a.value()) };
-    0
 }
 
 /// `sx_alertness_level`.
@@ -1132,7 +1133,7 @@ pub unsafe extern "C" fn sx_alertness_level(a: *mut SxAlertness) -> i32 {
 
 /// `sx_sine`.
 #[unsafe(no_mangle)]
-pub extern "C" fn sx_sine(heading: i32, kind: i32) -> i32 {
+pub extern "C" fn sx_sine(heading: i32, kind: u32) -> i32 {
     sine(heading, sine_of(kind).unwrap_or_default())
 }
 
@@ -1285,18 +1286,18 @@ mod tests {
             assert!(sx_knowledge_new(2, 7).is_null());
             let k = sx_knowledge_new(2, 0);
             let mut gone = Fact::default();
-            assert_eq!(sx_knowledge_learn(k, &fact(1, 1, 5, 1), 5, &mut gone), 0);
-            assert_eq!(sx_knowledge_learn(k, &fact(2, 1, 6, 1), 6, &mut gone), 0);
-            assert_eq!(sx_knowledge_learn(k, &fact(3, 1, 7, 1), 7, &mut gone), 1);
+            assert_eq!(sx_knowledge_learn(k, 5, &fact(1, 1, 5, 1), &mut gone), 0);
+            assert_eq!(sx_knowledge_learn(k, 6, &fact(2, 1, 6, 1), &mut gone), 0);
+            assert_eq!(sx_knowledge_learn(k, 7, &fact(3, 1, 7, 1), &mut gone), 1);
             assert_eq!(gone.subject, 1);
-            assert_eq!(sx_knowledge_learn(k, &fact(4, 1, 8, 1), 8, null_mut()), 1);
+            assert_eq!(sx_knowledge_learn(k, 8, &fact(4, 1, 8, 1), null_mut()), 1);
             assert_eq!(sx_knowledge_count(k), 2);
             // merge: an older report does not replace a newer fact.
-            assert_eq!(sx_knowledge_merge(k, &fact(3, 1, 1, 9), 10, null_mut()), 0);
+            assert_eq!(sx_knowledge_merge(k, 10, &fact(3, 1, 1, 9), null_mut()), 0);
             let mut out = Fact::default();
             assert_eq!(sx_knowledge_get(k, 3, 1, &mut out), 1);
             assert_eq!(out.strength, 1);
-            assert_eq!(sx_knowledge_merge(k, &fact(3, 1, 9, 9), 10, null_mut()), 0);
+            assert_eq!(sx_knowledge_merge(k, 10, &fact(3, 1, 9, 9), null_mut()), 0);
             assert_eq!(sx_knowledge_get(k, 3, 1, &mut out), 1);
             assert_eq!((out.strength, out.seen_at), (9, 9));
             assert_eq!(sx_knowledge_touch(k, 3, 1, 12), 1);
@@ -1321,10 +1322,10 @@ mod tests {
                 seen_at: 20,
                 ..Message::default()
             };
-            assert_eq!(sx_knowledge_learn_message(k, &m, 2, 20, &mut gone), 1);
+            assert_eq!(sx_knowledge_learn_message(k, 20, &m, 2, &mut gone), 1);
             assert_eq!(sx_knowledge_get(k, 8, 2, &mut out), 1);
             assert_eq!(out.source, 2);
-            assert_eq!(sx_knowledge_merge_message(k, &m, 1, 20, null_mut()), 0);
+            assert_eq!(sx_knowledge_merge_message(k, 20, &m, 1, null_mut()), 0);
             assert_eq!(sx_knowledge_get(k, 8, 2, &mut out), 1);
             assert_eq!(out.source, 1);
             assert_eq!(sx_knowledge_remove(k, 8, 2), 1);
@@ -1334,12 +1335,12 @@ mod tests {
             assert_eq!(sx_knowledge_count(k), 0);
             // nulls
             assert_eq!(sx_knowledge_count(null_mut()), ERROR_ARGUMENT);
-            assert_eq!(sx_knowledge_learn(k, null(), 1, null_mut()), ERROR_ARGUMENT);
+            assert_eq!(sx_knowledge_learn(k, 1, null(), null_mut()), ERROR_ARGUMENT);
             assert_eq!(sx_knowledge_get(k, 1, 1, null_mut()), ERROR_ARGUMENT);
             assert_eq!(sx_knowledge_at(k, 0, null_mut()), ERROR_ARGUMENT);
             let f = fact(1, 1, 1, 1);
             assert_eq!(
-                sx_knowledge_learn(null_mut(), &f, 1, null_mut()),
+                sx_knowledge_learn(null_mut(), 1, &f, null_mut()),
                 ERROR_ARGUMENT
             );
             sx_knowledge_free(k);
@@ -1351,10 +1352,10 @@ mod tests {
     fn knowledge_evicts_weakest() {
         unsafe {
             let k = sx_knowledge_new(2, 1);
-            sx_knowledge_learn(k, &fact(1, 1, 5, 9), 5, null_mut());
-            sx_knowledge_learn(k, &fact(2, 1, 5, 2), 5, null_mut());
+            sx_knowledge_learn(k, 5, &fact(1, 1, 5, 9), null_mut());
+            sx_knowledge_learn(k, 5, &fact(2, 1, 5, 2), null_mut());
             let mut gone = Fact::default();
-            assert_eq!(sx_knowledge_learn(k, &fact(3, 1, 6, 5), 6, &mut gone), 1);
+            assert_eq!(sx_knowledge_learn(k, 6, &fact(3, 1, 6, 5), &mut gone), 1);
             assert_eq!(gone.subject, 2);
             sx_knowledge_free(k);
         }
@@ -1365,7 +1366,7 @@ mod tests {
         unsafe {
             let k = sx_knowledge_new(8, 0);
             for (s, kind) in [(1, 1), (2, 1), (3, 2), (4, 1)] {
-                sx_knowledge_learn(k, &fact(s, kind, 0, 1), 0, null_mut());
+                sx_knowledge_learn(k, 0, &fact(s, kind, 0, 1), null_mut());
             }
             let mut sentinel = [fact(77, 77, 77, 77); 3];
             // Kind 1 only: three facts expire, room for two.
@@ -1395,10 +1396,10 @@ mod tests {
             assert!(sx_outbox_new(0).is_null());
             assert!(sx_inbox_new(0).is_null());
             let o = sx_outbox_new(2);
-            assert_eq!(sx_outbox_post(o, &msg(1), 0, 0, 10), 0);
-            assert_eq!(sx_outbox_post(o, &msg(2), 5, 0, 10), 2);
-            assert_eq!(sx_outbox_post(o, &msg(2), 10, 0, 10), 0);
-            assert_eq!(sx_outbox_post(o, &msg(3), 30, 0, 10), 1);
+            assert_eq!(sx_outbox_post(o, 0, &msg(1), 0, 10), 0);
+            assert_eq!(sx_outbox_post(o, 5, &msg(2), 0, 10), 2);
+            assert_eq!(sx_outbox_post(o, 10, &msg(2), 0, 10), 0);
+            assert_eq!(sx_outbox_post(o, 30, &msg(3), 0, 10), 1);
             assert_eq!(sx_outbox_pending(o), 2);
             let mut out = [Message::default(); 2];
             assert_eq!(sx_outbox_due(o, 10, out.as_mut_ptr(), 1), 1);
@@ -1408,7 +1409,7 @@ mod tests {
             assert_eq!(out[0].subject, 2);
             assert_eq!(sx_outbox_due(o, 10, null_mut(), 1), ERROR_ARGUMENT);
             assert_eq!(sx_outbox_due(o, 10, null_mut(), 0), 0);
-            assert_eq!(sx_outbox_post(o, null(), 1, 0, 0), ERROR_ARGUMENT);
+            assert_eq!(sx_outbox_post(o, 1, null(), 0, 0), ERROR_ARGUMENT);
             assert_eq!(sx_outbox_sender_gone(o), 0);
             assert_eq!(sx_outbox_clear(o), 0);
             assert_eq!(sx_outbox_pending(null_mut()), ERROR_ARGUMENT);
@@ -1486,14 +1487,14 @@ mod tests {
                 blocking: 1,
                 ..Area::default()
             };
-            assert_eq!(sx_areas_add(a, &area, 5), 0);
+            assert_eq!(sx_areas_add(a, 5, &area), 0);
             let soft = Area {
                 kind: 2,
                 blocking: 0,
                 strength: 3,
                 ..area
             };
-            assert_eq!(sx_areas_add(a, &soft, 6), 1);
+            assert_eq!(sx_areas_add(a, 6, &soft), 1);
             assert_eq!(sx_areas_count(a), 2);
             let mut index = 9u32;
             assert_eq!(sx_areas_contains(a, 100, 105, 0, &mut index), 1);
@@ -1507,16 +1508,18 @@ mod tests {
             assert_eq!(sx_areas_blocks(a, c, f, f), 1);
             assert_eq!(sx_areas_blocks(a, c, c, f), 0);
             assert_eq!(sx_areas_blocks(a, null(), f, f), ERROR_ARGUMENT);
-            let mut cost = 0u32;
-            assert_eq!(sx_areas_cost(a, c, f, f, &mut cost), 0);
-            assert_eq!(cost, 3);
-            assert_eq!(sx_areas_cost(a, c, f, f, null_mut()), ERROR_ARGUMENT);
+            assert_eq!(sx_areas_cost(a, c, f, f), 3);
+            assert_eq!(sx_areas_cost(a, null(), f, f), i64::from(ERROR_ARGUMENT));
+            assert_eq!(
+                sx_areas_cost(null_mut(), c, f, f),
+                i64::from(ERROR_ARGUMENT)
+            );
             let mut out = Area::default();
             assert_eq!(sx_areas_at(a, 1, &mut out), 1);
             assert_eq!((out.kind, out.since), (2, 6));
             assert_eq!(sx_areas_at(a, 2, &mut out), 0);
             assert_eq!(sx_areas_at(a, 0, null_mut()), ERROR_ARGUMENT);
-            assert_eq!(sx_areas_add(a, null(), 1), ERROR_ARGUMENT);
+            assert_eq!(sx_areas_add(a, 1, null()), ERROR_ARGUMENT);
             assert_eq!(sx_areas_expire(a, 100), 2);
             assert_eq!(sx_areas_clear(a), 0);
             assert_eq!(sx_areas_count(null_mut()), ERROR_ARGUMENT);
@@ -1527,10 +1530,9 @@ mod tests {
             assert_eq!(sx_timers_set(t, 4, 10, 10), 0);
             assert_eq!(sx_timers_active(t, 4, 15), 1);
             assert_eq!(sx_timers_active(t, 4, 20), 0);
-            let mut left = 99u32;
-            assert_eq!(sx_timers_left(t, 4, 15, &mut left), 0);
-            assert_eq!(left, 5);
-            assert_eq!(sx_timers_left(t, 4, 15, null_mut()), ERROR_ARGUMENT);
+            assert_eq!(sx_timers_left(t, 4, 15), 5);
+            assert_eq!(sx_timers_left(t, 9, 15), 0);
+            assert_eq!(sx_timers_left(null_mut(), 4, 15), i64::from(ERROR_ARGUMENT));
             assert_eq!(sx_timers_count(t), 1);
             assert_eq!(sx_timers_remove(t, 4), 1);
             assert_eq!(sx_timers_remove(t, 4), 0);
@@ -1576,13 +1578,11 @@ mod tests {
             assert_eq!(sx_alertness_update(&mut a, 0, &cfg, levels.as_mut_ptr()), 1);
             assert_eq!(levels, [0, 2]);
             assert_eq!(sx_alertness_level(&mut a), 2);
-            let mut value = 0u32;
-            assert_eq!(sx_alertness_value(&mut a, &mut value), 0);
-            assert_eq!(value, 70);
+            assert_eq!(sx_alertness_value(&a), 70);
             assert_eq!(sx_alertness_update(&mut a, 20, &cfg, null_mut()), 1);
             assert_eq!(sx_alertness_level(&mut a), 1);
             assert_eq!(sx_alertness_update(&mut a, 20, &cfg, null_mut()), 0);
-            assert_eq!(sx_alertness_value(&mut a, null_mut()), ERROR_ARGUMENT);
+            assert_eq!(sx_alertness_value(null()), i64::from(ERROR_ARGUMENT));
             assert_eq!(sx_alertness_stimulus(&mut a, 1, 1, null()), ERROR_ARGUMENT);
             assert_eq!(
                 sx_alertness_update(&mut a, 1, null(), null_mut()),

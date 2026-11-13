@@ -225,7 +225,7 @@ pub(crate) fn run_scene(end: u32) -> Vec<Event> {
         lifetime: u32::MAX,
         ..Area::default()
     };
-    lit.add(torch, 0);
+    lit.add(0, torch);
     let (mut picked, mut msgs) = (Vec::new(), Vec::new());
     for t in 1..=end {
         let (player, visible) = player_at(t);
@@ -242,7 +242,7 @@ pub(crate) fn run_scene(end: u32) -> Vec<Event> {
             );
             for &i in &picked {
                 let g = &mut guards[i as usize];
-                g.known.learn(fact(NOISE, player, t, SOURCE_HEARD), t);
+                g.known.learn(t, fact(NOISE, player, t, SOURCE_HEARD));
                 g.alert.stimulus(HEAR, t, &ALERT_CFG);
                 ev.push(Event::Heard { t, guard: i });
             }
@@ -253,7 +253,7 @@ pub(crate) fn run_scene(end: u32) -> Vec<Event> {
             msgs.clear();
             guards[i].inbox.take_due(t, &mut msgs);
             for m in &msgs {
-                guards[i].known.learn_message(m, SOURCE_TOLD, t);
+                guards[i].known.learn_message(t, m, SOURCE_TOLD);
                 guards[i].alert.stimulus(TOLD, t, &ALERT_CFG);
                 ev.push(Event::Told { t, guard: me });
             }
@@ -261,7 +261,7 @@ pub(crate) fn run_scene(end: u32) -> Vec<Event> {
             let sees = visible && hex(guards[i].pos, player) <= SIGHT;
             if sees {
                 let g = &mut guards[i];
-                g.known.learn(fact(SEEN, player, t, SOURCE_OWN), t);
+                g.known.learn(t, fact(SEEN, player, t, SOURCE_OWN));
                 g.alert.stimulus(SEE, t, &ALERT_CFG);
                 ev.push(Event::Saw { t, guard: me });
                 if !g.timers.active(SHOUTED, t) {

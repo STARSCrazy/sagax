@@ -86,8 +86,8 @@ impl Outbox {
     /// `cooldown` old. The first post never waits for the cooldown.
     pub fn post(
         &mut self,
-        msg: Message,
         now: u32,
+        msg: Message,
         delay: u32,
         cooldown: u32,
     ) -> Result<(), Refused> {

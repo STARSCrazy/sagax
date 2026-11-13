@@ -210,7 +210,7 @@ fn report(o: &mut Officer, me: u32, at: Pos, t: u32, ev: &mut Vec<Event>) {
         keep_if_sender_gone: 0,
         ..Message::default()
     };
-    if o.report.due(t, REPORT_EVERY) && o.radio.post(call, t, RADIO_DELAY, RADIO_COOLDOWN).is_ok() {
+    if o.report.due(t, REPORT_EVERY) && o.radio.post(t, call, RADIO_DELAY, RADIO_COOLDOWN).is_ok() {
         o.report.mark(t);
         ev.push(Event::RadioSent { t, officer: me });
     }
@@ -243,8 +243,8 @@ pub fn run_scene(end: u32) -> Vec<Event> {
             let mut flags = 0;
             if t == CRIME_TICK && sees && !o.ignore.active(ACTOR, t) {
                 // Witness: remember, report at once, chase.
-                table.learn(seen(actor, t), t);
-                o.known.learn(seen(actor, t), t);
+                table.learn(t, seen(actor, t));
+                o.known.learn(t, seen(actor, t));
                 report(o, me, actor, t, &mut ev);
                 o.progress.start(cheb(o.pos, actor), t);
                 let c = o.sm.set_state(CHASE, t).unwrap();
@@ -260,8 +260,8 @@ pub fn run_scene(end: u32) -> Vec<Event> {
                 let mut lost = false;
                 if (t + me).is_multiple_of(SIGHT_EVERY) {
                     if sees {
-                        o.known.learn(seen(actor, t), t);
-                        table.learn(seen(actor, t), t);
+                        o.known.learn(t, seen(actor, t));
+                        table.learn(t, seen(actor, t));
                         report(o, me, actor, t, &mut ev);
                     }
                     lost = t.wrapping_sub(target(o).unwrap().seen_at) >= LOST_AT;
@@ -361,7 +361,7 @@ pub fn run_scene(end: u32) -> Vec<Event> {
                 for &h in &picked {
                     let c = &mut officers[h as usize];
                     // Learning by radio does not refresh the shared table.
-                    c.known.learn_message(&call, SOURCE_TOLD, t);
+                    c.known.learn_message(t, &call, SOURCE_TOLD);
                     c.report.mark(t);
                     begin_search(c, h, call.pos, LOOK_SENT);
                     let ch = c.sm.set_state(WALK, t).unwrap();

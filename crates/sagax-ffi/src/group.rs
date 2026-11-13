@@ -430,7 +430,7 @@ pub unsafe extern "C" fn sx_gather(
     y: i32,
     faction: u32,
     radius: i64,
-    metric: i32,
+    metric: u32,
     free_only: u32,
     candidates: *const SxGatherCandidate,
     n: u32,
@@ -609,7 +609,7 @@ pub extern "C" fn sx_squad_new(
     memory_cap: u32,
     area_cap: u32,
     inbox_cap: u32,
-    metric: i32,
+    metric: u32,
 ) -> *mut SxSquad {
     create(|| {
         let squad = Squad::new(
@@ -993,12 +993,12 @@ pub unsafe extern "C" fn sx_squad_areas(squad: *mut SxSquad) -> *mut SxAreas {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_observe(
     squad: *mut SxSquad,
-    fact: *const SxFact,
     now: u32,
+    fact: *const SxFact,
     evicted: *mut SxFact,
 ) -> i32 {
     let s = &mut squad!(squad);
-    match s.observe(*input!(fact), now) {
+    match s.observe(now, *input!(fact)) {
         Some(gone) => {
             // SAFETY: see above.
             unsafe { put(evicted, gone) };
@@ -1022,25 +1022,36 @@ pub unsafe extern "C" fn sx_squad_report(
     i32::from(s.report(*input!(msg), arrive_at))
 }
 
-/// `sx_squad_targets`.
+/// `sx_squad_targets`: returns how many facts were written; `total` (may be
+/// null) gets the number of all targets.
 ///
 /// # Safety
-/// `squad` is null or valid; `out` is null or has room for `cap` facts.
+/// `squad` is null or valid; `out` is null or has room for `cap` facts;
+/// `total` is null or writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_squad_targets(squad: *mut SxSquad, out: *mut SxFact, cap: u32) -> i32 {
+pub unsafe extern "C" fn sx_squad_targets(
+    squad: *mut SxSquad,
+    out: *mut SxFact,
+    cap: u32,
+    total: *mut u32,
+) -> i32 {
     let s = &mut squad!(squad);
     if out.is_null() && cap > 0 {
         return ERROR_ARGUMENT;
     }
-    let mut total = 0;
+    let mut all = 0usize;
+    let mut written = 0usize;
     for (i, f) in s.targets().enumerate() {
         if i < cap as usize {
             // SAFETY: within `cap` (see above).
             unsafe { out.add(i).write(*f) };
+            written += 1;
         }
-        total += 1;
+        all += 1;
     }
-    to_i32(total)
+    // SAFETY: null or writable (see above).
+    unsafe { put(total, u32::try_from(all).unwrap_or(u32::MAX)) };
+    to_i32(written)
 }
 
 /// `sx_squad_add_shipped`.
@@ -1355,14 +1366,14 @@ pub unsafe extern "C" fn sx_keeper_free(keeper: *mut SxKeeper) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_keeper_set(
     keeper: *mut SxKeeper,
-    goal: *const SxGoal,
     now: u32,
+    goal: *const SxGoal,
 ) -> i32 {
     let k = get!(keeper);
     let Some(goal) = input!(goal).goal() else {
         return ERROR_ARGUMENT;
     };
-    k.0.set(goal, now);
+    k.0.set(now, goal);
     0
 }
 
@@ -1461,7 +1472,7 @@ pub unsafe extern "C" fn sx_keeper_inputs(
     x: i32,
     y: i32,
     z: i32,
-    metric: i32,
+    metric: u32,
     signal_given: u32,
     discipline: u32,
     out: *mut i32,

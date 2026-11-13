@@ -64,7 +64,7 @@ impl Areas {
     /// the new centre is renewed: all fields are replaced. Otherwise the
     /// area is appended; when full, the oldest is removed first (on a tie
     /// the earlier slot), the rest keep their order. Returns the index.
-    pub fn add(&mut self, mut area: Area, now: u32) -> usize {
+    pub fn add(&mut self, now: u32, mut area: Area) -> usize {
         area.since = now;
         if let Some(i) = self
             .items

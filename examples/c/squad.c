@@ -183,7 +183,7 @@ int main(void)
 	seen.subject = E1;
 	seen.kind = ENEMY;
 	seen.pos[0] = 20;
-	CHECK(sx_squad_observe(squad, &seen, 0, NULL) == 0);
+	CHECK(sx_squad_observe(squad, 0, &seen, NULL) == 0);
 	told.kind = SX_REPORT_ENEMY;
 	told.subject = E2;
 	told.pos[0] = 24;
@@ -284,7 +284,7 @@ int main(void)
 		CHECK(keeper != NULL);
 		CHECK(sx_skill_table_default(&table) == 0);
 		give_up = table.give_up_ticks[192 / 64];
-		CHECK(sx_keeper_set(keeper, &walkers[1].goal, 60) == 0);
+		CHECK(sx_keeper_set(keeper, 60, &walkers[1].goal) == 0);
 		CHECK(sx_keeper_inputs(keeper, 60, 16, 2, 0, SX_METRIC_CHEBYSHEV, 1,
 		                       (uint32_t)sx_discipline(192, &table), inputs) == 0);
 		CHECK(inputs[0] == 1 && inputs[3] == 1);

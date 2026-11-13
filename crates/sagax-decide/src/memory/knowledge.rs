@@ -107,7 +107,7 @@ impl Knowledge {
     /// Stores `fact`. A known key is overwritten in place (all fields); a
     /// new key is added, and if the table is full the fact chosen by the
     /// [`Evict`] rule is dropped and returned.
-    pub fn learn(&mut self, fact: Fact, now: u32) -> Option<Fact> {
+    pub fn learn(&mut self, now: u32, fact: Fact) -> Option<Fact> {
         match self.find(fact.subject, fact.kind) {
             Some(i) => {
                 self.items[i] = fact;
@@ -120,7 +120,7 @@ impl Knowledge {
     /// Like [`Knowledge::learn`], but a known key is overwritten only if the
     /// new `seen_at` is not older than the stored one (ages relative to
     /// `now`, so a wrapped clock works); otherwise the stored fact stays.
-    pub fn merge(&mut self, fact: Fact, now: u32) -> Option<Fact> {
+    pub fn merge(&mut self, now: u32, fact: Fact) -> Option<Fact> {
         match self.find(fact.subject, fact.kind) {
             Some(i) => {
                 if now.wrapping_sub(fact.seen_at) <= now.wrapping_sub(self.items[i].seen_at) {
@@ -266,12 +266,12 @@ impl Knowledge {
     }
 
     /// [`Knowledge::learn`] for the fact a message tells (`source` as given).
-    pub fn learn_message(&mut self, msg: &super::Message, source: u8, now: u32) -> Option<Fact> {
-        self.learn(msg.to_fact(source), now)
+    pub fn learn_message(&mut self, now: u32, msg: &super::Message, source: u8) -> Option<Fact> {
+        self.learn(now, msg.to_fact(source))
     }
 
     /// [`Knowledge::merge`] for the fact a message tells (`source` as given).
-    pub fn merge_message(&mut self, msg: &super::Message, source: u8, now: u32) -> Option<Fact> {
-        self.merge(msg.to_fact(source), now)
+    pub fn merge_message(&mut self, now: u32, msg: &super::Message, source: u8) -> Option<Fact> {
+        self.merge(now, msg.to_fact(source))
     }
 }

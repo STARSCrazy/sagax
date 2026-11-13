@@ -342,7 +342,7 @@ test('decide: memory, cooldown, dislike', () => {
   const cands = [{ option: strike, target: 1 }, { option: strike, target: 2 }, { option: wait }];
   d.setNow(100);
   assert.equal(d.decide(cands).index, 0);
-  d.record(cands[0], 100);
+  d.record(100, cands[0]);
   d.setNow(102);
   assert.equal(d.decide(cands).index, 1); // target 1 was struck just now
   d.setCooldown(strike, 3);
@@ -387,20 +387,30 @@ const fact = (subject, kind, seenAt, more = {}) => ({ subject, kind, pos: [0, 0,
 const msg = (subject, kind = 1, more = {}) => ({ kind, subject, pos: [1, 2, 3], seenAt: 7, strength: 8, data: 9, sender: 10, keepIfSenderGone: false, ...more });
 const keys = (k) => k.list().map((f) => [f.subject, f.kind]);
 
+test('memory: now comes first', () => {
+  const k = lib.knowledge(4);
+  assert.equal(k.learn(5, { subject: 1, kind: 2, pos: [0, 0, 0], seenAt: 5 }), null);
+  assert.equal(k.get(1, 2).seenAt, 5);
+  // The old order (fact, now) must fail loudly, not store something odd.
+  assert.throws(() => k.learn({ subject: 1, kind: 2, pos: [0, 0, 0], seenAt: 5 }, 5));
+  assert.equal(k.count(), 1);
+  k.free();
+});
+
 test('knowledge: key is (subject, kind), learn overwrites, setters', () => {
   assert.throws(() => lib.knowledge(0), RangeError);
   assert.throws(() => lib.knowledge(4, 'newest'), RangeError);
   const k = lib.knowledge(4);
-  assert.equal(k.learn(fact(1, 1, 0), 0), null);
-  assert.equal(k.learn(fact(1, 2, 0), 0), null);
-  assert.equal(k.learn(fact(2, 1, 0), 0), null);
+  assert.equal(k.learn(0, fact(1, 1, 0)), null);
+  assert.equal(k.learn(0, fact(1, 2, 0)), null);
+  assert.equal(k.learn(0, fact(2, 1, 0)), null);
   assert.equal(k.count(), 3);
-  assert.equal(k.learn(fact(1, 2, 5, { pos: [1, -2, 3] }), 5), null); // keeps its slot
+  assert.equal(k.learn(5, fact(1, 2, 5, { pos: [1, -2, 3] })), null); // keeps its slot
   assert.deepEqual(keys(k), [[1, 1], [1, 2], [2, 1]]);
   assert.deepEqual(k.get(1, 2), { subject: 1, kind: 2, pos: [1, -2, 3], seenAt: 5, source: 0, strength: 0, data: 0 });
   assert.equal(k.get(2, 2), null);
   const old = fact(1, 2, 3, { source: 2, strength: 4, data: 5, pos: [7, 8, 9] });
-  assert.equal(k.learn(old, 5), null); // learn overwrites even an older fact
+  assert.equal(k.learn(5, old), null); // learn overwrites even an older fact
   assert.deepEqual(k.get(1, 2), old);
   assert.equal(k.touch(1, 2, 20) && k.setPos(1, 2, [1, 1, 1]) && k.setData(1, 2, 6) && k.setStrength(1, 2, 8), true);
   assert.deepEqual(k.get(1, 2), fact(1, 2, 20, { source: 2, strength: 8, data: 6, pos: [1, 1, 1] }));
@@ -408,15 +418,15 @@ test('knowledge: key is (subject, kind), learn overwrites, setters', () => {
   assert.equal(k.remove(1, 2), true);
   assert.equal(k.removeSubject(1), 1);
   assert.equal(k.removeSubject(1), 0);
-  k.learn(fact(2, 5, 0), 0);
-  k.learn(fact(2, 6, 0), 0);
+  k.learn(0, fact(2, 5, 0));
+  k.learn(0, fact(2, 6, 0));
   assert.equal(k.removeSubject(2), 3); // all kinds
   assert.deepEqual(k.list(), []);
-  k.learn(fact(3, 0, 0), 0);
+  k.learn(0, fact(3, 0, 0));
   k.clear();
   assert.equal(k.count(), 0);
   // extreme values survive the round trip
-  k.learn({ subject: 4294967295, kind: 4294967295, pos: [-2147483648, 2147483647, -1], seenAt: 4294967295, source: 255, strength: 4294967295, data: 4294967295 }, 0);
+  k.learn(0, { subject: 4294967295, kind: 4294967295, pos: [-2147483648, 2147483647, -1], seenAt: 4294967295, source: 255, strength: 4294967295, data: 4294967295 });
   assert.deepEqual(k.get(4294967295, 4294967295), { subject: 4294967295, kind: 4294967295, pos: [-2147483648, 2147483647, -1], seenAt: 4294967295, source: 255, strength: 4294967295, data: 4294967295 });
   k.free();
   assert.throws(() => k.count(), /free/);
@@ -424,69 +434,69 @@ test('knowledge: key is (subject, kind), learn overwrites, setters', () => {
 
 test('knowledge: evict oldest (tie earlier slot) and weakest then oldest', () => {
   const k = lib.knowledge(3, 'oldest');
-  k.learn(fact(1, 0, 0), 0);
-  k.learn(fact(2, 0, 1), 1);
-  k.learn(fact(3, 0, 2), 2);
+  k.learn(0, fact(1, 0, 0));
+  k.learn(1, fact(2, 0, 1));
+  k.learn(2, fact(3, 0, 2));
   assert.equal(k.touch(1, 0, 3), true);
-  assert.equal(k.learn(fact(4, 0, 4), 4).subject, 2); // returns the evicted fact
+  assert.equal(k.learn(4, fact(4, 0, 4)).subject, 2); // returns the evicted fact
   assert.deepEqual(keys(k), [[1, 0], [3, 0], [4, 0]]);
   const t = lib.knowledge(3, 'oldest');
-  for (let s = 1; s <= 3; s++) t.learn(fact(s, 0, 5), 5);
-  assert.equal(t.learn(fact(9, 0, 5), 5).subject, 1);
+  for (let s = 1; s <= 3; s++) t.learn(5, fact(s, 0, 5));
+  assert.equal(t.learn(5, fact(9, 0, 5)).subject, 1);
   assert.deepEqual(keys(t), [[2, 0], [3, 0], [9, 0]]);
-  assert.equal(t.learn(fact(2, 0, 6), 6), null); // present key does not evict
+  assert.equal(t.learn(6, fact(2, 0, 6)), null); // present key does not evict
   const w = lib.knowledge(4, 'weakest');
   const with_ = (s, at, st) => fact(s, 0, at, { strength: st });
-  w.learn(with_(1, 10, 5), 10);
-  w.learn(with_(2, 0, 9), 10);
-  w.learn(with_(3, 4, 5), 10);
-  w.learn(with_(4, 4, 5), 10);
-  assert.equal(w.learn(with_(5, 10, 7), 10).subject, 3); // weakest 5, oldest of those, earlier slot
+  w.learn(10, with_(1, 10, 5));
+  w.learn(10, with_(2, 0, 9));
+  w.learn(10, with_(3, 4, 5));
+  w.learn(10, with_(4, 4, 5));
+  assert.equal(w.learn(10, with_(5, 10, 7)).subject, 3); // weakest 5, oldest of those, earlier slot
   assert.deepEqual(keys(w), [[1, 0], [2, 0], [4, 0], [5, 0]]);
-  assert.equal(w.learn(with_(6, 10, 9), 10).subject, 4);
+  assert.equal(w.learn(10, with_(6, 10, 9)).subject, 4);
   const s = lib.knowledge(2, 'weakest');
-  s.learn(with_(1, 0, 8), 100);
-  s.learn(with_(2, 99, 2), 100);
-  assert.equal(s.learn(with_(3, 100, 5), 100).subject, 2); // strength beats age
+  s.learn(100, with_(1, 0, 8));
+  s.learn(100, with_(2, 99, 2));
+  assert.equal(s.learn(100, with_(3, 100, 5)).subject, 2); // strength beats age
 });
 
 test('knowledge: merge keeps the newer, also across the wrap', () => {
   const k = lib.knowledge(2);
-  k.merge(fact(1, 0, 100, { data: 1 }), 110);
-  assert.equal(k.merge(fact(1, 0, 90, { data: 2 }), 110), null);
+  k.merge(110, fact(1, 0, 100, { data: 1 }));
+  assert.equal(k.merge(110, fact(1, 0, 90, { data: 2 })), null);
   assert.equal(k.get(1, 0).data, 1);
-  k.merge(fact(1, 0, 100, { data: 3 }), 110); // equal: not older
+  k.merge(110, fact(1, 0, 100, { data: 3 })); // equal: not older
   assert.equal(k.get(1, 0).data, 3);
-  k.merge(fact(1, 0, 105, { data: 4 }), 110);
+  k.merge(110, fact(1, 0, 105, { data: 4 }));
   assert.deepEqual([k.get(1, 0).seenAt, k.get(1, 0).data], [105, 4]);
   const w = lib.knowledge(1);
-  w.merge(fact(1, 0, 4294967293), 5); // age 8
-  w.merge(fact(1, 0, 2, { data: 9 }), 5); // age 3 is newer
+  w.merge(5, fact(1, 0, 4294967293)); // age 8
+  w.merge(5, fact(1, 0, 2, { data: 9 })); // age 3 is newer
   assert.equal(w.get(1, 0).data, 9);
-  w.merge(fact(1, 0, 4294967287, { data: 7 }), 5); // age 15 is older
+  w.merge(5, fact(1, 0, 4294967287, { data: 7 })); // age 15 is older
   assert.equal(w.get(1, 0).data, 9);
   const f = lib.knowledge(1);
-  f.merge(fact(1, 0, 0), 1);
-  assert.equal(f.merge(fact(2, 0, 1), 1).subject, 1);
+  f.merge(1, fact(1, 0, 0));
+  assert.equal(f.merge(1, fact(2, 0, 1)).subject, 1);
 });
 
 test('knowledge: learnMessage and mergeMessage turn a message into a fact', () => {
   const k = lib.knowledge(4);
   const m = msg(5, 3);
-  k.learnMessage(m, 2, 10);
+  k.learnMessage(10, m, 2);
   assert.deepEqual(k.get(5, 3), { subject: 5, kind: 3, pos: [1, 2, 3], seenAt: 7, source: 2, strength: 8, data: 9 });
-  k.mergeMessage({ ...m, seenAt: 3, data: 1 }, 1, 10); // older: kept
+  k.mergeMessage(10, { ...m, seenAt: 3, data: 1 }, 1); // older: kept
   assert.equal(k.get(5, 3).data, 9);
-  k.mergeMessage({ ...m, seenAt: 8, data: 1 }, 1, 10);
+  k.mergeMessage(10, { ...m, seenAt: 8, data: 1 }, 1);
   assert.deepEqual([k.get(5, 3).data, k.get(5, 3).source], [1, 1]);
 });
 
 test('knowledge: expire, expire with per-kind ages, expireKind', () => {
   const k = lib.knowledge(5);
-  k.learn(fact(1, 1, 0), 0);
-  k.learn(fact(2, 2, 0), 0);
-  k.learn(fact(3, 1, 10), 10);
-  k.learn(fact(4, 2, 10), 10);
+  k.learn(0, fact(1, 1, 0));
+  k.learn(0, fact(2, 2, 0));
+  k.learn(10, fact(3, 1, 10));
+  k.learn(10, fact(4, 2, 10));
   assert.deepEqual(k.expire(20, 20).map((f) => f.subject), [1, 2]);
   // kind 1 lives 5, kind 2 lives 15: only subject 3 (age 10, kind 1) goes
   assert.deepEqual(k.expire(20, 0, (f) => (f.kind === 1 ? 5 : 15)).map((f) => f.subject), [3]);
@@ -498,10 +508,10 @@ test('knowledge: expire, expire with per-kind ages, expireKind', () => {
   for (const bad of [-1, NaN, 1.5, -Infinity]) assert.throws(() => k.expire(20, 0, () => bad), RangeError);
   assert.equal(k.count(), 1); // a bad callback removes nothing
   const e = lib.knowledge(5);
-  e.learn(fact(1, 1, 0), 0);
-  e.learn(fact(2, 2, 0), 0);
-  e.learn(fact(3, 1, 0), 0);
-  e.learn(fact(4, 1, 8), 8);
+  e.learn(0, fact(1, 1, 0));
+  e.learn(0, fact(2, 2, 0));
+  e.learn(0, fact(3, 1, 0));
+  e.learn(8, fact(4, 1, 8));
   const gone = e.expireKind(10, 1, 10);
   assert.deepEqual(gone.map((f) => f.subject), [1, 3]); // slot order, kind 1 only
   assert.deepEqual(gone[0], fact(1, 1, 0));
@@ -509,37 +519,37 @@ test('knowledge: expire, expire with per-kind ages, expireKind', () => {
   assert.deepEqual(e.expireKind(10, 9, 0), []);
   // wrapped clock: age 15 at now = 10
   const w = lib.knowledge(1);
-  w.learn(fact(1, 0, 4294967291), 0);
+  w.learn(0, fact(1, 0, 4294967291));
   assert.deepEqual(w.expire(10, 16), []);
   assert.equal(w.expire(10, 15).length, 1);
-  w.learn(fact(1, 0, 4294967291), 0);
+  w.learn(0, fact(1, 0, 4294967291));
   assert.equal(w.expireKind(10, 0, 15).length, 1);
 });
 
 test('outbox: cooldown from the last accepted post, full, delays, sender gone', () => {
   assert.throws(() => lib.outbox(0), RangeError);
   const o = lib.outbox(4);
-  assert.equal(o.post(msg(1), 0, 102, 170), 'ok');
-  assert.equal(o.post(msg(2), 169, 102, 170), 'cooldown');
-  assert.equal(o.post(msg(3), 170, 102, 170), 'ok'); // a refused post does not move the start
-  assert.equal(o.post(msg(4), 339, 102, 170), 'cooldown');
-  assert.equal(o.post(msg(5), 340, 102, 170), 'ok');
+  assert.equal(o.post(0, msg(1), 102, 170), 'ok');
+  assert.equal(o.post(169, msg(2), 102, 170), 'cooldown');
+  assert.equal(o.post(170, msg(3), 102, 170), 'ok'); // a refused post does not move the start
+  assert.equal(o.post(339, msg(4), 102, 170), 'cooldown');
+  assert.equal(o.post(340, msg(5), 102, 170), 'ok');
   assert.equal(o.pending(), 3);
   const w = lib.outbox(2);
-  assert.equal(w.post(msg(1), 4294967285, 0, 170), 'ok');
-  assert.equal(w.post(msg(1), 158, 0, 170), 'cooldown');
-  assert.equal(w.post(msg(1), 159, 0, 170), 'ok');
+  assert.equal(w.post(4294967285, msg(1), 0, 170), 'ok');
+  assert.equal(w.post(158, msg(1), 0, 170), 'cooldown');
+  assert.equal(w.post(159, msg(1), 0, 170), 'ok');
   const f = lib.outbox(2);
-  assert.equal(f.post(msg(1), 0, 5), 'ok');
-  assert.equal(f.post(msg(2), 0, 5), 'ok');
-  assert.equal(f.post(msg(3), 0, 5), 'full');
+  assert.equal(f.post(0, msg(1), 5), 'ok');
+  assert.equal(f.post(0, msg(2), 5), 'ok');
+  assert.equal(f.post(0, msg(3), 5), 'full');
   assert.equal(f.due(5).length, 2);
-  assert.equal(f.post(msg(3), 5, 5), 'ok');
+  assert.equal(f.post(5, msg(3), 5), 'ok');
 
   const d = lib.outbox(4);
-  d.post(msg(1), 0, 10);
-  d.post(msg(2), 1, 2);
-  d.post(msg(3), 2, 0);
+  d.post(0, msg(1), 10);
+  d.post(1, msg(2), 2);
+  d.post(2, msg(3), 0);
   assert.deepEqual(d.due(3).map((m) => m.subject), [2, 3]);
   assert.equal(d.pending(), 1);
   const [last] = d.due(10);
@@ -547,26 +557,26 @@ test('outbox: cooldown from the last accepted post, full, delays, sender gone', 
   assert.equal(d.pending(), 0);
 
   const g = lib.outbox(4);
-  g.post(msg(1), 0, 5);
-  g.post(msg(2, 1, { keepIfSenderGone: true }), 0, 5);
+  g.post(0, msg(1), 5);
+  g.post(0, msg(2, 1, { keepIfSenderGone: true }), 5);
   g.senderGone();
   assert.equal(g.pending(), 1);
   assert.deepEqual(g.due(5), [msg(2, 1, { keepIfSenderGone: true })]);
-  g.post(msg(3), 6, 5);
+  g.post(6, msg(3), 5);
   g.clear();
   assert.equal(g.pending(), 0);
-  assert.equal(g.post(msg(4), 7, 5, 100), 'cooldown'); // the cooldown survives clear
-  assert.equal(g.post(msg(4), 106, 5, 100), 'ok');
+  assert.equal(g.post(7, msg(4), 5, 100), 'cooldown'); // the cooldown survives clear
+  assert.equal(g.post(106, msg(4), 5, 100), 'ok');
 
   const m = lib.outbox(4);
-  for (const s of [1, 2, 3]) m.post(msg(s), 0, 0);
+  for (const s of [1, 2, 3]) m.post(0, msg(s), 0);
   assert.deepEqual(m.due(5, 2).map((x) => x.subject), [1, 2]);
   assert.equal(m.pending(), 1);
   assert.deepEqual(m.due(5, 0), []);
   assert.equal(m.due(5, 9).length, 1);
   // a message with the extremes of every field
   const big = { kind: 4294967295, subject: 4294967295, pos: [-2147483648, 2147483647, -1], seenAt: 4294967295, strength: 4294967295, data: 4294967295, sender: 4294967295, keepIfSenderGone: true };
-  m.post(big, 0, 0);
+  m.post(0, big, 0);
   assert.deepEqual(m.due(0), [big]);
 });
 
@@ -615,12 +625,12 @@ test('areas: renew, evict, expire, contains, blocks, cost', () => {
   assert.throws(() => lib.areas(0), RangeError);
   const area = (kind, x, radius, more = {}) => ({ kind, pos: [x, 0, 0], radius, lifetime: 255, strength: 0, data: 0, blocking: false, source: null, ...more });
   const z = lib.areas(4);
-  assert.equal(z.add(area(1, 0, 0x200), 0), 0);
-  assert.equal(z.add(area(1, 0x1ff, 0x200, { data: 2, source: [5, 6, -7] }), 10), 0); // renews
+  assert.equal(z.add(0, area(1, 0, 0x200)), 0);
+  assert.equal(z.add(10, area(1, 0x1ff, 0x200, { data: 2, source: [5, 6, -7] })), 0); // renews
   assert.equal(z.count(), 1);
   assert.deepEqual(z.list(), [area(1, 0x1ff, 0x200, { data: 2, since: 10, source: [5, 6, -7] })]);
-  assert.equal(z.add(area(1, 0x200 + 0x1ff, 0x200), 11), 1); // exactly at the radius: new
-  assert.equal(z.add(area(2, 0, 100), 1), 2); // other kind: new
+  assert.equal(z.add(11, area(1, 0x200 + 0x1ff, 0x200)), 1); // exactly at the radius: new
+  assert.equal(z.add(1, area(2, 0, 100)), 2); // other kind: new
   assert.equal(z.containsKind([0, 0, 0], 2), 2);
   assert.equal(z.containsKind([0, 0, 0], 3), null);
   assert.equal(z.contains([0, 0, 0]), 0);
@@ -628,53 +638,53 @@ test('areas: renew, evict, expire, contains, blocks, cost', () => {
   z.clear();
   assert.equal(z.count(), 0);
   // renewal uses the existing radius, then replaces it
-  z.add(area(1, 0, 10), 0);
-  assert.equal(z.add(area(1, 50, 1000), 1), 1);
-  assert.equal(z.add(area(1, 5, 20), 2), 0);
+  z.add(0, area(1, 0, 10));
+  assert.equal(z.add(1, area(1, 50, 1000)), 1);
+  assert.equal(z.add(2, area(1, 5, 20)), 0);
   assert.equal(z.list()[0].radius, 20);
   // full: the oldest goes, the new one is last
   const f = lib.areas(2);
-  f.add(area(1, 0, 10, { data: 1 }), 5);
-  f.add(area(1, 100, 10, { data: 2 }), 2);
-  assert.equal(f.add(area(1, 200, 10, { data: 3 }), 6), 1);
+  f.add(5, area(1, 0, 10, { data: 1 }));
+  f.add(2, area(1, 100, 10, { data: 2 }));
+  assert.equal(f.add(6, area(1, 200, 10, { data: 3 })), 1);
   assert.deepEqual(f.list().map((a) => a.data), [1, 3]);
   // expire by own lifetime, also across the wrap
   const e = lib.areas(4);
-  e.add(area(1, 0, 10, { lifetime: 100 }), 0);
-  e.add(area(1, 100, 10, { lifetime: 300, data: 2 }), 1);
+  e.add(0, area(1, 0, 10, { lifetime: 100 }));
+  e.add(1, area(1, 100, 10, { lifetime: 300, data: 2 }));
   assert.equal(e.expire(99), 0);
   assert.equal(e.expire(100), 1);
   assert.equal(e.expire(300), 0);
   assert.equal(e.expire(301), 1);
   const w = lib.areas(1);
-  w.add(area(1, 0, 10), 4294967285);
+  w.add(4294967285, area(1, 0, 10));
   assert.equal(w.expire(243), 0);
   assert.equal(w.expire(245), 1);
   // blocks and cost
   const b = lib.areas(4);
-  b.add(area(1, 0, 100, { blocking: true, strength: 1000 }), 0);
+  b.add(0, area(1, 0, 100, { blocking: true, strength: 1000 }));
   const out = [1000, 0, 0];
   assert.equal(b.blocks([10, 0, 0], out, [2000, 0, 0]), true);
   assert.equal(b.blocks([10, 0, 0], [20, 0, 0], out), false); // start inside
   assert.equal(b.blocks([10, 0, 0], out, [20, 0, 0]), false); // goal inside
   assert.equal(b.blocks([500, 0, 0], out, [2000, 0, 0]), false);
   const c = lib.areas(4);
-  c.add(area(1, 0, 100, { strength: 7 }), 0);
-  c.add(area(2, 0, 100, { strength: 5 }), 0);
-  c.add(area(3, 0, 100, { strength: 1000, blocking: true }), 0);
+  c.add(0, area(1, 0, 100, { strength: 7 }));
+  c.add(0, area(2, 0, 100, { strength: 5 }));
+  c.add(0, area(3, 0, 100, { strength: 1000, blocking: true }));
   assert.equal(c.cost([10, 0, 0], out, [2000, 0, 0]), 12);
   assert.equal(c.cost([500, 0, 0], out, [2000, 0, 0]), 0);
   assert.equal(c.cost([10, 0, 0], [20, 0, 0], out), 0);
   const s = lib.areas(2);
-  s.add(area(1, 0, 100, { strength: 4294967295 }), 0);
-  s.add(area(2, 0, 100, { strength: 9 }), 0);
+  s.add(0, area(1, 0, 100, { strength: 4294967295 }));
+  s.add(0, area(2, 0, 100, { strength: 9 }));
   assert.equal(s.cost([10, 0, 0], out, [2000, 0, 0]), 4294967295); // saturates, still unsigned
   // radius 0 holds nothing; extreme coordinates do not overflow
   const r = lib.areas(1);
-  r.add(area(1, 0, 0), 0);
+  r.add(0, area(1, 0, 0));
   assert.equal(r.contains([0, 0, 0]), null);
   const x = lib.areas(2);
-  x.add({ kind: 1, pos: [-2147483648, -2147483648, 0], radius: 2147483647, lifetime: 1, blocking: true }, 0);
+  x.add(0, { kind: 1, pos: [-2147483648, -2147483648, 0], radius: 2147483647, lifetime: 1, blocking: true });
   assert.equal(x.contains([-2147483648, -2147483648, 0]), 0);
   assert.equal(x.contains([2147483647, 2147483647, 0]), null);
   assert.equal(x.blocks([-2147483648, -2147483648, 0], [2147483647, 2147483647, 0], [2147483647, 2147483647, 0]), true);
@@ -1011,7 +1021,7 @@ test('stealth guard slice: noise, alertness, shout with delay, told', () => {
   const heard = lib.route({ inRange: 5 }, [5, 0], all, 'hex');
   assert.deepEqual(heard, [0]);
   for (const g of heard) {
-    known[g].learn({ subject: PLAYER, kind: NOISE, pos: [5, 0, 0], seenAt: 2, source: 1 }, 2);
+    known[g].learn(2, { subject: PLAYER, kind: NOISE, pos: [5, 0, 0], seenAt: 2, source: 1 });
     alert[g].stimulus(30, 2, cfg);
   }
   assert.deepEqual(alert[0].update(2, cfg), [0, 1]); // suspicious
@@ -1041,7 +1051,7 @@ test('stealth guard slice: noise, alertness, shout with delay, told', () => {
   // Round 11: guard 1 hears it: told the place, +60 -> searching.
   assert.deepEqual(inbox[1].takeDue(10), []);
   const [told] = inbox[1].takeDue(11);
-  known[1].learnMessage(told, 2, 11);
+  known[1].learnMessage(11, told, 2);
   alert[1].stimulus(60, 11, cfg);
   assert.deepEqual(known[1].get(PLAYER, SEEN), { subject: PLAYER, kind: SEEN, pos: [5, 0, 0], seenAt: 6, source: 2, strength: 0, data: 0 });
   assert.deepEqual(alert[1].update(11, cfg), [0, 2]);
@@ -1067,10 +1077,10 @@ test('route and points survive memory growth', () => {
   assert.equal(lib.route('all', [0, 0], c).length, 200000);
   // tables keep working after the memory moved
   const k = lib.knowledge(2);
-  k.learn(fact(1, 1, 5, { pos: [1, 2, 3] }), 5);
+  k.learn(5, fact(1, 1, 5, { pos: [1, 2, 3] }));
   assert.deepEqual(k.get(1, 1).pos, [1, 2, 3]);
   const big = lib.knowledge(20000);
-  for (let i = 0; i < 20000; i++) big.learn(fact(i, 0, i), i);
+  for (let i = 0; i < 20000; i++) big.learn(i, fact(i, 0, i));
   assert.equal(big.expire(20000, 10000).length, 10001);
   big.free();
 });
@@ -1086,14 +1096,14 @@ test('capacity is validated', () => {
 test('records and lists are copies; a freed table cannot be used', () => {
   const o = lib.outbox(2);
   const m = msg(1);
-  o.post(m, 0, 0);
+  o.post(0, m, 0);
   const [out] = o.due(0);
   out.pos[0] = 99;
   m.pos[1] = 77; // the caller's own message is not kept either
-  o.post(msg(1), 1, 0);
+  o.post(1, msg(1), 0);
   assert.deepEqual(o.due(1)[0].pos, [1, 2, 3]);
   const k = lib.knowledge(2);
-  k.learn(fact(1, 1, 0, { pos: [4, 5, 6] }), 0);
+  k.learn(0, fact(1, 1, 0, { pos: [4, 5, 6] }));
   const f = k.get(1, 1);
   f.pos[0] = 99;
   k.list()[0].pos[1] = 99;
@@ -1103,7 +1113,7 @@ test('records and lists are copies; a freed table cannot be used', () => {
     t.free(); // twice is fine
   }
   assert.throws(() => o.pending(), /free/);
-  assert.throws(() => k.learn(fact(1, 1, 0), 0), /free/);
+  assert.throws(() => k.learn(0, fact(1, 1, 0)), /free/);
 });
 
 // ---- group tactics ------------------------------------------------------------
@@ -1235,9 +1245,9 @@ test('squad memory: observe, report, targets, own knowledge and areas', () => {
   const sq = squadOf('euclid', [[1, 0, 0], [2, 3, 0]]);
   const k = sq.knowledge();
   assert.equal(k, sq.knowledge(), 'the same wrapper every time');
-  assert.equal(sq.observe(enemy(10, 20, 0, 5), 5), null);
+  assert.equal(sq.observe(5, enemy(10, 20, 0, 5)), null);
   assert.deepEqual(k.get(10, ENEMY), { subject: 10, kind: ENEMY, pos: [20, 0, 0], seenAt: 5, source: 0, strength: 0, data: 0 });
-  k.learn({ subject: 50, kind: 9, pos: [0, 0, 0], seenAt: 5 }, 5); // not a target
+  k.learn(5, { subject: 50, kind: 9, pos: [0, 0, 0], seenAt: 5 }); // not a target
   assert.equal(sq.report({ kind: SQUAD.reportEnemy, subject: 11, pos: [24, 10, 0], seenAt: 6, sender: 2 }, 8), true);
   assert.deepEqual(sq.targets().map((f) => f.subject), [10], 'the report is not read yet');
   sq.addTactic(lib.tactics.rush());
@@ -1263,8 +1273,8 @@ test('squad memory: observe, report, targets, own knowledge and areas', () => {
 
 test('areasMoveCost: blocked is null, else the cost of the cell moved to', () => {
   const z = lib.areas(4);
-  z.add({ kind: 1, pos: [0, 0, 0], radius: 100, lifetime: 255, blocking: true }, 0);
-  z.add({ kind: 2, pos: [500, 0, 0], radius: 100, lifetime: 255, strength: 7 }, 0);
+  z.add(0, { kind: 1, pos: [0, 0, 0], radius: 100, lifetime: 255, blocking: true });
+  z.add(0, { kind: 2, pos: [500, 0, 0], radius: 100, lifetime: 255, strength: 7 });
   const start = [1000, 0, 0];
   const goal = [2000, 0, 0];
   assert.equal(lib.areasMoveCost(z, [900, 0, 0], [10, 0, 0], start, goal), null);
@@ -1273,8 +1283,8 @@ test('areasMoveCost: blocked is null, else the cost of the cell moved to', () =>
   assert.equal(lib.areasMoveCost(z, [10, 0, 0], [800, 0, 0], start, goal), 0, 'leaving is free');
   assert.equal(lib.areasMoveCost(z, [900, 0, 0], [10, 0, 0], [20, 0, 0], goal), 0, 'start inside');
   const s = lib.areas(2);
-  s.add({ kind: 1, pos: [0, 0, 0], radius: 100, lifetime: 255, strength: 4294967295 }, 0);
-  s.add({ kind: 2, pos: [0, 0, 0], radius: 100, lifetime: 255, strength: 9 }, 0);
+  s.add(0, { kind: 1, pos: [0, 0, 0], radius: 100, lifetime: 255, strength: 4294967295 });
+  s.add(0, { kind: 2, pos: [0, 0, 0], radius: 100, lifetime: 255, strength: 9 });
   assert.equal(lib.areasMoveCost(s, [0, 0, 0], [10, 0, 0], start, goal), 2 ** 31 - 2, 'saturates as in C');
   z.free();
   assert.throws(() => lib.areasMoveCost(z, [0, 0, 0], [0, 0, 0], start, goal), /free/);
@@ -1288,7 +1298,7 @@ test('plans: goals, orders by channel, signal lines up the start, errors', () =>
   assert.equal(sq.plan(0), null, 'no target');
   assert.deepEqual(sq.check(0), { status: 'noPlan', plan: null });
   sq.setSkill(255);
-  sq.observe(enemy(10, 20, 0), 0);
+  sq.observe(0, enemy(10, 20, 0));
   const id = sq.plan(0, { seed: 3 });
   assert.equal(typeof id, 'number');
   const p = sq.pendingPlan();
@@ -1342,7 +1352,7 @@ function activeFlank() {
   sq.addTactic(lib.tactics.rush());
   sq.addTactic(lib.tactics.flank(2, 4));
   sq.setSkill(255);
-  sq.observe(enemy(10, 20, 0), 0);
+  sq.observe(0, enemy(10, 20, 0));
   const { status, plan } = sq.check(0);
   assert.equal(status, 'replan');
   assert.deepEqual(sq.check(5), { status: 'keep', plan: null });
@@ -1383,7 +1393,7 @@ test('gather orders, arrival reports, resume, stale orders, spot radius', () => 
   // a spot beyond the radius does not count
   sq = squadOf('euclid', [[1, 0, 0]]);
   sq.addTactic(lib.tactics.rush());
-  sq.observe(enemy(10, 20, 0), 0);
+  sq.observe(0, enemy(10, 20, 0));
   const spots = [{ pos: [14, 0, 0], tags: 0 }];
   sq.plan(0, { spots });
   assert.deepEqual([sq.pendingPlan().goals[0].pos, sq.pendingPlan().goals[0].unchecked], [[19, 0, 0], true]);
@@ -1397,7 +1407,7 @@ test('gather orders, arrival reports, resume, stale orders, spot radius', () => 
   assert.equal(t.addSlot({ place: { kind: 'side', side: 'left' }, gather: { kind: 'side', side: 'left' }, dist: 2, gatherDist: 6, kind: 'attack', start: { kind: 'signal' } }), 0);
   const only = squadOf('chebyshev', [[1, 0, 0]]);
   only.addTactic(t);
-  only.observe(enemy(10, 20, 0), 0);
+  only.observe(0, enemy(10, 20, 0));
   only.plan(0);
   const g = only.pendingPlan().goals[0];
   assert.deepEqual([g.pos, g.thenPos], [[20, 6, 0], [20, 2, 0]]);
@@ -1410,7 +1420,7 @@ test('plan activation wraps around 2^32', () => {
   sq.addTactic(lib.tactics.rush());
   sq.setSkill(255);
   const before = 4294967294;
-  sq.observe(enemy(10, 20, 0, before), before);
+  sq.observe(before, enemy(10, 20, 0, before));
   const think = sq.skillTable().thinkTicks[3];
   sq.plan(before);
   const at = (before + think) >>> 0;
@@ -1429,7 +1439,7 @@ test('keeper: postpone, broken, suspend never breaks, inputs', () => {
   k.postpone(0); // without a goal: nothing
   assert.equal(k.broken(100, 10), false);
   const goal = { kind: 'hold', pos: [3, 4, 0], target: 7, start: { kind: 'after', ticks: 2 }, slot: 1, plan: 5, issuedAt: 4294967290, startDelay: 1 };
-  k.set(goal, 4294967290);
+  k.set(4294967290, goal);
   assert.deepEqual(k.goal(), { member: null, kind: 'hold', custom: 0, pos: [3, 4, 0], unchecked: false, thenPos: null, thenUnchecked: false, target: 7, start: { kind: 'after', ticks: 2 }, slot: 1, plan: 5, issuedAt: 4294967290, startDelay: 1 });
   k.postpone(4294967295);
   k.postpone(3); // the first time stays
@@ -1447,12 +1457,12 @@ test('keeper: postpone, broken, suspend never breaks, inputs', () => {
   assert.deepEqual(k.inputs(0, [0, 0, 0], 'chebyshev', false, 0), [1, 4, 6, 0, 0]);
   k.clear();
   assert.deepEqual(k.inputs(0, [0, 0, 0], 'euclid', false, 0), [0, -1, 0, 0, 0]);
-  assert.throws(() => k.set({ ...goal, kind: 'dance' }, 0), RangeError);
-  assert.throws(() => k.set({ ...goal, slot: 256 }, 0), RangeError);
-  assert.throws(() => k.set({ ...goal, start: { kind: 'after', ticks: -1 } }, 0), RangeError);
+  assert.throws(() => k.set(0, { ...goal, kind: 'dance' }), RangeError);
+  assert.throws(() => k.set(0, { ...goal, slot: 256 }), RangeError);
+  assert.throws(() => k.set(0, { ...goal, start: { kind: 'after', ticks: -1 } }), RangeError);
   assert.throws(() => k.inputs(0, [0, 0, 0], 'taxi', false, 0), RangeError);
   assert.throws(() => k.broken(-1, 0), RangeError);
-  k.set({ kind: 'custom', custom: 42, pos: null }, 0);
+  k.set(0, { kind: 'custom', custom: 42, pos: null });
   assert.deepEqual([k.goal().kind, k.goal().custom, k.goal().pos, k.goal().start], ['custom', 42, null, { kind: 'now', ticks: 0 }]);
   k.free();
   k.free();
@@ -1471,7 +1481,7 @@ test('three levels: flank gathers, one signal at 49, all attack at 55', () => {
   assert.equal(sq.addTactic(lib.tactics.rush()), 0);
   assert.equal(sq.addTactic(lib.tactics.formation('line', 2)), 1);
   assert.equal(sq.addTactic(lib.tactics.flank(3, 4)), 2);
-  assert.equal(sq.observe(enemy(10, 20, 0), 0), null);
+  assert.equal(sq.observe(0, enemy(10, 20, 0)), null);
   assert.equal(sq.report({ kind: SQUAD.reportEnemy, subject: 11, pos: [24, 10, 0], seenAt: 0, sender: 2 }, 0), true);
 
   // One cell toward a place on Chebyshev: the nearest neighbour, ties to the first.

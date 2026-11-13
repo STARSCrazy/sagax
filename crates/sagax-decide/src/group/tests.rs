@@ -406,6 +406,7 @@ fn squad_of(metric: Metric, members: &[(u32, i32, i32, u32)]) -> Squad {
 
 fn see(sq: &mut Squad, id: u32, x: i32, y: i32, now: u32) {
     sq.knowledge_mut().learn(
+        now,
         Fact {
             subject: id,
             kind: ENEMY,
@@ -413,7 +414,6 @@ fn see(sq: &mut Squad, id: u32, x: i32, y: i32, now: u32) {
             seen_at: now,
             ..Fact::default()
         },
-        now,
     );
 }
 
@@ -582,13 +582,13 @@ fn target_only_from_leader_memory() {
     let _caller_world = [(10u32, [30, 0, 0]), (11u32, [2, 0, 0])];
     see(&mut sq, 10, 30, 0, 0);
     sq.knowledge_mut().learn(
+        0,
         Fact {
             subject: 11,
             kind: ENEMY + 1,
             pos: [2, 0, 0],
             ..Fact::default()
         },
-        0,
     );
     for seed in 0..16 {
         sq.plan(0, &[], &[], seed).unwrap().unwrap();
@@ -713,13 +713,13 @@ fn fall_back_without_target_moves_away_from_danger() {
     assert!(p.goals.iter().all(|(_, g)| g.pos == Some([0, 0, 0])));
     // A danger area to +x: retreat to -x behind the leader.
     sq.areas_mut().add(
+        0,
         Area {
             pos: [20, 0, 0],
             radius: 3,
             lifetime: 100,
             ..Area::default()
         },
-        0,
     );
     sq.plan(1, &[], &[], 0).unwrap().unwrap();
     let p = sq.pending_plan().unwrap();
@@ -1211,6 +1211,7 @@ fn report_only_after_arrival() {
     assert_eq!((f.subject, f.pos, f.source), (10, [0, 5, 0], SOURCE_TOLD));
     // The leader's own sight counts as its own.
     sq.observe(
+        61,
         Fact {
             subject: 11,
             kind: ENEMY,
@@ -1218,7 +1219,6 @@ fn report_only_after_arrival() {
             seen_at: 61,
             ..Fact::default()
         },
-        61,
     );
     assert_eq!(
         sq.knowledge().get(11, ENEMY).map(|f| f.source),
@@ -1353,9 +1353,9 @@ fn target_in_radius_signals_ambush() {
         seen_at: t,
         ..Fact::default()
     };
-    sq.observe(at(tactics::AMBUSH_RADIUS + 1, 6), 6);
+    sq.observe(6, at(tactics::AMBUSH_RADIUS + 1, 6));
     assert_eq!(sq.check(6, &[], &[], 0), Ok(Status::Keep));
-    sq.observe(at(tactics::AMBUSH_RADIUS, 7), 7);
+    sq.observe(7, at(tactics::AMBUSH_RADIUS, 7));
     assert_eq!(sq.check(7, &[], &[], 0), Ok(Status::Signal));
     // On-signal goals without a second place get a "go" at the same spot.
     let mut go = Vec::new();
@@ -1720,13 +1720,13 @@ impl Scene {
     /// E2 at `e2`, both read at tick 0.
     fn enemies_at_start(&mut self, e2: Pos) {
         self.sq.observe(
+            0,
             Fact {
                 subject: E1,
                 kind: ENEMY,
                 pos: [20, 0, 0],
                 ..Fact::default()
             },
-            0,
         );
         assert!(self.sq.report(
             Message {
@@ -1788,7 +1788,7 @@ impl Scene {
             w.goal = Some(o.goal);
             w.start_at = t + o.goal.start_delay + after;
             w.gathered = false;
-            w.keeper.set(o.goal, t);
+            w.keeper.set(t, o.goal);
             self.order_targets.push(o.goal.target);
             self.events.push(Ev::Order {
                 t,
@@ -2075,6 +2075,7 @@ fn ambush_on_target_in_radius() {
     for t in 0..=200 {
         for (id, start) in [(E1, 40), (E2, 44)] {
             s.sq.observe(
+                t,
                 Fact {
                     subject: id,
                     kind: ENEMY,
@@ -2082,7 +2083,6 @@ fn ambush_on_target_in_radius() {
                     seen_at: t,
                     ..Fact::default()
                 },
-                t,
             );
         }
         s.tick(t);
@@ -2239,7 +2239,7 @@ fn no_cheat() {
                             seen_at: t,
                             ..Fact::default()
                         };
-                        s.sq.observe(fact, t);
+                        s.sq.observe(t, fact);
                     } else if t % 17 == 0 {
                         let at = RADIO.arrival(Metric::Chebyshev, m.pos, lpos, t).unwrap();
                         let msg = Message {
@@ -2387,13 +2387,13 @@ fn areas_expire_inside_the_squad() {
     sq.set_skill(255);
     assert!(sq.set_gone(3) && sq.set_gone(4));
     sq.areas_mut().add(
+        0,
         Area {
             pos: [20, 0, 0],
             radius: 3,
             lifetime: 10,
             ..Area::default()
         },
-        0,
     );
     sq.plan(9, &[], &[], 0).unwrap().unwrap();
     let g = sq.pending_plan().unwrap().goals[0].1;

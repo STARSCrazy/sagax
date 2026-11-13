@@ -35,7 +35,7 @@ impl GoalKeeper {
     /// Takes a new goal, replacing the old one and clearing the postpone
     /// state. `now` is unused by the state itself (the goal carries its own
     /// `issued_at`) and kept for symmetry with the other calls.
-    pub fn set(&mut self, goal: Goal, _now: u32) {
+    pub fn set(&mut self, _now: u32, goal: Goal) {
         self.goal = Some(goal);
         self.postponed_at = None;
     }
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn postpone_until_give_up_reports_broken() {
         let mut k = GoalKeeper::new();
-        k.set(goal(Some([0, 0, 0]), 0), 0);
+        k.set(0, goal(Some([0, 0, 0]), 0));
         assert!(!k.broken(100, 10));
         k.postpone(100);
         assert!(!k.broken(109, 10));
@@ -158,21 +158,21 @@ mod tests {
     #[test]
     fn resume_resets_postpone() {
         let mut k = GoalKeeper::new();
-        k.set(goal(None, 0), 0);
+        k.set(0, goal(None, 0));
         k.postpone(10);
         k.resume(15);
         assert!(!k.broken(1000, 10));
         k.postpone(20);
         assert!(!k.broken(29, 10));
         assert!(k.broken(30, 10));
-        k.set(goal(None, 30), 30);
+        k.set(30, goal(None, 30));
         assert!(!k.broken(1000, 10), "a new goal clears the postpone");
     }
 
     #[test]
     fn give_up_zero_breaks_at_once() {
         let mut k = GoalKeeper::new();
-        k.set(goal(None, 0), 0);
+        k.set(0, goal(None, 0));
         assert!(!k.broken(5, 0), "not postponed: never broken");
         k.postpone(5);
         assert!(k.broken(5, 0));
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn suspended_never_broken() {
         let mut k = GoalKeeper::new();
-        k.set(goal(None, 0), 0);
+        k.set(0, goal(None, 0));
         k.postpone(0);
         k.suspend();
         assert!(!k.broken(1000, 10));
@@ -191,7 +191,7 @@ mod tests {
         assert!(!k.broken(1009, 10));
         assert!(k.broken(1010, 10));
         let mut free = GoalKeeper::new();
-        free.set(goal(None, 0), 0);
+        free.set(0, goal(None, 0));
         free.suspend();
         free.unsuspend(5);
         assert!(!free.broken(1000, 10), "not postponed stays so");
@@ -204,7 +204,7 @@ mod tests {
             k.inputs(5, [0, 0, 0], Metric::Euclid, false, 7),
             [0, -1, 0, 0, 7]
         );
-        k.set(goal(Some([3, 4, 0]), 10), 10);
+        k.set(10, goal(Some([3, 4, 0]), 10));
         assert_eq!(
             k.inputs(25, [0, 0, 0], Metric::Euclid, true, ONE),
             [1, 5, 15, 1, ONE as i32]
@@ -213,7 +213,7 @@ mod tests {
             k.inputs(25, [0, 0, 0], Metric::Manhattan, false, 0),
             [1, 7, 15, 0, 0]
         );
-        k.set(goal(None, 10), 10);
+        k.set(10, goal(None, 10));
         assert_eq!(
             k.inputs(12, [0, 0, 0], Metric::Euclid, false, 0),
             [1, -1, 2, 0, 0]
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn give_up_wraps() {
         let mut k = GoalKeeper::new();
-        k.set(goal(None, u32::MAX - 5), u32::MAX - 5);
+        k.set(u32::MAX - 5, goal(None, u32::MAX - 5));
         k.postpone(u32::MAX - 2);
         assert!(!k.broken(4, 10)); // age 7
         assert!(k.broken(7, 10)); // age 10

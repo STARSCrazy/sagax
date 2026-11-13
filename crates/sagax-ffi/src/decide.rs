@@ -208,16 +208,23 @@ pub unsafe extern "C" fn sx_decider_add_weighted(
     })
 }
 
-/// Shared by C and WebAssembly: option -1 for all, combine -1 to follow.
-pub(crate) fn set_combine(decider: &mut Decider, option: i32, combine: i32) -> i32 {
-    let how = u32::try_from(combine).ok().and_then(Combine::from_u32);
-    match (u32::try_from(option), how) {
-        (Err(_), Some(how)) => {
+/// `SX_ALL_OPTIONS`: `option` of `sx_decider_set_combine` for every option.
+const ALL_OPTIONS: u32 = u32::MAX;
+/// `SX_COMBINE_FOLLOW`: `combine` of `sx_decider_set_combine` for "follow the decider".
+const COMBINE_FOLLOW: u32 = u32::MAX;
+
+/// `option` `SX_ALL_OPTIONS` for all, `combine` `SX_COMBINE_FOLLOW` to follow.
+pub(crate) fn set_combine(decider: &mut Decider, option: u32, combine: u32) -> i32 {
+    let how = Combine::from_u32(combine);
+    match (option, how) {
+        (ALL_OPTIONS, Some(how)) => {
             decider.set_combine(how);
             0
         }
-        (Ok(option), how)
-            if (how.is_some() || combine == -1) && decider.set_option_combine(option, how) =>
+        (option, how)
+            if option != ALL_OPTIONS
+                && (how.is_some() || combine == COMBINE_FOLLOW)
+                && decider.set_option_combine(option, how) =>
         {
             0
         }
@@ -232,8 +239,8 @@ pub(crate) fn set_combine(decider: &mut Decider, option: i32, combine: i32) -> i
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_decider_set_combine(
     decider: *mut SxDecider,
-    option: i32,
-    combine: i32,
+    option: u32,
+    combine: u32,
 ) -> i32 {
     // SAFETY: see above.
     let Some(d) = (unsafe { decider.as_mut() }) else {
@@ -304,14 +311,14 @@ pub unsafe extern "C" fn sx_decider_set_now(decider: *mut SxDecider, now: u32) -
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_decider_record(
     decider: *mut SxDecider,
-    done: *const SxCandidate,
     now: u32,
+    done: *const SxCandidate,
 ) -> i32 {
     // SAFETY: see above.
     let (Some(d), Some(c)) = (unsafe { decider.as_mut() }, unsafe { done.as_ref() }) else {
         return ERROR_ARGUMENT;
     };
-    d.decider.record(Candidate::new(c.option, c.target), now);
+    d.decider.record(now, Candidate::new(c.option, c.target));
     0
 }
 
@@ -578,9 +585,9 @@ mod tests {
                 sx_decider_add_weighted(d, 1, &gate, 65535, 7),
                 ERROR_ARGUMENT
             );
-            assert_eq!(sx_decider_set_combine(d, -1, 1), 0);
+            assert_eq!(sx_decider_set_combine(d, u32::MAX, 1), 0);
             assert_eq!(sx_decider_set_combine(d, 0, 2), 0);
-            assert_eq!(sx_decider_set_combine(d, 0, -1), 0);
+            assert_eq!(sx_decider_set_combine(d, 0, u32::MAX), 0);
             assert_eq!(sx_decider_set_combine(d, 0, 9), ERROR_ARGUMENT);
             assert_eq!(sx_decider_set_rank(d, 1, 1), 0);
             assert_eq!(sx_decider_set_rank(d, 5, 1), ERROR_ARGUMENT);
@@ -613,8 +620,8 @@ mod tests {
 
             // Stage 2: memory and cooldown.
             assert_eq!(sx_decider_set_now(d, 10), 0);
-            assert_eq!(sx_decider_record(d, &both[1], 10), 0);
-            assert_eq!(sx_decider_record(d, std::ptr::null(), 10), ERROR_ARGUMENT);
+            assert_eq!(sx_decider_record(d, 10, &both[1]), 0);
+            assert_eq!(sx_decider_record(d, 10, std::ptr::null()), ERROR_ARGUMENT);
             assert_eq!(sx_decider_set_cooldown(d, 1, 3), 0);
             assert_eq!(sx_decider_set_cooldown(d, 8, 3), ERROR_ARGUMENT);
             assert_eq!(sx_decider_set_window(d, 5), 0);
