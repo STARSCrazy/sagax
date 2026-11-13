@@ -467,9 +467,31 @@ test('memory: now comes first', () => {
   assert.equal(k.learn(5, { subject: 1, kind: 2, pos: [0, 0, 0], seenAt: 5 }), null);
   assert.equal(k.get(1, 2).seenAt, 5);
   // The old order (fact, now) must fail loudly, not store something odd.
-  assert.throws(() => k.learn({ subject: 1, kind: 2, pos: [0, 0, 0], seenAt: 5 }, 5));
+  assert.throws(() => k.learn({ subject: 1, kind: 2, pos: [0, 0, 0], seenAt: 5 }, 5), TypeError);
+  assert.throws(() => k.merge({ subject: 1, kind: 2, pos: [0, 0, 0], seenAt: 5 }, 5), TypeError);
   assert.equal(k.count(), 1);
   k.free();
+  // The same for every call that takes now first: the old order throws a TypeError.
+  const o = lib.outbox(2);
+  assert.throws(() => o.post(msg(1), 5), TypeError);
+  assert.equal(o.pending(), 0);
+  o.free();
+  const a = lib.areas(2);
+  assert.throws(() => a.add({ kind: 1, pos: [0, 0, 0], radius: 5, lifetime: 9 }, 5), TypeError);
+  assert.equal(a.count(), 0);
+  a.free();
+  const sq = lib.squad({});
+  assert.throws(() => sq.observe({ subject: 1, kind: 2, pos: [0, 0, 0], seenAt: 5 }, 5), TypeError);
+  assert.equal(sq.knowledge().count(), 0);
+  sq.free();
+  const kp = lib.keeper();
+  assert.throws(() => kp.set({ kind: 'hold', pos: [0, 0, 0] }, 5), TypeError);
+  assert.equal(kp.goal(), null);
+  kp.free();
+  const d = lib.decider();
+  d.addOption(1);
+  assert.throws(() => d.record({ option: 0, target: 1 }, 5), TypeError);
+  d.free();
 });
 
 test('knowledge: key is (subject, kind), learn overwrites, setters', () => {
@@ -1481,7 +1503,8 @@ test('plans: goals, orders by channel, signal lines up the start, errors', () =>
   assert.equal(sq.validate(), null);
   assert.equal(typeof sq.plan(30, { extra: [0, 0, 1, 1], spots: [{ pos: [1, 1, 0], tags: 0 }], seed: 2 ** 40 }), 'number');
   // times and seeds are validated
-  for (const bad of [-1, 2 ** 32, 1.5, NaN, '5']) assert.throws(() => sq.ordersDue(bad), RangeError, String(bad));
+  for (const bad of [-1, 2 ** 32, 1.5, NaN]) assert.throws(() => sq.ordersDue(bad), RangeError, String(bad));
+  assert.throws(() => sq.ordersDue('5'), TypeError); // a wrong type, not a bad number (Task 11)
   assert.throws(() => sq.plan(0, { seed: -1 }), RangeError);
   assert.throws(() => sq.plan(0, { spots: [{ pos: [0, 0, 0], tags: -1 }] }), RangeError);
   assert.throws(() => sq.plan(0, { extra: [2 ** 31] }), RangeError);
@@ -1997,6 +2020,230 @@ test('crew: hex positions in and out', () => {
   // The squad itself holds axial positions.
   assert.deepEqual(sq.members()[0].pos, lib.hex.toAxial([0, 1, 0], 'oddR'));
   crew.free();
+});
+
+
+// ---- JavaScript conventions (Task 11) -----------------------------------------
+
+test('positions: arrays and objects are the same', () => {
+  const g = lib.grid(10, 10, { preset: 'tabletop' });
+  assert.deepEqual(g.findPath([0, 0, 0], [5, 3, 0]), g.findPath({ x: 0, y: 0 }, { x: 5, y: 3 }));
+  g.free();
+  const k = lib.knowledge(4);
+  k.learn(0, { subject: 1, kind: 1, pos: { x: 1, y: 2, level: 1 }, seenAt: 0 });
+  k.learn(0, { subject: 2, kind: 1, pos: { x: 1, y: 2, z: 1 }, seenAt: 0 });
+  assert.deepEqual(k.get(1, 1).pos, [1, 2, 1]);
+  assert.deepEqual(k.get(1, 1).pos, k.get(2, 1).pos);
+  k.free();
+  // a position without a level sits on level 0, in route and gather too
+  const near = [{ id: 1, x: 5, y: 0 }, { id: 2, x: 1, y: 0 }];
+  assert.deepEqual(lib.route({ nearest: 1 }, { x: 0, y: 0 }, near), [2]);
+  assert.deepEqual(lib.route({ nearest: 1 }, [0, 0, 0], near), [2]);
+  const cands = [{ id: 1, faction: 1, pos: [5, 0, 0], free: true }, { id: 2, faction: 1, pos: [1, 0, 0], free: true }];
+  assert.deepEqual(lib.gather({ x: 0, y: 0 }, 1, 10, cands), [2, 1]);
+  assert.deepEqual(lib.gather({ x: 0, y: 0, level: 0 }, 1, 10, cands), lib.gather([0, 0, 0], 1, 10, cands));
+});
+
+test('positions: conflicting z and level throw', () => {
+  const k = lib.knowledge(2);
+  assert.throws(() => k.learn(0, { subject: 1, kind: 1, pos: { x: 1, y: 2, z: 0, level: 1 }, seenAt: 0 }), RangeError);
+  assert.throws(() => k.learn(0, { subject: 1, kind: 1, pos: Object.assign([1, 2, 0], { level: 1 }), seenAt: 0 }), RangeError);
+  assert.equal(k.count(), 0);
+  // equal values are not a conflict
+  assert.equal(k.learn(0, { subject: 1, kind: 1, pos: { x: 1, y: 2, z: 1, level: 1 }, seenAt: 0 }), null);
+  k.free();
+  const g = lib.grid(4, 4, { preset: 'tabletop', levels: 2 });
+  assert.throws(() => g.findPath({ x: 0, y: 0, z: 0, level: 1 }, { x: 1, y: 1 }), RangeError);
+  assert.throws(() => g.contains({ x: 0, y: 0, z: 1, level: 0 }), RangeError);
+  g.free();
+});
+
+test('loose calls take a position', () => {
+  const g = lib.grid(8, 6, { preset: 'tabletop', levels: 2 });
+  g.reachable({ x: 0, y: 0 }, 20);
+  assert.deepEqual(g.pathTo({ x: 4, y: 2 }), g.pathTo(4, 2));
+  assert.notEqual(g.pathTo({ x: 4, y: 2 }), null);
+  assert.equal(g.pathTo({ x: 4, y: 2, level: 1 }), null); // unlinked level
+  assert.equal(g.contains(3, 3), true);
+  assert.equal(g.contains({ x: 3, y: 3, level: 1 }), true);
+  assert.equal(g.contains([3, 3, 2]), false);
+  assert.equal(g.contains({ x: 8, y: 0 }), false);
+  // setCost / block on level 1 through a position; the other level is untouched
+  g.setCost({ x: 2, y: 2, level: 1 }, 7);
+  assert.equal(g.costs()[(1 * 6 + 2) * 8 + 2], 7);
+  assert.equal(g.costs()[2 * 8 + 2], 0);
+  g.block({ x: 3, y: 2 });
+  assert.equal(g.costs()[2 * 8 + 3], 0xffffffff);
+  g.setCost(1, 1, 3);
+  assert.equal(g.costs()[1 * 8 + 1], 3);
+  // walls, zones, flow cost
+  g.addWall({ x: 5, y: 0, level: 1 }, 1, 0);
+  assert.equal(g.walls()[(1 * 6 + 0) * 8 + 5], 1);
+  assert.equal(g.walls()[(1 * 6 + 0) * 8 + 6], 2);
+  assert.equal(g.walls()[5], 0);
+  g.addZone({ x: 1, y: 4, level: 1 }, 3);
+  g.setZones({ x: 2, y: 4 }, 5);
+  assert.equal(g.zones()[(1 * 6 + 4) * 8 + 1], 8);
+  assert.equal(g.zones()[4 * 8 + 2], 5);
+  g.buildFlow([{ x: 7, y: 5 }]);
+  assert.equal(g.flowCost({ x: 4, y: 5 }), g.flowCost(4, 5));
+  assert.equal(g.flowCost({ x: 4, y: 5 }), 3);
+  g.free();
+  const h = lib.grid(6, 6, { preset: 'tabletop', hex: HEX.oddR });
+  assert.deepEqual(h.hexNeighbors({ x: 2, y: 3 }), h.hexNeighbors(2, 3));
+  const n = h.hexNeighbors({ x: 2, y: 2 })[3];
+  h.addHexWall({ x: 2, y: 2 }, 3);
+  assert.equal(h.findPath({ x: 2, y: 2 }, { x: n.x, y: n.y }).cost > 1, true);
+  assert.throws(() => h.addHexWall({ x: 2, y: 2 }, 6), RangeError);
+  assert.throws(() => h.addHexWall({ x: 2, y: 2 }, -1), RangeError);
+  assert.throws(() => h.addHexWall(2, 2, 1.5), RangeError);
+  h.free();
+  const q = lib.grid(4, 4, { preset: 'tabletop' });
+  assert.throws(() => q.addWall(1, 1, 2, 0), RangeError); // not a neighbour direction
+  q.free();
+});
+
+test('string constants', () => {
+  const sq = lib.squad({});
+  sq.addMember({ id: 1, pos: [0, 0, 0], roles: ['ranged'] });
+  sq.addMember({ id: 2, pos: [0, 0, 0], roles: ['ranged', 'area'] });
+  sq.addMember({ id: 3, pos: [0, 0, 0], roles: SQUAD.roleArea });
+  assert.deepEqual(sq.members().map((m) => m.roles), [1, 3, 2]);
+  assert.throws(() => sq.addMember({ id: 4, pos: [0, 0, 0], roles: ['archer'] }), RangeError);
+  assert.throws(() => sq.addMember({ id: 4, pos: [0, 0, 0], roles: 'ranged' }), TypeError);
+  sq.free();
+  // spot tags by name make the same plan as by bits
+  const plan = (tags) => {
+    const s = lib.squad({});
+    s.addMember({ id: 1, pos: [0, 0, 0] });
+    s.setLeader(1);
+    s.setTargetKind(1);
+    s.setSpotRadius(50);
+    const t = lib.tactic();
+    t.addSlot({ min: 1, max: 1, place: { kind: 'tagged', tags: ['cover', 'high'] }, kind: 'hold' });
+    s.addTactic(t);
+    s.observe(0, { subject: 9, kind: 1, pos: [20, 0, 0], seenAt: 0 });
+    s.plan(0, { spots: [{ pos: [3, 3, 0], tags: 0 }, { pos: [6, 1, 0], tags }, { pos: [4, 4, 0], tags: 1 }], seed: 1 });
+    const p = s.pendingPlan();
+    s.free();
+    return p;
+  };
+  const byBits = plan(3);
+  assert.equal(byBits.goals.length, 1);
+  assert.deepEqual(plan(['cover']), plan(SQUAD.tagCover));
+  assert.deepEqual(plan(['cover', 'high']), byBits);
+  assert.deepEqual(plan(['high', 'cover']), plan(SQUAD.tagCover | SQUAD.tagHigh));
+  assert.throws(() => plan(['cosy']), RangeError);
+  // fact source
+  const k = lib.knowledge(4);
+  k.learn(0, { subject: 1, kind: 1, pos: [0, 0, 0], seenAt: 0, source: 'told' });
+  k.learn(0, { subject: 2, kind: 1, pos: [0, 0, 0], seenAt: 0, source: 'heard' });
+  k.learn(0, { subject: 3, kind: 1, pos: [0, 0, 0], seenAt: 0, source: 'own' });
+  k.learn(0, { subject: 4, kind: 1, pos: [0, 0, 0], seenAt: 0, source: 7 });
+  assert.deepEqual([1, 2, 3, 4].map((s) => k.get(s, 1).source), [2, 1, 0, 7]);
+  assert.throws(() => k.learn(0, { subject: 5, kind: 1, pos: [0, 0, 0], seenAt: 0, source: 'rumour' }), RangeError);
+  assert.throws(() => k.learn(0, { subject: 5, kind: 1, pos: [0, 0, 0], seenAt: 0, source: 256 }), RangeError);
+  k.free();
+  // report kind by name
+  const r = lib.squad({});
+  r.addMember({ id: 1, pos: [0, 0, 0] });
+  assert.equal(r.report({ ...Report.arrived(1, 4), kind: 'arrived' }, 0), true);
+  assert.equal(r.report({ ...Report.goalBroken(1, 4), kind: 'goalBroken' }, 0), true);
+  assert.equal(r.report({ ...Report.enemy(1, { subject: 9, kind: 1, pos: [0, 0, 0], seenAt: 0 }), kind: 'enemy' }, 0), true);
+  assert.throws(() => r.report({ ...Report.arrived(1, 4), kind: 'lost' }, 0), RangeError);
+  r.free();
+});
+
+test('bad input throws', () => {
+  assert.throws(() => lib.knowledge(0), RangeError);
+  const k = lib.knowledge(2);
+  const f = { subject: 1, kind: 1, pos: [0, 0, 0], seenAt: 0 };
+  assert.throws(() => k.learn(1.5, f), RangeError);
+  assert.throws(() => k.learn(-1, f), RangeError);
+  assert.throws(() => k.learn('5', f), TypeError);
+  assert.throws(() => k.touch(1, 1, 2 ** 32), RangeError);
+  assert.throws(() => k.get(NaN, 1), RangeError);
+  assert.throws(() => k.get('1', 1), TypeError);
+  k.free();
+  const g = lib.grid(4, 4, { preset: 'tabletop' });
+  assert.throws(() => g.setCost(0, 0, 'x'), TypeError);
+  assert.throws(() => g.setCost(0, 0, -1), RangeError);
+  assert.throws(() => g.setCost(0.5, 0, 1), RangeError);
+  assert.throws(() => g.setLeaveCost(1.5), RangeError);
+  assert.throws(() => g.findPath({ x: 0, y: 0 }, { x: 1, y: 1 }, { budget: -1 }), RangeError);
+  assert.throws(() => g.findPath({ x: 'a', y: 0 }, { x: 1, y: 1 }), RangeError); // a position of the wrong shape
+  assert.throws(() => g.addZone(0, 0, 32), RangeError);
+  g.free();
+  assert.throws(() => lib.grid(0, 4, { preset: 'tabletop' }), RangeError);
+  assert.throws(() => lib.grid(4.5, 4, { preset: 'tabletop' }), RangeError);
+  assert.throws(() => lib.arrival(-1, 0, 0, 0), RangeError);
+  assert.throws(() => lib.arrival(0, 1.5, 0, 0), RangeError);
+  assert.throws(() => lib.arrival('0', 0, 0, 0), TypeError);
+  const d = lib.decider();
+  assert.throws(() => d.setNow(-1), RangeError);
+  assert.throws(() => d.setWindow(1.5), RangeError);
+  assert.throws(() => d.setCooldown(0, 1), RangeError); // no option
+  d.free();
+  const m = lib.machine(['a', 'b'], ['x']);
+  assert.throws(() => m.update(-1), RangeError);
+  assert.throws(() => m.setState('b', 2 ** 32), RangeError);
+  m.free();
+  const t = lib.timers(2);
+  assert.throws(() => t.set(1, 0, 1.5), RangeError);
+  t.free();
+  assert.throws(() => lib.sine(1.5), RangeError);
+  assert.throws(() => lib.pointsAround(1, 0.5, [0, 0, 0]), RangeError);
+  assert.throws(() => lib.sweepHeading(0, -1, 5), RangeError);
+});
+
+test('every handle guarded', () => {
+  const handles = [
+    ['grid', lib.grid(4, 4, { preset: 'tabletop' }), (h) => h.findPath({ x: 0, y: 0 }, { x: 1, y: 1 })],
+    ['decider', lib.decider(), (h) => h.addOption(1)],
+    ['machine', lib.machine(['a', 'b']), (h) => h.update(0)],
+    ['knowledge', lib.knowledge(2), (h) => h.count()],
+    ['squad', lib.squad({}), (h) => h.members()],
+    ['keeper', lib.keeper(), (h) => h.goal()],
+    ['crew', lib.crew({}), (h) => h.goal(1)],
+  ];
+  for (const [name, h, call] of handles) {
+    assert.doesNotThrow(() => call(h), name);
+    h.free();
+    assert.throws(() => call(h), /after free/, name);
+    h.free(); // twice is fine
+  }
+  if (Symbol.dispose) {
+    const makers = [
+      () => lib.grid(2, 2, { preset: 'tabletop' }), () => lib.decider(), () => lib.machine(['a']), () => lib.knowledge(1),
+      () => lib.outbox(1), () => lib.squad({}), () => lib.keeper(), () => lib.crew({}),
+    ];
+    for (const make of makers) {
+      const h = make();
+      h[Symbol.dispose]();
+      assert.equal(h.handle, 0);
+    }
+  }
+});
+
+test('value classes match C', () => {
+  const p = new Progress();
+  p.start(3, 4294967290);
+  assert.equal(p.stalled(3, 10), false); // age 9
+  assert.equal(p.stalled(4, 10), true); // age 10 across the wrap
+  assert.equal(p.update(1, 6, 1) && p.since === 6 && p.best === 1, true);
+  const i = new Interval();
+  i.mark(4294967295);
+  assert.equal(i.due(8, 10), false);
+  assert.equal(i.due(9, 10), true);
+  assert.throws(() => p.update(1.5, 0, 0), RangeError);
+  assert.throws(() => p.stalled(-1, 0), RangeError);
+  assert.throws(() => i.mark(2 ** 32), RangeError);
+  assert.throws(() => new Alertness().stimulus(1, 0, { max: 10, thresholds: [1, 2, 3, 4, 5, 6, 7, 8, 9] }), RangeError);
+  assert.throws(() => new Alertness().stimulus(-1, 0, { max: 10 }), RangeError);
+  // plain objects: the fields are there, not hidden
+  assert.deepEqual(Object.keys(new Progress()).sort(), ['best', 'since', 'started']);
+  assert.deepEqual(Object.keys(new Interval()).sort(), ['last', 'started']);
+  assert.deepEqual(Object.keys(new Alertness()).sort(), ['last', 'lastStimulus', 'level', 'value']);
 });
 
 console.log(`${passed} tests passed`);

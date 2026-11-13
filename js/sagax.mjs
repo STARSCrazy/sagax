@@ -9,7 +9,12 @@
 //   const area = grid.reachable({x: 0, y: 0}, 6);            // {cells: [{x, y, level, cost}], ...}
 //   grid.free();
 //
-// Positions are {x, y}, {x, y, level} or [x, y, level] (level 0 if left out).
+// Positions are {x, y}, {x, y, level} (or {x, y, z}) or [x, y, level] (level 0
+// if left out); the loose calls (setCost, contains, pathTo, ...) take x, y or
+// one position. Choices are names ('ranged', 'cover', 'told', ...) or numbers.
+// Numbers are checked: a bad number throws a RangeError, a wrong type a
+// TypeError. Handles (Grid, Decider, ...) throw after free(), and free in
+// `using` blocks where the runtime has Symbol.dispose.
 //
 // Every search answers with the same object:
 //   {cells, status, reached, cost, steps, zonesLeft, total, expanded, nodeLimitHit}
@@ -36,7 +41,7 @@ function rulesOf(rules) {
   const preset = rules.preset === undefined ? {} : PRESETS[rules.preset];
   if (preset === undefined) throw new RangeError(`Sagax: preset must be octile or tabletop, not ${rules.preset}`);
   const r = { fourWays: false, cutCorners: false, levels: 1, ...preset, ...rules };
-  r.hex = r.hex ?? null;
+  r.hex = r.hex === undefined || r.hex === null ? null : layoutOf(r.hex);
   const own = r.hex === null ? rules.straight : rules.step;
   if (rules.preset === undefined && own === undefined) {
     throw new TypeError(
@@ -73,7 +78,36 @@ export async function loadSagax(source) {
       ({ instance } = await WebAssembly.instantiate(await response.arrayBuffer(), {}));
     }
   }
+  loaded = instance.exports;
   return new Sagax(instance.exports);
+}
+
+/** The module the value classes (Progress, Interval, Alertness) call into: the one loaded last. */
+let loaded = null;
+
+/** The exports of the loaded module, for the value classes. */
+function wasm() {
+  if (loaded === null) throw new Error('Sagax: call loadSagax before using Progress, Interval or Alertness');
+  return loaded;
+}
+
+/**
+ * Every handle class: the module, the handle and one guard. A freed handle
+ * would write to address 0, so every call goes through `h`, which throws.
+ */
+class Handle {
+  get h() {
+    if (!this.handle) throw new Error('Sagax: used after free()');
+    return this.handle;
+  }
+}
+
+if (Symbol.dispose) {
+  Object.defineProperty(Handle.prototype, Symbol.dispose, {
+    value() { this.free(); },
+    writable: true,
+    configurable: true,
+  });
 }
 
 class Sagax {
@@ -114,38 +148,39 @@ function outputOf(output) {
 
 /** Positions as one flat list of x, y, level triples (the WebAssembly input). */
 function triples(list, what) {
+  if (!Array.isArray(list)) throw new TypeError(`Sagax: ${what}s must be an array of positions`);
   return list.flatMap((p) => posOf(p, what));
 }
 
 /** Loose (x, y, ...rest) or (position, ...rest) as [[x, y, level], ...rest]. */
 function cellArgs(args) {
   if (args[0] !== null && typeof args[0] === 'object') return [posOf(args[0], 'cell'), ...args.slice(1)];
-  return [[args[0], args[1], 0], ...args.slice(2)];
+  return [[i32Of(args[0], 'x'), i32Of(args[1], 'y'), 0], ...args.slice(2)];
 }
 
-export class Grid {
+export class Grid extends Handle {
   constructor(x, width, height, rules) {
-    const levels = rules.levels;
-    if (!(width > 0 && height > 0 && levels > 0)) throw new RangeError(`bad grid size ${width} x ${height} x ${levels}`);
+    super();
+    this.width = intIn(width, 1, I32_MAX, 'width');
+    this.height = intIn(height, 1, I32_MAX, 'height');
+    this.levels = intIn(rules.levels, 1, I32_MAX, 'levels');
     this.x = x;
-    this.width = width;
-    this.height = height;
-    this.levels = levels;
     this.rules = rules;
     this.hex = rules.hex;
     const flags = (rules.fourWays ? 1 : 0) | (rules.cutCorners ? 2 : 0);
-    this.handle = rules.hex === null
-      ? x.sx_grid_new(width, height, levels, 0, rules.straight, rules.diagonal, flags)
-      : x.sx_grid_new(width, height, levels, rules.hex, rules.step, 0, 0);
-    if (!this.handle) throw new RangeError('Sagax: bad grid size or rules');
-    if (rules.smoothMaxExtra) this.x.sx_grid_set_smooth_max_extra(this.handle, rules.smoothMaxExtra);
+    const handle = rules.hex === null
+      ? x.sx_grid_new(this.width, this.height, this.levels, 0, i32Of(rules.straight, 'straight'), i32Of(rules.diagonal ?? 0, 'diagonal'), flags)
+      : x.sx_grid_new(this.width, this.height, this.levels, rules.hex, i32Of(rules.step, 'step'), 0, 0);
+    if (!handle) throw new RangeError('Sagax: bad grid size or rules');
+    this.handle = handle;
+    if (rules.smoothMaxExtra !== undefined) x.sx_grid_set_smooth_max_extra(handle, i32Of(rules.smoothMaxExtra, 'smoothMaxExtra'));
   }
 
   // Views are made fresh for every use: they die when the WebAssembly memory grows.
   // Each has width * height * levels entries, level by level and row by row:
   // (level * height + y) * width + x.
   costs() {
-    return new Uint32Array(this.x.memory.buffer, this.x.sx_grid_costs(this.handle), this.#cells());
+    return new Uint32Array(this.x.memory.buffer, this.x.sx_grid_costs(this.h), this.#cells());
   }
   /** Raw wall bits, square grids only: bit i blocks the move by DIRECTIONS[i]. */
   walls() {
@@ -153,17 +188,17 @@ export class Grid {
     return this.#wallBits();
   }
   #wallBits() {
-    return new Uint8Array(this.x.memory.buffer, this.x.sx_grid_walls(this.handle), this.#cells());
+    return new Uint8Array(this.x.memory.buffer, this.x.sx_grid_walls(this.h), this.#cells());
   }
   zones() {
-    return new Uint32Array(this.x.memory.buffer, this.x.sx_grid_zones(this.handle), this.#cells());
+    return new Uint32Array(this.x.memory.buffer, this.x.sx_grid_zones(this.h), this.#cells());
   }
   #cells() {
     return this.width * this.height * this.levels;
   }
   /** Index of [x, y, level] in the views, or -1 off the grid. */
   #index([x, y, level]) {
-    const inside = this.contains(x, y) && level >= 0 && level < this.levels;
+    const inside = x >= 0 && y >= 0 && x < this.width && y < this.height && level >= 0 && level < this.levels;
     return inside ? (level * this.height + y) * this.width + x : -1;
   }
 
@@ -172,8 +207,9 @@ export class Grid {
   setWalls(array) { this.walls().set(array); } // square grids only
   setAllZones(array) { this.zones().set(array); }
 
-  contains(x, y) {
-    return x >= 0 && y >= 0 && x < this.width && y < this.height;
+  /** Whether a cell is on the grid: contains(x, y) (level 0) or contains({x, y, level}). */
+  contains(...args) {
+    return this.#index(cellArgs(args)[0]) >= 0;
   }
 
   /**
@@ -182,8 +218,9 @@ export class Grid {
    */
   setCost(...args) {
     const [cell, cost] = cellArgs(args);
+    const c = u32Of(cost, 'cost');
     const i = this.#index(cell);
-    if (i >= 0) this.costs()[i] = cost;
+    if (i >= 0) this.costs()[i] = c;
   }
   /** block(x, y) on level 0, or block({x, y, level}). */
   block(...args) {
@@ -200,38 +237,55 @@ export class Grid {
   link(a, b) {
     const [ax, ay, al] = posOf(a, 'a');
     const [bx, by, bl] = posOf(b, 'b');
-    return this.x.sx_grid_link(this.handle, ax, ay, al, bx, by, bl) === 1;
+    return this.x.sx_grid_link(this.h, ax, ay, al, bx, by, bl) === 1;
   }
 
-  /** A wall between x, y and its neighbour dx, dy away (both ways); on hex grids dx, dy is the neighbour's offset. */
-  addWall(x, y, dx, dy) {
+  /**
+   * A wall between a cell and its neighbour dx, dy away (both ways), on the
+   * cell's level: addWall(x, y, dx, dy) or addWall({x, y, level}, dx, dy).
+   * dx, dy is a step of one in each direction (on hex grids the neighbour's
+   * offset), else RangeError.
+   */
+  addWall(...args) {
+    const [[x, y, level], dx, dy] = cellArgs(args);
     const there = DIRECTIONS.findIndex(([a, b]) => a === dx && b === dy);
+    if (there < 0) throw new RangeError(`Sagax: a wall goes to a neighbour (dx, dy from -1 to 1, not both 0), not ${String(dx)}, ${String(dy)}`);
     const back = DIRECTIONS.findIndex(([a, b]) => a === -dx && b === -dy);
-    if (there < 0) return;
     const walls = this.#wallBits();
-    if (this.contains(x, y)) walls[y * this.width + x] |= 1 << there;
-    if (this.contains(x + dx, y + dy)) walls[(y + dy) * this.width + x + dx] |= 1 << back;
+    const here = this.#index([x, y, level]);
+    const next = this.#index([x + dx, y + dy, level]);
+    if (here >= 0) walls[here] |= 1 << there;
+    if (next >= 0) walls[next] |= 1 << back;
   }
 
-  /** Hex grids: the six neighbours of x, y; the index is the direction (as for addHexWall). */
-  hexNeighbors(x, y) {
-    if (this.x.sx_hex_neighbors(this.handle, x, y) !== 6) throw new RangeError('Sagax: not a hex grid');
+  /** Hex grids: the six neighbours of a cell, hexNeighbors(x, y) or hexNeighbors({x, y}); the index is the direction (as for addHexWall). */
+  hexNeighbors(...args) {
+    const [[x, y]] = cellArgs(args);
+    if (this.x.sx_hex_neighbors(this.h, x, y) !== 6) throw new RangeError('Sagax: not a hex grid');
     return this.readCells(6, 2);
   }
 
-  /** Hex grids: a wall between x, y and its neighbour in direction dir (both ways). */
-  addHexWall(x, y, dir) {
-    const n = this.hexNeighbors(x, y)[dir];
-    if (n === undefined) return;
-    this.addWall(x, y, n.x - x, n.y - y);
+  /** Hex grids: a wall between a cell and its neighbour in direction dir 0..5 (both ways): addHexWall(x, y, dir) or addHexWall({x, y, level}, dir). */
+  addHexWall(...args) {
+    const [cell, dir] = cellArgs(args);
+    intIn(dir, 0, 5, 'dir');
+    const n = this.hexNeighbors(cell)[dir];
+    this.addWall(cell, n.x - cell[0], n.y - cell[1]);
   }
 
-  /** Zone bits of a cell (bit i: inside zone i, e.g. the reach of enemy i). */
-  setZones(x, y, bits) {
-    if (this.contains(x, y)) this.zones()[y * this.width + x] = bits >>> 0;
+  /** Zone bits of a cell (bit i: inside zone i, e.g. the reach of enemy i): setZones(x, y, bits) or setZones({x, y, level}, bits). */
+  setZones(...args) {
+    const [cell, bits] = cellArgs(args);
+    const b = u32Of(bits, 'bits');
+    const i = this.#index(cell);
+    if (i >= 0) this.zones()[i] = b;
   }
-  addZone(x, y, zone) {
-    if (this.contains(x, y)) this.zones()[y * this.width + x] |= (1 << zone) >>> 0;
+  /** Puts a cell into zone 0..31: addZone(x, y, zone) or addZone({x, y, level}, zone). */
+  addZone(...args) {
+    const [cell, zone] = cellArgs(args);
+    const z = intIn(zone, 0, 31, 'zone');
+    const i = this.#index(cell);
+    if (i >= 0) this.zones()[i] |= (1 << z) >>> 0;
   }
   clearZones() {
     this.zones().fill(0);
@@ -239,8 +293,8 @@ export class Grid {
 
   /** Cost added for each zone a move leaves (e.g. an attack of opportunity). */
   setLeaveCost(cost) {
-    this.leaveCost = cost >>> 0;
-    this.x.sx_grid_set_leave_cost(this.handle, this.leaveCost);
+    this.leaveCost = u32Of(cost, 'cost');
+    this.x.sx_grid_set_leave_cost(this.h, this.leaveCost);
   }
 
   /**
@@ -262,7 +316,7 @@ export class Grid {
 
   /** stride 3: cells {x, y, level}; 4: {x, y, level, cost}; 2: {x, y} (hex neighbours). */
   readCells(count, stride) {
-    const out = new Int32Array(this.x.memory.buffer, this.x.sx_out(this.handle), count * stride);
+    const out = new Int32Array(this.x.memory.buffer, this.x.sx_out(this.h), count * stride);
     const cells = new Array(count);
     for (let i = 0; i < count; i++) {
       const o = i * stride;
@@ -274,19 +328,19 @@ export class Grid {
   }
 
   writeInput(numbers) {
-    const ptr = this.x.sx_input(this.handle, numbers.length);
+    const ptr = this.x.sx_input(this.h, numbers.length);
     new Int32Array(this.x.memory.buffer, ptr, numbers.length).set(numbers);
   }
 
   answer(n, stride, split = false) {
     if (n < 0) throw new RangeError('Sagax: bad arguments');
-    const r = new Int32Array(this.x.memory.buffer, this.x.sx_result(this.handle), 5);
+    const r = new Int32Array(this.x.memory.buffer, this.x.sx_result(this.h), 5);
     const status = STATUS[r[0]];
     const cells = this.readCells(n, stride);
     // Ways: split the cost into walking (steps and terrain) and zone penalty.
     let zonesLeft = 0;
     if (split && this.leaveCost && n > 1) {
-      const whole = this.x.sx_way(this.handle, 0);
+      const whole = this.x.sx_way(this.h, 0);
       if (whole > 1) zonesLeft = this.zonesLeft(this.readCells(whole, 3));
     }
     return {
@@ -312,9 +366,11 @@ export class Grid {
     // one goal may itself be an array position [x, y, level]
     const goals = Array.isArray(goal) && typeof goal[0] !== 'number' ? goal : [goal];
     const [sx, sy, sl] = posOf(start, 'start');
+    const b = intIn(budget, 0, I32_MAX, 'budget');
+    const o = outputOf(output);
     this.writeInput(triples(goals, 'goal'));
     this.last = 3;
-    return this.answer(this.x.sx_find_path(this.handle, sx, sy, sl, goals.length, budget, outputOf(output)), 3, true);
+    return this.answer(this.x.sx_find_path(this.h, sx, sy, sl, goals.length, b, o), 3, true);
   }
 
   /**
@@ -325,33 +381,38 @@ export class Grid {
    */
   flee(start, threats, maxCost, { output = 'cells' } = {}) {
     const [sx, sy, sl] = posOf(start, 'start');
+    const m = intIn(maxCost, 0, I32_MAX, 'maxCost');
+    const o = outputOf(output);
     this.writeInput(triples(threats, 'threat'));
     this.last = 3;
-    return this.answer(this.x.sx_flee(this.handle, sx, sy, sl, threats.length, maxCost, outputOf(output)), 3, true);
+    return this.answer(this.x.sx_flee(this.h, sx, sy, sl, threats.length, m, o), 3, true);
   }
 
   /** Every cell reachable from start at a cost of at most maxCost: cells [{x, y, level, cost}]. */
   reachable(start, maxCost, { budget = 0 } = {}) {
     const [sx, sy, sl] = posOf(start, 'start');
+    const m = intIn(maxCost, 0, I32_MAX, 'maxCost');
+    const b = intIn(budget, 0, I32_MAX, 'budget');
     this.last = 4;
-    return this.answer(this.x.sx_reachable(this.handle, sx, sy, sl, maxCost, budget), 4);
+    return this.answer(this.x.sx_reachable(this.h, sx, sy, sl, m, b), 4);
   }
 
   /** After status 'running': goes on with the last findPath / reachable. */
   continue(budget = 0) {
     const stride = this.last ?? 3;
-    return this.answer(this.x.sx_continue(this.handle, budget), stride, stride === 3);
+    return this.answer(this.x.sx_continue(this.h, intIn(budget, 0, I32_MAX, 'budget')), stride, stride === 3);
   }
 
-  /** After reachable() or findPath(): the way from that start to x, y (level 0), or null. */
-  pathTo(x, y, output = 'cells') {
-    const a = this.answer(this.x.sx_path_to(this.handle, x, y, 0, outputOf(output)), 3, true);
+  /** After reachable() or findPath(): the way from that start to a cell, pathTo(x, y, output) or pathTo({x, y, level}, output), or null. */
+  pathTo(...args) {
+    const [[x, y, level], output = 'cells'] = cellArgs(args);
+    const a = this.answer(this.x.sx_path_to(this.h, x, y, level, outputOf(output)), 3, true);
     return a.reached ? a : null;
   }
 
   /** The current way once more, as 'cells', 'turns' or 'smooth'. */
   way(output = 'cells') {
-    const n = this.x.sx_way(this.handle, outputOf(output));
+    const n = this.x.sx_way(this.h, outputOf(output));
     if (n < 0) throw new RangeError('Sagax: bad arguments');
     return this.readCells(n, 3);
   }
@@ -364,8 +425,12 @@ export class Grid {
    * @returns {{leader: {x,y,level}[], members: {x,y,level}[][]}}
    */
   formation(slots = FORMATION.block) {
-    this.writeInput(slots.flat());
-    const n = this.x.sx_formation(this.handle, slots.length);
+    if (!Array.isArray(slots)) throw new TypeError('Sagax: slots must be an array of [forward, right]');
+    this.writeInput(slots.flatMap((slot) => {
+      if (!Array.isArray(slot) || slot.length !== 2) throw new RangeError('Sagax: a formation slot is [forward, right]');
+      return slot.map((v) => i32Of(v, 'slot'));
+    }));
+    const n = this.x.sx_formation(this.h, slots.length);
     if (n < 0) throw new RangeError('Sagax: bad arguments');
     const rows = this.readCells(n * (slots.length + 1), 3);
     const members = slots.map((_, k) => rows.slice((k + 1) * n, (k + 2) * n));
@@ -379,8 +444,9 @@ export class Grid {
    * current way. @returns {number} cells in the field
    */
   buildFlow(goals, maxCost = 0x7fffffff) {
+    const m = intIn(maxCost, 0, I32_MAX, 'maxCost');
     this.writeInput(triples(goals, 'goal'));
-    const n = this.x.sx_flow_build(this.handle, goals.length, maxCost);
+    const n = this.x.sx_flow_build(this.h, goals.length, m);
     if (n < 0) throw new RangeError('Sagax: bad arguments');
     return n;
   }
@@ -392,13 +458,13 @@ export class Grid {
    */
   flowNext(walkers) {
     this.writeInput(triples(walkers, 'walker'));
-    if (this.x.sx_flow_next(this.handle, walkers.length) < 0) throw new RangeError('Sagax: bad arguments');
+    if (this.x.sx_flow_next(this.h, walkers.length) < 0) throw new RangeError('Sagax: bad arguments');
     return this.readCells(walkers.length, 4);
   }
 
-  /** Cost from x, y to the nearest goal of the flow field, or null. */
-  flowCost(x, y) {
-    const c = this.flowNext([{ x, y }])[0].cost;
+  /** Cost from a cell, flowCost(x, y) or flowCost({x, y, level}), to the nearest goal of the flow field, or null. */
+  flowCost(...args) {
+    const c = this.flowNext([cellArgs(args)[0]])[0].cost;
     return c < 0 ? null : c;
   }
 
@@ -410,22 +476,22 @@ export class Grid {
    * Needs steps that are possible both ways (no zones).
    */
   dstarBegin(start, goal) {
-    this.x.sx_dstar_begin(this.handle, ...posOf(start, 'start'), ...posOf(goal, 'goal'));
+    this.x.sx_dstar_begin(this.h, ...posOf(start, 'start'), ...posOf(goal, 'goal'));
   }
 
   /** Works on the plan; on 'found' the way from the walker to the goal. */
   dstarCompute({ budget = 0, output = 'cells' } = {}) {
-    return this.answer(this.x.sx_dstar_compute(this.handle, budget, outputOf(output)), 3);
+    return this.answer(this.x.sx_dstar_compute(this.h, intIn(budget, 0, I32_MAX, 'budget'), outputOf(output)), 3);
   }
 
   dstarMoveStart(cell) {
-    this.x.sx_dstar_move_start(this.handle, ...posOf(cell, 'cell'));
+    this.x.sx_dstar_move_start(this.h, ...posOf(cell, 'cell'));
   }
 
   /** Tell D* Lite which cells changed (after setCost / block / addWall). */
   dstarCellsChanged(cells) {
     this.writeInput(triples(cells, 'cell'));
-    return this.x.sx_dstar_cells_changed(this.handle, cells.length);
+    return this.x.sx_dstar_cells_changed(this.h, cells.length);
   }
 
   /**
@@ -434,7 +500,7 @@ export class Grid {
    * it costs nothing.
    */
   setTrace(on) {
-    this.x.sx_trace(this.handle, on ? 1 : 0);
+    this.x.sx_trace(this.h, on ? 1 : 0);
   }
 
   /**
@@ -443,9 +509,9 @@ export class Grid {
    * dropped counts steps lost because more than 200000 were waiting.
    */
   takeTrace() {
-    const n = this.x.sx_trace_take(this.handle);
-    const dropped = this.x.sx_trace_dropped(this.handle);
-    const raw = new Int32Array(this.x.memory.buffer, this.x.sx_out(this.handle), n * 9);
+    const n = this.x.sx_trace_take(this.h);
+    const dropped = this.x.sx_trace_dropped(this.h);
+    const raw = new Int32Array(this.x.memory.buffer, this.x.sx_out(this.h), n * 9);
     const events = new Array(n);
     for (let i = 0; i < n; i++) {
       const o = i * 9;
@@ -506,8 +572,9 @@ const DECIDE_TRACE = [null, 'factor', 'scored', 'chosen'];
  *   const c = d.decide([{ option: attack, target: 7, inputs: [3] }], { pick: 'best' });
  *   // c: {index, option, target, score, scores} or null if every score is 0
  */
-export class Decider {
+export class Decider extends Handle {
   constructor(x) {
+    super();
     this.x = x;
     this.handle = x.sx_decider_new();
     this.inputCount = 0;
@@ -520,7 +587,7 @@ export class Decider {
    * clamped; the factors are multiplied (0 rules out), compensated for their number.
    */
   addOption(weight = 1, considerations = [], { combine, rank } = {}) {
-    const option = this.x.sx_decider_add_option(this.handle, fixed(weight, 'weight'));
+    const option = this.x.sx_decider_add_option(this.h, fixed(weight, 'weight'));
     for (const c of considerations) this.addConsideration(option, c);
     if (combine !== undefined) this.setCombine(combine, option);
     if (rank !== undefined) this.setRank(option, rank);
@@ -539,9 +606,11 @@ export class Decider {
     if (k === undefined) throw new RangeError(`Sagax: unknown curve ${curve}`);
     const a = APPLY[apply];
     if (a === undefined) throw new RangeError(`Sagax: apply must be combine or multiply, not ${apply}`);
-    const r = this.x.sx_decider_add_weighted(this.handle, option, input, k, min | 0, max | 0, fixed(pull, 'pull'), a);
+    const o = u32Of(option, 'option');
+    const column = u32Of(input, 'input');
+    const r = this.x.sx_decider_add_weighted(this.h, o, column, k, i32Of(min, 'min'), i32Of(max, 'max'), fixed(pull, 'pull'), a);
     if (r !== 0) throw new RangeError(`Sagax: no option ${option}`);
-    if (input < MEMORY.sinceOption) this.inputCount = Math.max(this.inputCount, input + 1);
+    if (column < MEMORY.sinceOption) this.inputCount = Math.max(this.inputCount, column + 1);
   }
 
   /**
@@ -549,21 +618,22 @@ export class Decider {
    * (frames, turns); setNow before deciding, record what really happened.
    */
   setNow(now) {
-    this.x.sx_decider_set_now(this.handle, now >>> 0);
+    this.x.sx_decider_set_now(this.h, timeOf(now));
   }
   record(now, { option, target = 0 }) {
-    this.x.sx_decider_record(this.handle, option, target >>> 0, timeOf(now));
+    const t = timeOf(now);
+    this.x.sx_decider_record(this.h, u32Of(option, 'option'), u32Of(target, 'target'), t);
   }
   forget() {
-    this.x.sx_decider_forget(this.handle);
+    this.x.sx_decider_forget(this.h);
   }
   /** Counts look back less than time (0: all of the last 256 actions). */
   setWindow(time) {
-    this.x.sx_decider_set_window(this.handle, time >>> 0);
+    this.x.sx_decider_set_window(this.h, u32Of(time, 'window'));
   }
   /** After the option was done it scores 0 until time has passed (0: none). */
   setCooldown(option, time) {
-    if (this.x.sx_decider_set_cooldown(this.handle, option, time >>> 0) !== 0) {
+    if (this.x.sx_decider_set_cooldown(this.h, u32Of(option, 'option'), u32Of(time, 'cooldown')) !== 0) {
       throw new RangeError(`Sagax: no option ${option}`);
     }
   }
@@ -575,14 +645,15 @@ export class Decider {
    */
   setCombine(combine, option) {
     const c = combine === null ? -1 : combineOf(combine);
-    if (this.x.sx_decider_set_combine(this.handle, option ?? -1, c) !== 0) {
+    const o = option === undefined || option === null ? -1 : u32Of(option, 'option');
+    if (this.x.sx_decider_set_combine(this.h, o, c) !== 0) {
       throw new RangeError('Sagax: bad combine or option');
     }
   }
 
   /** Rank of an option: only the highest rank that still scores is chosen from. */
   setRank(option, rank) {
-    if (this.x.sx_decider_set_rank(this.handle, option, rank >>> 0) !== 0) {
+    if (this.x.sx_decider_set_rank(this.h, u32Of(option, 'option'), u32Of(rank, 'rank')) !== 0) {
       throw new RangeError(`Sagax: no option ${option}`);
     }
   }
@@ -590,40 +661,43 @@ export class Decider {
   /** The action going on now ({option, target} or null) scores times (1 + bonus). */
   setCurrent(current, bonus = 0.1) {
     const has = current ? 1 : 0;
-    this.x.sx_decider_set_current(this.handle, has, current?.option ?? 0, current?.target ?? 0, fixed(bonus, 'bonus'));
+    const option = has ? u32Of(current.option, 'option') : 0;
+    const target = has ? u32Of(current.target ?? 0, 'target') : 0;
+    this.x.sx_decider_set_current(this.h, has, option, target, fixed(bonus, 'bonus'));
   }
 
   /**
    * Scores every candidate {option, target, inputs: [raw integers]} and chooses one.
    * pick: 'best' (equal scores: the earlier one), 'weighted' or 'uniform' among the
-   * top best (0: all), driven by seed (integer below 2^53). Returns
+   * top best (0: all), driven by seed (a safe integer, or a BigInt for 64 bits). Returns
    * {index, option, target, score, scores} or null if every score is 0.
    */
   decide(candidates, { pick = 'best', top = 0, seed = 0 } = {}) {
     const p = PICK[pick];
     if (p === undefined) throw new RangeError(`Sagax: pick must be best, weighted or uniform, not ${pick}`);
+    if (!Array.isArray(candidates)) throw new TypeError('Sagax: candidates must be an array');
     const stride = this.inputCount;
     const row = stride + 2;
     const n = candidates.length;
-    const ptr = this.x.sx_decider_input(this.handle, n * row);
-    const buf = new Int32Array(this.x.memory.buffer, ptr, n * row);
-    candidates.forEach((c, i) => {
-      buf[i * row] = c.option;
-      buf[i * row + 1] = c.target ?? 0;
-      for (let k = 0; k < stride; k++) buf[i * row + 2 + k] = c.inputs?.[k] ?? 0;
+    const topN = u32Of(top, 'top');
+    const [low, high] = seedOf(seed);
+    // Checked first: the buffer is asked for only when every number is good.
+    const values = candidates.flatMap((c) => {
+      const inputs = c.inputs ?? [];
+      return [u32Of(c.option, 'option'), u32Of(c.target ?? 0, 'target'), ...Array.from({ length: stride }, (_, k) => i32Of(inputs[k] ?? 0, 'input'))];
     });
-    const low = seed % 0x100000000;
-    const high = Math.floor(seed / 0x100000000);
-    const r = this.x.sx_decider_decide(this.handle, n, stride, p, top, low >>> 0, high >>> 0);
+    const ptr = this.x.sx_decider_input(this.h, n * row);
+    new Int32Array(this.x.memory.buffer, ptr, n * row).set(values);
+    const r = this.x.sx_decider_decide(this.h, n, stride, p, topN, low, high);
     if (r === -1) throw new RangeError('Sagax: bad candidates (unknown option?)');
-    const scores = Array.from(new Uint32Array(this.x.memory.buffer, this.x.sx_decider_out(this.handle), n));
+    const scores = Array.from(new Uint32Array(this.x.memory.buffer, this.x.sx_decider_out(this.h), n));
     if (r < 0) return null;
     return { index: r, option: candidates[r].option, target: candidates[r].target ?? 0, score: scores[r], scores };
   }
 
   /** Tracing of decisions on or off. */
   setTrace(on) {
-    this.x.sx_decider_trace(this.handle, on ? 1 : 0);
+    this.x.sx_decider_trace(this.h, on ? 1 : 0);
   }
 
   /**
@@ -632,8 +706,8 @@ export class Decider {
    * the weight) or 'chosen'.
    */
   takeTrace() {
-    const n = this.x.sx_decider_trace_take(this.handle);
-    const raw = new Int32Array(this.x.memory.buffer, this.x.sx_decider_out(this.handle), n * 6);
+    const n = this.x.sx_decider_trace_take(this.h);
+    const raw = new Int32Array(this.x.memory.buffer, this.x.sx_decider_out(this.h), n * 6);
     const events = new Array(n);
     for (let i = 0; i < n; i++) {
       const o = i * 6;
@@ -669,8 +743,10 @@ const REASON = [null, 'transition', 'timeout', 'set'];
  *   m.timeout('search', 300, 'patrol');
  *   const change = m.update(frame, { seen: canSee });   // {from, to, reason, transition} or null
  */
-export class Machine {
+export class Machine extends Handle {
   constructor(x, states, conditions, initial) {
+    super();
+    if (!Array.isArray(states) || !Array.isArray(conditions)) throw new TypeError('Sagax: states and conditions are arrays of names');
     if (conditions.length > 64) throw new RangeError('Sagax: at most 64 conditions');
     this.x = x;
     this.states = states;
@@ -680,8 +756,9 @@ export class Machine {
   }
 
   stateOf(name) {
+    if (typeof name !== 'number' && typeof name !== 'string') throw new TypeError(`Sagax: a state is a name or a number, not ${typeof name}`);
     const i = typeof name === 'number' ? name : this.states.indexOf(name);
-    if (!(i >= 0 && i < this.states.length)) throw new RangeError(`Sagax: unknown state ${name}`);
+    if (!(i >= 0 && i < this.states.length) || !Number.isInteger(i)) throw new RangeError(`Sagax: unknown state ${name}`);
     return i;
   }
 
@@ -700,38 +777,39 @@ export class Machine {
     const f = from === '*' ? -1 : this.stateOf(from);
     const [wl, wh] = this.bits(when);
     const [ul, uh] = this.bits(unless);
-    const i = this.x.sx_machine_add_transition(this.handle, f, this.stateOf(to), wl, wh, ul, uh, after >>> 0);
+    const i = this.x.sx_machine_add_transition(this.h, f, this.stateOf(to), wl, wh, ul, uh, u32Of(after, 'after'));
     if (i < 0) throw new RangeError('Sagax: bad transition');
     return i;
   }
 
   /** After time in state, go to next. */
   timeout(state, time, next) {
-    if (this.x.sx_machine_set_timeout(this.handle, this.stateOf(state), time >>> 0, this.stateOf(next)) !== 0) {
+    if (this.x.sx_machine_set_timeout(this.h, this.stateOf(state), u32Of(time, 'time'), this.stateOf(next)) !== 0) {
       throw new RangeError('Sagax: bad timeout');
     }
   }
 
   /** One tick; flags {name: true}. Returns {from, to, reason, transition} or null. */
   update(now, flags = {}) {
+    const t = timeOf(now);
     const [l, h] = this.bits(Object.keys(flags).filter((k) => flags[k]));
-    if (this.x.sx_machine_update(this.handle, now >>> 0, l, h) !== 1) return null;
-    const c = new Int32Array(this.x.memory.buffer, this.x.sx_machine_change(this.handle), 4);
+    if (this.x.sx_machine_update(this.h, t, l, h) !== 1) return null;
+    const c = new Int32Array(this.x.memory.buffer, this.x.sx_machine_change(this.h), 4);
     return { from: this.states[c[0]], to: this.states[c[1]], reason: REASON[c[2]], transition: c[3] };
   }
 
   get state() {
-    return this.states[this.x.sx_machine_state(this.handle)];
+    return this.states[this.x.sx_machine_state(this.h)];
   }
 
   /** When the current state was entered. */
   get entered() {
-    return this.x.sx_machine_entered(this.handle) >>> 0;
+    return this.x.sx_machine_entered(this.h) >>> 0;
   }
 
   /** Puts the machine into state at now (also to start the clock). */
   setState(state, now) {
-    this.x.sx_machine_set_state(this.handle, this.stateOf(state), now >>> 0);
+    this.x.sx_machine_set_state(this.h, this.stateOf(state), timeOf(now));
   }
 
   free() {
@@ -765,6 +843,7 @@ function choice(table, name, what) {
 }
 
 const EVICT = { oldest: 0, weakest: 1 };
+const SOURCE = { own: 0, heard: 1, told: 2 };
 const METRIC = { euclid: 0, manhattan: 1, chebyshev: 2, hex: 3 };
 const SINE = { fine: 0, coarse: 1 };
 const POST = ['ok', 'full', 'cooldown'];
@@ -784,9 +863,14 @@ const FACT_SIZE = 9;
 const MESSAGE_SIZE = 10;
 const AREA_SIZE = 14;
 
+/** A fact source: 'own', 'heard', 'told' or a number 0 .. 255 (more values are yours to use). */
+function sourceOf(source) {
+  return typeof source === 'string' ? choice(SOURCE, source, 'source') : u8Of(source, 'source');
+}
+
 function factValues(f) {
   const [px, py, pz] = posOf(f.pos ?? [0, 0, 0]);
-  return [u32(f.subject), u32(f.kind), u32(px), u32(py), u32(pz), u32(f.seenAt), u32(f.strength ?? 0), u32(f.data ?? 0), u32(f.source ?? 0) & 0xff];
+  return [u32Of(f.subject, 'subject'), u32Of(f.kind, 'kind'), px, py, pz, timeOf(f.seenAt ?? 0), u32Of(f.strength ?? 0, 'strength'), u32Of(f.data ?? 0, 'data'), sourceOf(f.source ?? 0)];
 }
 
 function factOf(r) {
@@ -795,7 +879,7 @@ function factOf(r) {
 
 function messageValues(m) {
   const [px, py, pz] = posOf(m.pos ?? [0, 0, 0]);
-  return [u32(m.kind), u32(m.subject), u32(px), u32(py), u32(pz), u32(m.seenAt), u32(m.strength ?? 0), u32(m.data ?? 0), u32(m.sender ?? 0), m.keepIfSenderGone ? 1 : 0];
+  return [u32Of(m.kind, 'kind'), u32Of(m.subject ?? 0, 'subject'), px, py, pz, timeOf(m.seenAt ?? 0), u32Of(m.strength ?? 0, 'strength'), u32Of(m.data ?? 0, 'data'), u32Of(m.sender ?? 0, 'sender'), m.keepIfSenderGone ? 1 : 0];
 }
 
 function messageOf(r) {
@@ -805,7 +889,7 @@ function messageOf(r) {
 function areaValues(a) {
   const [px, py, pz] = posOf(a.pos ?? [0, 0, 0]);
   const [sx, sy, sz] = posOf(a.source ?? [0, 0, 0], 'source');
-  return [u32(a.kind ?? 0), u32(px), u32(py), u32(pz), u32(a.radius), u32(a.strength ?? 0), u32(a.since ?? 0), u32(a.lifetime), u32(a.data ?? 0), u32(sx), u32(sy), u32(sz), a.blocking ? 1 : 0, a.source ? 1 : 0];
+  return [u32Of(a.kind ?? 0, 'kind'), px, py, pz, i32Of(a.radius, 'radius'), u32Of(a.strength ?? 0, 'strength'), timeOf(a.since ?? 0), u32Of(a.lifetime, 'lifetime'), u32Of(a.data ?? 0, 'data'), sx, sy, sz, a.blocking ? 1 : 0, a.source ? 1 : 0];
 }
 
 function areaOf(r) {
@@ -847,8 +931,9 @@ class Lent {
  * (a freed handle would write to address 0). A lent table (owner set) is
  * freed by its owner.
  */
-class Table {
+class Table extends Handle {
   constructor(x, prefix, handle, owner = null, epoch = null) {
+    super();
     if (!handle) throw new RangeError('Sagax: capacity must be at least 1');
     this.x = x;
     this.prefix = prefix;
@@ -858,17 +943,17 @@ class Table {
   }
 
   get h() {
-    if (!this.handle) throw new Error('Sagax: used after free()');
+    const handle = super.h;
     if (this.owner) {
       void this.owner.h; // throws after the owner (or its owner) was freed
       if (this.lentAt !== null && this.owner.epoch !== this.lentAt) {
         throw new Error('Sagax: this lent keeper is stale: the crew changed since crew.keeper(); ask for it again');
       }
-      if (this.lentAt !== null && this.x.sx_keeper_live(this.handle) !== 1) {
+      if (this.lentAt !== null && this.x.sx_keeper_live(handle) !== 1) {
         throw new Error('Sagax: this lent keeper is stale: its member left the group');
       }
     }
-    return this.handle;
+    return handle;
   }
 
   /** Frees the table. Using it afterwards throws. A squad's own table is freed with the squad (this does nothing). */
@@ -938,38 +1023,38 @@ export class Knowledge extends Table {
 
   /** Renews the time of a fact. False if unknown. */
   touch(subject, kind, now) {
-    return this.x.sx_knowledge_touch(this.h, u32(subject), u32(kind), u32(now)) === 1;
+    return this.x.sx_knowledge_touch(this.h, u32Of(subject, 'subject'), u32Of(kind, 'kind'), timeOf(now)) === 1;
   }
 
   /** Sets the place of a fact. False if unknown. */
   setPos(subject, kind, pos) {
     const [px, py, pz] = posOf(pos);
-    return this.x.sx_knowledge_set_pos(this.h, u32(subject), u32(kind), i32(px), i32(py), i32(pz)) === 1;
+    return this.x.sx_knowledge_set_pos(this.h, u32Of(subject, 'subject'), u32Of(kind, 'kind'), px, py, pz) === 1;
   }
 
   /** Sets the data of a fact. False if unknown. */
   setData(subject, kind, data) {
-    return this.x.sx_knowledge_set_data(this.h, u32(subject), u32(kind), u32(data)) === 1;
+    return this.x.sx_knowledge_set_data(this.h, u32Of(subject, 'subject'), u32Of(kind, 'kind'), u32Of(data, 'data')) === 1;
   }
 
   /** Sets the strength of a fact. False if unknown. */
   setStrength(subject, kind, strength) {
-    return this.x.sx_knowledge_set_strength(this.h, u32(subject), u32(kind), u32(strength)) === 1;
+    return this.x.sx_knowledge_set_strength(this.h, u32Of(subject, 'subject'), u32Of(kind, 'kind'), u32Of(strength, 'strength')) === 1;
   }
 
   /** Forgets one fact. False if unknown. */
   remove(subject, kind) {
-    return this.x.sx_knowledge_remove(this.h, u32(subject), u32(kind)) === 1;
+    return this.x.sx_knowledge_remove(this.h, u32Of(subject, 'subject'), u32Of(kind, 'kind')) === 1;
   }
 
   /** Forgets all facts about a subject. Returns how many. */
   removeSubject(subject) {
-    return this.x.sx_knowledge_remove_subject(this.h, u32(subject));
+    return this.x.sx_knowledge_remove_subject(this.h, u32Of(subject, 'subject'));
   }
 
   /** The fact (subject, kind) or null. */
   get(subject, kind) {
-    return this.x.sx_knowledge_get(this.h, u32(subject), u32(kind)) === 1 ? this.#fact() : null;
+    return this.x.sx_knowledge_get(this.h, u32Of(subject, 'subject'), u32Of(kind, 'kind')) === 1 ? this.#fact() : null;
   }
 
   /** All facts in slot order. */
@@ -990,7 +1075,8 @@ export class Knowledge extends Table {
    * a negative, fractional or NaN limit throws a RangeError.
    */
   expire(now, maxAge, perKind) {
-    if (!perKind) return this.#facts(this.x.sx_knowledge_expire(this.h, u32(now), u32(maxAge)));
+    const t = timeOf(now);
+    if (!perKind) return this.#facts(this.x.sx_knowledge_expire(this.h, t, u32Of(maxAge, 'maxAge')));
     const gone = [];
     for (const f of this.list()) {
       const limit = perKind(f);
@@ -998,7 +1084,7 @@ export class Knowledge extends Table {
       // Infinity (or any integer past 2^32 - 1) never expires; other bad limits are refused.
       if (limit === Infinity || limit > ALL) continue;
       if (!Number.isInteger(limit) || limit < 0) throw new RangeError('Sagax: perKind must return a whole number of ticks, 0 or more (Infinity: never)');
-      if (u32(u32(now) - f.seenAt) >= limit) gone.push(f);
+      if (u32(t - f.seenAt) >= limit) gone.push(f);
     }
     for (const f of gone) this.remove(f.subject, f.kind);
     return gone;
@@ -1006,7 +1092,8 @@ export class Knowledge extends Table {
 
   /** Like expire, for facts of one kind only (other kinds stay). */
   expireKind(now, kind, maxAge) {
-    return this.#facts(this.x.sx_knowledge_expire_kind(this.h, u32(now), u32(kind), u32(maxAge)));
+    const t = timeOf(now);
+    return this.#facts(this.x.sx_knowledge_expire_kind(this.h, t, u32Of(kind, 'kind'), u32Of(maxAge, 'maxAge')));
   }
 
   /** Number of facts. */
@@ -1041,13 +1128,16 @@ export class Outbox extends Table {
    */
   post(now, message, delay = 0, cooldown = 0) {
     const t = timeOf(now);
-    putRecord(this.x, this.x.sx_outbox_record(this.h), messageValues(message));
-    return POST[this.x.sx_outbox_post(this.h, t, u32(delay), u32(cooldown))];
+    const values = messageValues(message);
+    const d = u32Of(delay, 'delay');
+    const c = u32Of(cooldown, 'cooldown');
+    putRecord(this.x, this.x.sx_outbox_record(this.h), values);
+    return POST[this.x.sx_outbox_post(this.h, t, d, c)];
   }
 
   /** Takes (at most max of) the messages whose own delay is over, in post order. */
   due(now, max = ALL) {
-    const n = this.x.sx_outbox_due(this.h, u32(now), u32(max));
+    const n = this.x.sx_outbox_due(this.h, timeOf(now), u32Of(max, 'max'));
     return messagesOf(takeRecord(this.x, this.x.sx_outbox_out(this.h), n * MESSAGE_SIZE), n);
   }
 
@@ -1081,13 +1171,15 @@ export class Inbox extends Table {
 
   /** Puts a message on its way, arriving at arriveAt. When full, the one arriving latest makes room if the new one is earlier; else false. */
   push(message, arriveAt) {
-    putRecord(this.x, this.x.sx_inbox_record(this.h), messageValues(message));
-    return this.x.sx_inbox_push(this.h, u32(arriveAt)) === 1;
+    const values = messageValues(message);
+    const t = timeOf(arriveAt);
+    putRecord(this.x, this.x.sx_inbox_record(this.h), values);
+    return this.x.sx_inbox_push(this.h, t) === 1;
   }
 
   /** Takes (at most max of) the messages that have arrived, in push order. */
   takeDue(now, max = ALL) {
-    const n = this.x.sx_inbox_take_due(this.h, u32(now), u32(max));
+    const n = this.x.sx_inbox_take_due(this.h, timeOf(now), u32Of(max, 'max'));
     return messagesOf(takeRecord(this.x, this.x.sx_inbox_out(this.h), n * MESSAGE_SIZE), n);
   }
 
@@ -1131,26 +1223,27 @@ export class Areas extends Table {
   /** Adds an area (since = now), or renews the first of the same kind whose centre is closer than its radius. Returns its index. */
   add(now, area) {
     const t = timeOf(now);
-    putRecord(this.x, this.x.sx_areas_record(this.h), areaValues(area));
+    const values = areaValues(area);
+    putRecord(this.x, this.x.sx_areas_record(this.h), values);
     return this.x.sx_areas_add(this.h, t);
   }
 
   /** Removes areas whose age is at least their lifetime. Returns how many. */
   expire(now) {
-    return this.x.sx_areas_expire(this.h, u32(now));
+    return this.x.sx_areas_expire(this.h, timeOf(now));
   }
 
   /** Index of the first area containing pos, or null. */
   contains(pos) {
     const [px, py, pz] = posOf(pos);
-    const i = this.x.sx_areas_contains(this.h, i32(px), i32(py), i32(pz));
+    const i = this.x.sx_areas_contains(this.h, px, py, pz);
     return i >= 0 ? i : null;
   }
 
   /** Like contains, for areas of one kind. */
   containsKind(pos, kind) {
     const [px, py, pz] = posOf(pos);
-    const i = this.x.sx_areas_contains_kind(this.h, i32(px), i32(py), i32(pz), u32(kind));
+    const i = this.x.sx_areas_contains_kind(this.h, px, py, pz, u32Of(kind, 'kind'));
     return i >= 0 ? i : null;
   }
 
@@ -1207,22 +1300,22 @@ export class Timers extends Table {
 
   /** Starts or renews the timer of id. */
   set(id, now, duration) {
-    this.x.sx_timers_set(this.h, u32(id), u32(now), u32(duration));
+    this.x.sx_timers_set(this.h, u32Of(id, 'id'), timeOf(now), u32Of(duration, 'duration'));
   }
 
   /** True while the timer of id runs (age below its duration). */
   active(id, now) {
-    return this.x.sx_timers_active(this.h, u32(id), u32(now)) === 1;
+    return this.x.sx_timers_active(this.h, u32Of(id, 'id'), timeOf(now)) === 1;
   }
 
   /** Time left of the timer of id (0 if none or over). */
   left(id, now) {
-    return u32(this.x.sx_timers_left(this.h, u32(id), u32(now)));
+    return u32(this.x.sx_timers_left(this.h, u32Of(id, 'id'), timeOf(now)));
   }
 
   /** Stops the timer of id. False if there was none. */
   remove(id) {
-    return this.x.sx_timers_remove(this.h, u32(id)) === 1;
+    return this.x.sx_timers_remove(this.h, u32Of(id, 'id')) === 1;
   }
 
   /** Stops all timers. */
@@ -1236,37 +1329,57 @@ export class Timers extends Table {
   }
 }
 
+/** Runs `call` on a record in the module's scratch buffer: put, call, take. Returns [result, record]. */
+function onRecord(record, call) {
+  const x = wasm();
+  const ptr = x.sx_scratch(record.length);
+  new Int32Array(x.memory.buffer, ptr, record.length).set(record);
+  const result = call(x, ptr);
+  return [result, Array.from(new Int32Array(x.memory.buffer, ptr, record.length))];
+}
+
 /**
  * Tells whether a chase still gets closer: the best value so far (lower is
- * better, e.g. a distance) and when it last improved.
+ * better, e.g. a distance) and when it last improved. A plain object; the
+ * rules run in the module (as in C), so load it first (loadSagax).
  */
 export class Progress {
   constructor() {
     this.reset();
   }
 
+  #record() {
+    return [this.best, this.since, this.started ? 1 : 0];
+  }
+
+  #take([best, since, started]) {
+    this.best = best;
+    this.since = u32(since);
+    this.started = (started & 0xff) !== 0;
+  }
+
   /** Starts with value at now. */
   start(value, now) {
-    this.best = i32(value);
-    this.since = u32(now);
-    this.started = true;
+    const v = i32Of(value, 'value');
+    const t = timeOf(now);
+    this.#take(onRecord(this.#record(), (x, ptr) => x.sx_progress_start(ptr, v, t))[1]);
   }
 
   /** If value beats the best by at least minGain, it becomes the best (since = now) and true is returned. False if not started. */
   update(value, now, minGain) {
-    if (!this.started) return false;
-    // A difference of two i32 is exact in a double.
-    if (this.best - i32(value) >= i32(minGain)) {
-      this.best = i32(value);
-      this.since = u32(now);
-      return true;
-    }
-    return false;
+    const v = i32Of(value, 'value');
+    const t = timeOf(now);
+    const g = i32Of(minGain, 'minGain');
+    const [r, record] = onRecord(this.#record(), (x, ptr) => x.sx_progress_update(ptr, v, t, g));
+    this.#take(record);
+    return r === 1;
   }
 
   /** True if started and the last improvement is at least limit old. */
   stalled(now, limit) {
-    return this.started && u32(u32(now) - this.since) >= u32(limit);
+    const t = timeOf(now);
+    const l = u32Of(limit, 'limit');
+    return onRecord(this.#record(), (x, ptr) => x.sx_progress_stalled(ptr, t, l))[0] === 1;
   }
 
   /** Back to not started. */
@@ -1285,13 +1398,17 @@ export class Interval {
 
   /** True if never marked, or at least every has passed since the mark. */
   due(now, every) {
-    return !this.started || u32(u32(now) - this.last) >= u32(every);
+    const t = timeOf(now);
+    const e = u32Of(every, 'every');
+    return onRecord([this.last, this.started ? 1 : 0], (x, ptr) => x.sx_interval_due(ptr, t, e))[0] === 1;
   }
 
   /** Records that it ran at now. */
   mark(now) {
-    this.last = u32(now);
-    this.started = true;
+    const t = timeOf(now);
+    const [, [last, started]] = onRecord([this.last, this.started ? 1 : 0], (x, ptr) => x.sx_interval_mark(ptr, t));
+    this.last = u32(last);
+    this.started = (started & 0xff) !== 0;
   }
 
   /** Back to never started. */
@@ -1303,22 +1420,19 @@ export class Interval {
 
 const ALERT_LEVELS = 8;
 
-/** An alert config {max, decayPerTick, hold, hysteresis, thresholds} as u32s; at most 8 thresholds. */
+/** An alert config {max, decayPerTick, hold, hysteresis, thresholds} as the config part of the record: max, decay, hold, hysteresis, count, 8 thresholds. */
 function alertConfig(cfg) {
   const thresholds = cfg.thresholds ?? [];
+  if (!Array.isArray(thresholds)) throw new TypeError('Sagax: thresholds must be an array');
   if (thresholds.length > ALERT_LEVELS) throw new RangeError(`Sagax: an alertness has at most ${ALERT_LEVELS} thresholds`);
-  return {
-    max: u32(cfg.max),
-    decay: u32(cfg.decayPerTick ?? 0),
-    hold: u32(cfg.hold ?? 0),
-    hysteresis: u32(cfg.hysteresis ?? 0),
-    thresholds: thresholds.map(u32),
-  };
+  const fill = [...thresholds.map((t) => u32Of(t, 'threshold')), ...new Array(ALERT_LEVELS - thresholds.length).fill(0)];
+  return [u32Of(cfg.max, 'max'), u32Of(cfg.decayPerTick ?? 0, 'decayPerTick'), u32Of(cfg.hold ?? 0, 'hold'), u32Of(cfg.hysteresis ?? 0, 'hysteresis'), thresholds.length, ...fill];
 }
 
 /**
  * A value that rises with stimuli and decays, with levels (unaware,
- * suspicious, searching, alert, ...) that you name yourself.
+ * suspicious, searching, alert, ...) that you name yourself. A plain object;
+ * the rules run in the module (as in C), so load it first (loadSagax).
  *
  *   const cfg = {max: 100, decayPerTick: 2, hold: 5, hysteresis: 5, thresholds: [20, 50, 80]};
  *   const a = new Alertness();
@@ -1338,42 +1452,29 @@ export class Alertness {
     this.level = 0;
   }
 
-  /** Applies the decay owed up to now, adds amount (up to max) and remembers now as the last stimulus. The level changes in update. */
-  stimulus(amount, now, cfg) {
-    const c = alertConfig(cfg);
-    now = u32(now);
-    this.#decay(now, c);
-    this.value = Math.min(c.max, Math.min(this.value + u32(amount), ALL));
-    this.lastStimulus = now;
+  #run(cfg, call) {
+    const record = [this.value, this.last, this.lastStimulus, this.level, ...alertConfig(cfg)];
+    const [r, [value, last, lastStimulus, level]] = onRecord(record, call);
+    this.value = u32(value);
+    this.last = u32(last);
+    this.lastStimulus = u32(lastStimulus);
+    this.level = level & 0xff;
+    return r;
   }
 
-  #decay(now, c) {
-    const sinceLast = u32(now - this.last);
-    const afterHold = Math.max(0, u32(now - this.lastStimulus) - c.hold);
-    // The product can pass 2^53, but then it is far above any value anyway.
-    const lost = c.decay * Math.min(sinceLast, afterHold);
-    this.value = lost >= this.value ? 0 : this.value - lost;
-    this.last = now;
+  /** Applies the decay owed up to now, adds amount (up to max) and remembers now as the last stimulus. The level changes in update. */
+  stimulus(amount, now, cfg) {
+    const a = u32Of(amount, 'amount');
+    const t = timeOf(now);
+    this.#run(cfg, (x, ptr) => x.sx_alertness_stimulus(ptr, a, t));
   }
 
   /** Decays up to now and sets the level. Returns [from, to] if it changed, else null. */
   update(now, cfg) {
-    const c = alertConfig(cfg);
-    now = u32(now);
-    this.#decay(now, c);
-
-    const th = c.thresholds;
+    const t = timeOf(now);
     const from = this.level;
-    const reached = th.filter((t) => this.value >= t).length;
-    let to = from;
-    if (reached > to) {
-      to = reached;
-    } else {
-      to = Math.min(from, th.length);
-      while (to > 0 && to - 1 < th.length && this.value < Math.max(0, th[to - 1] - c.hysteresis)) to--;
-    }
-    this.level = to;
-    return to !== from ? [from, to] : null;
+    const changed = this.#run(cfg, (x, ptr) => x.sx_alertness_update(ptr, t));
+    return changed === 1 ? [from, this.level] : null;
   }
 }
 
@@ -1401,23 +1502,22 @@ function ruleOf(rule) {
 }
 
 /** Ids picked from candidates [{id, x, y}] by a rule, see Sagax.route. */
-function routeOf(x, rule, [ox, oy], candidates, metric, divisor) {
+function routeOf(x, rule, origin, candidates, metric, divisor) {
   const [code, arg] = ruleOf(rule);
+  const [ox, oy] = originOf(origin);
   const m = choice(METRIC, metric, 'metric');
+  const d = i32Of(divisor, 'divisor');
+  if (!Array.isArray(candidates)) throw new TypeError('Sagax: candidates must be an array');
   const n = candidates.length;
+  const ids = candidates.flatMap((c) => [u32Of(c.id, 'id'), i32Of(c.x, 'x'), i32Of(c.y, 'y')]);
   const size = Math.max(n * 3, 1);
   // The pointer first, the view right after: asking for the buffer may grow
   // the memory, and a grown memory kills older views. Only the number is kept.
   const ptr = x.sx_scratch(size);
   const view = new Int32Array(x.memory.buffer, ptr, size);
-  for (let i = 0; i < n; i++) {
-    const c = candidates[i];
-    view[i * 3] = i32(c.id);
-    view[i * 3 + 1] = i32(c.x);
-    view[i * 3 + 2] = i32(c.y);
-  }
+  view.set(ids);
   // The call may grow the memory again: make a new view from the number.
-  const count = x.sx_route(code, arg, n, i32(ox), i32(oy), m, i32(divisor));
+  const count = x.sx_route(code, arg, n, ox, oy, m, d);
   if (count < 0) throw new RangeError('Sagax: bad route arguments');
   return Array.from(new Uint32Array(x.memory.buffer, ptr, count));
 }
@@ -1435,6 +1535,8 @@ const POINT_DEFAULT = {
 /** Point of an agent around a place: [x, y, z] or null past the last step. */
 function pointsAroundOf(x, agent, step, centre, pattern) {
   const [cx, cy, cz] = posOf(centre, 'centre');
+  const a = u32Of(agent, 'agent');
+  const st = u32Of(step, 'step');
   const p = { ...POINT_DEFAULT, ...pattern };
   const sine = choice(SINE, p.sine, 'sine');
   let custom = 0;
@@ -1448,12 +1550,12 @@ function pointsAroundOf(x, agent, step, centre, pattern) {
     // Like Rust: a missing distance counts as 0 (an extra one is ignored).
     const distances = fill(p.distances.slice(0, p.offsets.length));
     ptr = x.sx_scratch(23);
-    new Int32Array(x.memory.buffer, ptr, 23).set([p.headingStep, p.firstDistance, p.offsets.length, ...offsets, ...distances, ...p.min, ...p.max].map(i32));
+    new Int32Array(x.memory.buffer, ptr, 23).set([p.headingStep, p.firstDistance, p.offsets.length, ...offsets, ...distances, ...p.min, ...p.max].map((v) => i32Of(v, 'pattern')));
     custom = 1;
   } else {
     ptr = x.sx_scratch(3);
   }
-  const r = x.sx_points_around(u32(agent), u32(step), i32(cx), i32(cy), i32(cz), custom, sine);
+  const r = x.sx_points_around(a, st, cx, cy, cz, custom, sine);
   if (r < 0) throw new RangeError('Sagax: bad point pattern');
   if (r === 0) return null;
   return Array.from(new Int32Array(x.memory.buffer, ptr, 3));
@@ -1493,11 +1595,11 @@ Object.assign(Sagax.prototype, {
   },
   /** When a message sent at now arrives: now + base + distance * perUnit (u32, wrapping). */
   arrival(now, base, distance, perUnit) {
-    return u32(u32(now) + u32(base) + Math.imul(u32(distance), u32(perUnit)));
+    return u32(this.x.sx_arrival(timeOf(now), u32Of(base, 'base'), u32Of(distance, 'distance'), u32Of(perUnit, 'perUnit')));
   },
   /** Sine of a heading (256 = full turn): 'fine' times 65536, 'coarse' times 256 (17-entry table). */
   sine(heading, mode = 'fine') {
-    return this.x.sx_sine(i32(heading), choice(SINE, mode, 'sine'));
+    return this.x.sx_sine(i32Of(heading, 'heading'), choice(SINE, mode, 'sine'));
   },
   /**
    * Point where an agent looks around a place: pointsAround(agent, step, [x, y, z], pattern?).
@@ -1508,10 +1610,14 @@ Object.assign(Sagax.prototype, {
   },
   /** sweepHeading(base, elapsed, stepTicks, offsets?): heading 0..255 while looking around. */
   sweepHeading(base, elapsed, stepTicks, offsets) {
-    if (!offsets) return this.x.sx_sweep_heading(i32(base), u32(elapsed), u32(stepTicks), -1);
-    const ptr = this.x.sx_scratch(offsets.length);
-    new Int32Array(this.x.memory.buffer, ptr, Math.max(offsets.length, 1)).set(offsets.map(i32));
-    return this.x.sx_sweep_heading(i32(base), u32(elapsed), u32(stepTicks), offsets.length);
+    const b = i32Of(base, 'base');
+    const e = u32Of(elapsed, 'elapsed');
+    const t = u32Of(stepTicks, 'stepTicks');
+    if (!offsets) return this.x.sx_sweep_heading(b, e, t, -1);
+    const list = offsets.map((o) => i32Of(o, 'offset'));
+    const ptr = this.x.sx_scratch(list.length);
+    new Int32Array(this.x.memory.buffer, ptr, Math.max(list.length, 1)).set(list);
+    return this.x.sx_sweep_heading(b, e, t, list.length);
   },
 });
 
@@ -1586,6 +1692,9 @@ export const SQUAD = {
   maxExtraColumns: 1024, // most columns setExtraColumns takes
 };
 
+const ROLE = { ranged: SQUAD.roleRanged, area: SQUAD.roleArea };
+const TAG = { cover: SQUAD.tagCover, high: SQUAD.tagHigh, hidden: SQUAD.tagHidden, choke: SQUAD.tagChoke };
+const REPORT = { enemy: SQUAD.reportEnemy, arrived: SQUAD.reportArrived, goalBroken: SQUAD.reportGoalBroken };
 const ERROR_PLAN = -3;
 const MEMBER_STATE = { active: 0, suspended: 1, gone: 2 };
 const MEMBER_STATES = Object.keys(MEMBER_STATE);
@@ -1615,8 +1724,9 @@ export class PlanError extends RangeError {
   }
 }
 
-/** An integer from lo to hi, else RangeError. */
+/** An integer from lo to hi: a TypeError if v is not a number at all, else a RangeError if it is not a whole number in range. */
 function intIn(v, lo, hi, what) {
+  if (typeof v !== 'number') throw new TypeError(`Sagax: ${what} must be a number, not ${v === null ? 'null' : typeof v}`);
   if (!Number.isInteger(v) || v < lo || v > hi) throw new RangeError(`Sagax: ${what} must be an integer from ${lo} to ${hi}, not ${String(v)}`);
   return v;
 }
@@ -1628,21 +1738,43 @@ const safeOf = (v, what) => intIn(v, Number.MIN_SAFE_INTEGER, Number.MAX_SAFE_IN
 
 /**
  * A position as checked i32s [x, y, z]. Accepts [x, y, z], {x, y, z} and
- * {x, y, level} (z / level optional, 0 by default; both given must agree).
+ * {x, y, level} (z / level optional, 0 by default). Anything that is not a
+ * position of one of these shapes is a RangeError, and so are z and level,
+ * or an array with a level property, that differ: the level is never picked
+ * silently.
  */
 function posOf(p, what = 'pos') {
+  const coord = (v) => {
+    if (typeof v !== 'number') throw new RangeError(`Sagax: ${what} must be [x, y, z] or {x, y, z} of numbers`);
+    return i32Of(v, what);
+  };
   if (Array.isArray(p)) {
     if (p.length !== 3) throw new RangeError(`Sagax: ${what} must be [x, y, z] or {x, y, z}`);
-    return p.map((c) => i32Of(c, what));
+    if (p.level !== undefined && p.level !== p[2]) {
+      throw new RangeError(`Sagax: ${what} is an array with z ${String(p[2])} and level ${String(p.level)}, which differ`);
+    }
+    return p.map(coord);
   }
   if (p !== null && typeof p === 'object') {
     const { x, y, z, level } = p;
     if (z !== undefined && level !== undefined && z !== level) {
       throw new RangeError(`Sagax: ${what} has z ${String(z)} and level ${String(level)}, which differ`);
     }
-    return [i32Of(x, what), i32Of(y, what), i32Of(z ?? level ?? 0, what)];
+    return [coord(x), coord(y), coord(z ?? level ?? 0)];
   }
   throw new RangeError(`Sagax: ${what} must be [x, y, z] or {x, y, z}`);
+}
+
+/** The x and y of an origin ([x, y], [x, y, z] or an object position; only x and y count). */
+function originOf(origin) {
+  const [x, y] = posOf(Array.isArray(origin) && origin.length === 2 ? [...origin, 0] : origin, 'origin');
+  return [x, y];
+}
+
+/** Bits from a number or a list of names out of a table ('ranged', 'cover', ...), else RangeError / TypeError. */
+function bitsOf(v, table, what) {
+  if (!Array.isArray(v)) return u32Of(v, what);
+  return v.reduce((bits, name) => (bits | choice(table, name, what)) >>> 0, 0);
 }
 
 /** Four numbers of a skill table row, checked. */
@@ -1664,7 +1796,7 @@ function takeInts(x, ptr, count) {
 }
 
 function memberValues(m) {
-  return [u32Of(m.id, 'id'), ...posOf(m.pos), u32Of(m.roles ?? 0, 'roles'), u8Of(m.skill ?? 0, 'skill'), choice(MEMBER_STATE, m.state ?? 'active', 'state')];
+  return [u32Of(m.id, 'id'), ...posOf(m.pos), bitsOf(m.roles ?? 0, ROLE, 'roles'), u8Of(m.skill ?? 0, 'skill'), choice(MEMBER_STATE, m.state ?? 'active', 'state')];
 }
 
 function memberOf(r) {
@@ -1755,17 +1887,17 @@ function placeValues(p, allowNone) {
   const pos = kind === PLACE.offset ? posOf(p.pos, 'offset') : [0, 0, 0];
   let value = 0;
   if (kind === PLACE.side) value = choice(SIDE, p.side, 'side');
-  if (kind === PLACE.tagged) value = u32Of(p.tags, 'tags');
+  if (kind === PLACE.tagged) value = bitsOf(p.tags, TAG, 'tags');
   return [kind, ...pos, value];
 }
 
 function slotValues(s) {
   const kind = choice(GOAL_KIND, s.kind ?? 'move', 'goal kind');
   return [
-    u32Of(s.roles ?? 0, 'roles'), u8Of(s.min ?? 1, 'min'), u8Of(s.max ?? 1, 'max'),
+    bitsOf(s.roles ?? 0, ROLE, 'roles'), u8Of(s.min ?? 1, 'min'), u8Of(s.max ?? 1, 'max'),
     ...placeValues(s.place, false), ...placeValues(s.gather ?? { kind: 'none' }, true),
     kind, kind === GOAL_KIND.custom ? u32Of(s.custom ?? 0, 'custom') : 0,
-    ...startValues(s.start), u32Of(s.wantTags ?? 0, 'wantTags'), i32Of(s.dist ?? 0, 'dist'),
+    ...startValues(s.start), bitsOf(s.wantTags ?? 0, TAG, 'wantTags'), i32Of(s.dist ?? 0, 'dist'),
     i32Of(s.gatherDist ?? s.dist ?? 0, 'gatherDist'),
   ].map(i32);
 }
@@ -2066,12 +2198,14 @@ export class Squad extends Table {
     return this.x.sx_squad_observe(h, t) === 1 ? factOf(this.#out(FACT_SIZE).map(u32)) : null;
   }
 
-  /** A member's report (a message, kind SQUAD.report*), read from arriveAt on. False if the inbox refused it. */
+  /** A member's report (a message, kind 'enemy' | 'arrived' | 'goalBroken' or SQUAD.report*), read from arriveAt on. False if the inbox refused it. */
   report(message, arriveAt) {
     if (message?.kind === 3) throw new RangeError('Sagax: kind 3 is gone, use reportDanger');
     const t = timeOf(arriveAt);
+    const named = typeof message?.kind === 'string' ? { ...message, kind: choice(REPORT, message.kind, 'report kind') } : message;
+    const values = messageValues(named);
     const h = this.h;
-    putScratch(this.x, messageValues(message));
+    putScratch(this.x, values);
     return this.x.sx_squad_report(h, t) === 1;
   }
 
@@ -2132,7 +2266,7 @@ export class Squad extends Table {
     const [low, high] = seedOf(seed);
     const values = [
       ...extra.map((v) => i32Of(v, 'extra')),
-      ...spots.flatMap((s) => [...posOf(s.pos, 'spot'), i32(u32Of(s.tags ?? 0, 'tags'))]),
+      ...spots.flatMap((s) => [...posOf(s.pos, 'spot'), i32(bitsOf(s.tags ?? 0, TAG, 'tags'))]),
     ];
     const h = this.h;
     putScratch(this.x, values);
@@ -2273,7 +2407,7 @@ export class Keeper extends Table {
   addGoalOption(decider, weight = 1) {
     if (!(decider instanceof Decider)) throw new TypeError('Sagax: addGoalOption takes a Decider');
     const w = fixed(weight, 'weight');
-    const option = this.x.sx_keeper_add_goal_option(decider.handle, w);
+    const option = this.x.sx_keeper_add_goal_option(decider.h, w);
     decider.inputCount = Math.max(decider.inputCount, KEEPER.extra);
     return option;
   }
@@ -2285,7 +2419,7 @@ export class Keeper extends Table {
    */
   setCurrent(decider, option, discipline) {
     if (!(decider instanceof Decider)) throw new TypeError('Sagax: setCurrent takes a Decider');
-    this.x.sx_keeper_set_current(this.h, decider.handle, u32Of(option, 'option'), u32Of(discipline, 'discipline'));
+    this.x.sx_keeper_set_current(this.h, decider.h, u32Of(option, 'option'), u32Of(discipline, 'discipline'));
   }
 
   /** Out of play: never broken. */
@@ -2453,7 +2587,7 @@ export class Crew extends Table {
     const [low, high] = seedOf(seed);
     const values = [
       ...extra.map((v) => i32Of(v, 'extra')),
-      ...spots.flatMap((s) => [...posOf(s.pos, 'spot'), i32(u32Of(s.tags ?? 0, 'tags'))]),
+      ...spots.flatMap((s) => [...posOf(s.pos, 'spot'), i32(bitsOf(s.tags ?? 0, TAG, 'tags'))]),
     ];
     const h = this.#changed;
     putScratch(this.x, values);
@@ -2598,7 +2732,7 @@ Object.assign(Sagax.prototype, {
    * Only x and y count. Returns the ids.
    */
   gather(origin, faction, radius, candidates, { metric = 'euclid', freeOnly = false, max = candidates.length } = {}) {
-    const [ox, oy] = posOf([...origin.slice(0, 2), 0], 'origin');
+    const [ox, oy] = originOf(origin);
     const m = choice(METRIC, metric, 'metric');
     const values = candidates.flatMap((c) => [u32Of(c.id, 'id'), u32Of(c.faction, 'faction'), ...posOf(c.pos), c.free ? 1 : 0].map(i32));
     const r = safeOf(radius, 'radius');
