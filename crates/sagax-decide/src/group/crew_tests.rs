@@ -1170,6 +1170,9 @@ struct OffsetOnly {
     area: Option<Area>,
     calls: [u32; 9],
     seen: u32,
+    member_seen: u32,
+    centre_seen: u32,
+    area_seen: u32,
 }
 
 impl OffsetOnly {
@@ -1189,6 +1192,20 @@ impl OffsetOnly {
         }
         for p in targets {
             self.pos(p, "view target");
+        }
+        if let Some(m) = view.member(1) {
+            self.pos(m.pos, "view member(1)");
+            self.member_seen += 1;
+        }
+        if let Some(c) = view.centre() {
+            self.pos(c, "view centre");
+            self.centre_seen += 1;
+        }
+        let areas: Vec<Area> = view.areas().collect();
+        for a in areas {
+            self.pos(a.pos, "view area");
+            self.pos(a.source, "view area source");
+            self.area_seen += 1;
         }
     }
 }
@@ -1271,6 +1288,29 @@ impl SquadRules for OffsetOnly {
 
 #[test]
 fn crew_hex_rules_see_offset_coords() {
+    // The wish is a spot: the spot slot runs and the goal snaps to it.
+    let (rules, _) = run_hex_offset([3, 3, 0], true);
+    assert!(
+        rules.calls.iter().all(|&c| c > 0),
+        "every slot called: {:?}",
+        rules.calls
+    );
+    assert!(rules.seen > 0);
+    assert!(rules.member_seen > 0 && rules.centre_seen > 0 && rules.area_seen > 0);
+}
+
+#[test]
+fn crew_hex_place_result_comes_back_in_offset_coords() {
+    // Odd-row offset point that is no spot, and no spots at all: the goal
+    // is the unchecked wish, so a dropped conversion changes it.
+    let place_at: Pos = [15, 9, 0];
+    assert_ne!(HexLayout::OddR.to_axial_pos(place_at), place_at);
+    let (rules, goals) = run_hex_offset(place_at, false);
+    assert!(rules.calls[2] > 0);
+    assert!(goals.contains(&Some(place_at)), "goals {goals:?}");
+}
+
+fn run_hex_offset(place_at: Pos, with_spots: bool) -> (OffsetOnly, Vec<Option<Pos>>) {
     let layout = HexLayout::OddR;
     let mut crew = Crew::new(CrewConfig {
         squad: SquadConfig {
@@ -1289,7 +1329,7 @@ fn crew_hex_rules_see_offset_coords() {
     }
     let target: Pos = [9, 5, 0];
     let friend: Pos = [11, 7, 0];
-    let spots = [
+    let all_spots = [
         Spot {
             pos: [3, 3, 0],
             tags: 0,
@@ -1307,6 +1347,7 @@ fn crew_hex_rules_see_offset_coords() {
     tactic.slots[0].place = Place::Custom(7);
     tactic.aborts.push(Abort::Custom(3));
     tactic.trigger = Trigger::Custom(4);
+    let spots: &[Spot] = if with_spots { &all_spots } else { &[] };
     let sq = crew.squad_mut();
     for id in [2, 3] {
         assert!(sq.set_channel(id, Channel::Custom(1)));
@@ -1327,10 +1368,9 @@ fn crew_hex_rules_see_offset_coords() {
             },
         );
     }
-    let place_at: Pos = [3, 3, 0];
     let mut known: Vec<Pos> = members.iter().map(|m| m.1).collect();
     known.extend([target, friend, place_at]);
-    known.extend(spots.iter().map(|s| s.pos));
+    known.extend(all_spots.iter().map(|s| s.pos));
     let area = Area {
         pos: [3, 3, 0],
         source: [5, 3, 0],
@@ -1356,7 +1396,7 @@ fn crew_hex_rules_see_offset_coords() {
             };
             assert!(crew.report_with(t, msg, &mut rules));
         }
-        crew.tick_with(t, &[], &spots, SEED, &mut rules, &mut events)
+        crew.tick_with(t, &[], spots, SEED, &mut rules, &mut events)
             .unwrap();
         for e in &events {
             if let CrewEvent::Order { goal, .. } = e {
@@ -1364,16 +1404,10 @@ fn crew_hex_rules_see_offset_coords() {
             }
         }
     }
-    assert!(
-        rules.calls.iter().all(|&c| c > 0),
-        "every slot called: {:?}",
-        rules.calls
-    );
-    assert!(rules.seen > 0);
-    assert!(goals.contains(&Some([3, 3, 0])), "goals {goals:?}");
     let a = *crew.squad().areas().iter().next().unwrap();
     assert_eq!(a.pos, layout.to_axial_pos([3, 3, 0]));
     assert_eq!(a.source, layout.to_axial_pos([5, 3, 0]));
+    (rules, goals)
 }
 
 /// Records the kind and tick of every report the report slot gets.
