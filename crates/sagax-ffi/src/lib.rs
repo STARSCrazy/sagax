@@ -1238,3 +1238,4 @@ pub mod machine;
 pub mod memory;
 pub mod crew;
 pub mod group;
+pub mod rules;

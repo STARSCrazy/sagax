@@ -32,6 +32,16 @@ fn codes_round_trip() {
         assert_eq!(place(code, extra, offset), Some(value));
     }
     assert_eq!(place(PLACE_NONE, 9, [1, 1, 1]), Some(None));
+    // A custom place keeps its id in both directions (it is no lossy
+    // "here" any more).
+    assert_eq!(
+        place(PLACE_CUSTOM, 41, [0; 3]),
+        Some(Some(Place::Custom(41)))
+    );
+    assert_eq!(
+        place_code(Some(Place::Custom(41))),
+        (PLACE_CUSTOM, 41, [0; 3])
+    );
     assert_eq!(place(PLACE_SIDE, 4, [0; 3]), None, "unknown side");
 
     for code in 0..=3 {
@@ -194,6 +204,12 @@ fn statuses_and_errors() {
         plan_error(PlanError::OptionsChanged),
         (ERROR_PLAN, u32::MAX, u32::MAX)
     );
+    // NeedsRules has a code of its own, apart from OptionsChanged.
+    assert_eq!(
+        plan_error(PlanError::NeedsRules),
+        (ERROR_NEEDS_RULES, u32::MAX, u32::MAX)
+    );
+    assert_ne!(ERROR_NEEDS_RULES, ERROR_PLAN);
     assert_eq!(
         plan_error(PlanError::TooManySlots { tactic: 1 }),
         (ERROR_PLAN, 1, u32::MAX)

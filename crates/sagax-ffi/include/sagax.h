@@ -197,6 +197,9 @@ typedef struct sx_result {
 #define SX_ERROR_INTERNAL  (-2) /* a bug in the library; please report */
 #define SX_ERROR_PLAN      (-3) /* a tactic reads a column beyond the row or has more
                                  * than 255 slots (since 8) */
+#define SX_ERROR_NEEDS_RULES (-4) /* a plain call (sx_squad_plan, sx_squad_check,
+                                 * sx_crew_tick) on a squad with custom parts: use the
+                                 * _with call and its rules (since 9) */
 
 /* budget everywhere: cells to expand at most in this call; 0 = unlimited. */
 
@@ -963,6 +966,9 @@ typedef struct sx_keeper sx_keeper;
                                    * (merged into the leader's knowledge as SX_SOURCE_TOLD) */
 #define SX_REPORT_ARRIVED     4   /* sender: the member; data: the plan id: it reached its
                                    * gather spot (as sx_squad_arrived, once it is read) */
+#define SX_REPORT_GAME_FIRST 16   /* the first kind a game should use for its own reports (they
+                                   * go to the report callback of sx_squad_rules); kinds below
+                                   * may gain a meaning of their own later */
 
 /* A member of a group. */
 typedef struct sx_member {
@@ -1015,6 +1021,8 @@ int32_t sx_gather(int32_t x, int32_t y, uint32_t faction, int64_t radius, uint32
                               * alone: like SX_SIDE_FRONT */
 #define SX_PLACE_TAGGED  4   /* a spot with the tag bits value, near the group centre */
 #define SX_PLACE_HERE    5   /* the leader's position */
+#define SX_PLACE_CUSTOM  6   /* the game's own: value is its id, the place callback of
+                              * sx_squad_rules decides (without it: the leader's position) */
 
 /* Sides of the target, seen from the group (left with +y pointing up). */
 #define SX_SIDE_FRONT 0
@@ -1083,6 +1091,10 @@ int32_t sx_tactic_add_abort(sx_tactic *tactic, uint32_t input, int32_t at_least)
  * beyond the row never fires. Returns 0; SX_ERROR_ARGUMENT for an unknown
  * cmp. */
 int32_t sx_tactic_add_abort_when(sx_tactic *tactic, uint32_t input, uint32_t cmp, int32_t value);
+/* The plan ends when the abort callback of sx_squad_rules says so for id (the
+ * game's own number); without rules it never fires. A squad with such a
+ * tactic needs rules (SX_ERROR_NEEDS_RULES). Returns 0. */
+int32_t sx_tactic_add_abort_custom(sx_tactic *tactic, uint32_t id);
 /* Whether the plan ends when its target is gone from the squad's knowledge
  * (on != 0, the default of sx_tactic_new and the shipped tactics). Off: the
  * plan is judged with the target's facts missing, like a plan without a
@@ -1100,6 +1112,10 @@ int32_t sx_tactic_trigger_all_arrived(sx_tactic *tactic, uint32_t max_wait);
 int32_t sx_tactic_trigger_target_in_radius(sx_tactic *tactic, int64_t radius);
 /* Only by sx_squad_signal. */
 int32_t sx_tactic_trigger_manual(sx_tactic *tactic);
+/* When the trigger callback of sx_squad_rules says so for id (the game's own
+ * number); without rules never. A squad with such a tactic needs rules
+ * (SX_ERROR_NEEDS_RULES). Returns 0. */
+int32_t sx_tactic_trigger_custom(sx_tactic *tactic, uint32_t id);
 
 /* -- skill: how well a squad plans and acts -- */
 
@@ -1201,16 +1217,21 @@ typedef struct sx_squad_config {
 	                             * are columns SX_IN_ROLE_0 and SX_IN_ROLE_1, entry i >= 2
 	                             * is column 8 + i - 2. Fewer than two: the free columns
 	                             * read 0. */
+	uint32_t rule_columns;      /* columns the columns callback of sx_squad_rules fills, after
+	                             * the extra columns (sx_squad_set_extra_columns): column
+	                             * sx_squad_extra_start + extra columns on; at most 1024 (with
+	                             * the extra columns). Above 0 the squad needs rules. */
 } sx_squad_config;
 
 /* Fill *out with the defaults: 8 members, 32 facts, 8 areas, 16 inbox
  * reports, 8 danger reports, SX_METRIC_EUCLID, two roles {SX_ROLE_RANGED,
- * SX_ROLE_AREA}. Returns 0; SX_ERROR_ARGUMENT
+ * SX_ROLE_AREA}, no rule columns. Returns 0; SX_ERROR_ARGUMENT
  * for a null out. */
 int32_t sx_squad_config_default(sx_squad_config *out);
 /* A squad as configured. Skill 0, the default skill table, target kind 0,
  * no tactics. Null if config is null, a capacity is 0, the metric is
- * unknown or role_count is above 8. */
+ * unknown, role_count is above 8 or rule_columns (with the extra columns)
+ * is above 1024. */
 sx_squad *sx_squad_new(const sx_squad_config *config);
 void sx_squad_free(sx_squad *squad);
 
@@ -1293,6 +1314,12 @@ int32_t sx_squad_set_shout(sx_squad *squad, uint32_t id, int64_t range);
 int32_t sx_squad_set_radio(sx_squad *squad, uint32_t id, uint32_t base, uint32_t per_unit);
 /* Never arrives. */
 int32_t sx_squad_set_silent(sx_squad *squad, uint32_t id);
+/* The game's own channel: the channel_delay callback of sx_squad_rules gives
+ * the delay of every order (and of reports, see sx_squad_report_arrives_at_with
+ * and sx_crew_report) for id (the game's own number); without rules it never
+ * arrives. A squad with a member on such a channel needs rules
+ * (SX_ERROR_NEEDS_RULES). */
+int32_t sx_squad_set_channel_custom(sx_squad *squad, uint32_t member, uint32_t id);
 /* The area a danger report (sx_squad_report_danger) adds: its kind, radius, strength, lifetime
  * and blocking are used; centre, source and data come from the report.
  * Default: kind 0, radius 2, strength 1, lifetime 255, not blocking.
@@ -1345,7 +1372,8 @@ int32_t sx_squad_report_danger(sx_squad *squad, uint32_t sender, const int32_t *
 /* When a report sent by the member at now reaches the acting leader: at
  * once for the leader, else over the member's channel from its position to
  * the leader's. Returns 1 and the tick in *at (may be null), or 0 if it
- * never arrives (also for an unknown or inactive member). */
+ * never arrives (also for an unknown or inactive member, and over a custom
+ * channel: see sx_squad_report_arrives_at_with). */
 int32_t sx_squad_report_arrives_at(sx_squad *squad, uint32_t id, uint32_t now, uint32_t *at);
 /* The plan that became active since the last call, once: returns 1 and the
  * plan id in *plan (may be null), or 0. */
@@ -1414,7 +1442,8 @@ int32_t sx_squad_validate(sx_squad *squad, uint32_t *tactic, uint32_t *input);
  * past their lifetime are dropped first.
  * Returns 1 (the id goes to *plan, which may be null), 0 if nothing scores
  * above 0 or no member is active (the pending plan stays), SX_ERROR_PLAN
- * (see sx_squad_validate), or SX_ERROR_ARGUMENT. */
+ * (see sx_squad_validate), SX_ERROR_NEEDS_RULES (a squad with custom parts:
+ * use sx_squad_plan_with), or SX_ERROR_ARGUMENT. */
 int32_t sx_squad_plan(sx_squad *squad, uint32_t now, const int32_t *extra,
                       uint32_t extra_count, const sx_spot *spots, uint32_t spot_count,
                       uint64_t seed, uint32_t *plan);
@@ -1428,7 +1457,8 @@ int32_t sx_squad_plan(sx_squad *squad, uint32_t now, const int32_t *extra,
  * (not after the signal): REPLAN among the candidates scoring above that
  * bar only. The trigger fires: the signal is given (SIGNAL). Else KEEP.
  * Returns SX_SQUAD_* (a new plan's id to *plan, which may be null),
- * SX_ERROR_PLAN, or SX_ERROR_ARGUMENT. */
+ * SX_ERROR_PLAN, SX_ERROR_NEEDS_RULES (see sx_squad_plan) or
+ * SX_ERROR_ARGUMENT. */
 int32_t sx_squad_check(sx_squad *squad, uint32_t now, const int32_t *extra,
                        uint32_t extra_count, const sx_spot *spots, uint32_t spot_count,
                        uint64_t seed, uint32_t *plan);
@@ -1465,6 +1495,243 @@ int32_t sx_squad_signal_given(sx_squad *squad);
  * if there is none. */
 int32_t sx_squad_pending_plan(sx_squad *squad, sx_plan *out, sx_order *goals, uint32_t cap);
 int32_t sx_squad_active_plan(sx_squad *squad, sx_plan *out, sx_order *goals, uint32_t cap);
+
+/* -- rules: the game's logic at fixed points of a plan or check -- */
+
+/* A squad calls the game's own code ("slots") through a sx_squad_rules that
+ * the game lends to one call (the _with functions; the plain functions use
+ * no rules). The squad never keeps the table or its pointers. Each callback
+ * pointer may be NULL: then that slot does what the squad does without rules
+ * (a zeroed sx_squad_rules is all built-in). A callback must not call any
+ * function on the same squad or crew; it reads the squad through the view
+ * (sx_view_*), valid only inside that callback. Costs and scores are
+ * int64_t, lower is better; ties go to the lower member or spot index. The
+ * built-in value a context carries (built_in) saturates to int64_t.
+ *
+ * Order of calls, always the same, never in hash order, no random numbers:
+ *   plan:  keep_target for every known target (knowledge order); per candidate
+ *          (tactic order, then target order) columns, then the custom aborts
+ *          of its tactic in the order added (the first that fires stops the
+ *          rest and the candidate scores 0); place for every custom place of
+ *          the chosen tactic (slots in order, a slot's gather before its
+ *          place); member_cost per slot and active member that has the slot's
+ *          role bits, slot by slot, members in group order, before members
+ *          are assigned; spot_score per member in assignment order and its
+ *          gather spots, then its place spots, free spots within the spot
+ *          radius in index order.
+ *   check: first report for every game report that has arrived (arrival order),
+ *          then all report actions are applied (after the danger reports of the
+ *          call, before any abort); then columns and abort of the active row;
+ *          then the candidates as in a plan (a replan runs a whole plan);
+ *          last trigger of a custom trigger, while the plan holds and the
+ *          signal was not given. sx_squad_plan_with reads the reports the
+ *          same way first.
+ *   channel_delay whenever an order goes over a custom channel: when a plan
+ *          becomes active and on the signal per goal in the plan's goal order,
+ *          on reinstate for that member; reports of the crew over the
+ *          member's channel (sx_crew_tick_with, sx_crew_report_with).
+ *          A squad times orders only: sx_squad_report keeps the arrive_at
+ *          the game gives; sx_squad_report_arrives_at_with tells it.
+ * Hex crews: every position a callback sees is in the game's offset
+ * coordinates (contexts, view, report msg pos), and a position a callback
+ * writes (place, an area added by a report) is taken as offset. The
+ * contexts' built_in values, distances and heading stay as computed.
+ * A squad that needs rules (a custom place, trigger, abort or channel, or
+ * rule columns) is refused by the plain plan, check and tick with
+ * SX_ERROR_NEEDS_RULES; the plain sx_squad_orders_due, sx_squad_arrived and
+ * sx_squad_reinstate never activate a due plan (the next call with rules
+ * does, its times counted from when it was due), sx_squad_signal returns 0,
+ * and no plain call sends over a custom channel. */
+
+/* Read-only look at a squad inside a callback (never made by the game). */
+typedef struct sx_squad_view sx_squad_view;
+/* What a report callback hands back, at most 4 actions per report (never made
+ * by the game). The squad applies the actions of all reports of a call at one
+ * point, after the last report: a later report's view does not show the
+ * actions of an earlier one yet. A signal action is given only if no abort
+ * fires and the target is not lost in the same call. */
+typedef struct sx_report_actions sx_report_actions;
+
+/* Slot 3, place: one candidate's tactic and slot, the group, the target. The
+ * wish point goes to out (3 values), preset to the leader's position. */
+typedef struct sx_place_ctx {
+	uint32_t tactic;            /* index of the tactic */
+	uint32_t slot;              /* index of the slot */
+	uint32_t target;            /* the target's id; valid if has_target */
+	int32_t dist;               /* the slot's gather_dist for a gather place, else dist */
+	int32_t leader[3];          /* the acting leader */
+	int32_t centre[3];          /* the group centre (mean of the active members) */
+	int32_t face[3];            /* what the slots face (the target, else the nearest threat);
+	                             * valid if has_face */
+	int32_t friend_pos[3];      /* the target's nearest other target; valid if has_friend */
+	uint8_t heading;            /* from centre to face (256 = full turn); 0 without a face */
+	uint8_t gather;             /* 1: the slot's gather place, 0: its place */
+	uint8_t has_face;
+	uint8_t has_friend;
+	uint8_t has_target;
+} sx_place_ctx;
+
+/* Slot 4, member cost. built_in: the metric distance from the member to the
+ * slot's first wish point (Euclid: squared). */
+typedef struct sx_cost_ctx {
+	int64_t built_in;
+	uint32_t tactic;
+	uint32_t slot;
+	sx_member member;
+	int32_t wish[3];
+} sx_cost_ctx;
+
+/* Slot 5, spot score. built_in: 2^100 added to the metric
+ * distance from wish to the spot when the spot lacks a bit of want_tags, saturated
+ * to int64_t (see sx_spot_score_builtin); a callback that wants the exact
+ * built-in order for such spots leaves spot_score NULL or uses
+ * sx_builtin_spot_score. */
+typedef struct sx_spot_ctx {
+	int64_t built_in;
+	uint32_t tactic;
+	uint32_t slot;
+	uint32_t index;             /* of the spot in the game's list */
+	uint32_t want_tags;         /* slot want_tags | the place's tags */
+	uint32_t target;            /* the plan's target id; valid if has_target */
+	sx_spot spot;
+	sx_member member;           /* the member that gets the spot */
+	int32_t wish[3];
+	int32_t target_pos[3];      /* valid if has_target */
+	uint8_t gather;             /* 1: ranking gather spots */
+	uint8_t has_target;
+} sx_spot_ctx;
+
+/* Slot 8, channel delay. distance: the plain distance in the squad's metric
+ * (Euclid: the rounded-down root). */
+typedef struct sx_channel_ctx {
+	uint32_t sender;
+	uint32_t receiver;
+	uint32_t distance;
+	uint32_t now;               /* when it is sent */
+	int32_t from[3];
+	int32_t to[3];
+	uint8_t report;             /* 1: a report, 0: an order */
+} sx_channel_ctx;
+
+/* Slots 2 and 7, one scoring row. For columns: row is the row before the rule
+ * columns (row_len values) and out gets exactly the rule columns (all 0 when
+ * called). For abort: the active plan's row (active 1) in a check, or a
+ * candidate's (active 1 only for the active (tactic, target)), which then
+ * scores 0. row is valid during the callback only. */
+typedef struct sx_row_ctx {
+	const int32_t *row;
+	uint32_t row_len;
+	uint32_t tactic;
+	uint32_t target;            /* the candidate's target id; valid if has_target */
+	uint32_t now;
+	uint8_t has_target;
+	uint8_t active;
+} sx_row_ctx;
+
+/* The game's callbacks, NULL = built-in. Return values of 1 or 0 mean: keep /
+ * fire / usable / arrives, or not. user is passed to every callback.
+ *   keep_target   slot 1: 1 keeps the known target for new plans, 0 drops it
+ *                 (it still counts as a friend of other targets and as a threat for a
+ *                 tactic without a target; it never ends the active plan).
+ *   columns       slot 2: fill the count rule columns of a candidate's row.
+ *   place         slot 3: the wish point of SX_PLACE_CUSTOM id.
+ *   member_cost   slot 4: 1 and the cost in *cost, or 0: the member cannot
+ *                 take the slot.
+ *   spot_score    slot 5: 1 and the score in *score, or 0: the member may not
+ *                 use the spot (the spot radius, the taken spots and the
+ *                 skill's rank error still apply).
+ *   trigger       slot 6: 1 fires the signal of sx_tactic_trigger_custom id.
+ *   abort         slot 7: 1 ends the plan of sx_tactic_add_abort_custom id.
+ *   channel_delay slot 8: 1 and the delay in ticks in *delay (arrives at
+ *                 now + delay, wrapping), or 0: it does not arrive.
+ *   report        slot 9: the leader reads a report of a kind the squad does not
+ *                 know (every kind but 1, 2 and 4; a game's own start at
+ *                 SX_REPORT_GAME_FIRST); put what the squad should do into actions. */
+typedef struct sx_squad_rules {
+	int32_t (*keep_target)(void *user, const sx_squad_view *view, const sx_fact *fact);
+	void (*columns)(void *user, const sx_squad_view *view, const sx_row_ctx *ctx, int32_t *out,
+	                uint32_t count);
+	void (*place)(void *user, uint32_t id, const sx_place_ctx *ctx, int32_t *out);
+	int32_t (*member_cost)(void *user, const sx_cost_ctx *ctx, int64_t *cost);
+	int32_t (*spot_score)(void *user, const sx_spot_ctx *ctx, int64_t *score);
+	int32_t (*trigger)(void *user, uint32_t id, const sx_squad_view *view, uint32_t now);
+	int32_t (*abort)(void *user, uint32_t id, const sx_squad_view *view, const sx_row_ctx *ctx);
+	int32_t (*channel_delay)(void *user, uint32_t id, const sx_channel_ctx *ctx, uint32_t *delay);
+	void (*report)(void *user, const sx_squad_view *view, const sx_message *msg, uint32_t now,
+	               sx_report_actions *actions);
+	void *user;
+} sx_squad_rules;
+
+/* The two built-ins as callbacks: *cost = ctx->built_in, 1. */
+int32_t sx_builtin_member_cost(void *user, const sx_cost_ctx *ctx, int64_t *cost);
+int32_t sx_builtin_spot_score(void *user, const sx_spot_ctx *ctx, int64_t *score);
+
+/* All callbacks NULL except member_cost = sx_builtin_member_cost and
+ * spot_score = sx_builtin_spot_score, user NULL: a table to start from (it
+ * behaves exactly as a zeroed one). Returns 0; SX_ERROR_ARGUMENT for a null
+ * out. */
+int32_t sx_squad_rules_default(sx_squad_rules *out);
+
+/* The built-in spot score to *out: (miss << 100) | distance, where miss is 1
+ * when the spot lacks a bit of want_tags and distance the metric distance
+ * (SX_METRIC_*) from wish (3 values) to the spot in x and y (Euclid: squared);
+ * saturated to int64_t (a spot that misses a tag always reads INT64_MAX).
+ * Returns 0; SX_ERROR_ARGUMENT for a null pointer or an unknown metric. */
+int32_t sx_spot_score_builtin(const int32_t *wish, uint32_t want_tags, const sx_spot *spot,
+                              uint32_t metric, int64_t *out);
+
+/* The view, read-only, valid inside the callback it came with. Counts and
+ * indexes run in group order (also suspended and gone members) and knowledge
+ * order (every known target, also the ones keep_target drops). The at calls
+ * return 1, or 0 past the end; the count calls return a count;
+ * SX_ERROR_ARGUMENT for a null pointer. */
+int32_t sx_view_member_count(const sx_squad_view *view);
+int32_t sx_view_member_at(const sx_squad_view *view, uint32_t index, sx_member *out);
+int32_t sx_view_target_count(const sx_squad_view *view);
+int32_t sx_view_target_at(const sx_squad_view *view, uint32_t index, sx_fact *out);
+/* The plan being carried out. (struct sx_view_plan has no typedef, so that
+ * the name of the function stays free in C.) */
+struct sx_view_plan {
+	uint32_t plan;              /* its id */
+	uint32_t tactic;
+	uint32_t target;            /* valid if has_target */
+	uint32_t since;             /* when it became active */
+	uint8_t has_plan;           /* 0: no plan is active (the other fields are 0) */
+	uint8_t has_target;
+	uint8_t signal_given;
+};
+/* Writes the active plan to *out; returns 1 with a plan, else 0. */
+int32_t sx_view_plan(const sx_squad_view *view, struct sx_view_plan *out);
+/* The group centre (mean of the active members) to out (3 values); 1, or 0
+ * without an active member. */
+int32_t sx_view_centre(const sx_squad_view *view, int32_t *out);
+
+/* Actions of a report callback. Each returns 1 if stored, 0 when the report
+ * has its 4 actions already. */
+/* Add a danger area (its since becomes the tick of the call). */
+int32_t sx_report_add_area(sx_report_actions *actions, const sx_area *area);
+/* Give the signal of the active plan, if it was not given yet. */
+int32_t sx_report_signal(sx_report_actions *actions);
+/* Forget the target with this subject. */
+int32_t sx_report_forget(sx_report_actions *actions, uint32_t subject);
+
+/* The calls with rules (NULL = built-in, the same as the plain call; the table
+ * is read during the call only). As sx_squad_plan and sx_squad_check. */
+int32_t sx_squad_plan_with(sx_squad *squad, uint32_t now, const int32_t *extra,
+                           uint32_t extra_count, const sx_spot *spots, uint32_t spot_count,
+                           uint64_t seed, const sx_squad_rules *rules, uint32_t *plan);
+int32_t sx_squad_check_with(sx_squad *squad, uint32_t now, const int32_t *extra,
+                            uint32_t extra_count, const sx_spot *spots, uint32_t spot_count,
+                            uint64_t seed, const sx_squad_rules *rules, uint32_t *plan);
+/* As sx_squad_signal; the second orders go over a custom channel too. */
+int32_t sx_squad_signal_with(sx_squad *squad, uint32_t now, const sx_squad_rules *rules);
+/* As sx_squad_reinstate; the goal goes over a custom channel too. */
+int32_t sx_squad_reinstate_with(sx_squad *squad, uint32_t id, uint32_t now,
+                                const sx_squad_rules *rules);
+/* As sx_squad_report_arrives_at; over a custom channel the channel_delay
+ * callback says (the plain call: never). */
+int32_t sx_squad_report_arrives_at_with(sx_squad *squad, uint32_t id, uint32_t now,
+                                        const sx_squad_rules *rules, uint32_t *at);
 
 /* -- keeper: one member's goal -- */
 
@@ -1628,6 +1895,32 @@ int32_t sx_crew_report_danger(sx_crew *crew, uint32_t sender, const int32_t *cen
 int32_t sx_crew_tick(sx_crew *crew, uint32_t now, const int32_t *extra, uint32_t extra_count,
                      const sx_spot *spots, uint32_t spot_count, uint64_t seed,
                      sx_crew_event *events, uint32_t cap, uint32_t *total);
+/* As sx_crew_tick with the game's rules (NULL = the plain call): the squad's
+ * check is sx_squad_check_with, the orders and the members' reports go over a
+ * custom channel through its channel_delay callback, and a game report that
+ * arrives (see sx_crew_report) goes to the report callback. With hex_grid
+ * every callback sees offset coordinates (see "rules" above). Returns as
+ * sx_crew_tick; a crew whose squad needs rules is refused by the plain call
+ * with SX_ERROR_NEEDS_RULES. */
+int32_t sx_crew_tick_with(sx_crew *crew, uint32_t now, const int32_t *extra, uint32_t extra_count,
+                          const sx_spot *spots, uint32_t spot_count, uint64_t seed,
+                          const sx_squad_rules *rules, sx_crew_event *events, uint32_t cap,
+                          uint32_t *total);
+/* As sx_crew_reinstate with rules: the goal goes over a custom channel too. */
+int32_t sx_crew_reinstate_with(sx_crew *crew, uint32_t id, uint32_t now,
+                               const sx_squad_rules *rules);
+/* A report of the game, sent by member msg->sender at now over the member's
+ * channel to the leader (as the crew's own reports; msg->pos is in offset
+ * coordinates with hex_grid). Its kind decides who reads it (see
+ * sx_squad_report): a game's own kind (SX_REPORT_GAME_FIRST on) goes to the
+ * report callback in sx_crew_tick_with. Returns 1 if stored or if it can never
+ * arrive (no way to the leader, the sender is not an active member, a custom
+ * channel without rules: it is dropped), 0 if the inbox refused it,
+ * SX_ERROR_ARGUMENT for a null pointer. */
+int32_t sx_crew_report(sx_crew *crew, uint32_t now, const sx_message *msg);
+/* As sx_crew_report; a custom channel times it through the rules. */
+int32_t sx_crew_report_with(sx_crew *crew, uint32_t now, const sx_message *msg,
+                            const sx_squad_rules *rules);
 /* The member's decider inputs at now (its position, the squad's metric, the
  * signal and the discipline of its own skill) to *out. */
 int32_t sx_crew_member_inputs(sx_crew *crew, uint32_t id, uint32_t now, sx_member_inputs *out);
@@ -1770,20 +2063,54 @@ _Static_assert(offsetof(sx_order, goal) == 4, "sx_order.goal layout");
 _Static_assert(sizeof(sx_plan) == 28, "sx_plan layout");
 _Static_assert(offsetof(sx_plan, goal_count) == 20, "sx_plan.goal_count layout");
 _Static_assert(offsetof(sx_plan, has_target) == 24, "sx_plan.has_target layout");
-_Static_assert(sizeof(sx_squad_config) == 60, "sx_squad_config layout");
+_Static_assert(sizeof(sx_squad_config) == 64, "sx_squad_config layout");
 _Static_assert(offsetof(sx_squad_config, metric) == 20, "sx_squad_config.metric layout");
 _Static_assert(offsetof(sx_squad_config, role_count) == 24, "sx_squad_config.role_count layout");
 _Static_assert(offsetof(sx_squad_config, role_masks) == 28, "sx_squad_config.role_masks layout");
+_Static_assert(offsetof(sx_squad_config, rule_columns) == 60, "sx_squad_config.rule_columns layout");
 _Static_assert(sizeof(sx_member_inputs) == 20, "sx_member_inputs layout");
 _Static_assert(offsetof(sx_member_inputs, discipline) == 16, "sx_member_inputs.discipline layout");
-_Static_assert(sizeof(sx_crew_config) == 68, "sx_crew_config layout");
+_Static_assert(sizeof(sx_crew_config) == 72, "sx_crew_config layout");
 _Static_assert(offsetof(sx_crew_config, squad) == 0, "sx_crew_config.squad layout");
-_Static_assert(offsetof(sx_crew_config, arrive_radius) == 60, "sx_crew_config.arrive_radius layout");
-_Static_assert(offsetof(sx_crew_config, hex_grid) == 64, "sx_crew_config.hex_grid layout");
+_Static_assert(offsetof(sx_crew_config, arrive_radius) == 64, "sx_crew_config.arrive_radius layout");
+_Static_assert(offsetof(sx_crew_config, hex_grid) == 68, "sx_crew_config.hex_grid layout");
 _Static_assert(sizeof(sx_crew_event) == 88, "sx_crew_event layout");
 _Static_assert(offsetof(sx_crew_event, start_at) == 12, "sx_crew_event.start_at layout");
 _Static_assert(offsetof(sx_crew_event, goal) == 16, "sx_crew_event.goal layout");
 _Static_assert(offsetof(sx_crew_event, has_start_at) == 84, "sx_crew_event.has_start_at layout");
+_Static_assert(sizeof(sx_place_ctx) == 72, "sx_place_ctx layout");
+_Static_assert(offsetof(sx_place_ctx, dist) == 12, "sx_place_ctx.dist layout");
+_Static_assert(offsetof(sx_place_ctx, leader) == 16, "sx_place_ctx.leader layout");
+_Static_assert(offsetof(sx_place_ctx, centre) == 28, "sx_place_ctx.centre layout");
+_Static_assert(offsetof(sx_place_ctx, face) == 40, "sx_place_ctx.face layout");
+_Static_assert(offsetof(sx_place_ctx, friend_pos) == 52, "sx_place_ctx.friend_pos layout");
+_Static_assert(offsetof(sx_place_ctx, heading) == 64, "sx_place_ctx.heading layout");
+_Static_assert(offsetof(sx_place_ctx, has_target) == 68, "sx_place_ctx.has_target layout");
+_Static_assert(sizeof(sx_cost_ctx) == 56, "sx_cost_ctx layout");
+_Static_assert(offsetof(sx_cost_ctx, tactic) == 8, "sx_cost_ctx.tactic layout");
+_Static_assert(offsetof(sx_cost_ctx, member) == 16, "sx_cost_ctx.member layout");
+_Static_assert(offsetof(sx_cost_ctx, wish) == 40, "sx_cost_ctx.wish layout");
+_Static_assert(sizeof(sx_spot_ctx) == 96, "sx_spot_ctx layout");
+_Static_assert(offsetof(sx_spot_ctx, tactic) == 8, "sx_spot_ctx.tactic layout");
+_Static_assert(offsetof(sx_spot_ctx, want_tags) == 20, "sx_spot_ctx.want_tags layout");
+_Static_assert(offsetof(sx_spot_ctx, target) == 24, "sx_spot_ctx.target layout");
+_Static_assert(offsetof(sx_spot_ctx, spot) == 28, "sx_spot_ctx.spot layout");
+_Static_assert(offsetof(sx_spot_ctx, member) == 44, "sx_spot_ctx.member layout");
+_Static_assert(offsetof(sx_spot_ctx, wish) == 68, "sx_spot_ctx.wish layout");
+_Static_assert(offsetof(sx_spot_ctx, target_pos) == 80, "sx_spot_ctx.target_pos layout");
+_Static_assert(offsetof(sx_spot_ctx, gather) == 92, "sx_spot_ctx.gather layout");
+_Static_assert(offsetof(sx_spot_ctx, has_target) == 93, "sx_spot_ctx.has_target layout");
+_Static_assert(sizeof(sx_channel_ctx) == 44, "sx_channel_ctx layout");
+_Static_assert(offsetof(sx_channel_ctx, distance) == 8, "sx_channel_ctx.distance layout");
+_Static_assert(offsetof(sx_channel_ctx, now) == 12, "sx_channel_ctx.now layout");
+_Static_assert(offsetof(sx_channel_ctx, from) == 16, "sx_channel_ctx.from layout");
+_Static_assert(offsetof(sx_channel_ctx, to) == 28, "sx_channel_ctx.to layout");
+_Static_assert(offsetof(sx_channel_ctx, report) == 40, "sx_channel_ctx.report layout");
+_Static_assert(sizeof(struct sx_view_plan) == 20, "sx_view_plan layout");
+_Static_assert(offsetof(struct sx_view_plan, since) == 12, "sx_view_plan.since layout");
+_Static_assert(offsetof(struct sx_view_plan, has_plan) == 16, "sx_view_plan.has_plan layout");
+_Static_assert(offsetof(struct sx_view_plan, has_target) == 17, "sx_view_plan.has_target layout");
+_Static_assert(offsetof(struct sx_view_plan, signal_given) == 18, "sx_view_plan.signal_given layout");
 #endif
 
 #endif

@@ -7,6 +7,9 @@ pub const ERROR_ARGUMENT: i32 = -1;
 pub const ERROR_INTERNAL: i32 = -2;
 /// `SX_ERROR_PLAN`: a tactic reads a column beyond the scoring row.
 pub const ERROR_PLAN: i32 = -3;
+/// `SX_ERROR_NEEDS_RULES`: a plain call on a squad with custom parts (see
+/// `Squad::needs_rules`); use the `_with` call.
+pub const ERROR_NEEDS_RULES: i32 = -4;
 
 /// `SX_FOUR_WAYS`: square grid, only straight moves.
 pub const FOUR_WAYS: u32 = 1;
@@ -65,6 +68,8 @@ pub const PLACE_BETWEEN: u32 = 3;
 pub const PLACE_TAGGED: u32 = 4;
 /// `SX_PLACE_HERE`.
 pub const PLACE_HERE: u32 = 5;
+/// `SX_PLACE_CUSTOM`: the game's own place; `value` is its id.
+pub const PLACE_CUSTOM: u32 = 6;
 
 /// `SX_SIDE_FRONT`.
 pub const SIDE_FRONT: u32 = 0;

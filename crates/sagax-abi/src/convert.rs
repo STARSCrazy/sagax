@@ -16,13 +16,14 @@ use sagax_nav::nav::{Budget, Output, Status};
 use crate::codes::{
     CMP_AT_LEAST, CMP_AT_MOST, CMP_EQUAL, CMP_NOT_EQUAL, COMBINE_FOLLOW, CREW_ACTIVATED,
     CREW_ARRIVED, CREW_BROKEN, CREW_NO_PLAN, CREW_ORDER, CREW_PLANNED, CREW_SIGNAL, CREW_START,
-    DONE, ERROR_PLAN, FOUND, GOAL_ATTACK, GOAL_CUSTOM, GOAL_HOLD, GOAL_MOVE, GOAL_RETREAT,
-    GOAL_WAIT, GRID_HEX_EVEN_Q, GRID_HEX_EVEN_R, GRID_HEX_ODD_Q, GRID_HEX_ODD_R, IDLE,
-    MEMBER_ACTIVE, MEMBER_GONE, MEMBER_SUSPENDED, METRIC_CHEBYSHEV, METRIC_EUCLID, METRIC_HEX,
-    METRIC_MANHATTAN, PARTIAL, PICK_BEST, PICK_UNIFORM, PICK_WEIGHTED, PLACE_BETWEEN, PLACE_HERE,
-    PLACE_NONE, PLACE_OFFSET, PLACE_SIDE, PLACE_TAGGED, RUNNING, SHAPE_COLUMN, SHAPE_LINE,
-    SHAPE_WEDGE, SIDE_FRONT, SIDE_LEFT, SIDE_REAR, SIDE_RIGHT, SQUAD_KEEP, SQUAD_NO_PLAN,
-    SQUAD_REPLAN, SQUAD_SIGNAL, START_AFTER_TICKS, START_NOW, START_ON_SIGNAL, UNREACHABLE,
+    DONE, ERROR_NEEDS_RULES, ERROR_PLAN, FOUND, GOAL_ATTACK, GOAL_CUSTOM, GOAL_HOLD, GOAL_MOVE,
+    GOAL_RETREAT, GOAL_WAIT, GRID_HEX_EVEN_Q, GRID_HEX_EVEN_R, GRID_HEX_ODD_Q, GRID_HEX_ODD_R,
+    IDLE, MEMBER_ACTIVE, MEMBER_GONE, MEMBER_SUSPENDED, METRIC_CHEBYSHEV, METRIC_EUCLID,
+    METRIC_HEX, METRIC_MANHATTAN, PARTIAL, PICK_BEST, PICK_UNIFORM, PICK_WEIGHTED, PLACE_BETWEEN,
+    PLACE_CUSTOM, PLACE_HERE, PLACE_NONE, PLACE_OFFSET, PLACE_SIDE, PLACE_TAGGED, RUNNING,
+    SHAPE_COLUMN, SHAPE_LINE, SHAPE_WEDGE, SIDE_FRONT, SIDE_LEFT, SIDE_REAR, SIDE_RIGHT,
+    SQUAD_KEEP, SQUAD_NO_PLAN, SQUAD_REPLAN, SQUAD_SIGNAL, START_AFTER_TICKS, START_NOW,
+    START_ON_SIGNAL, UNREACHABLE,
 };
 
 // ---- numbers ------------------------------------------------------------------
@@ -148,8 +149,8 @@ pub fn side(code: u32) -> Option<Side> {
     }
 }
 
-/// The place of a record: `kind` is `SX_PLACE_*`, `value` the `SX_SIDE_*`
-/// or the tag bits, `offset` the offset of `SX_PLACE_OFFSET`. `Some(None)`
+/// The place of a record: `kind` is `SX_PLACE_*`, `value` the `SX_SIDE_*`,
+/// the tag bits or the id of `SX_PLACE_CUSTOM`, `offset` the offset of `SX_PLACE_OFFSET`. `Some(None)`
 /// for `SX_PLACE_NONE`, `None` if the kind or the side is unknown.
 pub fn place(kind: u32, value: u32, offset: Pos) -> Option<Option<Place>> {
     Some(Some(match kind {
@@ -159,6 +160,7 @@ pub fn place(kind: u32, value: u32, offset: Pos) -> Option<Option<Place>> {
         PLACE_BETWEEN => Place::Between,
         PLACE_TAGGED => Place::Tagged(value),
         PLACE_HERE => Place::Here,
+        PLACE_CUSTOM => Place::Custom(value),
         _ => return None,
     }))
 }
@@ -172,9 +174,7 @@ pub const fn place_code(place: Option<Place>) -> (u32, u32, Pos) {
         Some(Place::Between) => (PLACE_BETWEEN, 0, [0; 3]),
         Some(Place::Tagged(tags)) => (PLACE_TAGGED, tags, [0; 3]),
         Some(Place::Here) => (PLACE_HERE, 0, [0; 3]),
-        // No code of its own yet: shown as what it is without rules, the
-        // leader's position, with the id as the value.
-        Some(Place::Custom(id)) => (PLACE_HERE, id, [0; 3]),
+        Some(Place::Custom(id)) => (PLACE_CUSTOM, id, [0; 3]),
     }
 }
 
@@ -379,17 +379,18 @@ pub const fn squad_status(status: SquadStatus) -> (i32, Option<PlanId>) {
     }
 }
 
-/// `(SX_ERROR_PLAN, tactic, input)` of a plan error; the input is
-/// `u32::MAX` where there is no column; for `OptionsChanged` and
-/// `NeedsRules` both are `u32::MAX`.
+/// `(code, tactic, input)` of a plan error: `SX_ERROR_PLAN`, or
+/// `SX_ERROR_NEEDS_RULES` for `NeedsRules`; the input is `u32::MAX` where
+/// there is no column; for `OptionsChanged` and `NeedsRules` both are
+/// `u32::MAX`.
 pub fn plan_error(error: PlanError) -> (i32, u32, u32) {
-    let (tactic, input) = match error {
-        PlanError::InputOutOfRange { tactic, input } => (tactic, input),
-        PlanError::TooManySlots { tactic } => (tactic, u32::MAX),
-        PlanError::OptionsChanged => (usize::MAX, u32::MAX),
-        PlanError::NeedsRules => (usize::MAX, u32::MAX),
+    let (code, tactic, input) = match error {
+        PlanError::InputOutOfRange { tactic, input } => (ERROR_PLAN, tactic, input),
+        PlanError::TooManySlots { tactic } => (ERROR_PLAN, tactic, u32::MAX),
+        PlanError::OptionsChanged => (ERROR_PLAN, usize::MAX, u32::MAX),
+        PlanError::NeedsRules => (ERROR_NEEDS_RULES, usize::MAX, u32::MAX),
     };
-    (ERROR_PLAN, u32::try_from(tactic).unwrap_or(u32::MAX), input)
+    (code, u32::try_from(tactic).unwrap_or(u32::MAX), input)
 }
 
 /// A crew event as numbers.

@@ -3744,12 +3744,14 @@ pub unsafe extern "C" fn sx_squad_add_tactic(s: *mut WasmSquad, t: *mut WasmTact
     to_i32(w.squad.add_tactic(t.0))
 }
 
-/// `ERROR_PLAN` (-3) with the tactic and column in the out buffer.
+/// `ERROR_PLAN` (-3) with the tactic and column in the out buffer, or
+/// `ERROR_NEEDS_RULES` (-4) for a squad with custom parts.
 fn plan_error(w: &mut WasmSquad, e: PlanError) -> i32 {
     plan_error_to(&mut w.out, e)
 }
 
-/// `ERROR_PLAN` (-3) with the tactic and column in `out`.
+/// `ERROR_PLAN` (-3) with the tactic and column in `out`, or
+/// `ERROR_NEEDS_RULES` (-4) (both `-1` there): the code is `convert::plan_error`'s.
 fn plan_error_to(out: &mut Vec<i32>, e: PlanError) -> i32 {
     // No column: -1 in the out buffer.
     let (code, tactic, input) = convert::plan_error(e);

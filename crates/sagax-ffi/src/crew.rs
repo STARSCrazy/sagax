@@ -9,7 +9,8 @@ use super::group::{
     Held, Lend, SxGoal, SxKeeper, SxMember, SxSpot, SxSquad, SxSquadConfig, lists, plan_error,
     sx_squad_config_default,
 };
-use super::memory::{SxFact, pos3, put};
+use super::memory::{SxFact, SxMessage, pos3, put};
+use super::rules::{CRules, SxSquadRules};
 use super::{ERROR_ARGUMENT, create, destroy, guarded, hex_layout, to_i32};
 use sagax_abi::convert;
 
@@ -194,6 +195,7 @@ pub unsafe extern "C" fn sx_crew_new(config: *const SxCrewConfig) -> *mut SxCrew
                 dangers: s.dangers as usize,
                 metric: convert::metric(s.metric)?,
                 roles: convert::roles(s.role_count, &s.role_masks)?,
+                rule_columns: s.rule_columns as usize,
                 ..SquadConfig::default()
             },
             arrive_radius: c.arrive_radius,
@@ -283,7 +285,28 @@ pub unsafe extern "C" fn sx_crew_set_gone(crew: *mut SxCrew, id: u32) -> i32 {
 /// `crew` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_crew_reinstate(crew: *mut SxCrew, id: u32, now: u32) -> i32 {
-    i32::from(crew!(crew).crew.reinstate(id, now))
+    // SAFETY: see above; no rules.
+    unsafe { sx_crew_reinstate_with(crew, id, now, std::ptr::null()) }
+}
+
+/// `sx_crew_reinstate_with`: the goal goes over a custom channel too.
+///
+/// # Safety
+/// `crew` is null or valid; `rules` is null or valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_crew_reinstate_with(
+    crew: *mut SxCrew,
+    id: u32,
+    now: u32,
+    rules: *const SxSquadRules,
+) -> i32 {
+    let c = crew!(crew);
+    // SAFETY: null or valid (see above).
+    let mut rules = unsafe { CRules::of(rules) };
+    guarded(|| match rules.as_mut() {
+        Some(r) => i32::from(c.crew.reinstate_with(id, now, r)),
+        None => i32::from(c.crew.reinstate(id, now)),
+    })
 }
 
 /// `sx_crew_set_pos`: `pos` is 3 values.
@@ -373,6 +396,44 @@ pub unsafe extern "C" fn sx_crew_tick(
     cap: u32,
     total: *mut u32,
 ) -> i32 {
+    // SAFETY: see above; no rules.
+    unsafe {
+        sx_crew_tick_with(
+            crew,
+            now,
+            extra,
+            extra_count,
+            spots,
+            spot_count,
+            seed,
+            std::ptr::null(),
+            events,
+            cap,
+            total,
+        )
+    }
+}
+
+/// `sx_crew_tick_with`: as `sx_crew_tick`, the slots going to `rules`
+/// (null: the built-in ones).
+///
+/// # Safety
+/// As [`sx_crew_tick`]; `rules` is null or valid for the call.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sx_crew_tick_with(
+    crew: *mut SxCrew,
+    now: u32,
+    extra: *const i32,
+    extra_count: u32,
+    spots: *const SxSpot,
+    spot_count: u32,
+    seed: u64,
+    rules: *const SxSquadRules,
+    events: *mut SxCrewEvent,
+    cap: u32,
+    total: *mut u32,
+) -> i32 {
     let c = crew!(crew);
     if events.is_null() && cap > 0 {
         return ERROR_ARGUMENT;
@@ -381,8 +442,13 @@ pub unsafe extern "C" fn sx_crew_tick(
     let Some((extra, spots)) = (unsafe { lists(extra, extra_count, spots, spot_count) }) else {
         return ERROR_ARGUMENT;
     };
+    // SAFETY: null or valid (see above).
+    let mut rules = unsafe { CRules::of(rules) };
     guarded(|| {
-        let result = c.crew.tick(now, extra, spots, seed, &mut c.events);
+        let result = match rules.as_mut() {
+            Some(r) => c.crew.tick_with(now, extra, spots, seed, r, &mut c.events),
+            None => c.crew.tick(now, extra, spots, seed, &mut c.events),
+        };
         // SAFETY: null or writable (see above).
         unsafe { put(total, u32::try_from(c.events.len()).unwrap_or(u32::MAX)) };
         if let Err(e) = result {
@@ -395,6 +461,42 @@ pub unsafe extern "C" fn sx_crew_tick(
             unsafe { events.add(i).write(SxCrewEvent::of(e)) };
         }
         to_i32(n)
+    })
+}
+
+/// `sx_crew_report`: a report of the game from member `msg.sender` to the
+/// leader, over the member's channel. 1, or 0 when the inbox refused it.
+///
+/// # Safety
+/// `crew` is null or valid; `msg` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_crew_report(crew: *mut SxCrew, now: u32, msg: *const SxMessage) -> i32 {
+    // SAFETY: see above; no rules.
+    unsafe { sx_crew_report_with(crew, now, msg, std::ptr::null()) }
+}
+
+/// `sx_crew_report_with`: a custom channel times the report through
+/// `rules`.
+///
+/// # Safety
+/// As [`sx_crew_report`]; `rules` is null or valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_crew_report_with(
+    crew: *mut SxCrew,
+    now: u32,
+    msg: *const SxMessage,
+    rules: *const SxSquadRules,
+) -> i32 {
+    let c = crew!(crew);
+    let msg = *input!(msg);
+    // SAFETY: null or valid (see above).
+    let mut rules = unsafe { CRules::of(rules) };
+    guarded(|| {
+        let stored = match rules.as_mut() {
+            Some(r) => c.crew.report_with(now, msg, r),
+            None => c.crew.report(now, msg),
+        };
+        i32::from(stored)
     })
 }
 

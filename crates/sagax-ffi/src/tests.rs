@@ -883,8 +883,8 @@ mod squad {
     use sagax_decide::group::{
         IN_AREA, IN_EXTRA, IN_LOSSES, IN_OFF_PLAN, IN_PLAN_AGE, IN_RANGED, IN_ROLE_0, IN_ROLE_1,
         IN_TARGET_AGE, IN_TARGET_DIST, IN_TARGET_FRIEND_DIST, MAX_EXTRA_COLUMNS, REPORT_ARRIVED,
-        REPORT_ENEMY, REPORT_GOAL_BROKEN, ROLE_AREA, ROLE_RANGED, TAG_CHOKE, TAG_COVER, TAG_HIDDEN,
-        TAG_HIGH,
+        REPORT_ENEMY, REPORT_GAME_FIRST, REPORT_GOAL_BROKEN, ROLE_AREA, ROLE_RANGED, TAG_CHOKE,
+        TAG_COVER, TAG_HIDDEN, TAG_HIGH,
     };
     use std::mem::{offset_of, size_of};
     use std::ptr::{null, null_mut};
@@ -965,6 +965,7 @@ mod squad {
             metric,
             role_count: 2,
             role_masks: ROLES,
+            rule_columns: 0,
         });
         assert!(!sq.is_null());
         unsafe {
@@ -1025,6 +1026,7 @@ mod squad {
             ("SX_REPORT_GOAL_BROKEN", i64::from(REPORT_GOAL_BROKEN)),
             ("SX_REPORT_ENEMY", i64::from(REPORT_ENEMY)),
             ("SX_REPORT_ARRIVED", i64::from(REPORT_ARRIVED)),
+            ("SX_REPORT_GAME_FIRST", i64::from(REPORT_GAME_FIRST)),
         ];
         let ffi = [
             ("SX_MEMBER_ACTIVE", 0),
@@ -1036,6 +1038,7 @@ mod squad {
             ("SX_PLACE_BETWEEN", i64::from(PLACE_BETWEEN)),
             ("SX_PLACE_TAGGED", i64::from(PLACE_TAGGED)),
             ("SX_PLACE_HERE", i64::from(PLACE_HERE)),
+            ("SX_PLACE_CUSTOM", i64::from(PLACE_CUSTOM)),
             ("SX_SIDE_FRONT", 0),
             ("SX_SIDE_LEFT", 1),
             ("SX_SIDE_RIGHT", 2),
@@ -1068,6 +1071,7 @@ mod squad {
             ("SX_ERROR_ARGUMENT", i64::from(ERROR_ARGUMENT)),
             ("SX_ERROR_INTERNAL", i64::from(ERROR_INTERNAL)),
             ("SX_ERROR_PLAN", i64::from(ERROR_PLAN)),
+            ("SX_ERROR_NEEDS_RULES", i64::from(ERROR_NEEDS_RULES)),
             ("SX_FOUR_WAYS", i64::from(FOUR_WAYS)),
             ("SX_CUT_CORNERS", i64::from(CUT_CORNERS)),
             ("SX_IDLE", i64::from(IDLE)),
@@ -1246,7 +1250,7 @@ mod squad {
                 (c.members, c.memory, c.areas, c.inbox, c.dangers, c.metric),
                 (8, 32, 8, 16, 8, EUCLID)
             );
-            assert_eq!(size_of::<SxSquadConfig>(), 60);
+            assert_eq!(size_of::<SxSquadConfig>(), 64);
             assert_eq!((c.role_count, c.role_masks), (2, ROLES));
             assert_eq!(sx_squad_config_default(null_mut()), ERROR_ARGUMENT);
             let sq = sx_squad_new(&c);
@@ -1324,6 +1328,7 @@ mod squad {
                 metric: EUCLID,
                 role_count: 2,
                 role_masks: ROLES,
+                rule_columns: 0,
             });
             assert_eq!(sx_squad_add_member(sq, &member(1, 0, 0, 0)), 0);
             assert_eq!(sx_squad_add_member(sq, &member(2, 1, 0, 0)), 1);
@@ -1395,6 +1400,7 @@ mod squad {
                 metric: EUCLID,
                 role_count: 2,
                 role_masks: ROLES,
+                rule_columns: 0,
             };
             for broken in [
                 SxSquadConfig { members: 0, ..base },
@@ -2692,7 +2698,7 @@ mod conventions {
     use std::ptr::null_mut;
 
     const HEADER: &str = include_str!("../include/sagax.h");
-    const SOURCES: [&str; 7] = [
+    const SOURCES: [&str; 8] = [
         include_str!("lib.rs"),
         include_str!("grid.rs"),
         include_str!("memory.rs"),
@@ -2700,6 +2706,7 @@ mod conventions {
         include_str!("machine.rs"),
         include_str!("group.rs"),
         include_str!("crew.rs"),
+        include_str!("rules.rs"),
     ];
 
     /// Every `#[unsafe(no_mangle)]` function of the sources.
@@ -2775,6 +2782,7 @@ mod conventions {
             SxAlertConfig, SxAlertness, SxArea, SxFact, SxInterval, SxMessage, SxNearby,
             SxPointPattern, SxProgress,
         };
+        use crate::rules::{SxChannelCtx, SxCostCtx, SxPlaceCtx, SxSpotCtx, SxViewPlan};
         use crate::{Point, SxEvent, SxResult, SxRules};
         use std::mem::{offset_of, size_of};
 
@@ -2849,7 +2857,8 @@ mod conventions {
                 SxSquadConfig,
                 metric,
                 role_count,
-                role_masks
+                role_masks,
+                rule_columns
             ),
             layout!("sx_member_inputs", SxMemberInputs, discipline),
             layout!(
@@ -2860,6 +2869,49 @@ mod conventions {
                 hex_grid
             ),
             layout!("sx_crew_event", SxCrewEvent, start_at, goal, has_start_at),
+            layout!(
+                "sx_place_ctx",
+                SxPlaceCtx,
+                dist,
+                leader,
+                centre,
+                face,
+                friend_pos,
+                heading,
+                has_target
+            ),
+            layout!("sx_cost_ctx", SxCostCtx, tactic, member, wish),
+            layout!(
+                "sx_spot_ctx",
+                SxSpotCtx,
+                tactic,
+                want_tags,
+                target,
+                spot,
+                member,
+                wish,
+                target_pos,
+                gather,
+                has_target
+            ),
+            layout!(
+                "sx_channel_ctx",
+                SxChannelCtx,
+                distance,
+                now,
+                from,
+                to,
+                report
+            ),
+            // No typedef: the name of the struct is also a function's.
+            layout!(
+                "struct sx_view_plan",
+                SxViewPlan,
+                since,
+                has_plan,
+                has_target,
+                signal_given
+            ),
         ]
     }
 
@@ -2905,7 +2957,12 @@ mod conventions {
     }
 
     /// Structs holding pointers: no size assert (they differ between 32 and 64 bit).
-    const POINTER_STRUCTS: [&str; 2] = ["sx_map", "sx_areas_cost_ctx"];
+    const POINTER_STRUCTS: [&str; 4] = [
+        "sx_map",
+        "sx_areas_cost_ctx",
+        "sx_row_ctx",
+        "sx_squad_rules",
+    ];
 
     #[test]
     fn every_value_struct_has_a_size_assert() {
@@ -3672,12 +3729,13 @@ mod crew {
         assert_eq!(offset_of!(SxCrewEvent, start_at), 12);
         assert_eq!(offset_of!(SxCrewEvent, goal), 16);
         assert_eq!(offset_of!(SxCrewEvent, has_start_at), 84);
-        assert_eq!(size_of::<SxCrewConfig>(), 68);
+        assert_eq!(size_of::<SxCrewConfig>(), 72);
         assert_eq!(offset_of!(SxSquadConfig, role_count), 24);
         assert_eq!(offset_of!(SxSquadConfig, role_masks), 28);
+        assert_eq!(offset_of!(SxSquadConfig, rule_columns), 60);
         assert_eq!(offset_of!(SxCrewConfig, squad), 0);
-        assert_eq!(offset_of!(SxCrewConfig, arrive_radius), 60);
-        assert_eq!(offset_of!(SxCrewConfig, hex_grid), 64);
+        assert_eq!(offset_of!(SxCrewConfig, arrive_radius), 64);
+        assert_eq!(offset_of!(SxCrewConfig, hex_grid), 68);
         assert_eq!(size_of::<SxMemberInputs>(), 20);
         let names = [
             "SX_CREW_PLANNED",

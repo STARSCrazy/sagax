@@ -1712,6 +1712,7 @@ const ROLE = { ranged: SQUAD.roleRanged, area: SQUAD.roleArea };
 const TAG = { cover: SQUAD.tagCover, high: SQUAD.tagHigh, hidden: SQUAD.tagHidden, choke: SQUAD.tagChoke };
 const REPORT = { enemy: SQUAD.reportEnemy, arrived: SQUAD.reportArrived, goalBroken: SQUAD.reportGoalBroken };
 const ERROR_PLAN = -3;
+const ERROR_NEEDS_RULES = -4; // a plain call on a squad with custom parts (C and Rust only)
 const MEMBER_STATE = { active: 0, suspended: 1, gone: 2 };
 const MEMBER_STATES = Object.keys(MEMBER_STATE);
 const GOAL_KIND = { move: 0, hold: 1, attack: 2, wait: 3, retreat: 4, custom: 5 };
@@ -1735,6 +1736,8 @@ const SCORE_SIZE = 9;
 const MAX_SKILL_ROWS = 8;
 const I32_MIN = -0x80000000;
 const I32_MAX = 0x7fffffff;
+
+const NEEDS_RULES_TEXT = 'Sagax: the squad has custom parts (place, trigger, abort, channel or rule columns) that need rules, which only C and Rust can lend';
 
 /** A tactic reads a column the scoring rows do not have (see Squad.validate). */
 export class PlanError extends RangeError {
@@ -2108,6 +2111,7 @@ export class Squad extends Table {
     if (r === ERROR_PLAN) {
       throw planErrorOf(this.#out(2));
     }
+    if (r === ERROR_NEEDS_RULES) throw new RangeError(NEEDS_RULES_TEXT);
     if (r < 0) throw new RangeError('Sagax: bad squad arguments');
     return r;
   }
@@ -2718,6 +2722,7 @@ export class Crew extends Table {
     if (n === ERROR_PLAN) {
       throw planErrorOf(this.#out(2));
     }
+    if (n === ERROR_NEEDS_RULES) throw new RangeError(NEEDS_RULES_TEXT);
     if (n < 0) throw new RangeError('Sagax: bad crew arguments');
     const all = this.#out(n * CREW_EVENT_SIZE);
     const events = [];

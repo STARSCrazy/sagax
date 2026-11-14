@@ -10,6 +10,7 @@ use sagax_decide::{Consideration, Curve};
 use super::crew::SxCrew;
 use super::decide::{SxConsideration, SxDecideEvent, SxDecider};
 use super::memory::{SxArea, SxAreas, SxFact, SxKnowledge, SxMessage, pos3, put};
+use super::rules::{CRules, SxSquadRules};
 use super::{ERROR_ARGUMENT, create, destroy, guarded, slice_of, to_i32};
 use sagax_abi::convert;
 use sagax_decide::memory::Metric;
@@ -33,7 +34,7 @@ pub struct SxMember {
 }
 
 impl SxMember {
-    fn of(m: &Member) -> Self {
+    pub(crate) fn of(m: &Member) -> Self {
         Self {
             id: m.id,
             pos: m.pos,
@@ -470,6 +471,16 @@ pub unsafe extern "C" fn sx_tactic_add_abort_when(
     0
 }
 
+/// `sx_tactic_add_abort_custom`.
+///
+/// # Safety
+/// `tactic` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_add_abort_custom(tactic: *mut SxTactic, id: u32) -> i32 {
+    get!(tactic).0.aborts.push(Abort::Custom(id));
+    0
+}
+
 /// `sx_tactic_set_abort_if_target_lost`.
 ///
 /// # Safety
@@ -523,6 +534,16 @@ pub unsafe extern "C" fn sx_tactic_trigger_target_in_radius(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_tactic_trigger_manual(tactic: *mut SxTactic) -> i32 {
     get!(tactic).0.trigger = Trigger::Manual;
+    0
+}
+
+/// `sx_tactic_trigger_custom`.
+///
+/// # Safety
+/// `tactic` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_trigger_custom(tactic: *mut SxTactic, id: u32) -> i32 {
+    get!(tactic).0.trigger = Trigger::Custom(id);
     0
 }
 
@@ -668,6 +689,9 @@ pub struct SxSquadConfig {
     pub role_count: u32,
     /// The role list: one scoring column per mask (see `sx_squad_extra_start`).
     pub role_masks: [u32; 8],
+    /// Columns the rules fill (`sx_squad_rules.columns`), after the extra
+    /// columns.
+    pub rule_columns: u32,
 }
 
 /// `sx_squad_config_default`.
@@ -702,6 +726,7 @@ pub unsafe extern "C" fn sx_squad_config_default(out: *mut SxSquadConfig) -> i32
                 metric,
                 role_count: roles.len() as u32,
                 role_masks,
+                rule_columns: c.rule_columns as u32,
             },
         );
     }
@@ -709,7 +734,7 @@ pub unsafe extern "C" fn sx_squad_config_default(out: *mut SxSquadConfig) -> i32
 }
 
 /// `sx_squad_new`: null if `config` is null, a capacity is 0, the metric is
-/// unknown or `role_count` is above 8.
+/// unknown, `role_count` is above 8 or `rule_columns` is too large.
 ///
 /// # Safety
 /// `config` is null or valid.
@@ -728,6 +753,7 @@ pub unsafe extern "C" fn sx_squad_new(config: *const SxSquadConfig) -> *mut SxSq
             dangers: c.dangers as usize,
             metric: convert::metric(c.metric)?,
             roles: convert::roles(c.role_count, &c.role_masks)?,
+            rule_columns: c.rule_columns as usize,
             ..SquadConfig::default()
         })
         .ok()?;
@@ -814,6 +840,26 @@ pub unsafe extern "C" fn sx_squad_suspend(squad: *mut SxSquad, id: u32) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_reinstate(squad: *mut SxSquad, id: u32, now: u32) -> i32 {
     i32::from(squad!(squad).reinstate(id, now))
+}
+
+/// `sx_squad_reinstate_with`: the goal goes over a custom channel too.
+///
+/// # Safety
+/// `squad` is null or valid; `rules` is null or valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_reinstate_with(
+    squad: *mut SxSquad,
+    id: u32,
+    now: u32,
+    rules: *const SxSquadRules,
+) -> i32 {
+    let s = &mut squad!(squad);
+    // SAFETY: null or valid (see above).
+    let mut rules = unsafe { CRules::of(rules) };
+    guarded(|| match rules.as_mut() {
+        Some(r) => i32::from(s.reinstate_with(id, now, r)),
+        None => i32::from(s.reinstate(id, now)),
+    })
 }
 
 /// `sx_squad_set_gone`.
@@ -1213,6 +1259,19 @@ pub unsafe extern "C" fn sx_squad_set_silent(squad: *mut SxSquad, id: u32) -> i3
     i32::from(squad!(squad).set_channel(id, Channel::None))
 }
 
+/// `sx_squad_set_channel_custom`.
+///
+/// # Safety
+/// `squad` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_channel_custom(
+    squad: *mut SxSquad,
+    member: u32,
+    id: u32,
+) -> i32 {
+    i32::from(squad!(squad).set_channel(member, Channel::Custom(id)))
+}
+
 /// `sx_squad_set_danger_area`.
 ///
 /// # Safety
@@ -1423,14 +1482,39 @@ pub unsafe extern "C" fn sx_squad_report_arrives_at(
     now: u32,
     at: *mut u32,
 ) -> i32 {
-    match squad!(squad).report_arrives_at(id, now) {
-        Some(t) => {
-            // SAFETY: null or writable (see above).
-            unsafe { put(at, t) };
-            1
+    // SAFETY: see above; no rules.
+    unsafe { sx_squad_report_arrives_at_with(squad, id, now, std::ptr::null(), at) }
+}
+
+/// `sx_squad_report_arrives_at_with`: a custom channel asks `rules`.
+///
+/// # Safety
+/// As [`sx_squad_report_arrives_at`]; `rules` is null or valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_report_arrives_at_with(
+    squad: *mut SxSquad,
+    id: u32,
+    now: u32,
+    rules: *const SxSquadRules,
+    at: *mut u32,
+) -> i32 {
+    let s = &mut squad!(squad);
+    // SAFETY: null or valid (see above).
+    let mut rules = unsafe { CRules::of(rules) };
+    guarded(|| {
+        let arrives = match rules.as_mut() {
+            Some(r) => s.report_arrives_at_with(id, now, r),
+            None => s.report_arrives_at(id, now),
+        };
+        match arrives {
+            Some(t) => {
+                // SAFETY: null or writable (see above).
+                unsafe { put(at, t) };
+                1
+            }
+            None => 0,
         }
-        None => 0,
-    }
+    })
 }
 
 /// `sx_squad_targets`: returns how many facts were written; `total` (may be
@@ -1610,7 +1694,7 @@ pub(crate) unsafe fn lists<'a>(
     }
 }
 
-/// `sx_squad_plan`.
+/// `sx_squad_plan`: `sx_squad_plan_with` without rules.
 ///
 /// # Safety
 /// `squad` is null or valid; `extra` and `spots` are null or hold their
@@ -1627,24 +1711,66 @@ pub unsafe extern "C" fn sx_squad_plan(
     seed: u64,
     plan: *mut u32,
 ) -> i32 {
+    // SAFETY: see above; no rules.
+    unsafe {
+        sx_squad_plan_with(
+            squad,
+            now,
+            extra,
+            extra_count,
+            spots,
+            spot_count,
+            seed,
+            std::ptr::null(),
+            plan,
+        )
+    }
+}
+
+/// `sx_squad_plan_with`: as `sx_squad_plan`, the slots going to `rules`
+/// (null: the built-in ones).
+///
+/// # Safety
+/// As [`sx_squad_plan`]; `rules` is null or valid for the call.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sx_squad_plan_with(
+    squad: *mut SxSquad,
+    now: u32,
+    extra: *const i32,
+    extra_count: u32,
+    spots: *const SxSpot,
+    spot_count: u32,
+    seed: u64,
+    rules: *const SxSquadRules,
+    plan: *mut u32,
+) -> i32 {
     let s = &mut squad!(squad);
     // SAFETY: see above.
     let Some((extra, spots)) = (unsafe { lists(extra, extra_count, spots, spot_count) }) else {
         return ERROR_ARGUMENT;
     };
-    guarded(|| match s.plan(now, extra, spots, seed) {
-        Ok(Some(id)) => {
-            // SAFETY: see above.
-            unsafe { put(plan, id) };
-            1
+    // SAFETY: null or valid (see above).
+    let mut rules = unsafe { CRules::of(rules) };
+    guarded(|| {
+        let made = match rules.as_mut() {
+            Some(r) => s.plan_with(now, extra, spots, seed, r),
+            None => s.plan(now, extra, spots, seed),
+        };
+        match made {
+            Ok(Some(id)) => {
+                // SAFETY: see above.
+                unsafe { put(plan, id) };
+                1
+            }
+            Ok(None) => 0,
+            // SAFETY: null details.
+            Err(e) => unsafe { plan_error(e, std::ptr::null_mut(), std::ptr::null_mut()) },
         }
-        Ok(None) => 0,
-        // SAFETY: null details.
-        Err(e) => unsafe { plan_error(e, std::ptr::null_mut(), std::ptr::null_mut()) },
     })
 }
 
-/// `sx_squad_check`.
+/// `sx_squad_check`: `sx_squad_check_with` without rules.
 ///
 /// # Safety
 /// As [`sx_squad_plan`].
@@ -1660,13 +1786,53 @@ pub unsafe extern "C" fn sx_squad_check(
     seed: u64,
     plan: *mut u32,
 ) -> i32 {
+    // SAFETY: see above; no rules.
+    unsafe {
+        sx_squad_check_with(
+            squad,
+            now,
+            extra,
+            extra_count,
+            spots,
+            spot_count,
+            seed,
+            std::ptr::null(),
+            plan,
+        )
+    }
+}
+
+/// `sx_squad_check_with`: as `sx_squad_check`, the slots going to `rules`
+/// (null: the built-in ones).
+///
+/// # Safety
+/// As [`sx_squad_plan_with`].
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn sx_squad_check_with(
+    squad: *mut SxSquad,
+    now: u32,
+    extra: *const i32,
+    extra_count: u32,
+    spots: *const SxSpot,
+    spot_count: u32,
+    seed: u64,
+    rules: *const SxSquadRules,
+    plan: *mut u32,
+) -> i32 {
     let s = &mut squad!(squad);
     // SAFETY: see above.
     let Some((extra, spots)) = (unsafe { lists(extra, extra_count, spots, spot_count) }) else {
         return ERROR_ARGUMENT;
     };
-    guarded(
-        || match s.check(now, extra, spots, seed).map(convert::squad_status) {
+    // SAFETY: null or valid (see above).
+    let mut rules = unsafe { CRules::of(rules) };
+    guarded(|| {
+        let checked = match rules.as_mut() {
+            Some(r) => s.check_with(now, extra, spots, seed, r),
+            None => s.check(now, extra, spots, seed),
+        };
+        match checked.map(convert::squad_status) {
             Ok((code, id)) => {
                 if let Some(id) = id {
                     // SAFETY: see above.
@@ -1676,8 +1842,8 @@ pub unsafe extern "C" fn sx_squad_check(
             }
             // SAFETY: null details.
             Err(e) => unsafe { plan_error(e, std::ptr::null_mut(), std::ptr::null_mut()) },
-        },
-    )
+        }
+    })
 }
 
 /// `sx_squad_orders_due`.
@@ -1724,6 +1890,25 @@ pub unsafe extern "C" fn sx_squad_orders_due(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_signal(squad: *mut SxSquad, now: u32) -> i32 {
     i32::from(squad!(squad).signal(now))
+}
+
+/// `sx_squad_signal_with`: the signal over custom channels too.
+///
+/// # Safety
+/// `squad` is null or valid; `rules` is null or valid for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_signal_with(
+    squad: *mut SxSquad,
+    now: u32,
+    rules: *const SxSquadRules,
+) -> i32 {
+    let s = &mut squad!(squad);
+    // SAFETY: null or valid (see above).
+    let mut rules = unsafe { CRules::of(rules) };
+    guarded(|| match rules.as_mut() {
+        Some(r) => i32::from(s.signal_with(now, r)),
+        None => i32::from(s.signal(now)),
+    })
 }
 
 /// `sx_squad_arrived`.
