@@ -160,10 +160,14 @@ impl Mission {
     }
 
     /// Empties every playbook slot; the decider and the considerations on
-    /// its options stay. A running playbook plan runs on.
+    /// its options stay. A running playbook plan runs on (when it ends, a
+    /// plan added to its slot meanwhile is still a candidate).
     pub fn clear_playbook(&mut self) {
         for slot in &mut self.replan.playbook {
             slot.used = false;
+        }
+        if self.running_option < Some(self.default_option()) {
+            self.running_option = None;
         }
     }
 
@@ -195,18 +199,22 @@ impl Mission {
         &mut self.replan.decider
     }
 
-    /// The plan broke or ended: replan, or fall back. `finished` is the
-    /// playbook slot of a plan that ended; it is no candidate now.
+    /// The plan broke or ended, or there is none yet: replan, or fall back.
+    /// `finished` is the playbook slot of a plan that ended; it is no
+    /// candidate now. Widening plans are candidates only on a real break
+    /// (`broke`: a fail condition or an impossible step) of a character that
+    /// may widen.
     pub(super) fn replace_plan(
         &mut self,
         view: View<'_>,
         finished: Option<u32>,
+        broke: bool,
         rules: &mut dyn MissionRules,
     ) -> Action {
         if !self.leeway.replan {
             return self.hold_here(view);
         }
-        let widen = self.leeway.widen;
+        let widen = broke && self.leeway.widen;
         self.build_defaults(view, widen);
         let mut rows = std::mem::take(&mut self.replan.rows);
         let mut scores = std::mem::take(&mut self.replan.scores);
@@ -474,7 +482,11 @@ impl Mission {
                     Some(f) if view.now.wrapping_sub(f.seen_at) <= lost_after => {
                         put(&[Step::attack(f.subject)])
                     }
-                    Some(f) => put(&[Step::search(Where::Subject(f.subject), 0, lost_after)]),
+                    Some(f) => put(&[Step::search(
+                        Where::Subject(f.subject),
+                        motive.radius,
+                        lost_after,
+                    )]),
                     None => 0,
                 }
             }

@@ -294,7 +294,11 @@ impl Mission {
 
     pub(super) fn run_return(&mut self, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
         let anchor = self.detour.anchor.unwrap_or(view.pos);
-        if self.arrived(view.pos, anchor) || self.resumed_step_goes_elsewhere(anchor, view) {
+        // A strict character always walks back first: if its plan broke
+        // during the detour it holds where it stands, which must be the
+        // anchor.
+        let shortcut = self.leeway.replan && self.resumed_step_goes_elsewhere(anchor, view);
+        if self.arrived(view.pos, anchor) || shortcut {
             return self.resume(view, rules);
         }
         Action::GoTo(anchor)
@@ -338,7 +342,7 @@ impl Mission {
             }
             Activity::Wander => self.run_wander(view, rules),
             // No plan before the detour: take one now.
-            _ => self.replace_plan(view, None, rules),
+            _ => self.replace_plan(view, None, false, rules),
         }
     }
 }

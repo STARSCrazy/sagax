@@ -1279,11 +1279,15 @@ fn default_plans_per_motive() {
     );
 
     // A subject not seen for longer than `lost_after`: search for it.
-    let (a, _, p) = first(Motive::defeat(5), lost_after + 1, &k);
+    let wide = Motive {
+        radius: 4,
+        ..Motive::defeat(5)
+    };
+    let (a, _, p) = first(wide, lost_after + 1, &k);
     assert!(matches!(a, Action::Search(_)));
     assert_eq!(
         p.unwrap().steps(),
-        &[Step::search(Where::Subject(5), 0, lost_after)]
+        &[Step::search(Where::Subject(5), 4, lost_after)]
     );
 
     // No default plan: hold where it stands.
@@ -1525,10 +1529,18 @@ fn widening_emits_call() {
     for (leeway, chosen) in [(Leeway::FREE, Some(0)), (Leeway::FLEXIBLE, None)] {
         let mut m = mission(MissionConfig::default());
         m.set_leeway(leeway);
+        m.set_plan(&Plan::looping(&[Step::wait(9)]).fails_when(flag))
+            .unwrap();
         m.add_playbook(&squad, ONE, true).unwrap();
-        let out = m.tick(0, [0, 0, 0], &k, 0);
+        let out = m.tick(0, [0, 0, 0], &k, 1);
         let option = chosen.unwrap_or(DEFAULT);
-        assert_eq!(out.events(), &[Event::Replanned { option }]);
+        assert_eq!(
+            out.events(),
+            &[
+                Event::Broken(BreakReason::Fail(flag)),
+                Event::Replanned { option }
+            ]
+        );
         let out = m.tick(1, [0, 0, 0], &k, 0);
         if chosen.is_some() {
             assert_eq!(
@@ -1704,4 +1716,96 @@ fn wander_replans_only_when_a_plan_condition_fires() {
         ]
     );
     assert_eq!(out.action, Action::GoTo([0, 0, 0]));
+}
+
+#[test]
+fn no_widening_without_a_real_break() {
+    let calls = |events: &[Event]| {
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Call { .. } | Event::WantsSquad { .. }))
+            .count()
+    };
+    let squad = Plan::once(&[Step::squad(3, Where::Here), Step::wait(5)]);
+    let k = thief_known();
+
+    // No plan yet: the default plan, not the widening ones.
+    let mut m = mission(MissionConfig::default());
+    m.set_leeway(Leeway::FREE);
+    m.add_playbook(&squad, ONE, true).unwrap();
+    let mut pos = [3, 0, 0];
+    let events = run(&mut m, &k, &mut pos, 0, 10);
+    assert_eq!(events[0], Event::Replanned { option: DEFAULT });
+    assert_eq!(calls(&events), 0);
+
+    // A plan end replans without them too.
+    let mut m = mission(MissionConfig::default());
+    m.set_leeway(Leeway::FREE);
+    m.add_playbook(&squad, ONE, true).unwrap();
+    m.set_plan(&Plan::once(&[Step::wait(1)])).unwrap();
+    let mut pos = [3, 0, 0];
+    let events = run(&mut m, &k, &mut pos, 0, 10);
+    assert!(events.contains(&Event::Broken(BreakReason::PlanEnded)));
+    assert!(events.contains(&Event::Replanned { option: DEFAULT }));
+    assert_eq!(calls(&events), 0);
+}
+
+#[test]
+fn strict_walks_back_before_holding() {
+    let mut m = mission(MissionConfig::default());
+    m.set_leeway(Leeway::STRICT);
+    m.set_plan(&Plan::looping(&[Step::go_to([9, 0, 0])]).fails_when(STOLEN))
+        .unwrap();
+    let mut k = thief_known();
+    m.tick(0, [2, 0, 0], &k, 0);
+    let custom = Detour::Custom {
+        kind: 1,
+        at: Where::Here,
+        param: 0,
+    };
+    assert!(m.detour(0, custom, &k));
+    m.tick(1, [2, 3, 0], &k, 0);
+    k.learn(1, stolen_fact());
+    m.end_detour();
+    // The step goes elsewhere, but the strict guard walks back first.
+    let mut pos = [2, 3, 0];
+    let mut held = None;
+    for now in 2..10 {
+        let out = m.tick(now, pos, &k, 0);
+        if out.events().contains(&Event::FellBack) {
+            assert_eq!(
+                out.events(),
+                &[
+                    Event::Returned,
+                    Event::Broken(BreakReason::Fail(STOLEN)),
+                    Event::FellBack
+                ]
+            );
+            held = Some(out.action);
+            break;
+        }
+        assert!(!broke(out.events()));
+        assert!(matches!(out.action, Action::GoTo([2, 0, 0])), "{now}");
+        pos = step_toward(pos, out.action);
+    }
+    assert_eq!(held, Some(Action::Hold([2, 0, 0])));
+}
+
+#[test]
+fn clear_playbook_forgets_the_running_slot() {
+    let mut m = mission(MissionConfig::default());
+    m.add_playbook(&Plan::once(&[Step::wait(1)]), ONE, false)
+        .unwrap();
+    let k = knowledge();
+    assert_eq!(
+        m.tick(0, [0, 0, 0], &k, 0).events(),
+        &[Event::Replanned { option: 0 }]
+    );
+    m.clear_playbook();
+    m.add_playbook(&Plan::once(&[Step::wait(5)]), ONE, false)
+        .unwrap();
+    // The plan of slot 0 ends; the new plan in slot 0 is a candidate.
+    let out = m.tick(1, [0, 0, 0], &k, 0);
+    assert_eq!(out.events().last(), Some(&Event::Replanned { option: 0 }));
+    assert_eq!(m.plan().unwrap().steps(), &[Step::wait(5)]);
 }

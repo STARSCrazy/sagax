@@ -90,7 +90,9 @@ pub trait MissionRules {
 
     /// Replaces a candidate's score (`built_in` is the decider's score,
     /// [`ONE`](crate::ONE) = 1.0); `Some(0)` vetoes it. The answer is final,
-    /// also for a candidate that is not feasible. Default: `None`, keep the
+    /// also for a candidate that is not feasible. When every candidate ends
+    /// at 0 (vetoed or not), the fallback still applies: the default plan
+    /// if it is feasible, else `Hold(Here)`. Default: `None`, keep the
     /// built-in score.
     fn score(&mut self, ctx: &PlanCtx, built_in: u32) -> Option<u32> {
         let _ = (ctx, built_in);

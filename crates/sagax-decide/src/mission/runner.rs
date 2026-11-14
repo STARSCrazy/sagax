@@ -241,6 +241,11 @@ impl Mission {
     /// ([`Leeway::replan`] and [`Leeway::widen`]); else they only count as
     /// done.
     ///
+    /// The plan end counts as a break for replanning, with one difference:
+    /// widening plans (the built-in one and widening playbook slots) are
+    /// candidates only on a real break (a fail condition or an impossible
+    /// step), not at a plan end and not without a plan.
+    ///
     /// **On a break** the tick emits [`Event::Broken`], then:
     ///
     /// - with [`Leeway::replan`]: every filled playbook slot (a widening one
@@ -254,13 +259,16 @@ impl Mission {
     ///   default plan if it is feasible, else `Hold(Here)`, both
     ///   [`Event::FellBack`].
     /// - without: `Hold(Here)` where the character stands, [`Event::FellBack`].
+    ///   A strict character always finishes the walk back to the anchor of
+    ///   a detour before it resumes, so it holds at the anchor.
     ///
     /// The default plan, built from what the character knows at that
     /// moment: `Guard` follows its subject, or goes to its place and holds
     /// it; `Defeat` attacks its subject (or with none the nearest known
     /// enemy: [`MissionConfig::enemy_bits`], not defeated, lower id on equal
     /// distance) when seen within `lost_after` ticks, else searches its last
-    /// known position for `lost_after` ticks; `Reach` goes to its place,
+    /// known position for `lost_after` ticks within the motive's `radius`
+    /// (0: no limit); `Reach` goes to its place,
     /// gives [`MissionConfig::reached_signal`] and holds there; `Custom` has
     /// none.
     ///
@@ -291,7 +299,7 @@ impl Mission {
             self.emit(Event::DetourStarted);
         }
         let action = match self.activity {
-            Activity::Idle => self.replace_plan(view, None, rules),
+            Activity::Idle => self.replace_plan(view, None, false, rules),
             Activity::Wander => self.run_wander(view, rules),
             Activity::Plan => self.run_plan(view, rules),
             Activity::Detour => self.run_detour(view, rules),
@@ -368,7 +376,7 @@ impl Mission {
                 self.emit(Event::PlanDone);
                 self.emit(Event::Broken(BreakReason::PlanEnded));
                 let finished = self.running_option.filter(|&o| o < self.default_option());
-                return self.replace_plan(view, finished, rules);
+                return self.replace_plan(view, finished, false, rules);
             }
             self.emit(Event::Looped);
             next = 0;
@@ -397,7 +405,7 @@ impl Mission {
         rules: &mut dyn MissionRules,
     ) -> Action {
         self.emit(Event::Broken(reason));
-        self.replace_plan(view, None, rules)
+        self.replace_plan(view, None, true, rules)
     }
 
     /// The first fail condition that holds: those of step `index`
