@@ -51,8 +51,6 @@ mod rules_tests;
 mod tests;
 
 pub use crew::{Crew, CrewConfig, CrewError, CrewEvent};
-#[allow(deprecated)]
-pub use keeper::discipline;
 pub use keeper::{GOAL_OPTION_RANGE, GoalKeeper, KeeperInputs};
 pub use kit::{
     IN_AREA, IN_RANGED, ROLE_AREA, ROLE_RANGED, Shape, TAG_CHOKE, TAG_COVER, TAG_HIDDEN, TAG_HIGH,

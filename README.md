@@ -26,7 +26,7 @@ dependencies).
 - **Decisions and memory**: utility AI, state machines, a memory of the
   world, and **group tactics**: a squad leader plans from what it knows,
   hands out goals with shout or radio delay, and strikes at the same moment.
-  The `Crew` runs that loop in one call per tick.
+  The `Crew` runs that loop in one call per tick. A rules object lets a game put its own logic (sight, costs, triggers) into nine fixed points.
 - **Square and hex grids** (pointy or flat top, odd or even offset), 4 or 8
   directions, walls between cells, extra costs, zones that cost extra to
   leave (zones of control).
@@ -176,6 +176,7 @@ crew.free();
 | `examples/js/quickstart.mjs` | the three jobs in JavaScript |
 | `examples/js/squad.mjs` | the same squad walk in JavaScript |
 | `crates/sagax/examples/squad_walk.rs` | the same squad walk in Rust (`cargo run -p sagax --example squad_walk`) |
+| `crates/sagax/examples/ambush_rules.rs` | the ambush in Rust, with the game's own pieces in a `SquadRules` object (`cargo run -p sagax --example ambush_rules`) |
 
 The three squad walks print the same lines, and the checks compare them.
 

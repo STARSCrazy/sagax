@@ -283,12 +283,6 @@ impl Navigator {
         }
     }
 
-    /// Old name of [`continue_search`](Self::continue_search).
-    #[deprecated(note = "renamed to continue_search")]
-    pub fn resume<M: CellMap>(&mut self, map: &mut M, budget: impl Into<Budget>) -> Report {
-        self.continue_search(map, budget)
-    }
-
     /// Every cell reachable from `start` at a cost of at most `max_cost`,
     /// expanding at most `budget` cells. Afterwards [`area`](Self::area)
     /// lists them and [`path_to`](Self::path_to) gives the way to each.
@@ -782,13 +776,5 @@ mod tests {
         }
         assert_eq!(report.status, Status::Found);
         assert_eq!(report.cost, expected.cost);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn resume_forwards_to_continue_search() {
-        let mut map = DenseGrid::new(10, 10);
-        let mut nav = square();
-        assert_eq!(nav.resume(&mut map, Budget::UNLIMITED).status, Status::Idle);
     }
 }

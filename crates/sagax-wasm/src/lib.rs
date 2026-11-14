@@ -3080,16 +3080,6 @@ pub extern "C" fn sx_skill_pick_for(skill: u32, custom: u32) -> i32 {
     0
 }
 
-/// A member's discipline at `skill` (0 .. 255), the old name of
-/// [`sx_skill_for`] with `which` 2 (`custom` as there). Returns it, or -1.
-#[unsafe(no_mangle)]
-pub extern "C" fn sx_discipline(skill: u32, custom: u32) -> i32 {
-    if sx_skill_for(2, skill, custom) != 0 {
-        return ERROR_ARGUMENT;
-    }
-    scratch_copy(1).map_or(ERROR_ARGUMENT, |v| to_i32(v[0] as u32))
-}
-
 /// A squad with its own memory, an out buffer and the orders that are due
 /// but not taken yet.
 pub struct WasmSquad {

@@ -1694,7 +1694,7 @@ export const SQUAD = {
   inArea: 5, // = inRole1: with the default role list, roleArea
   inPlanAge: 6, // ticks since the active plan became active (its own row only)
   inTargetFriendDist: 7, // target to its nearest other known target; none: -1
-  inExtra: 8, // first column of the game's own with at most two roles; else Squad.extraStart()
+  inExtra: 8, // deprecated: the first game column only with at most two roles; use Squad.extraStart()
   roleRanged: 1,
   roleArea: 2,
   tagCover: 1,
@@ -2053,9 +2053,7 @@ export class Tactic extends Table {
  * scoring column per entry (a name or a bit mask, at most 8, else RangeError)
  * that counts the active members having it; entries 0 and 1 are the columns
  * SQUAD.inRole0 and inRole1, later ones follow after column 7, and
- * extraStart() says where the game's own columns begin. The old keys groupCap,
- * memoryCap, areaCap and inboxCap still work (0.9 only); an old and a new key
- * for the same field is a TypeError.
+ * extraStart() says where the game's own columns begin.
  */
 /** The role masks of a squad config's roles (names or bits, at most 8). */
 function rolesOf(roles) {
@@ -2066,16 +2064,10 @@ function rolesOf(roles) {
 
 /** The numbers sx_squad_new takes for a squad config (see Squad), and the role masks to put in the scratch buffer. */
 function squadConfigOf(config) {
-  const field = (name, old, fallback) => {
-    if (config[name] !== undefined && config[old] !== undefined) {
-      throw new TypeError(`Sagax: squad config has both ${name} and its old name ${old}`);
-    }
-    return capacityOf(config[name] ?? config[old] ?? fallback);
-  };
-  const members = field('members', 'groupCap', 8);
-  const memory = field('memory', 'memoryCap', 32);
-  const areas = field('areas', 'areaCap', 8);
-  const inbox = field('inbox', 'inboxCap', 16);
+  const members = capacityOf(config.members ?? 8);
+  const memory = capacityOf(config.memory ?? 32);
+  const areas = capacityOf(config.areas ?? 8);
+  const inbox = capacityOf(config.inbox ?? 16);
   const dangers = capacityOf(config.dangers ?? 8);
   const m = choice(METRIC, config.metric ?? 'euclid', 'metric');
   const masks = rolesOf(config.roles ?? ['ranged', 'area']);
@@ -2149,11 +2141,6 @@ export class Squad extends Table {
    */
   reinstate(id, now) {
     return this.x.sx_squad_reinstate(this.h, u32Of(id, 'id'), timeOf(now)) === 1;
-  }
-
-  /** The old name of reinstate (0.9 only). */
-  resume(id, now) {
-    return this.reinstate(id, now);
   }
 
   /** Marks a member dead or lost (counts in SQUAD.inLosses). False if unknown. */
@@ -2286,7 +2273,7 @@ export class Squad extends Table {
     this.x.sx_squad_set_target_kind(this.h, u32Of(kind, 'kind'));
   }
 
-  /** How many of the game's own columns each scoring row has from SQUAD.inExtra on (default 0, at most SQUAD.maxExtraColumns). */
+  /** How many of the game's own columns each scoring row has from extraStart() on (default 0, at most SQUAD.maxExtraColumns). */
   setExtraColumns(count) {
     if (this.x.sx_squad_set_extra_columns(this.h, u32Of(count, 'count')) !== 0) {
       throw new RangeError(`Sagax: at most ${SQUAD.maxExtraColumns} extra columns`);
@@ -2512,16 +2499,6 @@ export class Keeper extends Table {
   /** Back on the goal: the postpone clock is reset. */
   goalWon(now) {
     this.x.sx_keeper_goal_won(this.h, timeOf(now));
-  }
-
-  /** Old name of goalPostponed (for 0.9 only). */
-  postpone(now) {
-    this.goalPostponed(now);
-  }
-
-  /** Old name of goalWon (for 0.9 only). */
-  resume(now) {
-    this.goalWon(now);
   }
 
   /**
@@ -2804,10 +2781,6 @@ Object.assign(Sagax.prototype, {
     const ptr = this.x.sx_scratch(SKILL_SIZE);
     this.x.sx_skill_table_default();
     return skillOf(takeInts(this.x, ptr, SKILL_SIZE));
-  },
-  /** A member's discipline: holdBonus at the level of its own skill (table: the default). Old name of holdBonusFor. */
-  discipline(skill, table) {
-    return this.holdBonusFor(table, skill);
   },
   /** Ticks from making a plan until it is active, at the level of skill (0 .. 255) in table (null: the default). */
   thinkTicksFor(table, skill) {

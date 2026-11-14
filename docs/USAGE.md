@@ -11,9 +11,9 @@ parts are `sagax::nav`, `sagax::decide` and `sagax::debug`).
 
 The same rules hold in Rust, C and JavaScript, and every section of this
 guide shows its calls in that order: Rust, C, JavaScript. Names that
-changed in 0.9 are listed in the migration table of the
-[CHANGELOG](../CHANGELOG.md); the old names stay as deprecated aliases for
-0.9 where that was cheap and go in 0.10.
+changed in 0.9 and 0.10 are listed in the migration tables of the
+[CHANGELOG](../CHANGELOG.md); the deprecated aliases of 0.9 are gone in
+0.10.
 
 ### Positions
 
@@ -122,8 +122,8 @@ There are two groups of exceptions, on purpose:
 - **Lifecycle.** Every handle has `_new` and `_free`: `sx_nav_new` /
   `sx_nav_free`, `sx_flow_new` / `sx_flow_free`, `sx_dstar_new` /
   `sx_dstar_free`, `sx_grid_new` / `sx_grid_free`, `sx_crew_new` /
-  `sx_crew_free`. The old `_create` / `_destroy` names are macros for 0.9 and
-  gone in 0.10.
+  `sx_crew_free`. The old `_create` / `_destroy` names are gone
+  (removed in 0.10).
 - **Layout checks.** At the end of `sagax.h`, a C11 compiler checks every
   value struct (`sizeof` and key field offsets) against the numbers the
   library was built with, so a header and a library that disagree fail to
@@ -1019,6 +1019,22 @@ The Rust snippets assume `use sagax::prelude::*;` and, where named,
 enemies, `now` your tick (`u32`), `spots` your candidate places
 (`Vec<Spot>`, see below) and `seed` your `u64` for this decision.
 
+### Core and kit
+
+The group blocks have two layers. The **core** is what every squad needs:
+members, the leader's memory, scoring a (tactic, target) pair, assigning
+members to slots, orders over channels, the signal, aborts, skill, and the
+rules slots of "Your own pieces". The **kit** is what ships for the common
+case: the shipped tactics (`tactics::rush`, `formation`, `flank`, `ambush`,
+`focus`, `isolate`, `fall_back`), the tag bits (`TAG_COVER`, `TAG_HIGH`,
+`TAG_HIDDEN`, `TAG_CHOKE`), the role bits (`ROLE_RANGED`, `ROLE_AREA`) with
+their columns (`IN_RANGED`, `IN_AREA`) and the default numbers (the default
+role list and skill table). The kit is built only from the public API of the
+core, and the core never imports it (a test checks this). A game can write
+every piece of the kit itself, or leave all of it out: a squad with its own
+role list and its own tactics uses none of it. The Rust paths are unchanged
+(`group::tactics`, `group::TAG_COVER`); the module is `group::kit`.
+
 ### The Crew
 
 A `Crew` is a `Squad` with one `GoalKeeper` per member. Per game tick you
@@ -1040,6 +1056,7 @@ let mut crew = Crew::new(CrewConfig {
         inbox: 8,
         dangers: 4,
         metric: Metric::Chebyshev,
+        ..SquadConfig::default()
     },
     ..CrewConfig::default()
 })
@@ -1262,6 +1279,7 @@ let mut sq = Squad::new(SquadConfig {
     inbox: 8,
     dangers: 8,
     metric: Metric::Chebyshev,
+    ..SquadConfig::default()
 })?;
 assert!(sq.group_mut().add(Member { id: 1, pos: [0, 0, 0], roles: 0, skill: 192,
                                     state: MemberState::Active }).is_some());
@@ -1398,7 +1416,10 @@ not seen for too long) or a forgotten target ends it.
 ### Skill
 
 One `skill: u8` for the squad (0 weak, 255 elite) and one per member. The
-`SkillTable` (four levels, `skill / 64`, every number can be changed) sets:
+`SkillTable` (1 to 8 rows, `rows` of them, four by default; a skill takes row
+`skill * rows / 256`, so with four rows that is `skill / 64`; every number can
+be changed, see `Squad::set_skill_table`, which answers `false` for 0 or more
+than 8 rows) sets:
 
 | What | Weak squad | Elite squad |
 |---|---|---|
@@ -1460,8 +1481,7 @@ older `lib.areasMoveCost(areas, from, to, start, goal)` does the same). Only
 the cell moved to is judged: blocked by an area that holds neither start nor
 goal gives `None` / `-1` / `null`, otherwise the extra cost (at most
 `INT32_MAX - 1` in C and JavaScript). The level is the `z` coordinate. A "go
-around the place the shooter stood" route needs nothing else. (Rust
-`Areas::move_cost` is deprecated for 0.9: it took a `from` it never used.)
+around the place the shooter stood" route needs nothing else.
 
 **Units:** these adapters compare the cells directly with the areas, so the
 areas (and start and goal) must be in the map's cell coordinates `(x, y,
@@ -1525,6 +1545,168 @@ which defaults to `dist` there) is the distance of its gather place.
 **JavaScript note:** the group wrappers (`Squad`, `Keeper`, `Crew`, tactics,
 `gather`) throw on a time outside `0 .. 2^32 - 1`, an id or skill out of range
 and so on, as every wrapper now does (see the Conventions).
+
+### Your own pieces
+
+The built-in behaviour fits many games, but some rules are yours: what a
+character can see, what a hand sign costs, when an ambush strikes. Instead of
+forking the library, a squad calls your code at nine fixed points, the
+**slots**. All nine are methods of one trait, `SquadRules` (Rust), or fields
+of one struct, `sx_squad_rules` (C). Every slot has a default that does what
+the squad does without rules, so you write only the ones you need.
+
+| # | Slot | Asked | Default |
+|---|------|-------|---------|
+| 1 | `keep_target(view, fact)` | per known target, in knowledge order | keep every target |
+| 2 | `columns(view, ctx, out)` | per candidate row, fills the rule columns | writes nothing (the columns stay 0) |
+| 3 | `place(id, ctx)` | the wish point of a `Place::Custom(id)` | the leader's position |
+| 4 | `member_cost(ctx)` | per slot and member, before assigning | `ctx.built_in`: the distance to the wish point |
+| 5 | `spot_score(ctx)` | per member and spot within the spot radius | `ctx.built_in`: the built-in spot score |
+| 6 | `trigger(id, view, now)` | in a check, for a `Trigger::Custom(id)` | never fires |
+| 7 | `abort(id, view, ctx)` | per row, for an `Abort::Custom(id)` | never fires |
+| 8 | `channel_delay(id, ctx)` | when an order goes over a `Channel::Custom(id)` | never arrives |
+| 9 | `report(view, msg, now, actions)` | per report of a kind the core does not know | drops it |
+
+The order is fixed, never a hash order, and no slot gets a random number: in
+a plan 1, then 2 and 7 per candidate, then 3, 4 and 5; in a check first 9
+(and its actions), then 2 and 7 of the active row, the candidates (and a
+replan), last 6. Slot 8 runs whenever an order is sent. The full order is in
+the docs of `group::rules` (Rust) and above `sx_squad_rules` in `sagax.h`.
+Costs and scores are `i128` in Rust and `int64_t` in C, lower is better, ties
+go to the lower member or spot index.
+
+**Lending.** The game owns the rules object and lends it to one call; the
+squad and the `Crew` never store it, so both stay `Clone` and `Debug`. Rust:
+`squad.plan_with(.., &mut rules)`, `check_with`, `signal_with`,
+`reinstate_with`, `report_arrives_at_with`, and on a crew `tick_with`,
+`reinstate_with` and `report_with`. C: `sx_squad_plan_with` and the other
+`_with` functions of squad and crew, taking a `const sx_squad_rules *`. A
+**`NULL` callback** is the default of its slot, and
+`sx_squad_rules_default(&rules)` gives a table with every pointer `NULL`. A
+slot must not call into the squad it came from; it reads the squad through
+the **view** (`SquadView`, C `sx_view_*`): members, targets, areas, the
+centre, the leader, the tactics and the active plan (C
+`sx_view_active_plan`), valid only inside that call.
+
+**Custom ids.** A game's own pieces are named by numbers you choose, per
+slot: `Place::Custom(id)`, `Trigger::Custom(id)`, `Abort::Custom(id)` and
+`Channel::Custom(id)` in Rust; in C `SX_PLACE_CUSTOM` with the id as the
+place value, `sx_tactic_trigger_custom`, `sx_tactic_add_abort_custom` and
+`sx_squad_set_channel_custom`. The core never reads an id; your slot gets it
+and decides.
+
+**Reports.** A report of a kind the core knows (1 goal broken, 2 enemy, 4
+arrived) is handled by the core; every other kind goes to slot 9. Start your
+own kinds at `REPORT_GAME_FIRST` (`SX_REPORT_GAME_FIRST`, 16): the kinds
+below may gain a meaning later. The slot answers with **report actions**, at
+most four per report (`MAX_REPORT_ACTIONS`): add a danger area, give the
+signal, forget a target (`ReportActions::add_area`, `signal`, `forget`; C
+`sx_report_add_area`, `sx_report_signal`, `sx_report_forget`). The squad
+applies the actions of all reports of one call at **one fixed point**, after
+the last report and before any abort, so a later report's view does not yet
+show an earlier one's actions. A signal action is given only if no abort
+fires and the target is not lost in the same call.
+
+**Needs rules.** A squad with a custom place, trigger, abort or channel, or
+with rule columns (`SquadConfig::rule_columns`), cannot run without its rules.
+`Squad::needs_rules()` says so. The plain `plan` and `check` return
+`PlanError::NeedsRules`, the plain C calls `SX_ERROR_NEEDS_RULES` (-4); the
+plain `orders_due`, `arrived` and `reinstate` do not activate a due plan (the
+next call with rules does) and `signal` answers false. Nothing is lost
+silently. Rule columns follow the extra columns in a row, from
+`Squad::rule_start()`; the game's own columns start at `Squad::extra_start()`
+(C `sx_squad_extra_start`): 8 with the default two roles, one more for each
+role beyond two. `IN_EXTRA` is right only with at most two roles; do not use
+it.
+
+**Hex.** A `Crew` with a hex layout converts for the rules too: everything a
+slot sees (contexts, the view, a report's `pos`) is in your offset
+coordinates, and a position a slot returns (a place, an area from a report)
+is taken as offset. The `built_in` values and distances stay as the squad
+computed them (hex distances are the same in both systems).
+
+**Helpers.** `BuiltInRules` is the rules object with every default. Inside a
+slot, `ctx.built_in` is the default answer to add to or replace
+(`CostCtx::built_in`, `SpotCtx::built_in`), and `spot_score_builtin(wish,
+want_tags, spot, metric)` computes the spot score by hand (C
+`sx_spot_score_builtin`). In C, `sx_builtin_member_cost` and
+`sx_builtin_spot_score` are the two defaults as callbacks to wrap; they
+return `built_in` saturated to `int64_t`, so for exact built-in behaviour
+leave the pointer `NULL`. For a member cost by the way walked there is
+`path_cost` (Rust `sagax::rules::path_cost`, and `PathCost`, a rules object
+that does only that) and C `sx_path_cost(nav, map, from, to, budget, &cost)`:
+they run a search and return the cost, or nothing when there is no way.
+
+**Spot scores and tags.** The built-in spot score is `(miss << 100) |
+distance`: a spot that lacks a wanted tag ranks above *every* spot that has
+all of them, whatever the distance. So a penalty you add in `spot_score`
+never outranks a missing wanted tag; it only orders spots within the same
+tag class. If your penalty is to matter (a spot the enemy can see), give the
+candidate spots the tags the tactic wants, as the example does (it tags all
+its spots hidden), or replace the score instead of adding to `built_in`.
+
+**The recipe: `ambush_rules`.** Four guards lie in wait for an intruder on a
+map with two walls. Nothing of the library changes: the game hands the crew
+one rules object with five pieces, all built on a small sight test of its
+own (Bresenham over the walls).
+
+- `spot_score` adds a large penalty to a spot the intruder can see, so the
+  guards hide;
+- `channel_delay` makes hand signs arrive one tick later, and only in sight (a
+  guard behind the short wall never gets one);
+- `trigger` gives the signal when the intruder steps into the kill zone;
+- `report` takes the game's own kind "a guard was seen" and records it in the
+  rules object;
+- `abort` ends the ambush once it was seen, and the squad plans a rush.
+
+The shipped ambush scores the group-to-target distance on a curve of 0 to
+100. On a small map that loses to the rush everywhere, so the ambush is never
+picked. The example therefore builds its own consideration (`IN_TARGET_DIST`
+on a linear curve of 0 to 16) as part of the recipe; set the end of the curve
+for your map.
+
+Rust: `cargo run -p sagax --example ambush_rules`
+(`crates/sagax/examples/ambush_rules.rs`). C: `examples/c/ambush_rules.c`,
+the same two scenes, the same printed lines (the checks diff them). The
+integration is one rules object; the rest is the game's own sight test:
+
+```rust
+struct AmbushRules { walls: DenseGrid, intruder: Pos, seen: bool }
+
+impl SquadRules for AmbushRules {
+    fn spot_score(&mut self, ctx: &SpotCtx) -> Option<i128> {
+        let seen = sees(&self.walls, self.intruder, ctx.spot.pos);
+        Some(ctx.built_in + if seen { SEEN_PENALTY } else { 0 })
+    }
+    fn trigger(&mut self, id: u32, _view: &SquadView<'_>, _now: u32) -> bool {
+        id == KILL_ZONE && in_kill_zone(self.intruder)
+    }
+    // channel_delay, report and abort the same way
+}
+// per tick: crew.tick_with(now, &[], &spots, seed, &mut rules, &mut events)
+```
+
+```c
+static int32_t cb_spot_score(void *user, const sx_spot_ctx *ctx, int64_t *score)
+{
+	const struct ambush_rules *r = user;
+	*score = ctx->built_in + (sees(r, r->intruder, ctx->spot.pos) ? SEEN_PENALTY : 0);
+	return 1;
+}
+/* ... */
+sx_squad_rules table;
+sx_squad_rules_default(&table);            /* every callback NULL */
+table.spot_score = cb_spot_score;          /* and channel_delay, trigger, report, abort */
+table.user = &rules;
+sx_crew_tick_with(crew, now, NULL, 0, spots, n_spots, seed, &table, events, cap, &total);
+```
+
+**JavaScript.** JavaScript has no callbacks into the squad: the rules object
+is Rust and C only, and JS pieces will follow only on demand. A JavaScript
+squad therefore never needs rules. What works there are the data parts of
+this round: `roles` in the squad config, `squad.extraStart()`, a skill table
+with `rows`, abort comparisons (`tactic.addAbortWhen`, `abortIfTargetLost`),
+`squad.decider()` and the score log (`setScoreLog`, `scoreLog`).
 
 ### Debugging the plan
 

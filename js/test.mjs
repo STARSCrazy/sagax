@@ -1301,7 +1301,6 @@ test('squad: members, leader, skill, skill table, channels, validated', () => {
   assert.deepEqual(sq.members()[2].pos, [7, -8, 1]);
   assert.equal(sq.reinstate(2, 0), true);
   assert.equal(sq.reinstate(9, 0), false);
-  assert.equal(sq.resume(2, 0), true, 'the old name still works');
   assert.equal(sq.suspend(3), true);
   assert.equal(sq.leader(), 1, 'a suspended leader does not act');
   assert.equal(sq.setGone(1), true);
@@ -1321,11 +1320,11 @@ test('squad: members, leader, skill, skill table, channels, validated', () => {
   assert.deepEqual(table.pick, ['weighted', 'weighted', 'weighted', 'best']);
   assert.deepEqual(table.pickTop, [3, 2, 2, 0]);
   assert.deepEqual(table.thinkTicks, [34, 20, 10, 5]);
-  assert.equal(lib.discipline(200), table.holdBonus[3]);
+  assert.equal(lib.holdBonusFor(null, 200), table.holdBonus[3]);
   sq.setSkillTable({ ...table, thinkTicks: [1, 2, 3, 4], pick: ['uniform', 'best', 'best', 'best'] });
   assert.deepEqual(sq.skillTable().thinkTicks, [1, 2, 3, 4]);
   assert.equal(sq.skillTable().pick[0], 'uniform');
-  assert.equal(lib.discipline(0, { ...table, holdBonus: [9, 9, 9, 9] }), 9);
+  assert.equal(lib.holdBonusFor({ ...table, holdBonus: [9, 9, 9, 9] }, 0), 9);
   assert.throws(() => sq.setSkillTable({ ...table, pick: ['lucky', 'best', 'best', 'best'] }), RangeError);
   assert.throws(() => sq.setSkillTable({ ...table, spotRankError: [256, 0, 0, 0] }), RangeError);
   assert.throws(() => sq.setSkillTable({ ...table, thinkTicks: [1, 2, 3] }), RangeError);
@@ -1339,18 +1338,14 @@ test('squad: members, leader, skill, skill table, channels, validated', () => {
   sq.free();
 });
 
-test('squad: config keys and aliases', () => {
+test('squad: config keys', () => {
   const d = lib.squad();
   assert.equal(d.addMember({ id: 1, pos: [0, 0, 0] }), 0);
   d.free();
-  const old = lib.squad({ groupCap: 1, memoryCap: 2, areaCap: 3, inboxCap: 4 });
-  assert.equal(old.addMember({ id: 1, pos: [0, 0, 0] }), 0);
-  assert.equal(old.addMember({ id: 2, pos: [0, 0, 0] }), null, 'groupCap 1 is members 1');
-  old.free();
-  assert.throws(() => lib.squad({ members: 2, groupCap: 2 }), TypeError);
-  assert.throws(() => lib.squad({ memory: 2, memoryCap: 2 }), TypeError);
-  assert.throws(() => lib.squad({ areas: 2, areaCap: 2 }), TypeError);
-  assert.throws(() => lib.squad({ inbox: 2, inboxCap: 2 }), TypeError);
+  const small = lib.squad({ members: 1, memory: 2, areas: 3, inbox: 4 });
+  assert.equal(small.addMember({ id: 1, pos: [0, 0, 0] }), 0);
+  assert.equal(small.addMember({ id: 2, pos: [0, 0, 0] }), null, 'members 1 holds one');
+  small.free();
   assert.throws(() => lib.squad({ dangers: 1.5 }), RangeError);
   const one = lib.squad({ dangers: 1 });
   assert.equal(one.reportDanger({ sender: 1, centre: [0, 0, 0] }, 0), true);
@@ -1685,13 +1680,11 @@ test('keeper: named columns, goal option, renames', () => {
   k.setCurrent(d, 0, ONE / 2 | 0);
   assert.equal(score([1, 0, 0, 0, 0]).score, 65535);
   assert.throws(() => k.setCurrent({}, 0, 0), TypeError);
-  // the old names still work and give the same answers
   k.goalWon(6);
-  k.postpone(10);
+  k.goalPostponed(10);
   assert.equal(k.broken(20, 10), true);
-  k.resume(20);
+  k.goalWon(20);
   assert.equal(k.broken(1000, 10), false);
-  assert.equal(lib.discipline(200), lib.holdBonusFor(null, 200));
   k.free();
 });
 

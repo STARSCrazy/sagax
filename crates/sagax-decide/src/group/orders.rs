@@ -394,12 +394,6 @@ impl Squad {
         true
     }
 
-    /// The old name of [`Squad::reinstate`].
-    #[deprecated(since = "0.9.0", note = "renamed to `reinstate`")]
-    pub fn resume(&mut self, id: u32, now: u32) -> bool {
-        self.reinstate(id, now)
-    }
-
     /// When an order sent at `at` reaches the active member `id` (or, with
     /// `report`, its report reaches the leader): at once for the acting
     /// leader, else by its channel, a [`Channel::Custom`] through `rules`;

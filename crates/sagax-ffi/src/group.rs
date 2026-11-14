@@ -1212,21 +1212,6 @@ pub unsafe extern "C" fn sx_squad_score_log(
     to_i32(written)
 }
 
-/// `sx_discipline`: the old name of `sx_skill_table_hold_bonus_for`.
-///
-/// # Safety
-/// `table` is null or valid.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_discipline(skill: u32, table: *const SxSkillTable) -> i32 {
-    // SAFETY: see above.
-    let bonus = unsafe { sx_skill_table_hold_bonus_for(table, skill) };
-    if bonus < 0 {
-        ERROR_ARGUMENT
-    } else {
-        to_i32(bonus)
-    }
-}
-
 /// `sx_squad_set_shout`.
 ///
 /// # Safety
@@ -2080,7 +2065,7 @@ pub unsafe extern "C" fn sx_keeper_clear(keeper: *mut SxKeeper) -> i32 {
     0
 }
 
-/// `sx_keeper_goal_postponed` (old name `sx_keeper_postpone`).
+/// `sx_keeper_goal_postponed`.
 ///
 /// # Safety
 /// `keeper` is null or valid.
@@ -2090,7 +2075,7 @@ pub unsafe extern "C" fn sx_keeper_goal_postponed(keeper: *mut SxKeeper, now: u3
     0
 }
 
-/// `sx_keeper_goal_won` (old name `sx_keeper_resume`).
+/// `sx_keeper_goal_won`.
 ///
 /// # Safety
 /// `keeper` is null or valid.

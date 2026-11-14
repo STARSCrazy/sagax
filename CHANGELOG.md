@@ -1,5 +1,149 @@
 # Changelog
 
+## 0.10.0
+
+The slim round. A squad can now run a game's own logic at nine fixed points
+(the rules object), the group code is split into a small core and a kit
+that is built only from the public API, and the C and WebAssembly layers
+share one crate of number codes. Code that sets none of the new things keeps
+identical ticks, events and golden traces: every scene test of 0.9 still
+passes unchanged. **C API version 10.** `SX_API_VERSION` is 10, so a game
+built with the new header refuses an older library. The deprecated aliases
+that 0.9 announced are gone (see the tables).
+
+### New
+
+- **The rules object** (Rust `SquadRules`, `BuiltInRules`; C
+  `sx_squad_rules`): nine slots (targets, columns, place, member cost, spot
+  score, trigger, abort, channel delay, report), lent per call (`plan_with`,
+  `check_with`, `signal_with`, `reinstate_with`, `report_arrives_at_with`,
+  `Crew::tick_with`, `Crew::reinstate_with`, `Crew::report_with`; C
+  `sx_squad_plan_with`, `sx_squad_check_with`, `sx_squad_signal_with`,
+  `sx_squad_reinstate_with`, `sx_squad_report_arrives_at_with`,
+  `sx_crew_tick_with`, `sx_crew_reinstate_with`, `sx_crew_report_with`). The
+  squad never stores the rules, so `Squad` and `Crew` stay `Clone` and
+  `Debug`. A read-only `SquadView` (C `sx_view_*`, `sx_view_active_plan`)
+  shows the squad to a slot. See "Your own pieces" in the guide.
+- **Custom pieces:** `Place::Custom(id)`, `Trigger::Custom(id)`,
+  `Abort::Custom(id)`, `Channel::Custom(id)` (C `SX_PLACE_CUSTOM`,
+  `sx_tactic_trigger_custom`, `sx_tactic_add_abort_custom`,
+  `sx_squad_set_channel_custom`); rule columns
+  (`SquadConfig::rule_columns`); `REPORT_GAME_FIRST` (16) for a game's own
+  report kinds, which go to the report slot together with every kind the core
+  does not know; report actions (`ReportActions`, at most 4 per report: add a
+  danger area, signal, forget a target; C `sx_report_*`) applied at one fixed
+  point of a call.
+- **`Squad::needs_rules`** and `PlanError::NeedsRules` (C
+  `SX_ERROR_NEEDS_RULES` = -4): a squad with custom parts refuses the plain
+  `plan`, `check` and `tick` instead of losing orders.
+- **Helpers:** `spot_score_builtin` (C `sx_spot_score_builtin`),
+  `sx_builtin_member_cost` and `sx_builtin_spot_score` (the two defaults as C
+  callbacks to wrap, saturated to `int64_t`; `NULL` is the exact default),
+  `sagax::rules::path_cost` and `PathCost` (C `sx_path_cost`): the member cost
+  by the way walked.
+- **Roles and columns:** `SquadConfig::roles` (a role list of up to 8 masks,
+  `RoleCounts`; C `role_count`, `role_masks`; JavaScript `roles`),
+  `IN_ROLE_0`, `IN_ROLE_1`, `Squad::role_column`, `Squad::extra_start`
+  (C `sx_squad_extra_start`, JavaScript `extraStart()`), `Squad::rule_start`.
+- **Skill table with 1 to 8 rows** (`SkillTable::rows`, `MAX_SKILL_ROWS`): a
+  skill takes row `skill * rows / 256`. The default has 4 rows, so it reads as
+  before. `SquadConfig::skill_table`.
+- **Abort comparisons:** `Abort::When { input, cmp, value }` with `Compare`
+  (`AtLeast`, `AtMost`, `Equal`, `NotEqual`), `Abort::at_least`; C
+  `sx_tactic_add_abort_when` and `SX_CMP_*`; JavaScript `addAbortWhen`.
+  `Tactic::abort_if_target_lost` (C `sx_tactic_set_abort_if_target_lost`,
+  JavaScript `abortIfTargetLost`) switches off the hidden abort for a lost
+  target; a target-age abort of the tactic still fires on a lost target.
+- **The squad's decider and score log:** `Squad::decider`, `decider_mut`,
+  `set_score_log`, `score_log` (C `sx_squad_decider`, `sx_squad_set_score_log`,
+  `sx_squad_score_log`; JavaScript `decider()`, `setScoreLog`, `scoreLog`).
+- **Core and kit:** the shipped tactics, tag and role bits and defaults moved to
+  `group::kit`; the core never imports it (a test checks it). Public paths
+  (`group::tactics`, `group::TAG_COVER`, ...) are unchanged.
+- **`sagax-abi`**, an internal crate with every number code and checked
+  conversion of the C and WebAssembly layers (no public API).
+- **Example:** `cargo run -p sagax --example ambush_rules` and
+  `examples/c/ambush_rules.c`: four guards ambush an intruder with the game's
+  own sight test, hand signs, kill zone and "seen" abort; the checks diff the
+  Rust and C output.
+
+### Migration table, 0.9 to 0.10
+
+Rust:
+
+| 0.9 | 0.10 |
+|---|---|
+| `Abort { input, at_least }` | `Abort::at_least(input, at_least)`, or `Abort::When { input, cmp, value }`, or `Abort::Custom(id)` (an enum now; match arms must name the variants) |
+| `SkillTable::level(s)` (associated function) | `table.level(s)` (a method; `skill * rows / 256`) |
+| `SkillTable` arrays of 4 | arrays of `MAX_SKILL_ROWS` (8) and `rows: u8`; entries beyond `rows` are unused |
+| `Squad::set_skill_table(table)` | returns `bool` (`false` for 0 or more than 8 rows, nothing changes); `#[must_use]` |
+| `IN_EXTRA` as the first game column | `Squad::extra_start()` (`IN_EXTRA` is deprecated and right only with at most two roles) |
+| `IN_RANGED`, `IN_AREA` | the same numbers; `IN_ROLE_0` and `IN_ROLE_1` are the names of the columns, `IN_RANGED` and `IN_AREA` stay for the default role list |
+| `SquadConfig { members, memory, areas, inbox, dangers, metric }` | new fields `roles`, `skill_table`, `rule_columns`; write `..SquadConfig::default()` |
+| a lost target always ended a plan | `Tactic::abort_if_target_lost` (default `true`: the same) |
+| a report of any kind but 1, 2 and 4 was dropped | goes to `SquadRules::report` (dropped without rules, as before) |
+| `Place`, `Trigger`, `Channel` with their old variants | each has a new `Custom(u32)` variant; an exhaustive `match` needs an arm |
+| the shipped tactics, tags and roles inside the group module | in `group::kit`; the public re-exports (`group::tactics`, `Shape`, `TAG_*`, `ROLE_*`) are unchanged |
+| `GoalKeeper::postpone(now)`, `resume(now)` | removed: `goal_postponed(now)`, `goal_won(now)` |
+| `keeper::discipline(skill, &table)`, `group::discipline` | removed: `table.hold_bonus_for(skill)` |
+| `Squad::resume(id, now)` | removed: `Squad::reinstate(id, now)` |
+| `Areas::move_cost(from, to, start, goal)` | removed: `Areas::cell_cost(to, start, goal)` |
+| `Navigator::resume(map, budget)` | removed: `Navigator::continue_search(map, budget)` |
+
+C:
+
+| 0.9 | 0.10 |
+|---|---|
+| `sx_skill_table` with arrays of 4 | `rows` and arrays of 8 (`pick`, `pick_top`, `think_ticks`, `timing_spread`, `hold_bonus`, `give_up_ticks`, `spot_rank_error`); the layout changed, the header's static asserts catch an old build; `sx_skill_table_default` has `rows` 4 |
+| `sx_squad_config` | grew by `role_count`, `role_masks[8]` and `rule_columns`; `sx_squad_config_default` fills them (two roles, no rule columns); the crew config grew with it |
+| `SX_IN_EXTRA` as the first game column | `sx_squad_extra_start(squad)` (the macro stays, deprecated, right only with at most two roles) |
+| `SX_IN_RANGED`, `SX_IN_AREA` | the same numbers; `SX_IN_ROLE_0`, `SX_IN_ROLE_1` are the new names |
+| `sx_tactic_add_abort(t, input, at_least)` | unchanged; `sx_tactic_add_abort_when(t, input, SX_CMP_*, value)` and `sx_tactic_add_abort_custom(t, id)` are new |
+| a lost target always ended a plan | `sx_tactic_set_abort_if_target_lost(t, on)`, default on: the same |
+| a report of any kind but 1, 2 and 4 was dropped | goes to the `report` callback of `sx_squad_rules` (dropped with `NULL`) |
+| `sx_squad_plan`, `sx_squad_check`, `sx_crew_tick` on a squad with custom parts | `SX_ERROR_NEEDS_RULES` (-4); use the `_with` calls |
+| `sx_squad_rules` | new; `sx_squad_rules_default` sets every pointer `NULL`, a zeroed table is the same |
+| `sx_nav_create`, `sx_nav_destroy`, `sx_flow_create`, `sx_flow_destroy`, `sx_dstar_create`, `sx_dstar_destroy` | removed: `_new` and `_free` |
+| `sx_squad_resume` | removed: `sx_squad_reinstate` |
+| `sx_keeper_postpone`, `sx_keeper_resume` | removed: `sx_keeper_goal_postponed`, `sx_keeper_goal_won` |
+| `sx_discipline(skill, table)` | removed (symbol and prototype): `sx_skill_table_hold_bonus_for(table, skill)` |
+
+JavaScript and WebAssembly:
+
+| 0.9 | 0.10 |
+|---|---|
+| `SHAPE` numbers 1 to 3 | 0 to 2 as C `SX_SHAPE_*`; `formation` takes the name or the number |
+| `tactics.flank` with sides clamped | 2 or 3 sides, anything else throws `RangeError` |
+| `decider.setCombine` with a negative option | only `ALL_OPTIONS` (-1, exported) means all; other negatives throw |
+| radius, range and skill table entries given as fractions or out of range | throw `RangeError` (a skill table entry is limited to 0 .. 2^31 - 1 in JavaScript) |
+| WASM `sx_tactic_shipped(kind, ..)` | `sx_tactic_rush`, `_formation`, `_flank`, `_ambush`, `_focus`, `_isolate`, `_fall_back` (internal exports; `lib.tactics.*` is unchanged) |
+| the squad config keys `groupCap`, `memoryCap`, `areaCap`, `inboxCap` | removed: `members`, `memory`, `areas`, `inbox` (the old keys are no longer read, so a squad built with them gets the defaults) |
+| `squad.resume(id, now)` | removed: `reinstate` |
+| `keeper.postpone(now)`, `keeper.resume(now)` | removed: `goalPostponed`, `goalWon` |
+| `lib.discipline(skill, table)` | removed: `lib.holdBonusFor(table, skill)` |
+| `SQUAD.inExtra` | deprecated: `squad.extraStart()` |
+
+Behaviour changes (no compile error, so read these):
+
+- The skill level of a skill is `skill * rows / 256`. With the default four
+  rows that is `skill / 64` as before; a table with other rows reads
+  differently.
+- `Tactic::abort_if_target_lost = false` removes only the hidden abort for a
+  lost target. A tactic that also has a target-age abort (the shipped ones
+  do) still aborts when the target is lost, because a lost target's age counts
+  as the largest value: drop that abort too to keep a lost target.
+- A squad with a custom piece or rule columns refuses the plain calls (see
+  above). This cannot affect a squad built with the 0.9 API.
+- JavaScript skill table entries are whole numbers from 0 to 2^31 - 1 (the
+  WebAssembly module takes 32-bit signed numbers); C and Rust take the full
+  `u32`.
+- The built-in spot score ranks a spot that lacks a wanted tag above every
+  spot that has all of them, whatever the distance (this is how `pick_spot`
+  always worked). A penalty added in a spot score slot therefore never
+  outranks a missing tag. The shipped ambush scores the group-to-target
+  distance on a curve of 0 to 100 and loses to rush on small maps; the example
+  builds its own consideration.
+
 ## 0.9.0
 
 The API round. 0.9 changes how the three interfaces look, not what the

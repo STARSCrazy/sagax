@@ -15,9 +15,7 @@
  *   sx_grid   cells with costs, walls and levels; sx_grid_map gives its sx_map
  *
  * Conventions (the same in every part of this header):
- *   - Names: every handle has sx_<name>_new and sx_<name>_free. The old
- *     sx_nav_create / _destroy (and flow, dstar) are macros for 0.9, gone in
- *     0.10.
+ *   - Names: every handle has sx_<name>_new and sx_<name>_free.
  *   - Return values: a yes/no question returns 1 or 0; a count or an index
  *     returns it; a function that has nothing to report returns 0; a scalar
  *     answer is returned directly when it fits (int64_t for values that do
@@ -49,7 +47,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 9
+#define SX_API_VERSION 10
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -199,7 +197,7 @@ typedef struct sx_result {
                                  * than 255 slots (since 8) */
 #define SX_ERROR_NEEDS_RULES (-4) /* a plain call (sx_squad_plan, sx_squad_check,
                                  * sx_crew_tick) on a squad with custom parts: use the
-                                 * _with call and its rules (since 9) */
+                                 * _with call and its rules (since 10) */
 
 /* budget everywhere: cells to expand at most in this call; 0 = unlimited. */
 
@@ -212,9 +210,6 @@ typedef struct sx_nav sx_nav;
 /* 0 if the rules are invalid or memory is short. */
 sx_nav *sx_nav_new(const sx_rules *rules);
 void sx_nav_free(sx_nav *nav);
-/* Old names of 0.8, deprecated, gone in 0.10. */
-#define sx_nav_create sx_nav_new
-#define sx_nav_destroy sx_nav_free
 
 /* Searches a way from start to the cheapest of goal_count goals (a goal
  * level may be SX_ANY_LEVEL) and writes it as output into points. Several
@@ -277,9 +272,6 @@ typedef struct sx_flow sx_flow;
 
 sx_flow *sx_flow_new(const sx_rules *rules);
 void sx_flow_free(sx_flow *flow);
-/* Old names of 0.8, deprecated, gone in 0.10. */
-#define sx_flow_create sx_flow_new
-#define sx_flow_destroy sx_flow_free
 
 /* Searches outward from goal_count goals up to max_cost. result->cells
  * counts the cells in the field. Exact when moves cost the same both ways
@@ -309,9 +301,6 @@ typedef struct sx_dstar sx_dstar;
 
 sx_dstar *sx_dstar_new(const sx_rules *rules);
 void sx_dstar_free(sx_dstar *dstar);
-/* Old names of 0.8, deprecated, gone in 0.10. */
-#define sx_dstar_create sx_dstar_new
-#define sx_dstar_destroy sx_dstar_free
 
 /* Plans from start to goal (goal.level >= 0) and forgets earlier work.
  * Nothing is searched yet. Returns 0. */
@@ -945,8 +934,8 @@ typedef struct sx_keeper sx_keeper;
 #define SX_IN_PLAN_AGE    6   /* ticks since the active plan became active (its own row only) */
 #define SX_IN_TARGET_FRIEND_DIST 7 /* target to the nearest other known target (Euclid: the
                                     * root); no target or no other target: -1 */
-#define SX_IN_EXTRA       8   /* first column of the game's own, with at most two role
-                               * columns; else sx_squad_extra_start */
+#define SX_IN_EXTRA       8   /* deprecated: the first column of the game's own is 8 only
+                               * with at most two roles; use sx_squad_extra_start */
 #define SX_MAX_ROLE_COUNTS 8  /* most entries of the role list */
 
 /* Role bits the default role list counts; the others are the game's. */
@@ -1153,9 +1142,6 @@ int32_t sx_skill_table_spot_rank_error_for(const sx_skill_table *table, uint32_t
  * SX_ERROR_ARGUMENT. */
 int32_t sx_skill_table_pick_for(const sx_skill_table *table, uint32_t skill,
                                 uint32_t *pick, uint32_t *top);
-/* Deprecated (0.9): the old name of sx_skill_table_hold_bonus_for, same
- * answer as an int32_t. */
-int32_t sx_discipline(uint32_t skill, const sx_skill_table *table);
 
 /* -- squad: the leader, its group, memory and plans -- */
 
@@ -1252,7 +1238,6 @@ int32_t sx_squad_remove_member(sx_squad *squad, uint32_t id);
 int32_t sx_squad_set_pos(sx_squad *squad, uint32_t id, int32_t x, int32_t y, int32_t z);
 int32_t sx_squad_suspend(sx_squad *squad, uint32_t id);
 int32_t sx_squad_reinstate(sx_squad *squad, uint32_t id, uint32_t now);
-#define sx_squad_resume sx_squad_reinstate /* the old name, for 0.9 only */
 int32_t sx_squad_set_gone(sx_squad *squad, uint32_t id);
 /* Returns how many members are listed (gone ones too). */
 int32_t sx_squad_member_count(sx_squad *squad);
@@ -1329,12 +1314,13 @@ int32_t sx_squad_danger_area(sx_squad *squad, sx_area *out);
 /* The fact kind in the leader's knowledge that counts as a target (default
  * 0). Returns 0. */
 int32_t sx_squad_set_target_kind(sx_squad *squad, uint32_t kind);
-/* How many of the game's own columns each scoring row has from SX_IN_EXTRA
+/* How many of the game's own columns each scoring row has from
+ * sx_squad_extra_start
  * on (default 0, at most 1024). Returns 0; SX_ERROR_ARGUMENT above 1024
  * (nothing changes). */
 int32_t sx_squad_set_extra_columns(sx_squad *squad, uint32_t count);
 /* The first column of the game's own: 8, plus one for every role beyond two
- * (so SX_IN_EXTRA with the default list). SX_ERROR_ARGUMENT for a null
+ * (8 with the default list). SX_ERROR_ARGUMENT for a null
  * squad. */
 int32_t sx_squad_extra_start(sx_squad *squad);
 /* How far (inclusive, in the squad's metric, x and y; Euclid compares
@@ -1417,7 +1403,7 @@ int32_t sx_squad_add_fall_back(sx_squad *squad);
  * SX_ERROR_ARGUMENT for a null squad or tactic (a non-null tactic is freed
  * then). */
 int32_t sx_squad_add_tactic(sx_squad *squad, sx_tactic *tactic);
-/* Check that every consideration reads a column the rows have (SX_IN_EXTRA
+/* Check that every consideration reads a column the rows have (sx_squad_extra_start
  * + extra columns, or a decider memory input), no tactic has more than
  * 255 slots and the squad's decider (sx_squad_decider) still has one option
  * per tactic. Returns 0, or SX_ERROR_PLAN with the tactic's index and the
@@ -1763,9 +1749,6 @@ int32_t sx_keeper_clear(sx_keeper *keeper);
 int32_t sx_keeper_goal_postponed(sx_keeper *keeper, uint32_t now);
 /* Back on the goal: the postpone clock is reset. */
 int32_t sx_keeper_goal_won(sx_keeper *keeper, uint32_t now);
-/* Deprecated (0.9): the old names. */
-#define sx_keeper_postpone sx_keeper_goal_postponed
-#define sx_keeper_resume sx_keeper_goal_won
 /* Out of play: never broken. unsuspend restarts a postponed goal's clock at
  * now. */
 int32_t sx_keeper_suspend(sx_keeper *keeper);

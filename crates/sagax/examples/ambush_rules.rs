@@ -21,7 +21,7 @@
 //! together. Scene B: the intruder stops at the wall, steps to the gap and sees
 //! guard 3; the ambush is dropped.
 //!
-//! The same scenes are in `examples/c/ambush.c`; both print the same lines.
+//! The same scenes are in `examples/c/ambush_rules.c`; both print the same lines.
 
 use sagax::decide::group::{
     Abort, Channel, ChannelCtx, IN_TARGET_DIST, REPORT_GAME_FIRST, ReportActions, RowCtx, SpotCtx,

@@ -9,10 +9,11 @@
 - **Faster D\* Lite**: after a change some neighbours are asked twice. A
   per-edge cost query would avoid that.
 - **Decisions, next steps:** memory of the world (0.7.0), group tactics
-  (0.8.0: squad leader, orders, signal, skill) and the 0.9.0 API round (one
-  set of conventions, the `Crew`, the `sagax` crate with its prelude) are
-  done. Next: a mission / intention planner that hands goals to groups the
-  way groups hand goals to members.
+  (0.8.0: squad leader, orders, signal, skill), the 0.9.0 API round (one
+  set of conventions, the `Crew`, the `sagax` crate with its prelude) and the
+  0.10.0 slim round (a core with a kit, the rules object for a game's own
+  pieces) are done. Next: a mission / intention planner that hands goals to
+  groups the way groups hand goals to members.
 - **Walking distance for the squad:** the squad measures distances in
   a straight-line metric (Euclid, Manhattan, Chebyshev or hex). Using the
   real walking distance instead (for `IN_TARGET_DIST`, the keeper's
@@ -35,7 +36,9 @@
   tactic score, the pick, each slot assignment and abort check, like the
   `Decider`'s trace) and a skill-driven chance that a member ignores its
   slot. Neither is built yet.
-- **Perception** (sight lines, cover, flanks), on the same `sagax-core`.
+- **Perception** (sight lines, cover, flanks), on the same `sagax-core`, as a
+  helper that a game's own rules call (like `path_cost` does for walking
+  cost): the squad itself stays blind, the game's slots ask the helper.
   Later, with it: *indirect coordination*, where characters see allies
   attack or flee and join in, only when they actually saw it.
 

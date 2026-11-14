@@ -77,8 +77,8 @@ fn wall_line() -> Walls {
 }
 
 #[test]
-fn version_is_9() {
-    assert_eq!(sx_api_version(), 9);
+fn version_is_10() {
+    assert_eq!(sx_api_version(), 10);
 }
 
 #[test]
@@ -1002,7 +1002,7 @@ mod squad {
         assert_eq!(size_of::<SxPlan>(), 28);
         assert_eq!(size_of::<SxSkillTable>(), 204);
         assert_eq!(size_of::<SxScoreEvent>(), 36);
-        assert_eq!(define("SX_API_VERSION"), 9);
+        assert_eq!(define("SX_API_VERSION"), 10);
         assert_eq!(define("SX_ERROR_PLAN"), i64::from(ERROR_PLAN));
         assert_eq!(define("SX_IDLE"), i64::from(IDLE));
         let core = [
@@ -1385,7 +1385,7 @@ mod squad {
         ] {
             assert!(!HEADER.contains(name), "{name} is still in sagax.h");
         }
-        assert!(HEADER.contains("#define sx_squad_resume sx_squad_reinstate"));
+        assert!(!HEADER.contains("sx_squad_resume"));
     }
 
     #[test]
@@ -2006,9 +2006,6 @@ mod squad {
             assert_eq!(table.pick, [1, 1, 1, 0, 0, 0, 0, 0]);
             assert_eq!(table.pick_top, [3, 2, 2, 0, 0, 0, 0, 0]);
             assert_eq!(table.spot_rank_error, [2, 1, 1, 0, 0, 0, 0, 0]);
-            assert_eq!(sx_discipline(0, &table), i32::from(u16::MAX) / 8);
-            assert_eq!(sx_discipline(255, null()), i32::from(u16::MAX) / 2);
-            assert_eq!(sx_discipline(256, null()), ERROR_ARGUMENT);
 
             let sq = squad_of(CHEBYSHEV, &[(1, 0, 0), (2, 1, 0)]);
             table.think_ticks = [1, 2, 3, 4, 4, 4, 4, 4];
@@ -2206,8 +2203,8 @@ mod squad {
             assert_eq!(define("SX_KEEPER_IN_SIGNAL"), 3);
             assert_eq!(define("SX_KEEPER_IN_DISCIPLINE"), 4);
             assert_eq!(define("SX_KEEPER_IN_EXTRA"), 5);
-            assert!(HEADER.contains("#define sx_keeper_resume sx_keeper_goal_won"));
-            assert!(HEADER.contains("#define sx_keeper_postpone sx_keeper_goal_postponed"));
+            assert!(!HEADER.contains("sx_keeper_resume"));
+            assert!(!HEADER.contains("sx_keeper_postpone"));
             assert!(HEADER.contains("sx_member_inputs"));
 
             let d = sx_decider_new();
@@ -2327,13 +2324,6 @@ mod squad {
             assert_eq!(sx_skill_table_give_up_ticks_for(&table, 64), 99);
             table.pick[0] = 7;
             assert_eq!(sx_skill_table_give_up_ticks_for(&table, 64), err);
-            // the old name gives the same answer
-            for skill in [0, 63, 64, 130, 200, 255] {
-                assert_eq!(
-                    i64::from(sx_discipline(skill, null())),
-                    sx_skill_table_hold_bonus_for(null(), skill)
-                );
-            }
         }
     }
 
@@ -3015,12 +3005,11 @@ mod conventions {
     }
 
     #[test]
-    fn old_handle_names_are_macros() {
+    fn old_handle_names_are_gone() {
         for kind in ["nav", "flow", "dstar"] {
-            for (old, new) in [("create", "new"), ("destroy", "free")] {
-                let line = format!("#define sx_{kind}_{old} sx_{kind}_{new}");
-                assert!(HEADER.contains(&line), "{line} missing in sagax.h");
-                assert!(!HEADER.contains(&format!("sx_{kind}_{old}(")));
+            for old in ["create", "destroy"] {
+                let name = format!("sx_{kind}_{old}");
+                assert!(!HEADER.contains(&name), "{name} is still in sagax.h");
             }
         }
     }

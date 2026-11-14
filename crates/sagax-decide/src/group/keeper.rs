@@ -1,7 +1,6 @@
 //! What one member holds: its current goal, whether it is postponed or
 //! suspended, and the inputs its own decider reads.
 
-use super::skill::SkillTable;
 use super::squad::{Goal, plain_dist};
 use crate::memory::{Metric, Pos};
 use crate::{Candidate, Consideration, Curve, Decider};
@@ -116,18 +115,6 @@ impl GoalKeeper {
         self.postponed_at = None;
     }
 
-    /// Old name of [`goal_postponed`](Self::goal_postponed).
-    #[deprecated(since = "0.9.0", note = "renamed to `goal_postponed`")]
-    pub fn postpone(&mut self, now: u32) {
-        self.goal_postponed(now);
-    }
-
-    /// Old name of [`goal_won`](Self::goal_won).
-    #[deprecated(since = "0.9.0", note = "renamed to `goal_won`")]
-    pub fn resume(&mut self, now: u32) {
-        self.goal_won(now);
-    }
-
     /// Adds the ready-made "keep my goal" option to a member's `decider` and
     /// returns its number. It scores `weight` times a step on
     /// [`IN_HAS_GOAL`] and a falling curve on [`IN_DIST`] (full at 0, 0 at
@@ -214,17 +201,10 @@ impl GoalKeeper {
     }
 }
 
-/// A member's discipline: the table's `hold_bonus` at the level of the
-/// member's own `skill` (`skill / 64`).
-#[deprecated(since = "0.9.0", note = "use `SkillTable::hold_bonus_for`")]
-pub fn discipline(skill: u8, table: &SkillTable) -> u32 {
-    table.hold_bonus_for(skill)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::group::{GoalKind, Start};
+    use crate::group::{GoalKind, SkillTable, Start};
     use crate::{Candidate, Decider, ONE};
 
     fn goal(pos: Option<Pos>, issued_at: u32) -> Goal {
@@ -334,21 +314,6 @@ mod tests {
         assert!(!k.broken(4, 10)); // age 7
         assert!(k.broken(7, 10)); // age 10
         assert_eq!(k.inputs(4, [0, 0, 0], Metric::Euclid, false, 0)[2], 10);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn old_keeper_names_forward() {
-        let mut k = GoalKeeper::new();
-        k.set(0, goal(None, 0));
-        k.postpone(10);
-        assert!(k.broken(20, 10));
-        k.resume(20);
-        assert!(!k.broken(1000, 10));
-        let t = SkillTable::default();
-        for skill in [0, 63, 64, 130, 200, 255] {
-            assert_eq!(discipline(skill, &t), t.hold_bonus_for(skill));
-        }
     }
 
     #[test]
