@@ -11,7 +11,8 @@ const RADIO: Channel = Channel::Radio {
     per_unit: 1,
 };
 const SEED: u64 = 7;
-/// The members of the flank scene (`examples/squad.rs`): id, x, y.
+/// The members of the flank scene (the former `examples/squad.rs` of
+/// sagax-decide): id, x, y.
 const MEMBERS: [(u32, i32, i32); 4] = [(1, 0, 0), (2, 0, 2), (3, 0, -2), (4, -3, 0)];
 const SKILL: u8 = 192;
 
@@ -302,7 +303,7 @@ fn crew_flank_scene_matches_blocks_by_hand() {
     let by_hand = run_by_hand(80);
     assert_eq!(by_crew, by_hand);
 
-    // Pinned from `examples/squad.rs` (before this round): plan at 0,
+    // Pinned from the former `examples/squad.rs` (before this round): plan at 0,
     // active at 5, the gather orders at 5, 9, 9, 10, the members on their
     // gather spots at 37, 48, 49, 49.
     assert_eq!(

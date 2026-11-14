@@ -1,6 +1,15 @@
-/* Sagax group tactics from C: a leader gathers its nearest free members,
- * plans a flank from three sides, waits until all have gathered and gives
- * one signal, so every attack starts at the same tick.
+/* Sagax from C: a squad walks around a wall and attacks from three sides
+ * at once.
+ *
+ * A 24 x 12 grid with a wall at x = 12 (rows 0 to 7, open below). The
+ * leader sees an enemy behind the wall; the crew plans a flank, sends the
+ * orders by radio and gives the signal once all stand at their side. Each
+ * member has its own decider: keep the goal, or idle. A member that chose
+ * its goal walks its sx_nav way, one cell per STEP ticks from its start
+ * tick.
+ *
+ * The same scene is in crates/sagax/examples/squad_walk.rs and
+ * examples/js/squad.mjs; all three print the same lines.
  * Build and run: sh examples/c/run.sh */
 
 #include <stddef.h>
@@ -15,69 +24,31 @@
 		} \
 	} while (0)
 
-#define ENEMY  1u    /* the fact kind of enemies */
-#define E1     10u   /* seen by the leader */
-#define E2     11u   /* reported by member 2 */
-#define FACTION 1u
+#define END     120u  /* ticks 0 ..= END */
+#define ENEMY   1u    /* the fact kind of an enemy */
+#define STEP    2u    /* ticks per cell of the walk */
+#define SEED    7u
+#define WIDTH   24
+#define HEIGHT  12
+#define CELLS   (WIDTH * HEIGHT)
 #define MEMBERS 4
-#define STEP   2u    /* ticks per cell a member walks */
+#define SKILL   192u
+#define EVENTS  16u   /* room for one tick's events */
 
-/* One member as the game moves it. */
+/* One member's own side: its decider, its way and where it is on it. */
 typedef struct walker {
 	uint32_t id;
-	int has_goal;
-	sx_goal goal;
-	uint32_t start_at;
-	int gathered;
+	int32_t pos[3];
+	sx_decider *decider;
+	uint32_t goal_option;
+	uint32_t idle_option;
+	sx_nav *nav;
+	sx_point way[CELLS];
+	int32_t way_len;
+	int32_t next;     /* next cell of the way to take */
+	uint32_t from;    /* the walk starts after this tick */
+	int on_goal;      /* the member chose its goal at the last decision */
 } walker;
-
-static int32_t chebyshev(int32_t ax, int32_t ay, int32_t bx, int32_t by)
-{
-	int32_t dx = ax > bx ? ax - bx : bx - ax;
-	int32_t dy = ay > by ? ay - by : by - ay;
-
-	return dx > dy ? dx : dy;
-}
-
-/* One cell from pos toward to: the neighbour nearest to it, ties to the
- * first in the list. */
-static void step_toward(int32_t *pos, const int32_t *to)
-{
-	static const int32_t dirs[8][2] = {
-		{1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1}
-	};
-	int32_t best_x = pos[0], best_y = pos[1];
-	int32_t best = -1;
-	int i;
-
-	if (pos[0] == to[0] && pos[1] == to[1])
-		return;
-	for (i = 0; i < 8; i++) {
-		int32_t x = pos[0] + dirs[i][0];
-		int32_t y = pos[1] + dirs[i][1];
-		int32_t left = chebyshev(x, y, to[0], to[1]);
-
-		if (best < 0 || left < best) {
-			best = left;
-			best_x = x;
-			best_y = y;
-		}
-	}
-	pos[0] = best_x;
-	pos[1] = best_y;
-}
-
-static sx_gather_candidate candidate(uint32_t id, int32_t x, int32_t y, uint8_t is_free)
-{
-	sx_gather_candidate c = {0};
-
-	c.id = id;
-	c.faction = FACTION;
-	c.pos[0] = x;
-	c.pos[1] = y;
-	c.free = is_free;
-	return c;
-}
 
 static sx_spot spot(int32_t x, int32_t y, uint32_t tags)
 {
@@ -89,223 +60,222 @@ static sx_spot spot(int32_t x, int32_t y, uint32_t tags)
 	return s;
 }
 
+static sx_point point(int32_t x, int32_t y)
+{
+	sx_point p;
+
+	p.x = x;
+	p.y = y;
+	p.level = 0;
+	return p;
+}
+
+static const char *kind_name(uint32_t kind)
+{
+	switch (kind) {
+	case SX_CREW_PLANNED: return "planned";
+	case SX_CREW_ACTIVATED: return "activated";
+	case SX_CREW_SIGNAL: return "signal";
+	case SX_CREW_ORDER: return "order";
+	case SX_CREW_START: return "start";
+	case SX_CREW_ARRIVED: return "arrived";
+	case SX_CREW_BROKEN: return "broken";
+	case SX_CREW_NO_PLAN: return "noplan";
+	default: return "?";
+	}
+}
+
 int main(void)
 {
-	sx_gather_candidate around[5];
-	sx_spot spots[5];
-	uint32_t called[3];
-	walker walkers[MEMBERS];
-	sx_order out[8];
+	static const int32_t members[MEMBERS][3] = {
+		{1, 2, 5}, {2, 2, 7}, {3, 2, 3}, {4, 0, 5}  /* id, x, y; member 1 leads */
+	};
+	static walker walkers[MEMBERS];
+	sx_crew_event events[EVENTS];
+	sx_spot spots[4];
+	sx_rules rules;
+	sx_map map;
+	sx_crew_config config;
+	sx_grid *grid;
+	sx_crew *crew;
 	sx_squad *squad;
-	sx_squad_config config;
-	sx_member m = {0};
 	sx_fact seen = {0};
-	sx_message told = {0};
-	uint32_t signal_at = 0, attack_at = 0, plans = 0, signals = 0, attacks = 0;
 	uint32_t t;
-	int32_t n, i;
+	int32_t i, y;
 
 	if (sx_api_version() < SX_API_VERSION) {
 		fprintf(stderr, "sagax library too old\n");
 		return 1;
 	}
 
-	/* The leader (1) stands at (0, 0) and calls the three nearest free
-	 * members of its faction within 10 cells: 6 is busy, 7 too far. */
-	around[0] = candidate(7, 30, 0, 1);
-	around[1] = candidate(4, -3, 0, 1);
-	around[2] = candidate(3, 0, -2, 1);
-	around[3] = candidate(6, 1, 1, 0);
-	around[4] = candidate(2, 0, 2, 1);
-	n = sx_gather(0, 0, FACTION, 10, SX_METRIC_CHEBYSHEV, 1, around, 5, called, 3);
-	CHECK(n == 3 && called[0] == 2 && called[1] == 3 && called[2] == 4);
-	printf("gathered: %u %u %u\n", (unsigned)called[0], (unsigned)called[1],
-	       (unsigned)called[2]);
+	/* The map: open cells and the wall at x = 12, rows 0 to 7. */
+	grid = sx_grid_new(WIDTH, HEIGHT, 1);
+	CHECK(grid != NULL);
+	for (y = 0; y <= 7; y++)
+		CHECK(sx_grid_set(grid, point(12, y), -1) == 0);
+	CHECK(sx_grid_map(grid, &map) == 0);
+	CHECK(sx_rules_default(SX_GRID_SQUARE, SX_PRESET_OCTILE, &rules) == 0);
+	rules.node_capacity = CELLS;
 
-	CHECK(sx_squad_config_default(&config) == 0);
-	CHECK(config.members == 8 && config.dangers == 8 && config.metric == SX_METRIC_EUCLID);
-	config.memory = 8;
-	config.areas = 4;
-	config.inbox = 8;
-	config.metric = SX_METRIC_CHEBYSHEV;
-	squad = sx_squad_new(&config);
-	CHECK(squad != NULL);
-	config.members = 0;
-	CHECK(sx_squad_new(&config) == NULL);
-	config.members = 8;
-	m.id = 1;
-	CHECK(sx_squad_add_member(squad, &m) == 0);
-	walkers[0].id = 1;
-	for (i = 0; i < 3; i++) {
-		int32_t k;
-
-		for (k = 0; k < 5; k++)
-			if (around[k].id == called[i])
-				break;
-		CHECK(k < 5);
-		m.id = called[i];
-		m.pos[0] = around[k].pos[0];
-		m.pos[1] = around[k].pos[1];
-		CHECK(sx_squad_add_member(squad, &m) == i + 1);
-		/* Orders reach the others by radio: 2 ticks plus 1 per cell. */
-		CHECK(sx_squad_set_radio(squad, m.id, 2, 1) == 1);
-		walkers[i + 1].id = m.id;
-	}
+	CHECK(sx_crew_config_default(&config) == 0);
+	config.squad.members = MEMBERS;
+	config.squad.memory = 8;
+	config.squad.areas = 4;
+	config.squad.inbox = 8;
+	config.squad.dangers = 4;
+	config.squad.metric = SX_METRIC_CHEBYSHEV;
+	crew = sx_crew_new(&config);
+	CHECK(crew != NULL);
 	for (i = 0; i < MEMBERS; i++) {
-		walkers[i].has_goal = 0;
-		walkers[i].start_at = 0;
-		walkers[i].gathered = 0;
-	}
-	CHECK(sx_squad_set_leader(squad, 1) == 1);
-	CHECK(sx_squad_set_target_kind(squad, ENEMY) == 0);
+		sx_member m = {0};
+		walker *w = &walkers[i];
+		int32_t option;
 
-	/* An elite squad (skill 192) knows all three levels: rush, a line and
-	 * the flank from three sides; the flank scores best. */
-	CHECK(sx_squad_set_skill(squad, 192) == 0);
+		m.id = (uint32_t)members[i][0];
+		m.pos[0] = members[i][1];
+		m.pos[1] = members[i][2];
+		m.skill = SKILL;
+		m.state = SX_MEMBER_ACTIVE;
+		CHECK(sx_crew_add_member(crew, &m) == i);
+
+		w->id = m.id;
+		w->pos[0] = m.pos[0];
+		w->pos[1] = m.pos[1];
+		w->pos[2] = 0;
+		w->decider = sx_decider_new();
+		CHECK(w->decider != NULL);
+		option = sx_keeper_add_goal_option(w->decider, SX_ONE);
+		CHECK(option >= 0);
+		w->goal_option = (uint32_t)option;
+		option = sx_decider_add_option(w->decider, SX_ONE / 4);
+		CHECK(option >= 0);
+		w->idle_option = (uint32_t)option;
+		w->nav = sx_nav_new(&rules);
+		CHECK(w->nav != NULL);
+		w->way_len = 0;
+		w->next = 0;
+		w->from = 0;
+		w->on_goal = 0;
+	}
+
+	squad = sx_crew_squad(crew);
+	CHECK(squad != NULL);
+	/* Orders reach the leader at once, the others by radio: 2 ticks plus 1
+	 * per cell. */
+	for (i = 1; i < MEMBERS; i++)
+		CHECK(sx_squad_set_radio(squad, walkers[i].id, 2, 1) == 1);
+	CHECK(sx_squad_set_leader(squad, 1) == 1);
+	CHECK(sx_squad_set_skill(squad, SKILL) == 0);
+	CHECK(sx_squad_set_target_kind(squad, ENEMY) == 0);
 	CHECK(sx_squad_add_rush(squad) == 0);
 	CHECK(sx_squad_add_formation(squad, SX_SHAPE_LINE, 2) == 1);
 	CHECK(sx_squad_add_flank(squad, 3, 4) == 2);
-	CHECK(sx_squad_add_flank(squad, 4, 4) == SX_ERROR_ARGUMENT);
-
-	/* The leader sees E1 itself; member 2 reports E2. */
-	seen.subject = E1;
+	seen.subject = 10;
 	seen.kind = ENEMY;
 	seen.pos[0] = 20;
-	CHECK(sx_squad_observe(squad, 0, &seen, NULL) == 0);
-	told.kind = SX_REPORT_ENEMY;
-	told.subject = E2;
-	told.pos[0] = 24;
-	told.pos[1] = 10;
-	told.sender = 2;
-	CHECK(sx_squad_report(squad, &told, 0) == 1);
+	seen.pos[1] = 5;
+	CHECK(sx_crew_observe(crew, 0, &seen, NULL) == 0);
 
-	spots[0] = spot(16, 0, SX_TAG_COVER);
-	spots[1] = spot(16, 2, 0);
-	spots[2] = spot(20, 4, SX_TAG_HIGH);
-	spots[3] = spot(20, -4, 0);
-	spots[4] = spot(12, 8, SX_TAG_COVER);
+	spots[0] = spot(16, 5, SX_TAG_COVER);
+	spots[1] = spot(16, 7, 0);
+	spots[2] = spot(20, 9, SX_TAG_HIGH);
+	spots[3] = spot(20, 1, 0);
 
-	for (t = 0; t <= 60; t++) {
-		uint32_t id = 0;
-		int32_t status;
+	for (t = 0; t <= END; t++) {
+		uint32_t total = 0;
+		int32_t n;
 
-		/* The game moves its members one cell per STEP ticks. */
+		/* 1. Walk: one cell per STEP ticks after the start, for a member
+		 * on its goal. */
 		for (i = 0; i < MEMBERS; i++) {
 			walker *w = &walkers[i];
-			sx_member at;
+			uint32_t d = t - w->from;
 
-			if (!w->has_goal)
-				continue;
-			CHECK(sx_squad_member_at(squad, (uint32_t)i, &at) == 1);
-			if (t > w->start_at && (t - w->start_at) % STEP == 0) {
-				step_toward(at.pos, w->goal.pos);
-				CHECK(sx_squad_set_pos(squad, w->id, at.pos[0], at.pos[1], at.pos[2]) == 1);
-			}
-			if ((w->goal.has_then_pos || w->goal.start == SX_START_ON_SIGNAL) && !w->gathered &&
-			    at.pos[0] == w->goal.pos[0] && at.pos[1] == w->goal.pos[1]) {
-				w->gathered = 1;
-				CHECK(sx_squad_arrived(squad, w->id, t) == 1);
-				printf("%3u: member %u gathered\n", (unsigned)t, (unsigned)w->id);
+			if (w->on_goal && d > 0 && d < 0x80000000u && d % STEP == 0 &&
+			    w->next < w->way_len) {
+				CHECK(sx_point_to_pos(w->way[w->next], w->pos) == 0);
+				w->next++;
+				CHECK(sx_crew_set_pos(crew, w->id, w->pos) == 1);
 			}
 		}
 
-		status = sx_squad_check(squad, t, NULL, 0, spots, 5, 7, &id);
-		CHECK(status >= 0);
-		if (status == SX_SQUAD_REPLAN) {
-			sx_plan plan;
-
-			CHECK(sx_squad_pending_plan(squad, &plan, NULL, 0) == 1);
-			printf("%3u: plan %u, tactic %u on %u\n", (unsigned)t, (unsigned)id,
-			       (unsigned)plan.tactic, (unsigned)plan.target);
-			plans++;
-		} else if (status == SX_SQUAD_SIGNAL) {
-			printf("%3u: signal\n", (unsigned)t);
-			signal_at = t;
-			signals++;
-		}
-
-		n = sx_squad_orders_due(squad, t, out, 8);
-		CHECK(n >= 0);
+		/* 2. The group. */
+		n = sx_crew_tick(crew, t, NULL, 0, spots, 4, SEED, events, EVENTS, &total);
+		CHECK(n >= 0 && (uint32_t)n == total);
 		for (i = 0; i < n; i++) {
-			int32_t k;
+			const sx_crew_event *e = &events[i];
 
-			for (k = 0; k < MEMBERS; k++)
-				if (walkers[k].id == out[i].member)
-					break;
-			CHECK(k < MEMBERS);
-			walkers[k].has_goal = 1;
-			walkers[k].goal = out[i].goal;
-			walkers[k].start_at = t + out[i].goal.start_delay +
-			                      (out[i].goal.start == SX_START_AFTER_TICKS ?
-			                       out[i].goal.start_ticks : 0);
-			walkers[k].gathered = 0;
-			printf("%3u: order for %u to %d, %d\n", (unsigned)t, (unsigned)out[i].member,
-			       (int)out[i].goal.pos[0], (int)out[i].goal.pos[1]);
-		}
+			if (e->kind == SX_CREW_ORDER) {
+				walker *w = NULL;
+				sx_point start, goal;
+				int32_t k;
 
-		for (i = 0; i < MEMBERS; i++) {
-			const walker *w = &walkers[i];
-
-			if (w->has_goal && w->goal.kind == SX_GOAL_ATTACK &&
-			    w->goal.start != SX_START_ON_SIGNAL && w->start_at == t) {
-				printf("%3u: member %u attacks\n", (unsigned)t, (unsigned)w->id);
-				CHECK(attacks == 0 || attack_at == t);
-				attack_at = t;
-				attacks++;
+				for (k = 0; k < MEMBERS; k++)
+					if (walkers[k].id == e->member)
+						w = &walkers[k];
+				CHECK(w != NULL && e->goal.has_pos);
+				CHECK(sx_pos_to_point(w->pos, &start) == 0);
+				CHECK(sx_pos_to_point(e->goal.pos, &goal) == 0);
+				w->way_len = sx_nav_find_path(w->nav, &map, start, &goal, 1, 0,
+				                              SX_OUT_CELLS, w->way, CELLS, NULL);
+				CHECK(w->way_len >= 0);
+				w->next = 1;
+				w->from = e->has_start_at ? e->start_at : t;
+			}
+			switch (e->kind) {
+			case SX_CREW_PLANNED:
+			case SX_CREW_ACTIVATED:
+				printf("t=%3u %s plan %u\n", (unsigned)t, kind_name(e->kind),
+				       (unsigned)e->plan);
+				break;
+			case SX_CREW_ORDER:
+			case SX_CREW_START:
+			case SX_CREW_ARRIVED:
+			case SX_CREW_BROKEN:
+				printf("t=%3u %s member %u\n", (unsigned)t, kind_name(e->kind),
+				       (unsigned)e->member);
+				break;
+			default:
+				printf("t=%3u %s\n", (unsigned)t, kind_name(e->kind));
 			}
 		}
-	}
-	CHECK(plans == 1);
-	CHECK(signals == 1 && signal_at == 49);
-	CHECK(attacks == MEMBERS && attack_at == 55);
-	printf("flank: one plan, one signal, all attack at %u\n", (unsigned)attack_at);
 
-	/* A member keeps its goal; postponed for longer than its skill allows,
-	 * the goal counts as broken and goes back to the leader as a report. */
-	{
-		sx_keeper *keeper = sx_keeper_new();
-		sx_skill_table table;
-		sx_message broken;
-		int32_t inputs[5];
-		uint32_t give_up;
+		/* 3. Each member decides: its goal or idle. */
+		for (i = 0; i < MEMBERS; i++) {
+			walker *w = &walkers[i];
+			sx_member_inputs in;
+			sx_candidate candidates[2];
+			int32_t rows[2][5];
+			sx_choice choice;
+			int32_t chosen, k;
 
-		CHECK(keeper != NULL);
-		CHECK(sx_skill_table_default(&table) == 0);
-		give_up = table.give_up_ticks[192 / 64];
-		CHECK(sx_keeper_set(keeper, 60, &walkers[1].goal) == 0);
-		CHECK(sx_keeper_inputs(keeper, 60, 16, 2, 0, SX_METRIC_CHEBYSHEV, 1,
-		                       (uint32_t)sx_skill_table_hold_bonus_for(&table, 192), inputs) == 0);
-		CHECK(inputs[SX_KEEPER_IN_HAS_GOAL] == 1 && inputs[SX_KEEPER_IN_SIGNAL] == 1);
-		CHECK(sx_keeper_goal_postponed(keeper, 61) == 0);
-		CHECK(sx_keeper_broken(keeper, 61 + give_up - 1, give_up) == 0);
-		CHECK(sx_keeper_broken(keeper, 61 + give_up, give_up) == 1);
-		CHECK(sx_report_goal_broken(walkers[1].id, walkers[1].goal.plan, &broken) == 0);
-		CHECK(sx_squad_report(squad, &broken, 61 + give_up) == 1);
-		printf("member %u gave its goal up after %u ticks\n", (unsigned)walkers[1].id,
-		       (unsigned)give_up);
-		sx_keeper_free(keeper);
-	}
-
-	/* A tactic of the game's own: everyone holds a choke spot. */
-	{
-		sx_tactic *hold = sx_tactic_new(SX_ONE / 2, 0, 1);
-		sx_slot slot = {0};
-
-		CHECK(hold != NULL);
-		slot.min = 1;
-		slot.max = 255;
-		slot.place.kind = SX_PLACE_TAGGED;
-		slot.place.value = SX_TAG_CHOKE;
-		slot.dist = 4; /* choke spots count within 3 * 4 of the group centre */
-		slot.kind = SX_GOAL_HOLD;
-		slot.start = SX_START_NOW;
-		CHECK(sx_tactic_add_slot(hold, &slot) == 0);
-		CHECK(sx_tactic_add_abort(hold, SX_IN_LOSSES, 2) == 0);
-		CHECK(sx_tactic_trigger_none(hold) == 0);
-		CHECK(sx_squad_add_tactic(squad, hold) == 3);
-		CHECK(sx_squad_validate(squad, NULL, NULL) == 0);
+			CHECK(sx_crew_member_inputs(crew, w->id, t, &in) == 1);
+			CHECK(sx_keeper_set_current(sx_crew_keeper(crew, w->id), w->decider,
+			                            w->goal_option, (uint32_t)in.discipline) == 0);
+			for (k = 0; k < 2; k++) {
+				rows[k][SX_KEEPER_IN_HAS_GOAL] = in.has_goal;
+				rows[k][SX_KEEPER_IN_DIST] = in.dist;
+				rows[k][SX_KEEPER_IN_AGE] = in.age;
+				rows[k][SX_KEEPER_IN_SIGNAL] = in.signal;
+				rows[k][SX_KEEPER_IN_DISCIPLINE] = in.discipline;
+			}
+			candidates[0].option = w->goal_option;
+			candidates[0].target = 0;
+			candidates[1].option = w->idle_option;
+			candidates[1].target = 0;
+			chosen = sx_decider_decide(w->decider, candidates, 2, &rows[0][0], 5,
+			                           SX_PICK_BEST, 0, 0, NULL, &choice);
+			CHECK(chosen >= 0);
+			w->on_goal = chosen == 1 && choice.candidate == 0;
+			CHECK(sx_crew_member_chose(crew, w->id, t, (uint32_t)w->on_goal) == 1);
+		}
 	}
 
-	sx_squad_free(squad);
+	for (i = 0; i < MEMBERS; i++) {
+		sx_nav_free(walkers[i].nav);
+		sx_decider_free(walkers[i].decider);
+	}
+	sx_crew_free(crew);
+	sx_grid_free(grid);
 	return 0;
 }
