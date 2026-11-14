@@ -2,6 +2,7 @@
 
 use super::{Activity, Mission, View};
 use crate::memory::{Knowledge, Pos};
+use crate::mission::rules::MissionRules;
 use crate::mission::types::{Action, Detour, DetourEnd, Event, OnLost, StepKind, Where};
 
 /// The search that runs when the subject of an `Engage` is lost and the
@@ -181,14 +182,14 @@ impl Mission {
         self.last_pos
     }
 
-    pub(super) fn run_detour(&mut self, view: View<'_>) -> Action {
+    pub(super) fn run_detour(&mut self, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
         let anchor = *self.detour.anchor.get_or_insert(view.pos);
         if self.detour.end_asked {
-            return self.end_with(DetourEnd::Ended, view);
+            return self.end_with(DetourEnd::Ended, view, rules);
         }
         match self.detour.kind {
-            Detour::Engage(subject) => self.engage(subject, anchor, view),
-            Detour::Flee { from, to } => self.flee(from, to, view),
+            Detour::Engage(subject) => self.engage(subject, anchor, view, rules),
+            Detour::Flee { from, to } => self.flee(from, to, view, rules),
             Detour::Custom { kind, at, param } => Action::Custom {
                 kind,
                 pos: self.resolve(at, view),
@@ -197,12 +198,18 @@ impl Mission {
         }
     }
 
-    fn engage(&mut self, subject: u32, anchor: Pos, view: View<'_>) -> Action {
+    fn engage(
+        &mut self,
+        subject: u32,
+        anchor: Pos,
+        view: View<'_>,
+        rules: &mut dyn MissionRules,
+    ) -> Action {
         let Some(fact) = self.fact(subject, view) else {
-            return self.end_with(DetourEnd::Forgotten, view);
+            return self.end_with(DetourEnd::Forgotten, view, rules);
         };
         if self.defeated(fact) {
-            return self.end_with(DetourEnd::Defeated, view);
+            return self.end_with(DetourEnd::Defeated, view, rules);
         }
         let leash = self.leeway.leash;
         let too_far = leash
@@ -212,7 +219,7 @@ impl Mission {
             .ticks
             .is_some_and(|t| view.now.wrapping_sub(self.detour.started_at) > t);
         if too_far || too_long {
-            return self.end_with(DetourEnd::Leash, view);
+            return self.end_with(DetourEnd::Leash, view, rules);
         }
         let pos = self.pos_in(fact.pos);
         let attack = Action::Attack { subject, pos };
@@ -221,7 +228,7 @@ impl Mission {
             return attack;
         }
         match leash.on_lost {
-            OnLost::Return => self.end_with(DetourEnd::Lost, view),
+            OnLost::Return => self.end_with(DetourEnd::Lost, view, rules),
             OnLost::Keep => attack,
             OnLost::Search { ticks, radius } => {
                 let s = self.detour.search.get_or_insert(LostSearch {
@@ -231,7 +238,7 @@ impl Mission {
                 });
                 let s = *s;
                 if view.now.wrapping_sub(s.begun_at) >= ticks {
-                    return self.end_with(DetourEnd::Lost, view);
+                    return self.end_with(DetourEnd::Lost, view, rules);
                 }
                 let (point, at) = self.search_step(s.point, s.centre, radius, view.pos);
                 self.detour.search = Some(LostSearch { point, ..s });
@@ -240,16 +247,22 @@ impl Mission {
         }
     }
 
-    fn flee(&mut self, from: Where, to: Option<Pos>, view: View<'_>) -> Action {
+    fn flee(
+        &mut self,
+        from: Where,
+        to: Option<Pos>,
+        view: View<'_>,
+        rules: &mut dyn MissionRules,
+    ) -> Action {
         let Some(from) = self.resolve(from, view) else {
-            return self.end_with(DetourEnd::Safe, view);
+            return self.end_with(DetourEnd::Safe, view, rules);
         };
         let to = to.map(|p| self.pos_in(p));
         if to.is_some_and(|p| self.arrived(view.pos, p)) {
-            return self.end_with(DetourEnd::Arrived, view);
+            return self.end_with(DetourEnd::Arrived, view, rules);
         }
         if !self.within(view.pos, from, self.config.safe_distance) {
-            return self.end_with(DetourEnd::Safe, view);
+            return self.end_with(DetourEnd::Safe, view, rules);
         }
         Action::Flee(to.unwrap_or_else(|| self.away_from(view.pos, from)))
     }
@@ -271,18 +284,18 @@ impl Mission {
     }
 
     /// Ends the detour: emits the event and starts the walk back.
-    fn end_with(&mut self, why: DetourEnd, view: View<'_>) -> Action {
+    fn end_with(&mut self, why: DetourEnd, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
         self.emit(Event::DetourEnded(why));
         self.activity = Activity::Returning;
         self.detour.search = None;
         self.detour.end_asked = false;
-        self.run_return(view)
+        self.run_return(view, rules)
     }
 
-    pub(super) fn run_return(&mut self, view: View<'_>) -> Action {
+    pub(super) fn run_return(&mut self, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
         let anchor = self.detour.anchor.unwrap_or(view.pos);
         if self.arrived(view.pos, anchor) || self.resumed_step_goes_elsewhere(anchor, view) {
-            return self.resume(view);
+            return self.resume(view, rules);
         }
         Action::GoTo(anchor)
     }
@@ -305,7 +318,7 @@ impl Mission {
     }
 
     /// Back from the detour: what ran before goes on.
-    fn resume(&mut self, view: View<'_>) -> Action {
+    fn resume(&mut self, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
         self.emit(Event::Returned);
         self.activity = self.detour.resume;
         match self.activity {
@@ -320,11 +333,12 @@ impl Mission {
                 }
                 // The fail conditions were not checked during the detour;
                 // the plan checks them now. A plan that broke during the
-                // detour breaks here (replanning hooks in at the break).
-                self.run_plan(view)
+                // detour breaks here and replans or falls back.
+                self.run_plan(view, rules)
             }
-            Activity::Wander => Action::Wander,
-            _ => Action::None,
+            Activity::Wander => self.run_wander(view, rules),
+            // No plan before the detour: take one now.
+            _ => self.replace_plan(view, None, rules),
         }
     }
 }

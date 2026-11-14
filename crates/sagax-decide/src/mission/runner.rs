@@ -1,15 +1,23 @@
 //! Running a plan: [`Mission`] and its tick.
 
+use super::rules::{BuiltInRules, FailCtx, MissionRules};
 use super::types::{
     Action, BreakReason, Event, Fail, Leeway, MAX_EVENTS, MissionConfig, MissionError, Motive,
-    Plan, Step, StepKind, Where,
+    Plan, StepKind, Where,
 };
 use crate::memory::{Fact, Knowledge, Metric, Pos, distance, points_around};
 
 #[path = "detour.rs"]
 mod detour;
+#[path = "replan.rs"]
+mod replan;
 
 use detour::DetourState;
+pub use replan::{
+    DEFAULT_PREFERENCE, DIST_CAP, IN_DIST, IN_EXTRA, IN_FEASIBLE, IN_KNOWN, IN_PREF, IN_WIDEN,
+    KNOWN_CAP, WIDEN_PREFERENCE,
+};
+use replan::{MAX_BUILT_IN_STEPS, Replan};
 
 /// What one [`Mission::tick`] gives the game: the action to take now and
 /// what happened on the way.
@@ -30,14 +38,13 @@ impl<'a> Output<'a> {
 /// What the mission is doing at the moment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Activity {
-    /// No plan to run.
+    /// No plan yet: the next tick replans (or holds where it stands).
     Idle,
     /// Running the plan at [`StepState::index`].
     Plan,
-    /// The plan ended in a `Wander` step: wander until given a new plan.
+    /// The plan ended in a `Wander` step: wander until a condition of the
+    /// plan fires or the game gives a new plan.
     Wander,
-    /// The plan ended or broke: nothing to do until given a new plan.
-    Stopped,
     /// A detour runs; what ran before waits in [`DetourState::resume`].
     Detour,
     /// The detour ended: walking back to the anchor before resuming.
@@ -90,9 +97,13 @@ pub struct Mission {
     config: MissionConfig,
     motive: Motive,
     leeway: Leeway,
-    /// The plan storage (capacity `max_steps`); valid while `has_plan`.
+    /// The plan storage (capacity `max_steps`, at least the longest
+    /// built-in plan); valid while `has_plan`.
     plan: Plan,
     has_plan: bool,
+    /// The decider option the running plan came from; `None` for a plan
+    /// the game set and for holding after a fallback.
+    running_option: Option<u32>,
     /// The plan was just set: its first step begins at the next tick.
     pending_start: bool,
     activity: Activity,
@@ -100,6 +111,7 @@ pub struct Mission {
     /// Where the character stood at the last tick (internal coordinates).
     last_pos: Option<Pos>,
     detour: DetourState,
+    replan: Replan,
     events: Vec<Event>,
 }
 
@@ -119,11 +131,13 @@ impl Mission {
             return Err(MissionError::HexNeedsHexMetric);
         }
         Ok(Self {
-            plan: Plan::with_capacity(config.max_steps),
+            plan: Plan::with_capacity(config.max_steps.max(MAX_BUILT_IN_STEPS)),
+            replan: Replan::new(&config),
             config,
             motive,
             leeway: Leeway::default(),
             has_plan: false,
+            running_option: None,
             pending_start: false,
             activity: Activity::Idle,
             step: StepState::default(),
@@ -173,6 +187,7 @@ impl Mission {
         }
         self.plan.copy_from(plan);
         self.has_plan = true;
+        self.running_option = None;
         self.pending_start = true;
         match self.activity {
             Activity::Detour | Activity::Returning => self.detour.resume = Activity::Plan,
@@ -182,7 +197,9 @@ impl Mission {
         Ok(())
     }
 
-    /// The plan given last, if any (also after it ended or broke).
+    /// The plan that runs, or ran last (also after it ended or broke): the
+    /// one the game set, a playbook plan, a built-in plan, or the
+    /// `Hold(Here)` of a fallback. `None` before the first.
     pub fn plan(&self) -> Option<&Plan> {
         self.has_plan.then_some(&self.plan)
     }
@@ -201,7 +218,14 @@ impl Mission {
 
     /// Runs one tick at time `now` for a character standing at `pos`, from
     /// what it knows (`knowledge`) and the game's condition bits for it
-    /// (`flags`, built from that knowledge).
+    /// (`flags`, built from that knowledge). [`Mission::tick_with`] with
+    /// [`BuiltInRules`].
+    pub fn tick(&mut self, now: u32, pos: Pos, knowledge: &Knowledge, flags: u64) -> Output<'_> {
+        self.tick_with(now, pos, knowledge, flags, &mut BuiltInRules)
+    }
+
+    /// [`Mission::tick`] with the game's rules (see [`MissionRules`] for
+    /// the slots and their order).
     ///
     /// Each tick: the fail conditions of the running step, then those of
     /// the plan; a fail breaks the plan. Then the step: impossible (a
@@ -209,12 +233,51 @@ impl Mission {
     /// `skip_if_impossible`, counts as done; done emits
     /// [`Event::StepDone`] and the next step begins and gives the action.
     /// After the last step a looping plan emits [`Event::Looped`] and starts
-    /// again; otherwise [`Event::PlanDone`] and the action is
-    /// [`Action::None`].
+    /// again; otherwise [`Event::PlanDone`], and the end counts as a break
+    /// ([`BreakReason::PlanEnded`]). A plan that ends in a `Wander` step
+    /// wanders instead (no replan) until a condition of the plan fires.
+    /// `Call` and `Squad` steps emit [`Event::Call`] (with the character's
+    /// position) and [`Event::WantsSquad`] when the character may widen
+    /// ([`Leeway::replan`] and [`Leeway::widen`]); else they only count as
+    /// done.
+    ///
+    /// **On a break** the tick emits [`Event::Broken`], then:
+    ///
+    /// - with [`Leeway::replan`]: every filled playbook slot (a widening one
+    ///   only when the character may widen; a playbook plan that just ended
+    ///   is no candidate), the default plan of the motive and, when the
+    ///   character may widen, the built-in widening plan (a call for help,
+    ///   then the default plan; for `Guard` and `Defeat`) are scored by the
+    ///   [`Mission::decider`] and picked by [`MissionConfig::pick`] (seed:
+    ///   `now` with the mission's id). The winner starts at its first step
+    ///   at once, [`Event::Replanned`]. When every candidate scores 0: the
+    ///   default plan if it is feasible, else `Hold(Here)`, both
+    ///   [`Event::FellBack`].
+    /// - without: `Hold(Here)` where the character stands, [`Event::FellBack`].
+    ///
+    /// The default plan, built from what the character knows at that
+    /// moment: `Guard` follows its subject, or goes to its place and holds
+    /// it; `Defeat` attacks its subject (or with none the nearest known
+    /// enemy: [`MissionConfig::enemy_bits`], not defeated, lower id on equal
+    /// distance) when seen within `lost_after` ticks, else searches its last
+    /// known position for `lost_after` ticks; `Reach` goes to its place,
+    /// gives [`MissionConfig::reached_signal`] and holds there; `Custom` has
+    /// none.
+    ///
+    /// Without a plan (none set yet) the tick does what a break does,
+    /// without [`Event::Broken`].
     ///
     /// During a detour the detour runs instead and no fail condition is
-    /// checked; see [`Mission::detour`].
-    pub fn tick(&mut self, now: u32, pos: Pos, knowledge: &Knowledge, flags: u64) -> Output<'_> {
+    /// checked; a plan that broke meanwhile breaks on the resume. See
+    /// [`Mission::detour`].
+    pub fn tick_with(
+        &mut self,
+        now: u32,
+        pos: Pos,
+        knowledge: &Knowledge,
+        flags: u64,
+        rules: &mut dyn MissionRules,
+    ) -> Output<'_> {
         self.events.clear();
         let view = View {
             now,
@@ -228,11 +291,11 @@ impl Mission {
             self.emit(Event::DetourStarted);
         }
         let action = match self.activity {
-            Activity::Idle | Activity::Stopped => Action::None,
-            Activity::Wander => Action::Wander,
-            Activity::Plan => self.run_plan(view),
-            Activity::Detour => self.run_detour(view),
-            Activity::Returning => self.run_return(view),
+            Activity::Idle => self.replace_plan(view, None, rules),
+            Activity::Wander => self.run_wander(view, rules),
+            Activity::Plan => self.run_plan(view, rules),
+            Activity::Detour => self.run_detour(view, rules),
+            Activity::Returning => self.run_return(view, rules),
         };
         Output {
             action: self.action_out(action),
@@ -240,49 +303,72 @@ impl Mission {
         }
     }
 
-    fn run_plan(&mut self, view: View<'_>) -> Action {
+    fn run_plan(&mut self, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
         if self.pending_start {
             self.pending_start = false;
             self.begin(0, view);
         }
-        let step = self.plan.steps()[self.step.index];
-        if let Some(fail) = self.first_fail(&step, view) {
-            return self.break_plan(BreakReason::Fail(fail));
+        let index = self.step.index;
+        let step = self.plan.steps()[index];
+        if let Some(fail) = self.first_fail(&step.fails, index, self.plan.fails(), view, rules) {
+            return self.break_plan(BreakReason::Fail(fail), view, rules);
         }
         let Some(action) = self.step_action(step.kind, view) else {
             return if step.skip_if_impossible {
-                self.advance(view)
+                self.advance(view, rules)
             } else {
-                self.break_plan(BreakReason::Impossible)
+                self.break_plan(BreakReason::Impossible, view, rules)
             };
         };
         if !self.step_done(step.kind, action, view) {
             return action;
         }
+        let widen = self.leeway.replan && self.leeway.widen;
         match step.kind {
             StepKind::Wander => {
-                self.emit(Event::StepDone(self.step.index as u16));
+                self.emit(Event::StepDone(index as u16));
                 self.emit(Event::PlanDone);
                 self.activity = Activity::Wander;
-                Action::Wander
+                return Action::Wander;
             }
-            StepKind::Signal(n) => {
-                self.emit(Event::Signal(n));
-                self.advance(view)
+            StepKind::Signal(n) => self.emit(Event::Signal(n)),
+            StepKind::Call { channel, kind } if widen => self.emit(Event::Call {
+                channel,
+                kind,
+                pos: self.pos_out(view.pos),
+            }),
+            StepKind::Squad { tactic, target } if widen => {
+                let pos = self.resolve(target, view).map(|p| self.pos_out(p));
+                self.emit(Event::WantsSquad {
+                    tactic,
+                    target: pos,
+                    subject: self.subject_of(target),
+                });
             }
-            _ => self.advance(view),
+            _ => {}
+        }
+        self.advance(view, rules)
+    }
+
+    /// The plan ended in a `Wander` step: wander on until a condition of
+    /// the plan fires.
+    fn run_wander(&mut self, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
+        match self.first_fail(&[], 0, self.plan.fails(), view, rules) {
+            Some(fail) => self.break_plan(BreakReason::Fail(fail), view, rules),
+            None => Action::Wander,
         }
     }
 
     /// Ends the running step and begins the next; returns its action.
-    fn advance(&mut self, view: View<'_>) -> Action {
+    fn advance(&mut self, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
         self.emit(Event::StepDone(self.step.index as u16));
         let mut next = self.step.index + 1;
         if next == self.plan.steps().len() {
             if !self.plan.repeat {
                 self.emit(Event::PlanDone);
-                self.activity = Activity::Stopped;
-                return Action::None;
+                self.emit(Event::Broken(BreakReason::PlanEnded));
+                let finished = self.running_option.filter(|&o| o < self.default_option());
+                return self.replace_plan(view, finished, rules);
             }
             self.emit(Event::Looped);
             next = 0;
@@ -304,23 +390,40 @@ impl Mission {
         };
     }
 
-    fn break_plan(&mut self, reason: BreakReason) -> Action {
+    fn break_plan(
+        &mut self,
+        reason: BreakReason,
+        view: View<'_>,
+        rules: &mut dyn MissionRules,
+    ) -> Action {
         self.emit(Event::Broken(reason));
-        self.activity = Activity::Stopped;
-        Action::None
+        self.replace_plan(view, None, rules)
     }
 
-    /// The first fail condition that holds: the step's, then the plan's.
-    fn first_fail(&self, step: &Step, view: View<'_>) -> Option<Fail> {
-        step.fails
-            .iter()
-            .chain(self.plan.fails())
-            .flatten()
-            .copied()
-            .find(|&f| self.fails(f, view))
+    /// The first fail condition that holds: those of step `index`
+    /// (`step_fails`), then the plan's. [`Fail::Custom`] asks the rules.
+    fn first_fail(
+        &self,
+        step_fails: &[Option<Fail>],
+        index: usize,
+        plan_fails: &[Option<Fail>],
+        view: View<'_>,
+        rules: &mut dyn MissionRules,
+    ) -> Option<Fail> {
+        let step = step_fails.iter().flatten().map(|&f| (Some(index), f));
+        let plan = plan_fails.iter().flatten().map(|&f| (None, f));
+        step.chain(plan)
+            .find(|&(step, f)| self.fails(f, step, view, rules))
+            .map(|(_, f)| f)
     }
 
-    fn fails(&self, fail: Fail, view: View<'_>) -> bool {
+    fn fails(
+        &self,
+        fail: Fail,
+        step: Option<usize>,
+        view: View<'_>,
+        rules: &mut dyn MissionRules,
+    ) -> bool {
         match fail {
             Fail::Unknown { subject } => self.fact(subject, view).is_none(),
             Fail::Defeated { subject } => {
@@ -336,8 +439,15 @@ impl Mission {
                 .get(subject, kind)
                 .is_some_and(|f| f.data & mask == value),
             Fail::Flags { mask, value } => view.flags & mask == value,
-            // The game's rules answer this; without rules it never fails.
-            Fail::Custom(_) => false,
+            Fail::Custom(id) => {
+                let ctx = FailCtx {
+                    now: view.now,
+                    pos: self.pos_out(view.pos),
+                    step,
+                    motive: self.motive,
+                };
+                rules.fail(&ctx, id)
+            }
         }
     }
 
@@ -388,8 +498,8 @@ impl Mission {
                 .is_some_and(|p| self.within(view.pos, p, radius)),
             StepKind::Attack(subject) => self.fact(subject, view).is_none_or(|f| self.defeated(f)),
             StepKind::Custom { .. } => self.step.finished,
-            // Call and Squad give their events only with widening (later);
-            // without, they count as done.
+            // Call and Squad are done at once (with widening they give
+            // their event first).
             StepKind::Wander
             | StepKind::Signal(_)
             | StepKind::Call { .. }
@@ -487,6 +597,14 @@ impl Mission {
         );
         let r = i128::from(radius);
         d <= if metric == Metric::Euclid { r * r } else { r }
+    }
+
+    /// Capacities of all storage, to check that ticking allocates nothing.
+    #[cfg(test)]
+    pub(super) fn capacities(&self) -> Vec<usize> {
+        let mut c = vec![self.events.capacity(), self.plan.capacity()];
+        c.extend(self.replan.capacities());
+        c
     }
 
     fn emit(&mut self, event: Event) {

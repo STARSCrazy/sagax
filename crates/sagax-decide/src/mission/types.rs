@@ -272,6 +272,21 @@ impl Plan {
         self.fails = other.fails;
     }
 
+    /// Makes this plan run `steps` once (or looping), without fail
+    /// conditions, without allocating while `steps` fits its capacity.
+    pub(super) fn set_steps(&mut self, steps: &[Step], repeat: bool) {
+        self.steps.clear();
+        self.steps.extend_from_slice(steps);
+        self.repeat = repeat;
+        self.fails = [None; MAX_FAILS];
+    }
+
+    /// The number of steps this plan holds without allocating.
+    #[cfg(test)]
+    pub(super) fn capacity(&self) -> usize {
+        self.steps.capacity()
+    }
+
     /// A plan that runs the steps once.
     pub fn once(steps: &[Step]) -> Self {
         Self::new(steps, false)

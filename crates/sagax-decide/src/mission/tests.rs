@@ -171,13 +171,14 @@ fn patrol_loops_like_a_script() {
 }
 
 #[test]
-fn no_plan_does_nothing() {
+fn no_plan_takes_default_plan() {
     let mut m = mission(MissionConfig::default());
-    let out = m.tick(0, [0, 0, 0], &knowledge(), 0);
-    assert_eq!(out.action, Action::None);
-    assert!(out.events().is_empty());
     assert_eq!(m.plan(), None);
     assert_eq!(m.step_index(), None);
+    let out = m.tick(0, [3, 0, 0], &knowledge(), 0);
+    assert_eq!(out.action, Action::GoTo([0, 0, 0]));
+    assert_eq!(out.events(), &[Event::Replanned { option: 8 }]);
+    assert_eq!(m.step_index(), Some(0));
 }
 
 #[test]
@@ -220,12 +221,18 @@ fn attack_done_when_known_defeated() {
     assert_eq!(out.events(), &[Event::StepDone(0)]);
     assert_eq!(out.action, Action::None);
     let out = m.tick(2, [1, 0, 0], &k, 0);
+    // The plan ends; the mission replans to the default plan.
     assert_eq!(
         out.events(),
-        &[Event::Signal(9), Event::StepDone(1), Event::PlanDone]
+        &[
+            Event::Signal(9),
+            Event::StepDone(1),
+            Event::PlanDone,
+            Event::Broken(BreakReason::PlanEnded),
+            Event::Replanned { option: 8 }
+        ]
     );
-    assert_eq!(out.action, Action::None);
-    assert_eq!(m.step_index(), None);
+    assert_eq!(out.action, Action::GoTo([0, 0, 0]));
 }
 
 #[test]
@@ -285,13 +292,19 @@ fn empty_knowledge_subject_step_breaks() {
     ] {
         let mut m = mission(MissionConfig::default());
         m.set_plan(&Plan::once(&[step])).unwrap();
-        let out = m.tick(0, [0, 0, 0], &k, 0);
-        assert_eq!(out.action, Action::None);
-        assert_eq!(out.events(), &[Event::Broken(BreakReason::Impossible)]);
-        let out = m.tick(1, [0, 0, 0], &k, 0);
-        assert_eq!(out.action, Action::None);
+        // The break replans to the default plan (go to the guarded place).
+        let out = m.tick(0, [1, 0, 0], &k, 0);
+        assert_eq!(out.action, Action::GoTo([0, 0, 0]));
+        assert_eq!(
+            out.events(),
+            &[
+                Event::Broken(BreakReason::Impossible),
+                Event::Replanned { option: 8 }
+            ]
+        );
+        let out = m.tick(1, [1, 0, 0], &k, 0);
+        assert_eq!(out.action, Action::GoTo([0, 0, 0]));
         assert!(out.events().is_empty());
-        assert_eq!(m.step_index(), None);
     }
 }
 
@@ -320,8 +333,12 @@ fn fails_break_step_then_plan() {
         .unwrap();
     assert_eq!(m.tick(0, [0, 0, 0], &k, 0).action, Action::Wait);
     let out = m.tick(1, [0, 0, 0], &k, 4);
-    assert_eq!(out.events(), &[Event::Broken(BreakReason::Fail(flag))]);
-    assert_eq!(out.action, Action::None);
+    let replanned = Event::Replanned { option: 8 };
+    assert_eq!(
+        out.events(),
+        &[Event::Broken(BreakReason::Fail(flag)), replanned]
+    );
+    assert_eq!(out.action, Action::GoTo([0, 0, 0]));
 
     // The step's fail is checked before the plan's.
     let step_fail = Fail::Unknown { subject: 6 };
@@ -330,7 +347,10 @@ fn fails_break_step_then_plan() {
     m.set_plan(&Plan::once(&[Step::wait(9).fails_when(step_fail)]).fails_when(plan_fail))
         .unwrap();
     let out = m.tick(0, [0, 0, 0], &k, 0);
-    assert_eq!(out.events(), &[Event::Broken(BreakReason::Fail(step_fail))]);
+    assert_eq!(
+        out.events(),
+        &[Event::Broken(BreakReason::Fail(step_fail)), replanned]
+    );
 
     // A fact condition on an unknown fact, a custom one and "defeated" on a
     // subject that is not are all false.
@@ -364,7 +384,10 @@ fn fails_break_step_then_plan() {
     assert!(m.tick(0, [0, 0, 0], &k, 0).events().is_empty());
     k.set_data(5, KIND, 8);
     let out = m.tick(1, [0, 0, 0], &k, 0);
-    assert_eq!(out.events(), &[Event::Broken(BreakReason::Fail(stolen))]);
+    assert_eq!(
+        out.events(),
+        &[Event::Broken(BreakReason::Fail(stolen)), replanned]
+    );
 }
 
 #[test]
@@ -1025,4 +1048,660 @@ fn hex_detour_in_offset() {
     assert!(!m.detour(3, Detour::Engage(5), &k));
     k.set_pos(5, KIND, [6, 2, 0]);
     assert!(m.detour(3, Detour::Engage(5), &k));
+}
+
+// ---- Breaks, replanning, default plans, widening, rules ----
+
+use crate::{Consideration, Curve, ONE, Pick};
+
+const STOLEN_KIND: u32 = 1;
+const ITEM: u32 = 20;
+const THIEF: u32 = 30;
+/// The default plan's option with the default config (8 playbook slots).
+const DEFAULT: u32 = 8;
+
+const STOLEN: Fail = Fail::Fact {
+    subject: ITEM,
+    kind: STOLEN_KIND,
+    mask: 1,
+    value: 1,
+};
+
+/// A patrol that breaks once the item is known as stolen.
+fn guarded_patrol() -> Plan {
+    Plan::looping(&[
+        Step::go_to([2, 0, 0]),
+        Step::wait(3),
+        Step::go_to([0, 0, 0]),
+    ])
+    .fails_when(STOLEN)
+}
+
+fn stolen_fact() -> Fact {
+    Fact {
+        subject: ITEM,
+        kind: STOLEN_KIND,
+        data: 1,
+        ..Fact::default()
+    }
+}
+
+fn thief_known() -> Knowledge {
+    let mut k = knowledge();
+    k.learn(0, fact(THIEF, [5, 0, 0]));
+    k
+}
+
+/// A guard on the patrol with "attack the thief" in its playbook.
+fn patrol_guard(leeway: Leeway) -> Mission {
+    let mut m = mission(MissionConfig::default());
+    m.set_leeway(leeway);
+    m.set_plan(&guarded_patrol()).unwrap();
+    assert_eq!(
+        m.add_playbook(&Plan::once(&[Step::attack(THIEF)]), ONE, false),
+        Ok(0)
+    );
+    m
+}
+
+/// Runs `m` for `ticks` ticks from `start`, walking toward each action;
+/// returns every event.
+fn run(m: &mut Mission, k: &Knowledge, pos: &mut Pos, start: u32, ticks: u32) -> Vec<Event> {
+    let mut events = Vec::new();
+    for now in start..start + ticks {
+        let out = m.tick(now, *pos, k, 0);
+        events.extend_from_slice(out.events());
+        *pos = step_toward(*pos, out.action);
+    }
+    events
+}
+
+fn broke(events: &[Event]) -> bool {
+    events.iter().any(|e| matches!(e, Event::Broken(_)))
+}
+
+#[test]
+fn stolen_item_replans_to_thief() {
+    let mut m = patrol_guard(Leeway::FLEXIBLE);
+    let mut k = thief_known();
+    let mut pos = [0, 0, 0];
+    assert!(!broke(&run(&mut m, &k, &mut pos, 0, 4)));
+    k.learn(4, stolen_fact());
+    let out = m.tick(4, pos, &k, 0);
+    assert_eq!(
+        out.events(),
+        &[
+            Event::Broken(BreakReason::Fail(STOLEN)),
+            Event::Replanned { option: 0 }
+        ]
+    );
+    assert_eq!(
+        out.action,
+        Action::Attack {
+            subject: THIEF,
+            pos: [5, 0, 0]
+        }
+    );
+    assert_eq!(m.plan().unwrap().steps(), &[Step::attack(THIEF)]);
+    assert_eq!(m.step_index(), Some(0));
+}
+
+#[test]
+fn strict_never_replans() {
+    let mut m = patrol_guard(Leeway::STRICT);
+    let mut k = thief_known();
+    let mut pos = [0, 0, 0];
+    assert!(!broke(&run(&mut m, &k, &mut pos, 0, 4)));
+    k.learn(4, stolen_fact());
+    let out = m.tick(4, pos, &k, 0);
+    assert_eq!(
+        out.events(),
+        &[Event::Broken(BreakReason::Fail(STOLEN)), Event::FellBack]
+    );
+    assert_eq!(out.action, Action::Hold(pos));
+    assert_eq!(m.plan().unwrap().steps(), &[Step::hold(Where::Here)]);
+    // It keeps holding there, the playbook ignored.
+    for now in 5..10 {
+        let out = m.tick(now, pos, &k, 0);
+        assert_eq!(out.action, Action::Hold(pos));
+        assert!(out.events().is_empty());
+    }
+}
+
+#[test]
+fn uninformed_guard_keeps_patrolling() {
+    let mut told = patrol_guard(Leeway::FLEXIBLE);
+    let mut other = patrol_guard(Leeway::FLEXIBLE);
+    let mut k_told = thief_known();
+    let k_other = thief_known();
+    let (mut p_told, mut p_other) = ([0, 0, 0], [0, 0, 0]);
+    run(&mut told, &k_told, &mut p_told, 0, 4);
+    run(&mut other, &k_other, &mut p_other, 0, 4);
+    // In the game's truth the item is gone; only one guard is told.
+    k_told.learn(4, stolen_fact());
+    assert!(broke(&run(&mut told, &k_told, &mut p_told, 4, 1)));
+    let events = run(&mut other, &k_other, &mut p_other, 4, 40);
+    assert!(!broke(&events));
+    assert!(events.contains(&Event::Looped));
+    assert_eq!(other.plan(), Some(&guarded_patrol()));
+}
+
+#[test]
+fn defeat_without_subject_attacks_nearest_enemy() {
+    let config = MissionConfig::default();
+    let (enemy, defeated) = (config.enemy_bits, config.defeated_bits);
+    let mut m = Mission::new(config, Motive::defeat_enemies()).unwrap();
+    let mut k = knowledge();
+    let with = |subject, pos, data| Fact {
+        data,
+        ..fact(subject, pos)
+    };
+    k.learn(0, with(7, [3, 0, 0], enemy));
+    k.learn(0, with(4, [-3, 0, 0], enemy));
+    // Nearer, but no enemy, or already defeated.
+    k.learn(0, with(2, [1, 0, 0], 0));
+    k.learn(0, with(3, [1, 1, 0], enemy | defeated));
+    let out = m.tick(0, [0, 0, 0], &k, 0);
+    assert_eq!(out.events(), &[Event::Replanned { option: DEFAULT }]);
+    // Equally near: the lower id.
+    assert_eq!(
+        out.action,
+        Action::Attack {
+            subject: 4,
+            pos: [-3, 0, 0]
+        }
+    );
+    // Once it is defeated the plan ends and the next enemy is taken.
+    k.set_data(4, KIND, enemy | defeated);
+    let out = m.tick(1, [0, 0, 0], &k, 0);
+    assert_eq!(
+        out.events(),
+        &[
+            Event::StepDone(0),
+            Event::PlanDone,
+            Event::Broken(BreakReason::PlanEnded),
+            Event::Replanned { option: DEFAULT }
+        ]
+    );
+    assert_eq!(
+        out.action,
+        Action::Attack {
+            subject: 7,
+            pos: [3, 0, 0]
+        }
+    );
+}
+
+#[test]
+fn default_plans_per_motive() {
+    let config = MissionConfig {
+        reached_signal: 9,
+        ..MissionConfig::default()
+    };
+    let lost_after = config.lost_after;
+    let mut k = knowledge();
+    k.learn(0, fact(5, [4, 0, 0]));
+    let first = |motive, now, k: &Knowledge| {
+        let mut m = Mission::new(config.clone(), motive).unwrap();
+        let out = m.tick(now, [0, 0, 0], k, 0);
+        (out.action, out.events().to_vec(), m.plan().cloned())
+    };
+    let replanned = vec![Event::Replanned { option: DEFAULT }];
+
+    let (a, e, p) = first(Motive::guard_place([2, 0, 0]), 0, &k);
+    assert_eq!((a, &e), (Action::GoTo([2, 0, 0]), &replanned));
+    assert_eq!(
+        p.unwrap().steps(),
+        &[
+            Step::go_to_where(Where::MotivePlace),
+            Step::hold(Where::MotivePlace)
+        ]
+    );
+
+    let (a, _, _) = first(Motive::guard_subject(5), 0, &k);
+    assert_eq!(
+        a,
+        Action::Follow {
+            subject: 5,
+            pos: [4, 0, 0]
+        }
+    );
+
+    let (_, e, p) = first(Motive::reach([2, 0, 0]), 0, &k);
+    assert_eq!(e, replanned);
+    assert_eq!(
+        p.unwrap().steps(),
+        &[
+            Step::go_to_where(Where::MotivePlace),
+            Step::signal(9),
+            Step::hold(Where::MotivePlace)
+        ]
+    );
+
+    // A subject not seen for longer than `lost_after`: search for it.
+    let (a, _, p) = first(Motive::defeat(5), lost_after + 1, &k);
+    assert!(matches!(a, Action::Search(_)));
+    assert_eq!(
+        p.unwrap().steps(),
+        &[Step::search(Where::Subject(5), 0, lost_after)]
+    );
+
+    // No default plan: hold where it stands.
+    let held = (Action::Hold([0, 0, 0]), vec![Event::FellBack]);
+    for motive in [
+        Motive::custom(1),
+        Motive::defeat(6),
+        Motive::guard_subject(6),
+    ] {
+        let (a, e, _) = first(motive, 0, &k);
+        assert_eq!((a, e), held.clone(), "{motive:?}");
+    }
+}
+
+#[test]
+fn no_plan_strict_holds_here() {
+    let mut m = mission(MissionConfig::default());
+    m.set_leeway(Leeway::STRICT);
+    let out = m.tick(0, [3, 0, 0], &knowledge(), 0);
+    assert_eq!(out.events(), &[Event::FellBack]);
+    assert_eq!(out.action, Action::Hold([3, 0, 0]));
+}
+
+/// Rules that log their calls and veto option 0.
+#[derive(Default)]
+struct Veto {
+    log: Vec<(&'static str, u32)>,
+}
+
+impl MissionRules for Veto {
+    fn fail(&mut self, _: &FailCtx, id: u32) -> bool {
+        self.log.push(("fail", id));
+        false
+    }
+
+    fn columns(&mut self, ctx: &PlanCtx, _: &mut [i32]) {
+        self.log.push(("columns", ctx.option));
+    }
+
+    fn score(&mut self, ctx: &PlanCtx, _: u32) -> Option<u32> {
+        self.log.push(("score", ctx.option));
+        (ctx.option == 0).then_some(0)
+    }
+}
+
+#[test]
+fn veto_by_rules() {
+    let mut m = patrol_guard(Leeway::FLEXIBLE);
+    let mut k = thief_known();
+    k.learn(0, stolen_fact());
+    let mut rules = Veto::default();
+    let out = m.tick_with(0, [0, 0, 0], &k, 0, &mut rules);
+    assert_eq!(
+        out.events(),
+        &[
+            Event::Broken(BreakReason::Fail(STOLEN)),
+            Event::Replanned { option: DEFAULT }
+        ]
+    );
+    assert_eq!(out.action, Action::GoTo([0, 0, 0]));
+    assert_eq!(
+        rules.log,
+        vec![("columns", 0), ("score", 0), ("columns", 8), ("score", 8)]
+    );
+}
+
+#[test]
+fn custom_fails_ask_rules_in_order() {
+    struct Fires {
+        log: Vec<(Option<usize>, u32)>,
+    }
+    impl MissionRules for Fires {
+        fn fail(&mut self, ctx: &FailCtx, id: u32) -> bool {
+            self.log.push((ctx.step, id));
+            id == 3
+        }
+    }
+    let mut m = mission(MissionConfig::default());
+    m.set_leeway(Leeway::STRICT);
+    m.set_plan(
+        &Plan::looping(&[Step::wait(9).fails_when(Fail::Custom(1))])
+            .fails_when(Fail::Custom(2))
+            .fails_when(Fail::Custom(3))
+            .fails_when(Fail::Custom(4)),
+    )
+    .unwrap();
+    let mut rules = Fires { log: Vec::new() };
+    let out = m.tick_with(0, [0, 0, 0], &knowledge(), 0, &mut rules);
+    assert_eq!(
+        out.events(),
+        &[
+            Event::Broken(BreakReason::Fail(Fail::Custom(3))),
+            Event::FellBack
+        ]
+    );
+    assert_eq!(rules.log, vec![(Some(0), 1), (None, 2), (None, 3)]);
+}
+
+#[test]
+fn same_seed_same_pick() {
+    let picks = || {
+        let mut m = mission(MissionConfig {
+            id: 3,
+            pick: Pick::Weighted { top: 0 },
+            ..MissionConfig::default()
+        });
+        for x in 1..4 {
+            m.add_playbook(
+                &Plan::looping(&[Step::hold(Where::Fixed([x, 0, 0]))]),
+                ONE,
+                false,
+            )
+            .unwrap();
+        }
+        let breaks = Plan::looping(&[Step::wait(9)]).fails_when(Fail::Flags { mask: 1, value: 1 });
+        let k = knowledge();
+        let mut options = Vec::new();
+        for now in 0..60 {
+            m.set_plan(&breaks).unwrap();
+            for e in m.tick(now, [0, 0, 0], &k, 1).events() {
+                if let Event::Replanned { option } = e {
+                    options.push(*option);
+                }
+            }
+        }
+        options
+    };
+    let a = picks();
+    assert_eq!(a.len(), 60);
+    assert_eq!(a, picks());
+    // Weighted: more than one plan gets picked.
+    assert!(a.iter().any(|&o| o != a[0]));
+}
+
+#[test]
+fn closer_plan_wins_with_distance_and_game_columns() {
+    struct Columns;
+    impl MissionRules for Columns {
+        fn columns(&mut self, ctx: &PlanCtx, out: &mut [i32]) {
+            // The game's own column: 1 for option 1.
+            out[0] = i32::from(ctx.option == 1);
+            assert!(ctx.feasible);
+        }
+    }
+    let mut m = mission(MissionConfig {
+        extra_columns: 1,
+        ..MissionConfig::default()
+    });
+    for x in [9, 2, 1] {
+        m.add_playbook(&Plan::once(&[Step::go_to([x, 0, 0])]), ONE, false)
+            .unwrap();
+    }
+    let near = Consideration::new(IN_DIST as u32, Curve::Inverse, 0, 10);
+    for o in 0..3 {
+        assert!(m.decider_mut().add_consideration(o, near));
+    }
+    // Option 2 is nearest, but the game's column rules it out.
+    let mine = Consideration::new(IN_EXTRA as u32, Curve::Step, 1, 1);
+    assert!(m.decider_mut().add_consideration(2, mine));
+    let out = m.tick_with(0, [0, 0, 0], &knowledge(), 0, &mut Columns);
+    assert_eq!(out.events(), &[Event::Replanned { option: 1 }]);
+    assert_eq!(out.action, Action::GoTo([2, 0, 0]));
+}
+
+#[test]
+fn playbook_slots() {
+    let mut m = mission(MissionConfig {
+        max_steps: 2,
+        max_playbook: 2,
+        ..MissionConfig::default()
+    });
+    assert_eq!((m.default_option(), m.widen_option()), (2, 3));
+    assert_eq!(m.decider().option_count(), 4);
+    let p = Plan::once(&[Step::pause()]);
+    assert_eq!(
+        m.add_playbook(&Plan::once(&[]), ONE, false),
+        Err(MissionError::EmptyPlan)
+    );
+    assert_eq!(
+        m.add_playbook(&Plan::once(&[Step::pause(); 3]), ONE, false),
+        Err(MissionError::TooManySteps)
+    );
+    assert_eq!(m.add_playbook(&p, ONE, false), Ok(0));
+    assert_eq!(m.add_playbook(&p, ONE, true), Ok(1));
+    assert_eq!(
+        m.add_playbook(&p, ONE, false),
+        Err(MissionError::PlaybookFull)
+    );
+    m.clear_playbook();
+    assert_eq!(m.add_playbook(&p, ONE, false), Ok(0));
+    // The options stay.
+    assert_eq!(m.decider().option_count(), 4);
+}
+
+#[test]
+fn widening_emits_call() {
+    let flag = Fail::Flags { mask: 1, value: 1 };
+    let mut m = mission(MissionConfig::default());
+    m.set_leeway(Leeway::FREE);
+    m.set_plan(&Plan::looping(&[Step::wait(9)]).fails_when(flag))
+        .unwrap();
+    let k = knowledge();
+    let widen = m.widen_option();
+    let out = m.tick(0, [1, 0, 0], &k, 1);
+    assert_eq!(
+        out.events(),
+        &[
+            Event::Broken(BreakReason::Fail(flag)),
+            Event::Replanned { option: widen }
+        ]
+    );
+    assert_eq!(out.action, Action::None);
+    assert_eq!(
+        m.plan().unwrap().steps(),
+        &[
+            Step::call(0, 0),
+            Step::go_to_where(Where::MotivePlace),
+            Step::hold(Where::MotivePlace)
+        ]
+    );
+    let out = m.tick(1, [1, 0, 0], &k, 0);
+    assert_eq!(
+        out.events(),
+        &[
+            Event::Call {
+                channel: 0,
+                kind: 0,
+                pos: [1, 0, 0]
+            },
+            Event::StepDone(0)
+        ]
+    );
+    assert_eq!(out.action, Action::GoTo([0, 0, 0]));
+
+    // A widening playbook plan asks for a squad tactic; without widening
+    // it is no candidate.
+    let squad = Plan::once(&[Step::squad(3, Where::Subject(THIEF)), Step::wait(5)]);
+    let k = thief_known();
+    for (leeway, chosen) in [(Leeway::FREE, Some(0)), (Leeway::FLEXIBLE, None)] {
+        let mut m = mission(MissionConfig::default());
+        m.set_leeway(leeway);
+        m.add_playbook(&squad, ONE, true).unwrap();
+        let out = m.tick(0, [0, 0, 0], &k, 0);
+        let option = chosen.unwrap_or(DEFAULT);
+        assert_eq!(out.events(), &[Event::Replanned { option }]);
+        let out = m.tick(1, [0, 0, 0], &k, 0);
+        if chosen.is_some() {
+            assert_eq!(
+                out.events(),
+                &[
+                    Event::WantsSquad {
+                        tactic: 3,
+                        target: Some([5, 0, 0]),
+                        subject: Some(THIEF)
+                    },
+                    Event::StepDone(0)
+                ]
+            );
+        } else {
+            assert_eq!(out.events(), &[Event::StepDone(0)]);
+        }
+    }
+}
+
+#[test]
+fn plan_end_replans_or_holds() {
+    let once = Plan::once(&[Step::go_to([1, 0, 0])]);
+    let k = knowledge();
+
+    // With replan: the playbook, then (the finished playbook plan is no
+    // candidate) the default plan.
+    let mut m = mission(MissionConfig::default());
+    m.set_plan(&once).unwrap();
+    m.add_playbook(&Plan::once(&[Step::wait(1)]), ONE, false)
+        .unwrap();
+    let out = m.tick(0, [1, 0, 0], &k, 0);
+    assert_eq!(
+        out.events(),
+        &[
+            Event::StepDone(0),
+            Event::PlanDone,
+            Event::Broken(BreakReason::PlanEnded),
+            Event::Replanned { option: 0 }
+        ]
+    );
+    assert_eq!(out.action, Action::Wait);
+    let out = m.tick(1, [1, 0, 0], &k, 0);
+    assert_eq!(
+        out.events(),
+        &[
+            Event::StepDone(0),
+            Event::PlanDone,
+            Event::Broken(BreakReason::PlanEnded),
+            Event::Replanned { option: DEFAULT }
+        ]
+    );
+    assert_eq!(out.action, Action::GoTo([0, 0, 0]));
+
+    // Without replan: hold where it stands.
+    let mut m = mission(MissionConfig::default());
+    m.set_leeway(Leeway::STRICT);
+    m.set_plan(&once).unwrap();
+    let out = m.tick(0, [1, 0, 0], &k, 0);
+    assert_eq!(
+        out.events(),
+        &[
+            Event::StepDone(0),
+            Event::PlanDone,
+            Event::Broken(BreakReason::PlanEnded),
+            Event::FellBack
+        ]
+    );
+    assert_eq!(out.action, Action::Hold([1, 0, 0]));
+}
+
+#[test]
+fn break_during_detour_replans_after_return() {
+    let mut m = mission(MissionConfig::default());
+    m.set_plan(&Plan::looping(&[Step::hold(Where::Fixed([0, 0, 0]))]).fails_when(STOLEN))
+        .unwrap();
+    m.add_playbook(&Plan::once(&[Step::attack(THIEF)]), ONE, false)
+        .unwrap();
+    let mut k = thief_known();
+    m.tick(0, [0, 0, 0], &k, 0);
+    let custom = Detour::Custom {
+        kind: 1,
+        at: Where::Here,
+        param: 0,
+    };
+    assert!(m.detour(0, custom, &k));
+    m.tick(1, [1, 0, 0], &k, 0);
+    k.learn(2, stolen_fact());
+    // Not checked during the detour.
+    assert!(!broke(m.tick(2, [1, 0, 0], &k, 0).events()));
+    m.end_detour();
+    let out = m.tick(3, [1, 0, 0], &k, 0);
+    assert_eq!(out.events(), &[Event::DetourEnded(DetourEnd::Ended)]);
+    assert_eq!(out.action, Action::GoTo([0, 0, 0]));
+    let out = m.tick(4, [0, 0, 0], &k, 0);
+    assert_eq!(
+        out.events(),
+        &[
+            Event::Returned,
+            Event::Broken(BreakReason::Fail(STOLEN)),
+            Event::Replanned { option: 0 }
+        ]
+    );
+    assert!(matches!(out.action, Action::Attack { subject: THIEF, .. }));
+}
+
+#[test]
+fn no_alloc_after_new() {
+    let mut m = Mission::new(
+        MissionConfig {
+            max_steps: 2,
+            max_playbook: 3,
+            extra_columns: 2,
+            pick: Pick::Weighted { top: 0 },
+            ..MissionConfig::default()
+        },
+        Motive::defeat_enemies(),
+    )
+    .unwrap();
+    m.set_leeway(Leeway::FREE);
+    let before = m.capacities();
+    m.add_playbook(
+        &Plan::once(&[Step::attack(THIEF), Step::wait(2)]),
+        ONE,
+        false,
+    )
+    .unwrap();
+    m.add_playbook(&Plan::once(&[Step::squad(1, Where::Here)]), ONE / 2, true)
+        .unwrap();
+    m.add_playbook(&Plan::looping(&[Step::wander()]), ONE / 3, false)
+        .unwrap();
+    let breaks = Plan::looping(&[Step::wait(9)]).fails_when(Fail::Flags { mask: 1, value: 1 });
+    let mut k = thief_known();
+    k.set_data(THIEF, KIND, m.config().enemy_bits);
+    let mut pos = [0, 0, 0];
+    let mut replans = 0;
+    for now in 0..200 {
+        if now % 7 == 0 {
+            m.set_plan(&breaks).unwrap();
+        }
+        let flags = u64::from(now % 7 == 0);
+        let out = m.tick_with(now, pos, &k, flags, &mut BuiltInRules);
+        replans += out
+            .events()
+            .iter()
+            .filter(|e| matches!(e, Event::Replanned { .. }))
+            .count();
+        pos = step_toward(pos, out.action);
+    }
+    assert!(replans >= 28, "{replans}");
+    assert_eq!(m.capacities(), before);
+}
+
+#[test]
+fn wander_replans_only_when_a_plan_condition_fires() {
+    let flag = Fail::Flags { mask: 1, value: 1 };
+    let mut m = mission(MissionConfig::default());
+    m.set_plan(&Plan::once(&[Step::wander()]).fails_when(flag))
+        .unwrap();
+    let k = knowledge();
+    let out = m.tick(0, [0, 0, 0], &k, 0);
+    assert_eq!(out.events(), &[Event::StepDone(0), Event::PlanDone]);
+    assert_eq!(out.action, Action::Wander);
+    let out = m.tick(1, [0, 0, 0], &k, 0);
+    assert!(out.events().is_empty());
+    assert_eq!(out.action, Action::Wander);
+    assert!(m.tick(2, [0, 0, 0], &k, 0).events().is_empty());
+    let out = m.tick(3, [4, 0, 0], &k, 1);
+    assert_eq!(
+        out.events(),
+        &[
+            Event::Broken(BreakReason::Fail(flag)),
+            Event::Replanned { option: DEFAULT }
+        ]
+    );
+    assert_eq!(out.action, Action::GoTo([0, 0, 0]));
 }
