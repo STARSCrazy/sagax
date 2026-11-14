@@ -1,15 +1,18 @@
 //! Four guards ambush an intruder, built from the game's own pieces.
 //! `cargo run -p sagax --example ambush_rules`
 //!
-//! A 20 x 12 map with a wall at x = 10 (rows 0 to 8, a gap below). Intruder
-//! 99 walks east through the gap. The guards wait on the east side. Nothing
+//! A 20 x 12 map with a wall at x = 10 (rows 0 to 8, a gap below) and a
+//! short one at x = 17 (rows 0 to 4). Intruder 99 walks east through the
+//! gap. The guards are on the east side and walk to the spot of their order
+//! (a cell per 2 ticks), so what is hidden is where they really stand. Nothing
 //! of the library changes: the game hands the squad a rules object with
 //! five pieces of its own, all built on a small sight test (Bresenham over
 //! the walls, game code):
 //!
 //! - **spot score:** a spot the intruder can see scores far worse, so the
 //!   guards hide (sneaking, cover against this one enemy);
-//! - **channel:** hand signs arrive one tick later, only in sight;
+//! - **channel:** hand signs arrive one tick later, only in sight (guard 4
+//!   stands behind the short wall: the leader never reaches it);
 //! - **trigger:** the intruder steps into the kill zone, the signal goes;
 //! - **report:** a guard that was seen says so (a kind of the game);
 //! - **abort:** that report ends the ambush; the squad plans a rush.
@@ -33,13 +36,18 @@ const HEIGHT: i32 = 12;
 /// Column of the wall; it covers rows 0 to `WALL_TOP`.
 const WALL_X: i32 = 10;
 const WALL_TOP: i32 = 8;
+/// A short second wall at x = 17, rows 0 to 4.
+const SHIELD_X: i32 = 17;
+const SHIELD_TOP: i32 = 4;
 const INTRUDER: u32 = 99;
 /// Fact kind of the intruder.
 const ENEMY: u32 = 1;
 const SKILL: u8 = 192;
 const SEED: u64 = 7;
 /// The guards: id, x, y. Guard 1 leads.
-const GUARDS: [(u32, i32, i32); 4] = [(1, 15, 3), (2, 14, 4), (3, 16, 4), (4, 15, 2)];
+/// Guard 4 stands behind the short wall at x = 17: the leader cannot see
+/// it, so no hand sign reaches it.
+const GUARDS: [(u32, i32, i32); 4] = [(1, 15, 3), (2, 14, 4), (3, 16, 4), (4, 19, 2)];
 /// Game ids of the pieces in the rules object.
 const HAND_SIGNS: u32 = 1;
 const KILL_ZONE: u32 = 1;
@@ -48,7 +56,7 @@ const SEEN: u32 = 1;
 const REPORT_SEEN: u32 = REPORT_GAME_FIRST;
 /// Added to the score of a spot the intruder can see.
 const SEEN_PENALTY: i128 = 10_000;
-/// Ticks per cell of the intruder's walk.
+/// Ticks per cell of the intruder's and the guards' walk.
 const STEP: u32 = 2;
 
 /// The walls: a grid where `BLOCKED` stops sight.
@@ -56,6 +64,9 @@ pub fn scene_walls() -> DenseGrid {
     let mut map = DenseGrid::new(WIDTH, HEIGHT);
     for y in 0..=WALL_TOP {
         map.set(WALL_X, y, DenseGrid::BLOCKED);
+    }
+    for y in 0..=SHIELD_TOP {
+        map.set(SHIELD_X, y, DenseGrid::BLOCKED);
     }
     map
 }
@@ -149,8 +160,23 @@ pub struct Scene {
     pub events: Vec<(u32, CrewEvent)>,
     /// The tick the "seen" report was sent (scene B).
     pub sent_at: Option<u32>,
+    /// Where the guards stood at each tick `0 ..= end` (in `GUARDS` order).
+    pub stood: Vec<[Pos; 4]>,
     /// The crew at the end.
     pub crew: Crew,
+}
+
+/// One guard's walk: a cell per `STEP` ticks towards its goal.
+#[derive(Clone, Copy, Default)]
+struct Walk {
+    goal: Option<Pos>,
+    from: u32,
+}
+
+/// The guards' start positions, for the tests.
+pub fn guard_start(id: u32) -> Pos {
+    let (_, x, y) = GUARDS.iter().copied().find(|g| g.0 == id).unwrap();
+    [x, y, 0]
 }
 
 fn scene_crew() -> Crew {
@@ -196,43 +222,59 @@ fn scene_crew() -> Crew {
     crew
 }
 
-fn scene_spots() -> [Spot; 7] {
-    [
-        (13, 6),
-        (13, 7),
-        (16, 7),
-        (17, 6),
-        (12, 10),
-        (13, 11),
-        (12, 1),
-    ]
-    .map(|(x, y)| Spot {
-        pos: [x, y, 0],
-        tags: TAG_HIDDEN,
-    })
+fn scene_spots(scene_b: bool) -> Vec<Spot> {
+    // Two spots in the intruder's view from the start (the bait), the rest
+    // out of sight; scene B adds guard 3 own place, which only the gap shows.
+    let mut cells = vec![(12, 10), (13, 11), (11, 3), (12, 1), (11, 5), (11, 1)];
+    if scene_b {
+        cells.push((16, 3));
+        cells.push((16, 4));
+    }
+    cells
+        .into_iter()
+        .map(|(x, y)| Spot {
+            pos: [x, y, 0],
+            tags: TAG_HIDDEN,
+        })
+        .collect()
 }
 
 /// Runs scene A (`false`) or B (`true`) for ticks `0 ..= end`.
 pub fn run_scene(scene_b: bool, end: u32) -> Scene {
     let walls = scene_walls();
     let mut crew = scene_crew();
-    let spots = scene_spots();
+    let spots = scene_spots(scene_b);
     let mut rules = AmbushRules {
         walls: scene_walls(),
         intruder: intruder_at(scene_b, 0),
         seen: false,
     };
-    let guard3 = {
-        let (_, x, y) = GUARDS[2];
-        [x, y, 0]
-    };
     let mut scene = Scene {
         events: Vec::new(),
         sent_at: None,
+        stood: Vec::new(),
         crew: crew.clone(),
     };
     let mut events = Vec::new();
+    let mut walks = [Walk::default(); 4];
+    let mut at_guard = GUARDS.map(|(_, x, y)| [x, y, 0]);
     for t in 0..=end {
+        // The guards walk to the goal of their last order, a cell per STEP
+        // ticks after it arrived.
+        for (i, w) in walks.iter().enumerate() {
+            let d = t.wrapping_sub(w.from);
+            if let Some(goal) = w.goal
+                && d > 0
+                && d < 1 << 31
+                && d.is_multiple_of(STEP)
+            {
+                let p = &mut at_guard[i];
+                p[0] += (goal[0] - p[0]).signum();
+                p[1] += (goal[1] - p[1]).signum();
+                assert!(crew.set_pos(GUARDS[i].0, *p));
+            }
+        }
+        scene.stood.push(at_guard);
         let at = intruder_at(scene_b, t);
         rules.intruder = at;
         crew.observe(
@@ -246,7 +288,7 @@ pub fn run_scene(scene_b: bool, end: u32) -> Scene {
             },
         );
         // Scene B: guard 3 is seen and tells the leader.
-        if scene_b && scene.sent_at.is_none() && sees(&walls, at, guard3) {
+        if scene_b && scene.sent_at.is_none() && sees(&walls, at, at_guard[2]) {
             let msg = Message {
                 kind: REPORT_SEEN,
                 sender: 3,
@@ -258,7 +300,16 @@ pub fn run_scene(scene_b: bool, end: u32) -> Scene {
         }
         crew.tick_with(t, &[], &spots, SEED, &mut rules, &mut events)
             .unwrap();
-        scene.events.extend(events.iter().map(|&e| (t, e)));
+        for &e in &events {
+            if let CrewEvent::Order { member, goal, .. } = e {
+                let i = GUARDS.iter().position(|g| g.0 == member).unwrap();
+                walks[i] = Walk {
+                    goal: goal.pos,
+                    from: t,
+                };
+            }
+            scene.events.push((t, e));
+        }
     }
     scene.crew = crew;
     scene
