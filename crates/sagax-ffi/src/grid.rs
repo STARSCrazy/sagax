@@ -295,6 +295,26 @@ mod tests {
     }
 
     #[test]
+    fn c_grid_link_extreme_coordinates() {
+        let grid = sx_grid_new(5, 1, 2);
+        unsafe {
+            assert_eq!(
+                sx_grid_link(grid, Point::new(i32::MIN, 0, 0), Point::new(1, 0, 1)),
+                0
+            );
+            assert_eq!(
+                sx_grid_link(grid, Point::new(1, 0, 0), Point::new(i32::MIN, 0, 1)),
+                0
+            );
+            assert_eq!(
+                sx_grid_link(grid, Point::new(i32::MAX, 0, 0), Point::new(i32::MIN, 0, 1)),
+                0
+            );
+            sx_grid_free(grid);
+        }
+    }
+
+    #[test]
     fn c_grid_walls_and_bad_arguments() {
         assert!(sx_grid_new(0, 1, 1).is_null());
         assert!(sx_grid_new(1, 0, 1).is_null());

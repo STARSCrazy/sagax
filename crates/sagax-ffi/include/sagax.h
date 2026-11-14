@@ -964,7 +964,7 @@ typedef struct sx_member {
 	uint32_t id;                /* the game's id */
 	int32_t pos[3];
 	uint32_t roles;             /* role bits (the game's, plus SX_ROLE_*) */
-	uint8_t skill;              /* the member's own skill, for sx_discipline */
+	uint8_t skill;              /* the member's own skill, for sx_skill_table_hold_bonus_for */
 	uint8_t state;              /* SX_MEMBER_* */
 } sx_member;
 
@@ -1579,7 +1579,9 @@ int32_t sx_crew_goal(sx_crew *crew, uint32_t id, sx_goal *out);
  * and sx_crew_keeper, and while member id is in the group; after that
  * every sx_keeper_* call on it returns SX_ERROR_ARGUMENT, it never reaches
  * another member's keeper). One keeper handle per member id, the same each
- * time. sx_squad_free and sx_keeper_free do nothing to them; the crew
+ * time (one small handle per member id ever asked for, kept until the
+ * crew is freed, so asking for many ids over a long game grows the list
+ * a little). sx_squad_free and sx_keeper_free do nothing to them; the crew
  * frees them with itself.
  * The crew takes its squad's orders itself: sx_squad_orders_due on a crew's
  * squad returns SX_ERROR_ARGUMENT. Null for a null crew or an unknown id. */

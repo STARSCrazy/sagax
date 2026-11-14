@@ -1025,7 +1025,8 @@ A `Crew` is a `Squad` with one `GoalKeeper` per member. Per game tick you
 tell it where the members are, call `tick`, read the events, and for each
 member ask for the row of its own decider and, once it decided, tell the
 crew what it chose. The crew moves nobody: walking, shooting and animation
-are yours. Channels, tactics, skill and the leader are set on the crew's own
+are yours. Arrival counts only on the same level (z), so a game that uses
+z for height must keep members on the goal's level. Channels, tactics, skill and the leader are set on the crew's own
 squad (`crew.squad_mut()`, C `sx_crew_squad`, JavaScript `crew.squad()`).
 
 Rust (`crates/sagax/examples/squad_walk.rs`, set-up and one tick):

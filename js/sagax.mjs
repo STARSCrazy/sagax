@@ -2635,7 +2635,7 @@ export class Crew extends Table {
     return this.#squad;
   }
 
-  /** The member's keeper (a Keeper) until the next call that changes the crew or the member leaves the group, or null if the id is unknown. */
+  /** The member's keeper (a Keeper; one small handle per member id ever asked for, kept until the crew is freed) until the next call that changes the crew or the member leaves the group, or null if the id is unknown. */
   keeper(id) {
     const k = this.x.sx_crew_keeper(this.h, u32Of(id, 'id'));
     return k ? new Keeper(this.x, new Lent(k, this, this.epoch)) : null;

@@ -468,7 +468,9 @@ impl DenseGrid {
     /// neighbour (`dx`, `dy` each in -1..=1, not both 0) and both are on the
     /// grid.
     pub fn link(&mut self, a: Cell, b: Cell) -> bool {
-        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let (Some(dx), Some(dy)) = (b.x.checked_sub(a.x), b.y.checked_sub(a.y)) else {
+            return false;
+        };
         let (Some(there), Some(back)) = (direction_index(dx, dy), direction_index(-dx, -dy)) else {
             return false;
         };
@@ -728,6 +730,23 @@ mod tests {
         assert_eq!(g.step(Cell::new(2, 0, 1), -1, 0), Some(0));
         assert_eq!(g.get_at(Cell::new(2, 0, 1)), Some(0));
         assert_eq!(g.get_at(Cell::new(2, 0, 2)), None);
+    }
+
+    #[test]
+    fn link_with_extreme_coordinates_returns_false() {
+        let mut g = bridge();
+        let before = way(&mut g);
+        for (a, b) in [
+            (Cell::new(i32::MIN, 0, 0), Cell::new(i32::MAX, 0, 1)),
+            (Cell::new(i32::MAX, 0, 0), Cell::new(i32::MIN, 0, 1)),
+            (Cell::new(0, i32::MIN, 0), Cell::new(0, i32::MAX, 1)),
+            (Cell::new(1, 0, 0), Cell::new(i32::MIN, 0, 1)),
+        ] {
+            assert!(!g.link(a, b));
+        }
+        assert!(!g.add_wall_at(Cell::new(i32::MAX, 0, 0), 1, 0));
+        assert!(!g.add_wall_at(Cell::new(i32::MIN, 0, 0), -1, 0));
+        assert_eq!(way(&mut g), before);
     }
 
     #[test]

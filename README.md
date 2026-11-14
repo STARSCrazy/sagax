@@ -41,7 +41,8 @@ dependencies).
 
 Three jobs: a path, a decision, a squad. Each is shown in Rust, C and
 JavaScript; [QUICKSTART.md](docs/QUICKSTART.md) has them in full, and every
-snippet comes from code that is built and run in this repository.
+snippet comes from code that is built and run in this repository; some are
+shortened.
 
 **A path.** A grid has no default cost: pick a preset (`Octile`: straight 10,
 diagonal 14; `Tabletop`: every step 1).

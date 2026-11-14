@@ -77,7 +77,7 @@ Rust:
 | `Navigator::resume` | `Navigator::continue_search` (`resume` is a deprecated forwarder) |
 | `Report.status: Option<Status>` | `Report.status: Status`; `Status::Idle` (the default) means nothing to continue |
 | `hex::HexMap` (trait for hex maps) | removed; a hex map implements `CellMap`, asked with offsets (`dx`, `dy`) |
-| `CellMap::steps(..)` | takes the offsets as a slice, `steps(from, offsets: &[(i32, i32)], out: &mut [Option<i32>])` |
+| `CellMap::steps(..)` | takes the offsets as a slice, `steps(from, from_start, offsets: &[(i32, i32)], out: &mut [Option<i32>])` |
 | `DenseGrid::walls`, `set_walls`, `walls_mut` | `wall_bits`, `set_wall_bits`, `wall_bits_mut` (no alias; see "Behaviour changes" for the bit meaning on hex) |
 | `Areas::move_cost(from, to, start, goal)` | `Areas::cell_cost(to: Cell, start: Cell, goal: Cell)` (`move_cost` is a deprecated forwarder) |
 | `sagax_nav` types `Cell`, `HexLayout`, `Pos` | defined in `sagax-core`, still re-exported by `sagax-nav` and `sagax-decide` (same paths work) |
