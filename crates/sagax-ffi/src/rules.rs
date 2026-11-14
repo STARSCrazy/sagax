@@ -230,7 +230,7 @@ impl SxRowCtx {
     }
 }
 
-/// `struct sx_view_plan`: the active plan, as a view shows it.
+/// `sx_view_plan`: the active plan, as a view shows it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SxViewPlan {
@@ -361,17 +361,6 @@ fn view_ptr(view: &SquadView<'_>) -> *const SxSquadView {
     std::ptr::from_ref(view).cast()
 }
 
-/// Whether `f` is the exported [`sx_builtin_member_cost`], which then gives
-/// the exact built-in cost (no saturation).
-fn is_builtin_cost(f: MemberCostFn) -> bool {
-    f as usize == sx_builtin_member_cost as MemberCostFn as usize
-}
-
-/// Whether `f` is the exported [`sx_builtin_spot_score`].
-fn is_builtin_score(f: SpotScoreFn) -> bool {
-    f as usize == sx_builtin_spot_score as SpotScoreFn as usize
-}
-
 // SAFETY (all calls below): the game filled the table with valid callbacks
 // and a valid `user` for the duration of the call that lent it (sagax.h);
 // every pointer passed is to a value that lives through the callback.
@@ -415,9 +404,6 @@ impl SquadRules for CRules {
         let Some(f) = self.table.member_cost else {
             return Some(ctx.built_in);
         };
-        if is_builtin_cost(f) {
-            return Some(ctx.built_in);
-        }
         let c = SxCostCtx::of(ctx);
         let mut cost = 0i64;
         // SAFETY: see above.
@@ -429,9 +415,6 @@ impl SquadRules for CRules {
         let Some(f) = self.table.spot_score else {
             return Some(ctx.built_in);
         };
-        if is_builtin_score(f) {
-            return Some(ctx.built_in);
-        }
         let c = SxSpotCtx::of(ctx);
         let mut score = 0i64;
         // SAFETY: see above.
@@ -562,13 +545,16 @@ pub unsafe extern "C" fn sx_view_target_at(
     }
 }
 
-/// `sx_view_plan`: writes the active plan to `out` (all 0 without one);
+/// `sx_view_active_plan`: writes the active plan to `out` (all 0 without one);
 /// returns 1 with a plan, else 0.
 ///
 /// # Safety
 /// `view` is null or the pointer a callback got; `out` is null or writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_view_plan(view: *const SxSquadView, out: *mut SxViewPlan) -> i32 {
+pub unsafe extern "C" fn sx_view_active_plan(
+    view: *const SxSquadView,
+    out: *mut SxViewPlan,
+) -> i32 {
     let v = view!(view);
     if out.is_null() {
         return ERROR_ARGUMENT;
@@ -663,7 +649,7 @@ pub unsafe extern "C" fn sx_report_forget(actions: *mut SxReportActions, subject
 
 // ---- helpers --------------------------------------------------------------------
 
-/// `sx_builtin_member_cost`: `*cost = ctx->built_in`, usable.
+/// `sx_builtin_member_cost`: `*cost = ctx->built_in` (saturated), usable.
 ///
 /// # Safety
 /// `ctx` and `cost` are null or valid.
@@ -685,7 +671,7 @@ pub unsafe extern "C" fn sx_builtin_member_cost(
     1
 }
 
-/// `sx_builtin_spot_score`: `*score = ctx->built_in`, usable.
+/// `sx_builtin_spot_score`: `*score = ctx->built_in` (saturated), usable.
 ///
 /// # Safety
 /// `ctx` and `score` are null or valid.
@@ -707,8 +693,7 @@ pub unsafe extern "C" fn sx_builtin_spot_score(
     1
 }
 
-/// `sx_squad_rules_default`: every callback `NULL` except the two
-/// built-ins.
+/// `sx_squad_rules_default`: every callback and `user` `NULL`.
 ///
 /// # Safety
 /// `out` is null or writable.
@@ -719,14 +704,7 @@ pub unsafe extern "C" fn sx_squad_rules_default(out: *mut SxSquadRules) -> i32 {
     }
     // SAFETY: non-null and writable (see above).
     unsafe {
-        put(
-            out,
-            SxSquadRules {
-                member_cost: Some(sx_builtin_member_cost),
-                spot_score: Some(sx_builtin_spot_score),
-                ..SxSquadRules::default()
-            },
-        );
+        put(out, SxSquadRules::default());
     }
     0
 }
@@ -774,8 +752,8 @@ mod tests {
     use crate::memory::{sx_areas_at, sx_areas_count};
     use sagax_abi::codes::*;
     use sagax_decide::group::{
-        Channel, Crew, CrewConfig, CrewEvent, IN_TARGET_DIST, Member, MemberState,
-        REPORT_GAME_FIRST, TAG_COVER, TAG_HIDDEN, TAG_HIGH, tactics,
+        Channel, Crew, CrewConfig, CrewEvent, IN_TARGET_DIST, IN_TARGET_FRIEND_DIST, Member,
+        MemberState, REPORT_GAME_FIRST, TAG_COVER, TAG_HIDDEN, TAG_HIGH, tactics,
     };
     use sagax_decide::memory::{Message, Metric};
     use std::ptr::{null, null_mut};
@@ -1074,7 +1052,7 @@ mod tests {
             assert!(rules.place.is_none() && rules.trigger.is_none());
             assert!(rules.abort.is_none() && rules.channel_delay.is_none());
             assert!(rules.report.is_none() && rules.user.is_null());
-            assert!(rules.member_cost.is_some() && rules.spot_score.is_some());
+            assert!(rules.member_cost.is_none() && rules.spot_score.is_none());
             assert_eq!(sx_squad_rules_default(null_mut()), ERROR_ARGUMENT);
         }
     }
@@ -1282,7 +1260,7 @@ mod tests {
             assert_eq!(sx_view_target_at(view, 0, &mut s.first_target), 1);
             s.past_member = sx_view_member_at(view, 99, &mut s.first_member.clone());
             s.past_target = sx_view_target_at(view, 99, &mut s.first_target.clone());
-            s.plan_ret = sx_view_plan(view, &mut s.plan);
+            s.plan_ret = sx_view_active_plan(view, &mut s.plan);
             s.centre_ret = sx_view_centre(view, s.centre.as_mut_ptr());
             st.seen.push((id, now, s.plan));
             st.snapshot.get_or_insert(s);
@@ -1754,6 +1732,168 @@ mod tests {
         }
     }
 
+    /// `targets_slot_drops_candidates`: keeps only the subjects in the list.
+    struct KeepOnly(Vec<u32>, Vec<u32>);
+
+    unsafe extern "C" fn keep_cb(
+        user: *mut c_void,
+        view: *const SxSquadView,
+        fact: *const SxFact,
+    ) -> i32 {
+        unsafe {
+            let st = &mut *user.cast::<KeepOnly>();
+            assert_eq!(sx_view_target_count(view), 2);
+            st.1.push((*fact).subject);
+            i32::from(st.0.contains(&(*fact).subject))
+        }
+    }
+
+    /// The factors the score log shows: `(target, input)`.
+    unsafe fn factors(sq: *mut SxSquad) -> Vec<(u32, i32)> {
+        unsafe {
+            let mut log = [SxScoreEvent::default(); 32];
+            let n = sx_squad_score_log(sq, log.as_mut_ptr(), 32, null_mut());
+            log[..n as usize]
+                .iter()
+                .filter(|e| e.event.kind == 1)
+                .map(|e| (e.target, e.event.input))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn c_keep_target_drops_candidates() {
+        unsafe {
+            let sq = squad(CHEBYSHEV, &[(1, 0, 0), (2, 1, 0), (3, 0, 1), (4, 1, 1)]);
+            let t = sx_tactic_new(ONE / 4, 0, 1);
+            assert_eq!(
+                sx_tactic_add_slot(t, &slot(place(PLACE_SIDE, SIDE_FRONT), 255)),
+                0
+            );
+            let x = sx_squad_extra_start(sq) as u32;
+            let linear = |input, max| SxConsideration {
+                input,
+                curve: 0,
+                min: 0,
+                max,
+            };
+            assert_eq!(sx_tactic_add_consideration(t, &linear(x, 9)), 0);
+            let friend = linear(IN_TARGET_FRIEND_DIST as u32, 100);
+            assert_eq!(sx_tactic_add_consideration(t, &friend), 0);
+            add(sq, t);
+            assert_eq!(sx_squad_set_extra_columns(sq, 1), 0);
+            assert_eq!(sx_squad_set_score_log(sq, 1), 0);
+            see(sq, 10, 20, 0, 0);
+            see(sq, 11, 23, 0, 0);
+            let mut st = KeepOnly(vec![11], Vec::new());
+            let rules = SxSquadRules {
+                keep_target: Some(keep_cb),
+                user: user(&mut st),
+                ..SxSquadRules::default()
+            };
+            let extra = [0, 5, 9];
+            let mut id = 0;
+            let made = sx_squad_plan_with(sq, 0, extra.as_ptr(), 3, null(), 0, 0, &rules, &mut id);
+            assert_eq!(made, 1);
+            // Asked for every known target, in knowledge order.
+            assert_eq!(st.1, [10, 11]);
+            let (p, _) = pending(sq);
+            assert_eq!((p.tactic, p.has_target, p.target), (0, 1, 11));
+            // Only 11 was scored; it read its own block (2) and its dropped friend.
+            assert_eq!(factors(sq), [(11, 9), (11, 3)]);
+            sx_squad_free(sq);
+        }
+    }
+
+    /// `columns_slot_fills_after_extra`: writes fixed rule columns and
+    /// records the row it saw.
+    struct Columns {
+        values: [i32; 2],
+        seen: Vec<(u32, u32, Vec<i32>)>,
+    }
+
+    unsafe extern "C" fn columns_cb(
+        user: *mut c_void,
+        view: *const SxSquadView,
+        ctx: *const SxRowCtx,
+        out: *mut i32,
+        count: u32,
+    ) {
+        unsafe {
+            let st = &mut *user.cast::<Columns>();
+            assert!(sx_view_member_count(view) > 0);
+            let c = &*ctx;
+            let row = std::slice::from_raw_parts(c.row, c.row_len as usize).to_vec();
+            st.seen.push((c.row_len, count, row));
+            let out = std::slice::from_raw_parts_mut(out, count as usize);
+            assert!(out.iter().all(|&v| v == 0));
+            out.copy_from_slice(&st.values);
+        }
+    }
+
+    #[test]
+    fn c_columns_fill_after_extra() {
+        unsafe {
+            let sq = sx_squad_new(&SxSquadConfig {
+                rule_columns: 2,
+                ..config(CHEBYSHEV)
+            });
+            assert!(!sq.is_null());
+            for (id, x, y) in [(1, 0, 0), (2, 1, 0), (3, 0, 1), (4, 1, 1)] {
+                assert!(sx_squad_add_member(sq, &member(id, x, y)) >= 0);
+            }
+            assert_eq!(sx_squad_set_leader(sq, 1), 1);
+            assert_eq!(sx_squad_set_target_kind(sq, ENEMY), 0);
+            assert_eq!(sx_squad_set_skill(sq, 255), 0);
+            assert_eq!(sx_squad_set_extra_columns(sq, 1), 0);
+            let start = sx_squad_extra_start(sq) as u32 + 1;
+            let t = tactic(place(PLACE_SIDE, SIDE_FRONT), 255);
+            let second = SxConsideration {
+                input: start + 1,
+                curve: 0,
+                min: 0,
+                max: 9,
+            };
+            assert_eq!(sx_tactic_add_consideration(t, &second), 0);
+            add(sq, t);
+            assert_eq!(sx_squad_set_score_log(sq, 1), 0);
+            see(sq, 10, 20, 0, 0);
+            let mut st = Columns {
+                values: [7, 9],
+                seen: Vec::new(),
+            };
+            let rules = SxSquadRules {
+                columns: Some(columns_cb),
+                user: user(&mut st),
+                ..SxSquadRules::default()
+            };
+            let extra = [0, 3];
+            let mut id = 0;
+            let made = sx_squad_plan_with(sq, 0, extra.as_ptr(), 2, null(), 0, 0, &rules, &mut id);
+            assert_eq!(made, 1);
+            assert_eq!(st.seen.len(), 1);
+            let (len, count, row) = &st.seen[0];
+            assert_eq!((*len, *count), (start, 2));
+            // The row before the rule columns: the built-in columns, then the extra one.
+            assert_eq!(row.len(), start as usize);
+            assert_eq!(
+                row[start as usize - 1],
+                3,
+                "the game's extra column of target 10"
+            );
+            // The second rule column (9 of 0..9) is the factor 1.0.
+            let mut log = [SxScoreEvent::default(); 32];
+            let n = sx_squad_score_log(sq, log.as_mut_ptr(), 32, null_mut());
+            let f: Vec<(i32, u32)> = log[..n as usize]
+                .iter()
+                .filter(|e| e.event.kind == 1)
+                .map(|e| (e.event.input, e.event.value))
+                .collect();
+            assert_eq!(f, [(9, ONE)]);
+            sx_squad_free(sq);
+        }
+    }
+
     #[test]
     fn c_view_accessors() {
         unsafe {
@@ -1777,7 +1917,7 @@ mod tests {
             assert_eq!(sx_view_member_count(null()), ERROR_ARGUMENT);
             assert_eq!(sx_view_member_at(null(), 0, &mut m), ERROR_ARGUMENT);
             assert_eq!(sx_view_target_count(null()), ERROR_ARGUMENT);
-            assert_eq!(sx_view_plan(null(), null_mut()), ERROR_ARGUMENT);
+            assert_eq!(sx_view_active_plan(null(), null_mut()), ERROR_ARGUMENT);
             assert_eq!(sx_view_centre(null(), null_mut()), ERROR_ARGUMENT);
             assert_eq!(sx_report_signal(null_mut()), ERROR_ARGUMENT);
             assert_eq!(sx_report_forget(null_mut(), 1), ERROR_ARGUMENT);

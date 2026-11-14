@@ -1584,8 +1584,7 @@ typedef struct sx_cost_ctx {
 /* Slot 5, spot score. built_in: 2^100 added to the metric
  * distance from wish to the spot when the spot lacks a bit of want_tags, saturated
  * to int64_t (see sx_spot_score_builtin); a callback that wants the exact
- * built-in order for such spots leaves spot_score NULL or uses
- * sx_builtin_spot_score. */
+ * built-in order for such spots leaves spot_score NULL. */
 typedef struct sx_spot_ctx {
 	int64_t built_in;
 	uint32_t tactic;
@@ -1662,14 +1661,14 @@ typedef struct sx_squad_rules {
 	void *user;
 } sx_squad_rules;
 
-/* The two built-ins as callbacks: *cost = ctx->built_in, 1. */
+/* The two built-ins as callbacks, for wrapping: they return ctx->built_in,
+ * saturated to int64_t (1 = usable). For exact built-in behaviour leave the
+ * pointer NULL. */
 int32_t sx_builtin_member_cost(void *user, const sx_cost_ctx *ctx, int64_t *cost);
 int32_t sx_builtin_spot_score(void *user, const sx_spot_ctx *ctx, int64_t *score);
 
-/* All callbacks NULL except member_cost = sx_builtin_member_cost and
- * spot_score = sx_builtin_spot_score, user NULL: a table to start from (it
- * behaves exactly as a zeroed one). Returns 0; SX_ERROR_ARGUMENT for a null
- * out. */
+/* Every callback NULL and user NULL (all built-in, exactly as a zeroed table):
+ * a table to start from. Returns 0; SX_ERROR_ARGUMENT for a null out. */
 int32_t sx_squad_rules_default(sx_squad_rules *out);
 
 /* The built-in spot score to *out: (miss << 100) | distance, where miss is 1
@@ -1689,9 +1688,8 @@ int32_t sx_view_member_count(const sx_squad_view *view);
 int32_t sx_view_member_at(const sx_squad_view *view, uint32_t index, sx_member *out);
 int32_t sx_view_target_count(const sx_squad_view *view);
 int32_t sx_view_target_at(const sx_squad_view *view, uint32_t index, sx_fact *out);
-/* The plan being carried out. (struct sx_view_plan has no typedef, so that
- * the name of the function stays free in C.) */
-struct sx_view_plan {
+/* The plan being carried out. */
+typedef struct sx_view_plan {
 	uint32_t plan;              /* its id */
 	uint32_t tactic;
 	uint32_t target;            /* valid if has_target */
@@ -1699,9 +1697,10 @@ struct sx_view_plan {
 	uint8_t has_plan;           /* 0: no plan is active (the other fields are 0) */
 	uint8_t has_target;
 	uint8_t signal_given;
-};
-/* Writes the active plan to *out; returns 1 with a plan, else 0. */
-int32_t sx_view_plan(const sx_squad_view *view, struct sx_view_plan *out);
+} sx_view_plan;
+/* Always writes the active plan to *out (all 0, has_plan 0, without one);
+ * returns 1 with a plan, else 0. */
+int32_t sx_view_active_plan(const sx_squad_view *view, sx_view_plan *out);
 /* The group centre (mean of the active members) to out (3 values); 1, or 0
  * without an active member. */
 int32_t sx_view_centre(const sx_squad_view *view, int32_t *out);
@@ -1723,7 +1722,7 @@ int32_t sx_squad_plan_with(sx_squad *squad, uint32_t now, const int32_t *extra,
 int32_t sx_squad_check_with(sx_squad *squad, uint32_t now, const int32_t *extra,
                             uint32_t extra_count, const sx_spot *spots, uint32_t spot_count,
                             uint64_t seed, const sx_squad_rules *rules, uint32_t *plan);
-/* As sx_squad_signal; the second orders go over a custom channel too. */
+/* As sx_squad_signal; the second order of each member goes over a custom channel too. */
 int32_t sx_squad_signal_with(sx_squad *squad, uint32_t now, const sx_squad_rules *rules);
 /* As sx_squad_reinstate; the goal goes over a custom channel too. */
 int32_t sx_squad_reinstate_with(sx_squad *squad, uint32_t id, uint32_t now,
@@ -2106,11 +2105,11 @@ _Static_assert(offsetof(sx_channel_ctx, now) == 12, "sx_channel_ctx.now layout")
 _Static_assert(offsetof(sx_channel_ctx, from) == 16, "sx_channel_ctx.from layout");
 _Static_assert(offsetof(sx_channel_ctx, to) == 28, "sx_channel_ctx.to layout");
 _Static_assert(offsetof(sx_channel_ctx, report) == 40, "sx_channel_ctx.report layout");
-_Static_assert(sizeof(struct sx_view_plan) == 20, "sx_view_plan layout");
-_Static_assert(offsetof(struct sx_view_plan, since) == 12, "sx_view_plan.since layout");
-_Static_assert(offsetof(struct sx_view_plan, has_plan) == 16, "sx_view_plan.has_plan layout");
-_Static_assert(offsetof(struct sx_view_plan, has_target) == 17, "sx_view_plan.has_target layout");
-_Static_assert(offsetof(struct sx_view_plan, signal_given) == 18, "sx_view_plan.signal_given layout");
+_Static_assert(sizeof(sx_view_plan) == 20, "sx_view_plan layout");
+_Static_assert(offsetof(sx_view_plan, since) == 12, "sx_view_plan.since layout");
+_Static_assert(offsetof(sx_view_plan, has_plan) == 16, "sx_view_plan.has_plan layout");
+_Static_assert(offsetof(sx_view_plan, has_target) == 17, "sx_view_plan.has_target layout");
+_Static_assert(offsetof(sx_view_plan, signal_given) == 18, "sx_view_plan.signal_given layout");
 #endif
 
 #endif

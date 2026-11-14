@@ -2903,9 +2903,8 @@ mod conventions {
                 to,
                 report
             ),
-            // No typedef: the name of the struct is also a function's.
             layout!(
-                "struct sx_view_plan",
+                "sx_view_plan",
                 SxViewPlan,
                 since,
                 has_plan,
