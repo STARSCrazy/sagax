@@ -250,6 +250,24 @@ impl Plan {
         }
     }
 
+    /// An empty plan with room for `steps` steps (storage of a mission).
+    pub(super) fn with_capacity(steps: usize) -> Self {
+        Self {
+            steps: Vec::with_capacity(steps),
+            repeat: false,
+            fails: [None; MAX_FAILS],
+        }
+    }
+
+    /// Makes this plan a copy of `other` without allocating, as long as
+    /// `other` has no more steps than this plan's capacity.
+    pub(super) fn copy_from(&mut self, other: &Plan) {
+        self.steps.clear();
+        self.steps.extend_from_slice(&other.steps);
+        self.repeat = other.repeat;
+        self.fails = other.fails;
+    }
+
     /// A plan that runs the steps once.
     pub fn once(steps: &[Step]) -> Self {
         Self::new(steps, false)
