@@ -579,3 +579,97 @@ fn new_and_set_plan_check_their_input() {
     assert_eq!(m.motive(), Motive::defeat(3));
     assert_eq!(m.config().max_steps, 2);
 }
+
+#[test]
+fn search_skips_points_outside_radius() {
+    let pattern = PointPattern {
+        first_distance: 2,
+        offsets: vec![0, 0],
+        distances: vec![9, 3],
+        ..PointPattern::default()
+    };
+    let config = MissionConfig {
+        search: pattern.clone(),
+        ..MissionConfig::default()
+    };
+    let id = config.id;
+    let centre = [10, 10, 0];
+    let p = |i| points_around(id, i, centre, &pattern).unwrap();
+    let plan = |radius| Plan::once(&[Step::search(Where::Fixed(centre), radius, 40)]);
+    let k = knowledge();
+
+    // Radius 4: point 1 (9 away) is skipped.
+    let mut m = mission(config.clone());
+    m.set_plan(&plan(4)).unwrap();
+    let mut pos = centre;
+    let mut seen = Vec::new();
+    for now in 0..30 {
+        let out = m.tick(now, pos, &k, 0);
+        if let Action::Search(at) = out.action
+            && seen.last() != Some(&at)
+        {
+            seen.push(at);
+        }
+        pos = step_toward(pos, out.action);
+    }
+    assert_eq!(&seen[..3], &[p(0), p(2), p(0)]);
+    assert!(!seen.contains(&p(1)));
+
+    // Radius 1: every point is skipped, the search stays at the centre.
+    let mut m = mission(config);
+    m.set_plan(&plan(1)).unwrap();
+    for now in 0..3 {
+        assert_eq!(m.tick(now, centre, &k, 0).action, Action::Search(centre));
+    }
+}
+
+#[test]
+fn hex_search_and_here_in_offset() {
+    // Step 0 at the centre, step 1 a quarter turn away, inside the bounds of
+    // an offset map 0..=5.
+    let pattern = PointPattern {
+        first_distance: 0,
+        offsets: vec![64],
+        distances: vec![3],
+        min: (0, 0),
+        max: (5, 5),
+        ..PointPattern::default()
+    };
+    let config = MissionConfig {
+        metric: Metric::Hex,
+        hex_layout: Some(HexLayout::OddR),
+        search: pattern.clone(),
+        ..MissionConfig::default()
+    };
+    let centre = [4, 4, 0];
+    let expected = points_around(config.id, 1, centre, &pattern).unwrap();
+    assert_ne!(expected, centre);
+    assert!((0..=5).contains(&expected[0]) && (0..=5).contains(&expected[1]));
+    let mut m = mission(config.clone());
+    m.set_plan(&Plan::once(&[Step::search(Where::Fixed(centre), 0, 9)]))
+        .unwrap();
+    // Standing at the centre (point 0): on to point 1, in offset and in
+    // the map's bounds.
+    let out = m.tick(0, centre, &knowledge(), 0);
+    assert_eq!(out.action, Action::Search(expected));
+
+    // `Here` comes back in offset too.
+    let mut m = mission(config);
+    m.set_plan(&Plan::once(&[Step::hold(Where::Here)])).unwrap();
+    assert_eq!(
+        m.tick(0, [3, 2, 0], &knowledge(), 0).action,
+        Action::Hold([3, 2, 0])
+    );
+}
+
+#[test]
+fn new_rejects_more_steps_than_u16_numbers() {
+    let config = MissionConfig {
+        max_steps: usize::from(u16::MAX) + 2,
+        ..MissionConfig::default()
+    };
+    assert_eq!(
+        Mission::new(config, Motive::reach([0, 0, 0])).err(),
+        Some(MissionError::TooManySteps)
+    );
+}

@@ -93,10 +93,15 @@ pub struct Mission {
 
 impl Mission {
     /// A mission for `motive`, without a plan. Errors on `max_steps` of 0
-    /// or on a hex layout without [`Metric::Hex`].
+    /// ([`MissionError::ZeroCapacity`]), above 65536 (step numbers are
+    /// `u16`; [`MissionError::TooManySteps`]) or on a hex layout without
+    /// [`Metric::Hex`].
     pub fn new(config: MissionConfig, motive: Motive) -> Result<Self, MissionError> {
         if config.max_steps == 0 {
             return Err(MissionError::ZeroCapacity);
+        }
+        if config.max_steps > usize::from(u16::MAX) + 1 {
+            return Err(MissionError::TooManySteps);
         }
         if config.hex_layout.is_some() && config.metric != Metric::Hex {
             return Err(MissionError::HexNeedsHexMetric);
@@ -316,12 +321,12 @@ impl Mission {
                 subject,
                 pos: self.subject_pos(subject, view)?,
             },
-            StepKind::Search { centre, .. } => {
+            StepKind::Search { centre, radius, .. } => {
                 let centre = self.resolve(centre, view)?;
-                let mut point = self.search_point(centre);
+                let mut point = self.search_point(centre, radius);
                 if self.arrived(view.pos, point) {
-                    self.step.search_point = self.step.search_point.wrapping_add(1);
-                    point = self.search_point(centre);
+                    self.step.search_point = (self.step.search_point + 1) % self.search_points();
+                    point = self.search_point(centre, radius);
                 }
                 Action::Search(point)
             }
@@ -393,16 +398,35 @@ impl Mission {
         bits != 0 && fact.data & bits == bits
     }
 
-    /// The search point the step goes to now, around `centre`.
-    fn search_point(&self, centre: Pos) -> Pos {
-        let points = self.config.search.offsets.len() + 1;
-        points_around(
-            self.config.id,
-            self.step.search_point % points,
-            centre,
-            &self.config.search,
-        )
-        .unwrap_or(centre)
+    /// Number of points in the search pattern.
+    fn search_points(&self) -> usize {
+        self.config.search.offsets.len() + 1
+    }
+
+    /// The search point the step goes to now, around `centre` (internal
+    /// coordinates). Points farther than `radius` from the centre are
+    /// skipped (the step's counter moves past them); `radius` 0 is no
+    /// limit. When every point is skipped, the centre.
+    fn search_point(&mut self, centre: Pos, radius: u32) -> Pos {
+        let points = self.search_points();
+        for j in 0..points {
+            let i = (self.step.search_point + j) % points;
+            let p = self.pattern_point(i, centre);
+            if radius == 0 || self.within(centre, p, radius) {
+                self.step.search_point = i;
+                return p;
+            }
+        }
+        centre
+    }
+
+    /// Point `i` of the search pattern around `centre` (internal
+    /// coordinates). With a hex layout the pattern, and its `min`/`max`
+    /// bounds, work in offset coordinates.
+    fn pattern_point(&self, i: usize, centre: Pos) -> Pos {
+        let around = self.pos_out(centre);
+        points_around(self.config.id, i, around, &self.config.search)
+            .map_or(centre, |p| self.pos_in(p))
     }
 
     fn arrived(&self, at: Pos, spot: Pos) -> bool {

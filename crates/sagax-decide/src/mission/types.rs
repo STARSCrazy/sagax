@@ -35,11 +35,15 @@ pub enum StepKind {
         /// How close it must come.
         radius: u32,
     },
-    /// Search around `centre` for this many ticks.
+    /// Search around `centre` for this many ticks: go to the points of the
+    /// config's search pattern in turn, again and again.
     Search {
         /// The middle of the search.
         centre: Where,
-        /// How far from the middle to search.
+        /// How far from the middle to search, in the mission's metric
+        /// (Euclid compares squares): a pattern point farther away is
+        /// skipped and the next one taken. 0 is no limit. When every point
+        /// is skipped, the character searches at the centre.
         radius: u32,
         /// How long to search.
         ticks: u32,
