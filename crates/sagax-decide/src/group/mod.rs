@@ -20,6 +20,9 @@
 //!   the trigger, [`Squad::signal`] starts the "on signal" goals, and
 //!   members [`Squad::report`] back through the leader's inbox (and
 //!   [`Squad::report_danger`] for shots).
+//! - [`rules`]: the game's own logic at fixed points of a plan or check
+//!   ([`SquadRules`], lent per call to [`Squad::plan_with`] and
+//!   [`Squad::check_with`]).
 //! - [`Crew`]: a squad with one [`GoalKeeper`] per member, run as one call
 //!   per tick ([`Crew::tick`]) that reports [`CrewEvent`]s; every step is
 //!   also a public squad or keeper call.
@@ -32,6 +35,7 @@ pub mod keeper;
 mod kit;
 mod members;
 mod orders;
+pub mod rules;
 mod skill;
 mod spots;
 mod squad;
@@ -41,6 +45,8 @@ mod tactic;
 mod crew_tests;
 #[cfg(test)]
 mod layout_tests;
+#[cfg(test)]
+mod rules_tests;
 #[cfg(test)]
 mod tests;
 
@@ -54,6 +60,10 @@ pub use kit::{
 };
 pub use members::{Group, Member, MemberState, Nearby, gather};
 pub use orders::{Channel, Order, REPORT_ARRIVED, REPORT_ENEMY, REPORT_GOAL_BROKEN, Status};
+pub use rules::{
+    BuiltInRules, ChannelCtx, CostCtx, MAX_REPORT_ACTIONS, PlaceCtx, PlanInfo, ReportAction,
+    ReportActions, RowCtx, SpotCtx, SquadRules, SquadView, spot_score_builtin,
+};
 pub use skill::{MAX_SKILL_ROWS, SkillTable};
 pub use spots::{Spot, SpotPick, heading, pick_spot, wish_point};
 #[allow(deprecated)]

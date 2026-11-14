@@ -1,4 +1,5 @@
 use super::members::MemberState;
+use super::rules::{BuiltInRules, SquadRules};
 use super::spots::Spot;
 use super::squad::{
     Active, DangerReport, Goal, PlanError, PlanId, Scratch, Squad, dist, fires, plain_dist,
@@ -387,6 +388,21 @@ impl Squad {
         spots: &[Spot],
         seed: u64,
     ) -> Result<Status, PlanError> {
+        if self.needs_rules() {
+            return Err(PlanError::NeedsRules);
+        }
+        self.check_with(now, extra, spots, seed, &mut BuiltInRules)
+    }
+
+    /// [`Squad::check`] with `rules` (see [`Squad::check_with`]).
+    pub(super) fn check_inner(
+        &mut self,
+        now: u32,
+        extra: &[i32],
+        spots: &[Spot],
+        seed: u64,
+        rules: &mut dyn SquadRules,
+    ) -> Result<Status, PlanError> {
         self.validate()?;
         self.advance(now);
         self.read_reports(now);
@@ -405,13 +421,13 @@ impl Squad {
             None => Verdict::Abort,
             Some(_) => {
                 let mut s = std::mem::take(&mut self.scratch);
-                let v = self.judge(&mut s, now, centre, extra);
+                let v = self.judge(&mut s, now, centre, extra, rules);
                 self.scratch = s;
                 v?
             }
         };
         match verdict {
-            Verdict::Abort => match self.plan_now(now, extra, spots, seed, None)? {
+            Verdict::Abort => match self.plan_now(now, extra, spots, seed, None, rules)? {
                 Some(id) => Ok(Status::Replan(id)),
                 None => {
                     self.active = None;
@@ -420,7 +436,7 @@ impl Squad {
                 }
             },
             Verdict::Better(bar) => Ok(self
-                .plan_now(now, extra, spots, seed, Some(bar))?
+                .plan_now(now, extra, spots, seed, Some(bar), rules)?
                 .map_or(Status::Keep, Status::Replan)),
             Verdict::Hold if self.trigger_fires(now, centre) => {
                 self.signal(now);
@@ -571,6 +587,7 @@ impl Squad {
         now: u32,
         centre: Pos,
         extra: &[i32],
+        rules: &mut dyn SquadRules,
     ) -> Result<Verdict, PlanError> {
         let Some(a) = &self.active else {
             return Ok(Verdict::Hold);
@@ -600,6 +617,7 @@ impl Squad {
             extra,
             true,
         );
+        self.rule_columns_into(s, rules, (t, fact, now, true));
         if fires(&self.tactics[t], &s.rows) {
             return Ok(Verdict::Abort);
         }
@@ -608,7 +626,11 @@ impl Squad {
         if a.signal_at.is_some() {
             return Ok(Verdict::Hold);
         }
-        self.score_candidates(s, now, centre, extra)?;
+        // The active pair stays a candidate even when the targets slot
+        // drops its target: that slot only filters new plans.
+        self.keep_targets(s, rules);
+        let keep = found.map(|i| (t, i));
+        self.score_candidates(s, now, centre, extra, keep, rules)?;
         let (mut mine, mut other) = (0u32, 0u32);
         for (&(ct, ci), &score) in s.candidates.iter().zip(&s.scores) {
             if ct == t && ci.map(|i| s.targets[i].subject) == target {

@@ -31,10 +31,17 @@ pub enum Place {
     Tagged(u32),
     /// The leader's position as given.
     Here,
+    /// A point the game's rules choose
+    /// ([`SquadRules::place`](super::SquadRules::place) gets the id; the
+    /// core never reads it). Needs a rules object (see
+    /// [`Squad::needs_rules`](super::Squad::needs_rules)); without one it is
+    /// the leader's position, as [`Place::Here`].
+    Custom(u32),
 }
 
 impl Place {
-    /// The tag bits this place itself asks for ([`Place::Tagged`]), else 0.
+    /// The tag bits this place itself asks for ([`Place::Tagged`]), else 0
+    /// (also for [`Place::Custom`]).
     /// The caller combines them with [`Slot::want_tags`] for
     /// [`super::pick_spot`].
     pub const fn tags(&self) -> u32 {

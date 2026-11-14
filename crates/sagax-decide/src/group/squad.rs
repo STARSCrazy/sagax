@@ -1,8 +1,11 @@
 use super::members::{Group, Member, MemberState};
 use super::orders::{Channel, Order};
+use super::rules::{
+    BuiltInRules, CostCtx, PlaceCtx, RowCtx, SpotCtx, SquadRules, SquadView, rank_spots,
+};
 use super::skill::{MAX_SKILL_ROWS, SkillTable};
-use super::spots::{Spot, SpotPick, pick_spot, wish_point};
-use super::tactic::{Abort, GoalKind, Slot, Start, Tactic};
+use super::spots::{Spot, SpotPick, heading, wish_point};
+use super::tactic::{Abort, GoalKind, Place, Slot, Start, Tactic};
 use crate::memory::{
     Area, Areas, Evict, Fact, Inbox, Knowledge, Message, Metric, Pos, ZeroCapacity, distance,
 };
@@ -164,7 +167,8 @@ pub struct Plan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PlanError {
     /// A consideration of tactic `tactic` reads column `input`, but a row
-    /// has only [`Squad::extra_start`] + [`Squad::set_extra_columns`] columns.
+    /// has only [`Squad::rule_start`] + [`SquadConfig::rule_columns`]
+    /// columns.
     InputOutOfRange {
         /// Index of the tactic.
         tactic: usize,
@@ -180,6 +184,10 @@ pub enum PlanError {
     /// The decider has a different number of options than the squad has
     /// tactics (see [`Squad::decider_mut`]).
     OptionsChanged,
+    /// The squad has parts only a rules object decides
+    /// ([`Squad::needs_rules`]): call [`Squad::plan_with`] or
+    /// [`Squad::check_with`].
+    NeedsRules,
 }
 
 impl std::fmt::Display for PlanError {
@@ -192,6 +200,7 @@ impl std::fmt::Display for PlanError {
                 write!(f, "tactic {tactic} has more than 255 slots")
             }
             Self::OptionsChanged => write!(f, "the decider has options the tactics do not"),
+            Self::NeedsRules => write!(f, "the squad has custom parts and needs a rules object"),
         }
     }
 }
@@ -282,6 +291,12 @@ pub(super) struct Scratch {
     pub(super) near: Vec<(i128, usize)>,
     pub(super) reports: Vec<Message>,
     pub(super) log: Vec<ScoreEntry>,
+    /// Per target: kept by the targets slot.
+    pub(super) kept: Vec<bool>,
+    /// Member costs, slot-major (`slot * group.len() + member index`).
+    pub(super) costs: Vec<Option<i128>>,
+    /// `(score, index)` of the spots ranked for one member.
+    pub(super) spot_keys: Vec<(i128, usize)>,
 }
 
 /// The plan being carried out, with what happened since it became active.
@@ -350,6 +365,12 @@ pub struct SquadConfig {
     pub roles: RoleCounts,
     /// The skill table the squad starts with (see [`Squad::set_skill_table`]).
     pub skill_table: SkillTable,
+    /// How many row columns the rules fill
+    /// ([`SquadRules::columns`](super::SquadRules::columns)), after the
+    /// caller's extra columns from [`Squad::rule_start`] on; at most
+    /// [`MAX_EXTRA_COLUMNS`]. More than 0 needs a rules object (see
+    /// [`Squad::needs_rules`]).
+    pub rule_columns: usize,
 }
 
 /// A danger report on its way to the leader (see [`Squad::report_danger`]).
@@ -396,6 +417,7 @@ pub struct Squad {
     pub(super) leader: Option<u32>,
     pub(super) target_kind: u32,
     pub(super) extra_columns: usize,
+    pub(super) rule_columns: usize,
     pub(super) pending: Option<Plan>,
     pub(super) active: Option<Active>,
     pub(super) orders: Vec<(Order, u32)>,
@@ -409,9 +431,13 @@ pub struct Squad {
 impl Squad {
     /// A squad with the capacities and metric of `config`. The knowledge
     /// drops the oldest fact when full. A capacity or the skill table out of
-    /// range (`rows` 0 or more than [`MAX_SKILL_ROWS`]) is an error.
+    /// range (`rows` 0 or more than [`MAX_SKILL_ROWS`]) or more than
+    /// [`MAX_EXTRA_COLUMNS`] rule columns is an error.
     pub fn new(config: SquadConfig) -> Result<Self, ZeroCapacity> {
-        if config.dangers == 0 || !rows_ok(&config.skill_table) {
+        if config.dangers == 0
+            || !rows_ok(&config.skill_table)
+            || config.rule_columns > MAX_EXTRA_COLUMNS
+        {
             return Err(ZeroCapacity);
         }
         Ok(Self {
@@ -432,6 +458,7 @@ impl Squad {
             leader: None,
             target_kind: 0,
             extra_columns: 0,
+            rule_columns: config.rule_columns,
             pending: None,
             active: None,
             orders: Vec::new(),
@@ -693,9 +720,17 @@ impl Squad {
         8 + self.roles.as_slice().len().saturating_sub(2)
     }
 
-    /// The row width: [`Squad::extra_start`] plus the caller columns.
-    fn row_width(&self) -> usize {
+    /// The first rule column ([`SquadConfig::rule_columns`]):
+    /// [`Squad::extra_start`] plus the caller columns. A row is the
+    /// built-in columns, the roles beyond two, the caller columns, then the
+    /// rule columns.
+    pub fn rule_start(&self) -> usize {
         self.extra_start() + self.extra_columns
+    }
+
+    /// The row width: [`Squad::rule_start`] plus the rule columns.
+    fn row_width(&self) -> usize {
+        self.rule_start() + self.rule_columns
     }
 
     /// How many caller columns each scoring row has after the built-in ones
@@ -779,9 +814,9 @@ impl Squad {
     }
 
     /// Fills `row` for one candidate: the built-in inputs, then the extra
-    /// block `block` (`None`: zeros). `active` marks the row of the active
-    /// (tactic, target), which reads the active plan's off-plan count and
-    /// age; other rows read 0 there.
+    /// block `block` (`None`: zeros); the rule columns stay 0. `active`
+    /// marks the row of the active (tactic, target), which reads the active
+    /// plan's off-plan count and age; other rows read 0 there.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn row_into(
         &self,
@@ -847,14 +882,46 @@ impl Squad {
         }
     }
 
-    /// Fills `s.candidates` and `s.scores` from `s.targets` (see
-    /// [`Squad::plan`]).
+    /// Fills `s.kept` from `s.targets` through the targets slot, in
+    /// knowledge order.
+    pub(super) fn keep_targets(&self, s: &mut Scratch, rules: &mut dyn SquadRules) {
+        let view = SquadView::new(self);
+        s.kept.clear();
+        s.kept
+            .extend(s.targets.iter().map(|f| rules.keep_target(&view, f)));
+    }
+
+    /// Fills the rule columns of `s.rows` through the columns slot; `ctx`
+    /// is `(tactic, target, now, active)`.
+    pub(super) fn rule_columns_into(
+        &self,
+        s: &mut Scratch,
+        rules: &mut dyn SquadRules,
+        ctx: (usize, Option<Fact>, u32, bool),
+    ) {
+        let (tactic, target, now, active) = ctx;
+        let (row, out) = s.rows.split_at_mut(self.rule_start());
+        let ctx = RowCtx {
+            tactic,
+            target,
+            row,
+            now,
+            active,
+        };
+        rules.columns(&SquadView::new(self), &ctx, out);
+    }
+
+    /// Fills `s.candidates` and `s.scores` from `s.targets` and `s.kept`
+    /// (see [`Squad::plan`]); `keep` (tactic, target index) is a candidate
+    /// even when the targets slot dropped its target.
     pub(super) fn score_candidates(
         &self,
         s: &mut Scratch,
         now: u32,
         centre: Pos,
         extra: &[i32],
+        keep: Option<(usize, usize)>,
+        rules: &mut dyn SquadRules,
     ) -> Result<(), PlanError> {
         s.candidates.clear();
         for (t, tactic) in self.tactics.iter().enumerate() {
@@ -862,8 +929,12 @@ impl Squad {
                 continue;
             }
             if tactic.needs_target {
-                s.candidates
-                    .extend((0..s.targets.len()).map(|i| (t, Some(i))));
+                let kept = &s.kept;
+                s.candidates.extend(
+                    (0..s.targets.len())
+                        .filter(|&i| kept[i] || keep == Some((t, i)))
+                        .map(|i| (t, Some(i))),
+                );
             } else {
                 s.candidates.push((t, None));
             }
@@ -888,6 +959,7 @@ impl Squad {
                 extra,
                 active,
             );
+            self.rule_columns_into(s, rules, (t, fact, now, active));
             let score = if fires(&self.tactics[t], &s.rows) {
                 0
             } else {
@@ -1008,12 +1080,13 @@ impl Squad {
     /// does not use up a needed specialist), then the slots in order take
     /// one more member each, round by round, up to their maximum. A slot
     /// only takes free active members (suspended and gone are skipped) with
-    /// all its role bits; among those the nearest to the slot's wish point,
-    /// ties to the lower member index. While minimums are filled, a member
-    /// is skipped if taking it would leave another slot's minimum
-    /// unreachable. Members get spots in assignment order through
-    /// [`pick_spot`] with `slot.want_tags | place.tags()`; with weak skill a
-    /// spot may be up to `spot_rank_error` ranks off the best (from `seed`).
+    /// all its role bits; among those the nearest to the slot's wish point
+    /// (the member cost slot), ties to the lower member index. While
+    /// minimums are filled, a member is skipped if taking it would leave
+    /// another slot's minimum unreachable. Members get spots in assignment
+    /// order ranked as [`pick_spot`](super::pick_spot) (the spot score slot)
+    /// with `slot.want_tags | place.tags()`; with weak skill a spot may be up
+    /// to `spot_rank_error` ranks off the best (from `seed`).
     ///
     /// Spots farther than the spot radius from the wish point do not count
     /// (see [`Squad::set_spot_radius`]).
@@ -1031,10 +1104,15 @@ impl Squad {
     /// leader's position. Formation offsets are in the square frame also on
     /// [`Metric::Hex`].
     ///
+    /// **Rules:** this is [`Squad::plan_with`] with [`BuiltInRules`]; a
+    /// squad with custom parts ([`Squad::needs_rules`]) is refused with
+    /// [`PlanError::NeedsRules`] first. The [rules](super::rules) list every
+    /// slot a game can fill, in the order the core calls them.
+    ///
     /// Returns the new plan's id, or `Ok(None)` (pending plan unchanged)
     /// when there is no active member or no candidate scores above 0. A
     /// consideration that reads beyond the row is an error
-    /// ([`Squad::validate`]), checked before anything else.
+    /// ([`Squad::validate`]), checked before anything else but the rules.
     pub fn plan(
         &mut self,
         now: u32,
@@ -1042,11 +1120,10 @@ impl Squad {
         spots: &[Spot],
         seed: u64,
     ) -> Result<Option<PlanId>, PlanError> {
-        self.validate()?;
-        self.advance(now);
-        self.read_reports(now);
-        self.areas.expire(now);
-        self.plan_now(now, extra, spots, seed, None)
+        if self.needs_rules() {
+            return Err(PlanError::NeedsRules);
+        }
+        self.plan_with(now, extra, spots, seed, &mut BuiltInRules)
     }
 
     /// [`Squad::plan`] without the first steps. With a `bar` every
@@ -1060,14 +1137,16 @@ impl Squad {
         spots: &[Spot],
         seed: u64,
         bar: Option<u64>,
+        rules: &mut dyn SquadRules,
     ) -> Result<Option<PlanId>, PlanError> {
         let mut s = std::mem::take(&mut self.scratch);
-        let made = self.plan_with(&mut s, now, extra, spots, seed, bar);
+        let made = self.plan_inner(&mut s, now, extra, spots, seed, bar, rules);
         self.scratch = s;
         made
     }
 
-    fn plan_with(
+    #[allow(clippy::too_many_arguments)]
+    fn plan_inner(
         &mut self,
         s: &mut Scratch,
         now: u32,
@@ -1075,6 +1154,7 @@ impl Squad {
         spots: &[Spot],
         seed: u64,
         bar: Option<u64>,
+        rules: &mut dyn SquadRules,
     ) -> Result<Option<PlanId>, PlanError> {
         let (Some(leader), Some(centre)) = (self.acting_leader().map(|m| m.pos), self.centre())
         else {
@@ -1084,7 +1164,8 @@ impl Squad {
 
         s.targets.clear();
         s.targets.extend(self.targets().copied());
-        self.score_candidates(s, now, centre, extra)?;
+        self.keep_targets(s, rules);
+        self.score_candidates(s, now, centre, extra, None, rules)?;
         if let Some(bar) = bar {
             for score in &mut s.scores {
                 if u64::from(*score) <= bar {
@@ -1115,19 +1196,59 @@ impl Squad {
                 .map(|(_, f)| f.pos)
         });
         let tactic = &self.tactics[t];
-        let wish_of = |place: &super::Place, dist: i32| match face {
-            Some(_) => wish_point(place, leader, centre, face, friend, self.metric, dist),
-            None => leader,
+        let target_id = target_fact.map(|f| f.subject);
+        let h = face.map_or(0, |f| heading(self.metric, centre, f));
+        let mut wish_of = |place: &Place, dist: i32, slot: usize, gather: bool| match *place {
+            Place::Custom(id) => rules.place(
+                id,
+                &PlaceCtx {
+                    tactic: t,
+                    slot,
+                    gather,
+                    leader,
+                    centre,
+                    face,
+                    friend,
+                    target: target_id,
+                    heading: h,
+                    dist,
+                },
+            ),
+            _ if face.is_some() => {
+                wish_point(place, leader, centre, face, friend, self.metric, dist)
+            }
+            _ => leader,
         };
         s.wishes.clear();
         s.then_wishes.clear();
-        for slot in &tactic.slots {
+        for (si, slot) in tactic.slots.iter().enumerate() {
             s.wishes.push(match &slot.gather {
-                Some(g) => wish_of(g, slot.gather_dist),
-                None => wish_of(&slot.place, slot.dist),
+                Some(g) => wish_of(g, slot.gather_dist, si, true),
+                None => wish_of(&slot.place, slot.dist, si, false),
             });
-            s.then_wishes
-                .push(slot.gather.map(|_| wish_of(&slot.place, slot.dist)));
+            s.then_wishes.push(
+                slot.gather
+                    .map(|_| wish_of(&slot.place, slot.dist, si, false)),
+            );
+        }
+
+        // Member costs, once: slot-major, active members with the roles.
+        let n = self.group.len();
+        s.costs.clear();
+        s.costs.resize(tactic.slots.len() * n, None);
+        for (si, slot) in tactic.slots.iter().enumerate() {
+            let wish = s.wishes[si];
+            for (i, m) in self.group.active() {
+                if m.roles & slot.roles == slot.roles {
+                    s.costs[si * n + i] = rules.member_cost(&CostCtx {
+                        tactic: t,
+                        slot: si,
+                        member: *m,
+                        wish,
+                        built_in: dist(self.metric, m.pos, wish),
+                    });
+                }
+            }
         }
 
         // Members to slots: minimums first, then round by round.
@@ -1169,6 +1290,9 @@ impl Squad {
         s.then_taken.resize(spots.len(), false);
         let err = u64::from(self.table.spot_rank_error[level]);
         let spread = u64::from(self.table.timing_spread[level]);
+        // Spots are ranked through the spot score slot (see `rank_spots`).
+        s.spot_keys.clear();
+        s.spot_keys.reserve(spots.len());
         let mut goals = Vec::with_capacity(s.picks.len());
         for &(mi, si) in &s.picks {
             let slot = &tactic.slots[si];
@@ -1176,9 +1300,24 @@ impl Squad {
             let skip = (draw(seed, SALT_SPOT, mi, now) % (err + 1)) as u8;
             let metric = self.metric;
             let radius = self.spot_radius_of(slot);
-            let pick = |wish: Pos, place: &super::Place, taken: &mut Vec<bool>| {
-                let want = slot.want_tags | place.tags();
-                match pick_spot(wish, want, spots, taken, skip, metric, radius) {
+            let Some(&member) = self.group.get(mi) else {
+                continue;
+            };
+            let keys = &mut s.spot_keys;
+            let mut pick = |wish: Pos, place: &Place, gather: bool, taken: &mut Vec<bool>| {
+                let ctx = SpotCtx {
+                    tactic: t,
+                    slot: si,
+                    gather,
+                    member,
+                    wish,
+                    want_tags: slot.want_tags | place.tags(),
+                    index: 0,
+                    spot: Spot { pos: wish, tags: 0 },
+                    target: target_fact,
+                    built_in: 0,
+                };
+                match rank_spots(rules, keys, &ctx, spots, taken, skip, metric, radius) {
                     SpotPick::Spot(i) => {
                         taken[i] = true;
                         (spots[i].pos, false)
@@ -1186,10 +1325,11 @@ impl Squad {
                     SpotPick::Unchecked(w) => (w, true),
                 }
             };
-            let (pos, unchecked) = pick(s.wishes[si], &first, &mut s.taken);
+            let gathers = slot.gather.is_some();
+            let (pos, unchecked) = pick(s.wishes[si], &first, gathers, &mut s.taken);
             let (then_pos, then_unchecked) = match s.then_wishes[si] {
                 Some(w) => {
-                    let (p, u) = pick(w, &slot.place, &mut s.then_taken);
+                    let (p, u) = pick(w, &slot.place, false, &mut s.then_taken);
                     (Some(p), u)
                 }
                 None => (None, false),
@@ -1213,8 +1353,7 @@ impl Squad {
                 issued_at: now,
                 start_delay: (draw(seed, SALT_TIME, mi, now) % (spread + 1)) as u32,
             };
-            let member = self.group.get(mi).map_or(0, |m| m.id);
-            goals.push((member, goal));
+            goals.push((member.id, goal));
         }
         self.pending = Some(Plan {
             id,
@@ -1227,14 +1366,20 @@ impl Squad {
         Ok(Some(id))
     }
 
-    /// Gives slot `si` its best free member; false if none is left.
+    /// The member cost of member index `i` for slot `si` (see
+    /// [`SquadRules::member_cost`]); `None`: it cannot take the slot.
+    fn cost(&self, s: &Scratch, si: usize, i: usize) -> Option<i128> {
+        s.costs[si * self.group.len() + i]
+    }
+
+    /// Gives slot `si` its best free member (lowest member cost, ties to
+    /// the lower index); false if none is left.
     fn take(&self, s: &mut Scratch, si: usize, roles: u32) -> bool {
-        let wish = s.wishes[si];
         let best = self
             .group
             .active()
             .filter(|&(i, m)| !s.used[i] && m.roles & roles == roles)
-            .map(|(i, m)| (dist(self.metric, m.pos, wish), i))
+            .filter_map(|(i, _)| self.cost(s, si, i).map(|c| (c, i)))
             .min();
         match best {
             Some((_, i)) => {
@@ -1247,18 +1392,21 @@ impl Squad {
         }
     }
 
-    /// Like [`Squad::take`] while minimums are filled: the nearest fitting
-    /// free member whose pick still leaves every minimum reachable.
+    /// Like [`Squad::take`] while minimums are filled: the cheapest fitting
+    /// free member whose pick still leaves every minimum reachable. The
+    /// reachability check sees role bits only: a member the cost slot
+    /// refuses still counts there, so such a slot may end below its minimum.
     fn take_min(&self, s: &mut Scratch, slots: &[Slot], si: usize) -> bool {
-        let (wish, roles) = (s.wishes[si], slots[si].roles);
-        s.near.clear();
-        let used = &s.used;
-        s.near.extend(
+        let roles = slots[si].roles;
+        let mut near = std::mem::take(&mut s.near);
+        near.clear();
+        near.extend(
             self.group
                 .active()
-                .filter(|&(i, m)| !used[i] && m.roles & roles == roles)
-                .map(|(i, m)| (dist(self.metric, m.pos, wish), i)),
+                .filter(|&(i, m)| !s.used[i] && m.roles & roles == roles)
+                .filter_map(|(i, _)| self.cost(s, si, i).map(|c| (c, i))),
         );
+        s.near = near;
         s.near.sort_unstable();
         for k in 0..s.near.len() {
             let i = s.near[k].1;

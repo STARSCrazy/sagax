@@ -46,8 +46,8 @@ impl Default for SkillTable {
 
 impl Default for SquadConfig {
     /// 8 members, 32 facts, 8 areas, 16 inbox reports, 8 danger reports,
-    /// [`Metric::Euclid`], the roles `[ROLE_RANGED, ROLE_AREA]` and the
-    /// default [`SkillTable`].
+    /// [`Metric::Euclid`], the roles `[ROLE_RANGED, ROLE_AREA]`, the
+    /// default [`SkillTable`] and no rule columns.
     fn default() -> Self {
         Self {
             members: 8,
@@ -58,6 +58,7 @@ impl Default for SquadConfig {
             metric: Metric::Euclid,
             roles: RoleCounts::new(&[ROLE_RANGED, ROLE_AREA]).unwrap_or(RoleCounts::NONE),
             skill_table: SkillTable::default(),
+            rule_columns: 0,
         }
     }
 }

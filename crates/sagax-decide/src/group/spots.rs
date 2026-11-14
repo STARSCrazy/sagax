@@ -165,6 +165,8 @@ fn side_point(metric: Metric, target: Pos, side: Side, h: u8, dist: i32) -> Pos 
 ///   down); without a friend, like [`Side::Front`].
 /// - [`Place::Tagged`] gives `centre`; the tag is matched by [`pick_spot`].
 /// - [`Place::Here`] gives `leader`.
+/// - [`Place::Custom`] gives `leader` too: only a rules object knows the
+///   point ([`SquadRules::place`](super::SquadRules::place)).
 pub fn wish_point(
     place: &Place,
     leader: Pos,
@@ -190,7 +192,7 @@ pub fn wish_point(
             _ => side_point(metric, at, Side::Front, h, dist),
         },
         Place::Tagged(_) => centre,
-        Place::Here => leader,
+        Place::Here | Place::Custom(_) => leader,
     }
 }
 

@@ -172,6 +172,9 @@ pub const fn place_code(place: Option<Place>) -> (u32, u32, Pos) {
         Some(Place::Between) => (PLACE_BETWEEN, 0, [0; 3]),
         Some(Place::Tagged(tags)) => (PLACE_TAGGED, tags, [0; 3]),
         Some(Place::Here) => (PLACE_HERE, 0, [0; 3]),
+        // No code of its own yet: shown as what it is without rules, the
+        // leader's position, with the id as the value.
+        Some(Place::Custom(id)) => (PLACE_HERE, id, [0; 3]),
     }
 }
 
@@ -377,13 +380,14 @@ pub const fn squad_status(status: SquadStatus) -> (i32, Option<PlanId>) {
 }
 
 /// `(SX_ERROR_PLAN, tactic, input)` of a plan error; the input is
-/// `u32::MAX` where there is no column; for `OptionsChanged` both are
-/// `u32::MAX`.
+/// `u32::MAX` where there is no column; for `OptionsChanged` and
+/// `NeedsRules` both are `u32::MAX`.
 pub fn plan_error(error: PlanError) -> (i32, u32, u32) {
     let (tactic, input) = match error {
         PlanError::InputOutOfRange { tactic, input } => (tactic, input),
         PlanError::TooManySlots { tactic } => (tactic, u32::MAX),
         PlanError::OptionsChanged => (usize::MAX, u32::MAX),
+        PlanError::NeedsRules => (usize::MAX, u32::MAX),
     };
     (ERROR_PLAN, u32::try_from(tactic).unwrap_or(u32::MAX), input)
 }
