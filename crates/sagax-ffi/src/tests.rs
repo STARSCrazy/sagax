@@ -3763,3 +3763,119 @@ mod crew {
         assert_eq!((c.arrive_radius, c.hex_grid), (0, 0));
     }
 }
+
+mod path_cost {
+    use super::*;
+    use crate::grid::{sx_grid_free, sx_grid_map, sx_grid_new, sx_grid_set};
+    use crate::rules::sx_path_cost;
+    use sagax_nav::grid::DenseGrid;
+
+    /// A 10 x 10 grid with a wall at x = 5 for y 0..=8 (open at y = 9).
+    unsafe fn walled() -> *mut crate::grid::SxGrid {
+        unsafe {
+            let grid = sx_grid_new(10, 10, 1);
+            assert!(!grid.is_null());
+            for y in 0..=8 {
+                assert_eq!(sx_grid_set(grid, Point::new(5, y, 0), -1), 0);
+            }
+            grid
+        }
+    }
+
+    #[test]
+    fn c_path_cost_same_as_rust() {
+        unsafe {
+            let grid = walled();
+            let mut map = SxMap {
+                step: None,
+                start_step: None,
+                move_cost: None,
+                steps: None,
+                context: std::ptr::null_mut(),
+            };
+            assert_eq!(sx_grid_map(grid, &mut map), 0);
+            let mut r = SxRules::default();
+            assert_eq!(sx_rules_default(0, 1, &mut r), 0);
+            let nav = sx_nav_new(&r);
+            assert!(!nav.is_null());
+
+            // The Rust side: the same grid, the same preset.
+            let mut dense = DenseGrid::new(10, 10);
+            for y in 0..=8 {
+                dense.set(5, y, DenseGrid::BLOCKED);
+            }
+            let mut rust = Navigator::new(
+                Topology::Square(GridRules::preset(Preset::Octile)),
+                r.node_capacity as usize,
+            );
+            let report = rust.find_path(
+                &mut dense,
+                Cell::new(0, 0, 0),
+                &[Cell::new(9, 0, 0)],
+                sagax_nav::Budget::UNLIMITED,
+            );
+            assert_eq!(report.status, sagax_nav::nav::Status::Found);
+
+            let (from, to) = ([0, 0, 0], [9, 0, 0]);
+            let mut cost = -7i64;
+            assert_eq!(
+                sx_path_cost(nav, &map, from.as_ptr(), to.as_ptr(), 0, &mut cost),
+                1
+            );
+            assert_eq!(cost, i64::from(report.cost));
+
+            // Not reachable: the cost is left alone.
+            let mut cost = -7i64;
+            let blocked = [5, 3, 0];
+            assert_eq!(
+                sx_path_cost(nav, &map, from.as_ptr(), blocked.as_ptr(), 0, &mut cost),
+                0
+            );
+            assert_eq!(cost, -7);
+            // Budget used up first.
+            assert_eq!(
+                sx_path_cost(nav, &map, from.as_ptr(), to.as_ptr(), 1, &mut cost),
+                0
+            );
+
+            // Bad arguments.
+            let null = std::ptr::null();
+            assert_eq!(
+                sx_path_cost(
+                    std::ptr::null_mut(),
+                    &map,
+                    from.as_ptr(),
+                    to.as_ptr(),
+                    0,
+                    &mut cost
+                ),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_path_cost(nav, &map, null, to.as_ptr(), 0, &mut cost),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_path_cost(nav, &map, from.as_ptr(), null, 0, &mut cost),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_path_cost(nav, &map, from.as_ptr(), to.as_ptr(), -1, &mut cost),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_path_cost(
+                    nav,
+                    &map,
+                    from.as_ptr(),
+                    to.as_ptr(),
+                    0,
+                    std::ptr::null_mut()
+                ),
+                ERROR_ARGUMENT
+            );
+            sx_nav_free(nav);
+            sx_grid_free(grid);
+        }
+    }
+}

@@ -19,6 +19,9 @@ use sagax_decide::memory::{Fact, Message, Pos};
 
 use super::group::{SxMember, SxSpot};
 use super::memory::{SxArea, SxFact, SxMessage, pos3, put};
+use crate::{Begun, CallbackMap, SxMap, SxNav};
+use sagax_nav::grid::Cell;
+use sagax_nav::nav::Status;
 
 // ---- value structs ------------------------------------------------------------
 
@@ -669,6 +672,50 @@ pub unsafe extern "C" fn sx_builtin_member_cost(
     // SAFETY: non-null and writable (see above).
     unsafe { cost.write(ctx.built_in) };
     1
+}
+
+/// `sx_path_cost`: the cost of the way from `from` to `to` (3 integers
+/// each) to `*cost`; 1 found, 0 not reachable or `budget` (cells, 0 =
+/// unlimited) used up (`*cost` untouched). Replaces the navigator's last
+/// search.
+///
+/// # Safety
+/// `nav` and `map` are null or valid (the callbacks too, for the call);
+/// `from` and `to` are null or hold 3 integers; `cost` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_path_cost(
+    nav: *mut SxNav,
+    map: *const SxMap,
+    from: *const i32,
+    to: *const i32,
+    budget: i32,
+    cost: *mut i64,
+) -> i32 {
+    // SAFETY: null or valid (see above).
+    let (Some(s), Some(mut map)) = (unsafe { nav.as_mut() }, CallbackMap::new(map)) else {
+        return ERROR_ARGUMENT;
+    };
+    let Some(budget) = convert::budget(budget) else {
+        return ERROR_ARGUMENT;
+    };
+    if from.is_null() || to.is_null() || cost.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: 3 integers each (see above).
+    let (from, to) = unsafe { (pos3(from), pos3(to)) };
+    crate::guarded(|| {
+        s.begun = Begun::Nothing;
+        // The same as `sagax::rules::path_cost`.
+        let report = s
+            .nav
+            .find_path(&mut map, Cell::from(from), &[Cell::from(to)], budget);
+        if report.status != Status::Found {
+            return 0;
+        }
+        // SAFETY: non-null and writable (see above).
+        unsafe { cost.write(i64::from(report.cost)) };
+        1
+    })
 }
 
 /// `sx_builtin_spot_score`: `*score = ctx->built_in` (saturated), usable.

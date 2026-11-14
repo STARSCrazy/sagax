@@ -1667,6 +1667,16 @@ typedef struct sx_squad_rules {
 int32_t sx_builtin_member_cost(void *user, const sx_cost_ctx *ctx, int64_t *cost);
 int32_t sx_builtin_spot_score(void *user, const sx_spot_ctx *ctx, int64_t *score);
 
+/* For a member_cost callback: the cost of the way from from to to (3 ints
+ * each: x, y, level; on a hex grid offset coordinates, as the callbacks get
+ * them) to *cost. Returns 1 if a way was found, 0 if the goal cannot be
+ * reached or budget cells (0 = unlimited) ran out (*cost is not written),
+ * SX_ERROR_ARGUMENT for a null pointer or a negative budget. Runs a search on
+ * nav and replaces its last one (sx_nav_continue then has nothing to go on
+ * with). Pass the nav and map the game already has. */
+int32_t sx_path_cost(sx_nav *nav, const sx_map *map, const int32_t *from, const int32_t *to,
+	int32_t budget, int64_t *cost);
+
 /* Every callback NULL and user NULL (all built-in, exactly as a zeroed table):
  * a table to start from. Returns 0; SX_ERROR_ARGUMENT for a null out. */
 int32_t sx_squad_rules_default(sx_squad_rules *out);

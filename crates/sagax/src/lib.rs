@@ -9,3 +9,4 @@ pub use sagax_decide as decide;
 pub use sagax_nav as nav;
 
 pub mod prelude;
+pub mod rules;
