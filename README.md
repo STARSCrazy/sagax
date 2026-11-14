@@ -172,6 +172,7 @@ crew.free();
 | `examples/c/quickstart.c` | a path, a decision, a crew and a state machine in C |
 | `examples/c/memory.c` | the memory blocks in C (knowledge, messages, areas, timers, alertness) |
 | `examples/c/squad.c` | four members walk around a wall and attack together, with `sx_grid`, `sx_nav_*` and `sx_crew_*` |
+| `examples/c/ambush_rules.c` | four guards ambush an intruder with the game's own sight, hand signs, kill zone and "seen" abort in an `sx_squad_rules` object |
 | `examples/js/quickstart.mjs` | the three jobs in JavaScript |
 | `examples/js/squad.mjs` | the same squad walk in JavaScript |
 | `crates/sagax/examples/squad_walk.rs` | the same squad walk in Rust (`cargo run -p sagax --example squad_walk`) |

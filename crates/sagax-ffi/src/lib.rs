@@ -1231,6 +1231,9 @@ mod tests;
 #[cfg(test)]
 mod bench;
 
+#[cfg(test)]
+mod ambush_replay;
+
 pub mod decide;
 pub mod grid;
 pub mod machine;
