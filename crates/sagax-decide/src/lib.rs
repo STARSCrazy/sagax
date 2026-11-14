@@ -26,6 +26,7 @@
 
 pub mod group;
 pub mod memory;
+pub mod mission;
 pub mod state;
 
 use std::cell::RefCell;
