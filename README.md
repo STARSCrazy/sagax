@@ -26,7 +26,8 @@ dependencies).
 - **Decisions and memory**: utility AI, state machines, a memory of the
   world, and **group tactics**: a squad leader plans from what it knows,
   hands out goals with shout or radio delay, and strikes at the same moment.
-  The `Crew` runs that loop in one call per tick. A rules object lets a game put its own logic (sight, costs, triggers) into nine fixed points.
+  The `Crew` runs that loop in one call per tick. A rules object lets a game
+  put its own logic (sight, costs, triggers) into nine fixed points.
 - **Square and hex grids** (pointy or flat top, odd or even offset), 4 or 8
   directions, walls between cells, extra costs, zones that cost extra to
   leave (zones of control).

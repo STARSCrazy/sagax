@@ -2064,6 +2064,9 @@ function rolesOf(roles) {
 
 /** The numbers sx_squad_new takes for a squad config (see Squad), and the role masks to put in the scratch buffer. */
 function squadConfigOf(config) {
+  for (const [old, now] of [['groupCap', 'members'], ['memoryCap', 'memory'], ['areaCap', 'areas'], ['inboxCap', 'inbox']]) {
+    if (config[old] !== undefined) throw new TypeError(`Sagax: squad config key ${old} was removed in 0.10; use ${now}`);
+  }
   const members = capacityOf(config.members ?? 8);
   const memory = capacityOf(config.memory ?? 32);
   const areas = capacityOf(config.areas ?? 8);

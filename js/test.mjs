@@ -1342,6 +1342,9 @@ test('squad: config keys', () => {
   const d = lib.squad();
   assert.equal(d.addMember({ id: 1, pos: [0, 0, 0] }), 0);
   d.free();
+  for (const [old, now] of [['groupCap', 'members'], ['memoryCap', 'memory'], ['areaCap', 'areas'], ['inboxCap', 'inbox']]) {
+    assert.throws(() => lib.squad({ [old]: 2 }), (e) => e instanceof TypeError && e.message.includes(now));
+  }
   const small = lib.squad({ members: 1, memory: 2, areas: 3, inbox: 4 });
   assert.equal(small.addMember({ id: 1, pos: [0, 0, 0] }), 0);
   assert.equal(small.addMember({ id: 2, pos: [0, 0, 0] }), null, 'members 1 holds one');

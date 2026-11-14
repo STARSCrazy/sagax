@@ -117,10 +117,11 @@ JavaScript and WebAssembly:
 | `decider.setCombine` with a negative option | only `ALL_OPTIONS` (-1, exported) means all; other negatives throw |
 | radius, range and skill table entries given as fractions or out of range | throw `RangeError` (a skill table entry is limited to 0 .. 2^31 - 1 in JavaScript) |
 | WASM `sx_tactic_shipped(kind, ..)` | `sx_tactic_rush`, `_formation`, `_flank`, `_ambush`, `_focus`, `_isolate`, `_fall_back` (internal exports; `lib.tactics.*` is unchanged) |
-| the squad config keys `groupCap`, `memoryCap`, `areaCap`, `inboxCap` | removed: `members`, `memory`, `areas`, `inbox` (the old keys are no longer read, so a squad built with them gets the defaults) |
+| the squad config keys `groupCap`, `memoryCap`, `areaCap`, `inboxCap` | removed: `members`, `memory`, `areas`, `inbox` (the old keys throw a `TypeError` that names the new key) |
 | `squad.resume(id, now)` | removed: `reinstate` |
 | `keeper.postpone(now)`, `keeper.resume(now)` | removed: `goalPostponed`, `goalWon` |
 | `lib.discipline(skill, table)` | removed: `lib.holdBonusFor(table, skill)` |
+| WASM `sx_discipline(skill, custom)` | removed (internal export; `lib.holdBonusFor` is unchanged) |
 | `SQUAD.inExtra` | deprecated: `squad.extraStart()` |
 
 Behaviour changes (no compile error, so read these):
