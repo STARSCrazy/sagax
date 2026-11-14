@@ -1,5 +1,5 @@
 use super::*;
-use crate::memory::{Fact, Message, Metric, Pos};
+use crate::memory::{Area, Fact, Message, Metric, Pos};
 use sagax_core::HexLayout;
 
 /// Fact kind of an enemy.
@@ -1042,4 +1042,416 @@ fn crew_no_plan_without_a_plan_leaves_keepers_alone() {
     crew.tick(0, &[], &[], SEED, &mut events).unwrap();
     assert_eq!(events, [CrewEvent::NoPlan]);
     assert_eq!(crew.goal(1), Some(goal), "no plan went away");
+}
+
+// --- The crew lends the rules ---
+
+/// The flank scene's walk for ticks `t0 ..= t0 + len`, each tick through
+/// `tick`; returns `(tick, event)` in order.
+fn run_crew_by(
+    crew: &mut Crew,
+    t0: u32,
+    len: u32,
+    mut tick: impl FnMut(&mut Crew, u32, &[Spot], &mut Vec<CrewEvent>),
+) -> Vec<(u32, CrewEvent)> {
+    let spots = flank_spots();
+    let mut walks = [Walk::default(); 4];
+    let mut all = Vec::new();
+    let mut events = Vec::new();
+    for k in 0..=len {
+        let t = t0.wrapping_add(k);
+        for (i, (id, ..)) in MEMBERS.iter().enumerate() {
+            let g = crew.squad().group();
+            let at = g.get(g.index(*id).unwrap()).unwrap().pos;
+            if let Some(p) = walks[i].next(t, at) {
+                assert!(crew.set_pos(*id, p));
+            }
+        }
+        tick(crew, t, &spots, &mut events);
+        note_orders(&mut walks, t, &events);
+        all.extend(events.iter().map(|e| (t, *e)));
+    }
+    all
+}
+
+#[test]
+fn crew_tick_equals_tick_with_builtin() {
+    let mut plain = flank_crew(8, 0);
+    let a = run_crew_by(&mut plain, 0, 200, |c, t, spots, ev| {
+        c.tick(t, &[], spots, SEED, ev).unwrap();
+    });
+    let mut lent = flank_crew(8, 0);
+    let b = run_crew_by(&mut lent, 0, 200, |c, t, spots, ev| {
+        c.tick_with(t, &[], spots, SEED, &mut BuiltInRules, ev)
+            .unwrap();
+    });
+    assert!(a.iter().any(|(_, e)| matches!(e, CrewEvent::Signal)));
+    assert_eq!(a, b);
+}
+
+/// A custom channel with a fixed delay; records every call.
+struct FixedDelay {
+    delay: u32,
+    seen: Vec<(u32, ChannelCtx)>,
+}
+
+impl SquadRules for FixedDelay {
+    fn channel_delay(&mut self, id: u32, ctx: &ChannelCtx) -> Option<u32> {
+        self.seen.push((id, *ctx));
+        Some(self.delay)
+    }
+}
+
+#[test]
+fn crew_rules_time_orders_and_reports() {
+    let mut crew = flank_crew(8, 0);
+    for (id, ..) in MEMBERS {
+        assert!(crew.squad_mut().set_channel(id, Channel::Custom(1)));
+    }
+    let mut events = Vec::new();
+    assert_eq!(
+        crew.tick(0, &[], &flank_spots(), SEED, &mut events),
+        Err(PlanError::NeedsRules)
+    );
+    let mut rules = FixedDelay {
+        delay: 3,
+        seen: Vec::new(),
+    };
+    let run = run_crew_by(&mut crew, 0, 200, |c, t, spots, ev| {
+        c.tick_with(t, &[], spots, SEED, &mut rules, ev).unwrap();
+    });
+    let activated = ticks_of(&run, |e| matches!(e, CrewEvent::Activated(_)));
+    let signals = ticks_of(&run, |e| matches!(e, CrewEvent::Signal));
+    assert!(!activated.is_empty() && !signals.is_empty());
+    let sent: Vec<u32> = activated.iter().chain(&signals).copied().collect();
+    let orders = orders_of(&run);
+    for (t, member, ..) in &orders {
+        let delay = if *member == 1 { 0 } else { 3 };
+        assert!(
+            sent.contains(&(t - delay)),
+            "order for {member} at {t}, sent at {sent:?}"
+        );
+    }
+    // Every member but the leader gets its first order 3 ticks after the
+    // activation.
+    for id in [2, 3, 4] {
+        let first = orders.iter().find(|o| o.1 == id).unwrap().0;
+        assert_eq!(first, activated[0] + 3, "member {id}");
+    }
+    // Arrival reports go over the channel at the event tick, and the
+    // leader reads them 3 ticks later: the signal comes with the last.
+    let arrived: Vec<(u32, u32)> = run
+        .iter()
+        .filter_map(|(t, e)| match e {
+            CrewEvent::Arrived { member } if *member != 1 => Some((*t, *member)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(arrived.len(), 3);
+    for &(t, m) in &arrived {
+        assert!(
+            rules
+                .seen
+                .iter()
+                .any(|(id, c)| *id == 1 && c.report && c.sender == m && c.now == t),
+            "report of {m} at {t}"
+        );
+    }
+    let last = arrived.iter().map(|a| a.0).max().unwrap();
+    assert_eq!(signals[0], last + 3);
+}
+
+/// Checks that every position a slot sees is one of `known` (offset
+/// coordinates the game gave); counts the calls per slot.
+#[derive(Default)]
+struct OffsetOnly {
+    known: Vec<Pos>,
+    place_at: Pos,
+    area: Option<Area>,
+    calls: [u32; 9],
+    seen: u32,
+}
+
+impl OffsetOnly {
+    fn pos(&mut self, p: Pos, what: &str) {
+        assert!(
+            self.known.contains(&p),
+            "{what}: {p:?} is no given position"
+        );
+        self.seen += 1;
+    }
+
+    fn view(&mut self, view: &SquadView<'_>) {
+        let members: Vec<Pos> = view.members().map(|m| m.pos).collect();
+        let targets: Vec<Pos> = view.targets().map(|f| f.pos).collect();
+        for p in members {
+            self.pos(p, "view member");
+        }
+        for p in targets {
+            self.pos(p, "view target");
+        }
+    }
+}
+
+impl SquadRules for OffsetOnly {
+    fn keep_target(&mut self, view: &SquadView<'_>, fact: &Fact) -> bool {
+        self.calls[0] += 1;
+        self.view(view);
+        self.pos(fact.pos, "keep_target");
+        true
+    }
+
+    fn columns(&mut self, view: &SquadView<'_>, ctx: &RowCtx<'_>, _: &mut [i32]) {
+        self.calls[1] += 1;
+        self.view(view);
+        if let Some(f) = ctx.target {
+            self.pos(f.pos, "columns target");
+        }
+    }
+
+    fn place(&mut self, _: u32, ctx: &PlaceCtx) -> Pos {
+        self.calls[2] += 1;
+        self.pos(ctx.leader, "place leader");
+        self.pos(ctx.centre, "place centre");
+        for p in [ctx.face, ctx.friend].into_iter().flatten() {
+            self.pos(p, "place face/friend");
+        }
+        self.place_at
+    }
+
+    fn member_cost(&mut self, ctx: &CostCtx) -> Option<i128> {
+        self.calls[3] += 1;
+        self.pos(ctx.member.pos, "cost member");
+        self.pos(ctx.wish, "cost wish");
+        Some(ctx.built_in)
+    }
+
+    fn spot_score(&mut self, ctx: &SpotCtx) -> Option<i128> {
+        self.calls[4] += 1;
+        self.pos(ctx.member.pos, "spot member");
+        self.pos(ctx.wish, "spot wish");
+        self.pos(ctx.spot.pos, "spot");
+        if let Some(f) = ctx.target {
+            self.pos(f.pos, "spot target");
+        }
+        Some(ctx.built_in)
+    }
+
+    fn trigger(&mut self, _: u32, view: &SquadView<'_>, _: u32) -> bool {
+        self.calls[5] += 1;
+        self.view(view);
+        false
+    }
+
+    fn abort(&mut self, _: u32, view: &SquadView<'_>, ctx: &RowCtx<'_>) -> bool {
+        self.calls[6] += 1;
+        self.view(view);
+        if let Some(f) = ctx.target {
+            self.pos(f.pos, "abort target");
+        }
+        false
+    }
+
+    fn channel_delay(&mut self, _: u32, ctx: &ChannelCtx) -> Option<u32> {
+        self.calls[7] += 1;
+        self.pos(ctx.from, "channel from");
+        self.pos(ctx.to, "channel to");
+        Some(1)
+    }
+
+    fn report(&mut self, view: &SquadView<'_>, msg: &Message, _: u32, act: &mut ReportActions<'_>) {
+        self.calls[8] += 1;
+        self.view(view);
+        self.pos(msg.pos, "report msg");
+        if let Some(a) = self.area.take() {
+            assert!(act.add_area(a));
+        }
+    }
+}
+
+#[test]
+fn crew_hex_rules_see_offset_coords() {
+    let layout = HexLayout::OddR;
+    let mut crew = Crew::new(CrewConfig {
+        squad: SquadConfig {
+            metric: Metric::Hex,
+            ..scene_config(8)
+        },
+        hex_layout: Some(layout),
+        ..CrewConfig::default()
+    })
+    .unwrap();
+    // Offset positions on odd rows; in axial the leader is the exact mean
+    // of the three (so the centre is a given position too).
+    let members: [(u32, Pos); 3] = [(1, [3, 1, 0]), (2, [5, 3, 0]), (3, [1, -1, 0])];
+    for (id, p) in members {
+        assert!(crew.add_member(scene_member(id, p[0], p[1])).is_some());
+    }
+    let target: Pos = [9, 5, 0];
+    let friend: Pos = [11, 7, 0];
+    let spots = [
+        Spot {
+            pos: [3, 3, 0],
+            tags: 0,
+        },
+        Spot {
+            pos: [1, 3, 0],
+            tags: 0,
+        },
+        Spot {
+            pos: [5, 5, 0],
+            tags: 0,
+        },
+    ];
+    let mut tactic = tactics::rush();
+    tactic.slots[0].place = Place::Custom(7);
+    tactic.aborts.push(Abort::Custom(3));
+    tactic.trigger = Trigger::Custom(4);
+    let sq = crew.squad_mut();
+    for id in [2, 3] {
+        assert!(sq.set_channel(id, Channel::Custom(1)));
+    }
+    assert!(sq.set_leader(1));
+    sq.set_skill(255);
+    sq.set_target_kind(ENEMY);
+    sq.set_spot_radius(Some(4));
+    sq.add_tactic(tactic);
+    for (subject, pos) in [(10, target), (11, friend)] {
+        crew.observe(
+            0,
+            Fact {
+                subject,
+                kind: ENEMY,
+                pos,
+                ..Fact::default()
+            },
+        );
+    }
+    let place_at: Pos = [3, 3, 0];
+    let mut known: Vec<Pos> = members.iter().map(|m| m.1).collect();
+    known.extend([target, friend, place_at]);
+    known.extend(spots.iter().map(|s| s.pos));
+    let area = Area {
+        pos: [3, 3, 0],
+        source: [5, 3, 0],
+        radius: 2,
+        lifetime: 100,
+        ..Area::default()
+    };
+    let mut rules = OffsetOnly {
+        known,
+        place_at,
+        area: Some(area),
+        ..OffsetOnly::default()
+    };
+    let mut events = Vec::new();
+    let mut goals = Vec::new();
+    for t in 0..=12 {
+        if t == 6 {
+            let msg = Message {
+                kind: REPORT_GAME_FIRST,
+                pos: target,
+                sender: 2,
+                ..Message::default()
+            };
+            assert!(crew.report_with(t, msg, &mut rules));
+        }
+        crew.tick_with(t, &[], &spots, SEED, &mut rules, &mut events)
+            .unwrap();
+        for e in &events {
+            if let CrewEvent::Order { goal, .. } = e {
+                goals.push(goal.pos);
+            }
+        }
+    }
+    assert!(
+        rules.calls.iter().all(|&c| c > 0),
+        "every slot called: {:?}",
+        rules.calls
+    );
+    assert!(rules.seen > 0);
+    assert!(goals.contains(&Some([3, 3, 0])), "goals {goals:?}");
+    let a = *crew.squad().areas().iter().next().unwrap();
+    assert_eq!(a.pos, layout.to_axial_pos([3, 3, 0]));
+    assert_eq!(a.source, layout.to_axial_pos([5, 3, 0]));
+}
+
+/// Records the kind and tick of every report the report slot gets.
+#[derive(Default)]
+struct SeenReports(Vec<(u32, u32)>);
+
+impl SquadRules for SeenReports {
+    fn report(&mut self, _: &SquadView<'_>, msg: &Message, now: u32, _: &mut ReportActions<'_>) {
+        self.0.push((msg.kind, now));
+    }
+}
+
+#[test]
+fn crew_report_uses_the_channel() {
+    let game = |sender| Message {
+        kind: REPORT_GAME_FIRST,
+        sender,
+        ..Message::default()
+    };
+    // Member 2 on a radio of 2 + 1 per cell, 3 cells from the leader.
+    let mut crew = flank_crew(8, 0);
+    assert!(crew.set_pos(2, [0, 3, 0]));
+    let mut rules = SeenReports::default();
+    assert!(crew.report(10, game(2)));
+    let mut events = Vec::new();
+    for t in 0..=20 {
+        crew.tick_with(t, &[], &flank_spots(), SEED, &mut rules, &mut events)
+            .unwrap();
+    }
+    assert_eq!(rules.0, [(REPORT_GAME_FIRST, 15)]);
+    // No way to the leader: dropped, nothing to send.
+    let mut crew = flank_crew(8, 0);
+    assert!(crew.squad_mut().set_channel(2, Channel::None));
+    let mut rules = SeenReports::default();
+    assert!(crew.report_with(0, game(2), &mut rules));
+    for t in 0..=20 {
+        crew.tick_with(t, &[], &flank_spots(), SEED, &mut rules, &mut events)
+            .unwrap();
+    }
+    assert!(rules.0.is_empty());
+    // The inbox (1) holds member 2's enemy report already.
+    let mut crew = flank_crew(1, 0);
+    assert!(!crew.report(0, game(3)));
+}
+
+#[test]
+fn crew_reinstate_with_custom_channel() {
+    let mut crew = flank_crew(8, 0);
+    for id in [2, 3, 4] {
+        assert!(crew.squad_mut().set_channel(id, Channel::Custom(1)));
+    }
+    let mut rules = FixedDelay {
+        delay: 4,
+        seen: Vec::new(),
+    };
+    let mut events = Vec::new();
+    for t in 0..=12 {
+        crew.tick_with(t, &[], &flank_spots(), SEED, &mut rules, &mut events)
+            .unwrap();
+    }
+    let goal = crew.goal(2).unwrap();
+    assert!(crew.suspend(2));
+    crew.tick_with(13, &[], &flank_spots(), SEED, &mut rules, &mut events)
+        .unwrap();
+    assert!(crew.reinstate_with(2, 14, &mut rules));
+    let mut got = None;
+    for t in 14..=24 {
+        crew.tick_with(t, &[], &flank_spots(), SEED, &mut rules, &mut events)
+            .unwrap();
+        for e in &events {
+            if let CrewEvent::Order {
+                member: 2, goal: g, ..
+            } = e
+            {
+                got.get_or_insert((t, *g));
+            }
+        }
+    }
+    assert_eq!(got, Some((18, goal)));
+    assert!(!crew.reinstate_with(99, 14, &mut rules));
 }

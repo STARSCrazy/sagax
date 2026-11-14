@@ -43,6 +43,13 @@
 //!   the squad, channels time orders only; reports keep the `arrive_at`
 //!   the caller gives ([`Squad::report`]), and
 //!   [`Squad::report_arrives_at_with`] tells when one would arrive.
+//! - A [`Crew`](super::Crew) lends the rules the same way
+//!   ([`Crew::tick_with`](super::Crew::tick_with),
+//!   [`Crew::reinstate_with`](super::Crew::reinstate_with),
+//!   [`Crew::report_with`](super::Crew::report_with)) and times its
+//!   members' reports over the same channel, built-in or custom. With a hex
+//!   layout its slots see offset coordinates (contexts, view, report
+//!   `pos`), and the positions they return are taken as offset.
 //!
 //! **Without rules.** A squad that needs rules ([`Squad::needs_rules`])
 //! fails loudly instead of losing orders: [`Squad::plan`] and
@@ -346,6 +353,14 @@ impl<'a> ReportActions<'a> {
     pub fn forget(&mut self, subject: u32) -> bool {
         self.push(ReportAction::Forget { subject })
     }
+
+    /// Changes every action of this report in place (a hex crew converts
+    /// the positions its slot gave).
+    pub(super) fn map(&mut self, f: impl Fn(ReportAction) -> ReportAction) {
+        for a in &mut self.out[self.start..] {
+            *a = f(*a);
+        }
+    }
 }
 
 /// The active plan, as a slot sees it.
@@ -378,7 +393,6 @@ impl<'a> SquadView<'a> {
 
     /// The same view, every position it returns converted from axial to
     /// offset coordinates of `layout`.
-    #[cfg_attr(not(test), allow(dead_code))] // used by a hex crew
     pub(super) fn with_hex(self, layout: HexLayout) -> Self {
         Self {
             hex: Some(layout),

@@ -4,9 +4,13 @@
 use super::keeper::{GoalKeeper, KeeperInputs};
 use super::members::{Member, MemberState};
 use super::orders::{Order, Status};
+use super::rules::{
+    BuiltInRules, ChannelCtx, CostCtx, PlaceCtx, ReportAction, ReportActions, RowCtx, SpotCtx,
+    SquadRules, SquadView,
+};
 use super::spots::Spot;
 use super::squad::{Goal, PlanError, PlanId, Squad, SquadConfig};
-use crate::memory::{Fact, Message, Metric, Pos, distance};
+use crate::memory::{Area, Fact, Message, Metric, Pos, distance};
 use sagax_core::HexLayout;
 
 /// Capacities and options of a [`Crew`] (see [`Crew::new`]).
@@ -246,7 +250,26 @@ impl Crew {
     /// made without it), its keeper is cleared: it has no goal until an
     /// order comes. False when the id is unknown.
     pub fn reinstate(&mut self, id: u32, now: u32) -> bool {
-        if !self.squad.reinstate(id, now) {
+        let known = self.squad.reinstate(id, now);
+        self.reinstated(id, now, known)
+    }
+
+    /// [`Crew::reinstate`] with the game's rules ([`Squad::reinstate_with`]:
+    /// the goal goes over a [`Channel::Custom`](super::Channel::Custom) too;
+    /// the slots see offset coordinates with a hex layout).
+    pub fn reinstate_with(&mut self, id: u32, now: u32, rules: &mut dyn SquadRules) -> bool {
+        let known = match self.hex {
+            Some(layout) => self
+                .squad
+                .reinstate_with(id, now, &mut HexRules::new(rules, layout)),
+            None => self.squad.reinstate_with(id, now, rules),
+        };
+        self.reinstated(id, now, known)
+    }
+
+    /// What the crew does after the squad reinstated `id` (`known`).
+    fn reinstated(&mut self, id: u32, now: u32, known: bool) -> bool {
+        if !known {
             return false;
         }
         self.pause(id, false, now);
@@ -296,6 +319,31 @@ impl Crew {
         self.squad.report_danger(sender, centre, shooter, arrive_at)
     }
 
+    /// A game report from member `msg.sender` to the leader (its `pos` in
+    /// offset coordinates with a hex layout): sent over the member's channel
+    /// at [`Squad::report_arrives_at`], as the crew's own reports. False when
+    /// the inbox refused it; a report that can never arrive (no way to the
+    /// leader, or the sender is not an active member) is dropped and
+    /// returns true. Its kind decides who reads it (see [`Squad::report`]):
+    /// a game's own kinds go to [`SquadRules::report`] in
+    /// [`Crew::tick_with`].
+    #[must_use]
+    pub fn report(&mut self, now: u32, msg: Message) -> bool {
+        self.report_with(now, msg, &mut BuiltInRules)
+    }
+
+    /// [`Crew::report`] with the game's rules: a
+    /// [`Channel::Custom`](super::Channel::Custom) times it through
+    /// [`SquadRules::channel_delay`] ([`Squad::report_arrives_at_with`]).
+    #[must_use]
+    pub fn report_with(&mut self, now: u32, msg: Message, rules: &mut dyn SquadRules) -> bool {
+        let msg = Message {
+            pos: self.pos_in(msg.pos),
+            ..msg
+        };
+        self.send(msg, msg.sender, now, rules)
+    }
+
     /// Runs the group at `now`; `events` is cleared first and gets what
     /// happened, in this order:
     ///
@@ -334,6 +382,10 @@ impl Crew {
     ///
     /// Members are visited in group order. Errors only from
     /// [`Squad::check`]; nothing after it is done then.
+    ///
+    /// **Rules:** this is [`Crew::tick_with`] with [`BuiltInRules`]; a squad
+    /// that needs rules ([`Squad::needs_rules`]) is refused in step 2 with
+    /// [`PlanError::NeedsRules`].
     pub fn tick(
         &mut self,
         now: u32,
@@ -342,11 +394,56 @@ impl Crew {
         seed: u64,
         events: &mut Vec<CrewEvent>,
     ) -> Result<(), PlanError> {
+        self.run(now, extra, spots, seed, None, events)
+    }
+
+    /// [`Crew::tick`] with the game's rules, in the same steps: step 2 is
+    /// [`Squad::check_with`], and steps 6 and 7 send at
+    /// [`Squad::report_arrives_at_with`], so a
+    /// [`Channel::Custom`](super::Channel::Custom) times the members'
+    /// reports too. With a hex layout every slot sees offset coordinates:
+    /// its contexts, its [`SquadView`] and the report's `pos`; what it
+    /// returns (a [`SquadRules::place`] point, an area of a
+    /// [`ReportActions::add_area`]) is taken as offset and kept axial. The
+    /// contexts' `built_in` values, distances and headings stay as the
+    /// squad computes them (in axial coordinates; hex distances are the
+    /// same in both).
+    pub fn tick_with(
+        &mut self,
+        now: u32,
+        extra: &[i32],
+        spots: &[Spot],
+        seed: u64,
+        rules: &mut dyn SquadRules,
+        events: &mut Vec<CrewEvent>,
+    ) -> Result<(), PlanError> {
+        self.run(now, extra, spots, seed, Some(rules), events)
+    }
+
+    /// [`Crew::tick_with`]; `None` is [`Crew::tick`] (built-in rules, a
+    /// squad that needs rules refused).
+    fn run(
+        &mut self,
+        now: u32,
+        extra: &[i32],
+        spots: &[Spot],
+        seed: u64,
+        rules: Option<&mut dyn SquadRules>,
+        events: &mut Vec<CrewEvent>,
+    ) -> Result<(), PlanError> {
         events.clear();
         self.sync_seats();
         self.pause_inactive(now);
         let had_plan = self.squad.active_plan().is_some();
 
+        if rules.is_none() && self.squad.needs_rules() {
+            return Err(PlanError::NeedsRules);
+        }
+        let mut built_in = BuiltInRules;
+        let rules: &mut dyn SquadRules = match rules {
+            Some(r) => r,
+            None => &mut built_in,
+        };
         let status = match self.hex {
             Some(layout) => {
                 self.spots.clear();
@@ -354,9 +451,13 @@ impl Crew {
                     pos: layout.to_axial_pos(s.pos),
                     ..*s
                 }));
-                self.squad.check(now, extra, &self.spots, seed)?
+                let mut hex = HexRules::new(&mut *rules, layout);
+                self.squad
+                    .check_with(now, extra, &self.spots, seed, &mut hex)?
             }
-            None => self.squad.check(now, extra, spots, seed)?,
+            None => self
+                .squad
+                .check_with(now, extra, spots, seed, &mut *rules)?,
         };
         match status {
             Status::Replan(id) => events.push(CrewEvent::Planned(id)),
@@ -425,7 +526,7 @@ impl Crew {
             if !seat.arrived
                 && goal.awaits_arrival()
                 && goal.pos.is_some_and(|p| self.within_radius(member.pos, p))
-                && self.send(Message::arrived(seat.id, goal.plan), seat.id, now)
+                && self.send(Message::arrived(seat.id, goal.plan), seat.id, now, rules)
             {
                 self.seats[i].arrived = true;
                 events.push(CrewEvent::Arrived { member: seat.id });
@@ -443,7 +544,12 @@ impl Crew {
             let give_up = self.squad.skill_table().give_up_ticks_for(member.skill);
             if !seat.broken
                 && seat.keeper.broken(now, give_up)
-                && self.send(Message::goal_broken(seat.id, goal.plan), seat.id, now)
+                && self.send(
+                    Message::goal_broken(seat.id, goal.plan),
+                    seat.id,
+                    now,
+                    rules,
+                )
             {
                 self.seats[i].broken = true;
                 events.push(CrewEvent::Broken { member: seat.id });
@@ -545,8 +651,15 @@ impl Crew {
 
     /// Sends a member report at the time it reaches the leader; true when
     /// it is on its way, or when it can never arrive (nothing to send).
-    fn send(&mut self, msg: Message, id: u32, now: u32) -> bool {
-        match self.squad.report_arrives_at(id, now) {
+    fn send(&mut self, msg: Message, id: u32, now: u32, rules: &mut dyn SquadRules) -> bool {
+        let at = match self.hex {
+            Some(layout) => {
+                self.squad
+                    .report_arrives_at_with(id, now, &mut HexRules::new(rules, layout))
+            }
+            None => self.squad.report_arrives_at_with(id, now, rules),
+        };
+        match at {
             Some(at) => self.squad.report(msg, at),
             None => true,
         }
@@ -596,4 +709,132 @@ fn active_member(squad: &Squad, id: u32) -> Option<Member> {
 
 fn is_active(squad: &Squad, id: u32) -> bool {
     active_member(squad, id).is_some()
+}
+
+/// The game's rules as a hex crew lends them: every position a slot gets
+/// goes from axial to offset coordinates of `layout`, every position it
+/// returns from offset to axial. Values the core computed (`built_in`,
+/// distances, headings) pass unchanged.
+struct HexRules<'a> {
+    inner: &'a mut dyn SquadRules,
+    layout: HexLayout,
+}
+
+impl<'a> HexRules<'a> {
+    fn new(inner: &'a mut dyn SquadRules, layout: HexLayout) -> Self {
+        Self { inner, layout }
+    }
+
+    fn out(&self, p: Pos) -> Pos {
+        self.layout.from_axial_pos(p)
+    }
+
+    fn fact(&self, f: Fact) -> Fact {
+        Fact {
+            pos: self.out(f.pos),
+            ..f
+        }
+    }
+
+    fn member(&self, m: Member) -> Member {
+        Member {
+            pos: self.out(m.pos),
+            ..m
+        }
+    }
+
+    fn row<'r>(&self, ctx: &RowCtx<'r>) -> RowCtx<'r> {
+        RowCtx {
+            target: ctx.target.map(|f| self.fact(f)),
+            ..*ctx
+        }
+    }
+}
+
+impl SquadRules for HexRules<'_> {
+    fn keep_target(&mut self, view: &SquadView<'_>, fact: &Fact) -> bool {
+        let fact = self.fact(*fact);
+        self.inner.keep_target(&view.with_hex(self.layout), &fact)
+    }
+
+    fn columns(&mut self, view: &SquadView<'_>, ctx: &RowCtx<'_>, out: &mut [i32]) {
+        let ctx = self.row(ctx);
+        self.inner.columns(&view.with_hex(self.layout), &ctx, out);
+    }
+
+    fn place(&mut self, id: u32, ctx: &PlaceCtx) -> Pos {
+        let ctx = PlaceCtx {
+            leader: self.out(ctx.leader),
+            centre: self.out(ctx.centre),
+            face: ctx.face.map(|p| self.out(p)),
+            friend: ctx.friend.map(|p| self.out(p)),
+            ..*ctx
+        };
+        self.layout.to_axial_pos(self.inner.place(id, &ctx))
+    }
+
+    fn member_cost(&mut self, ctx: &CostCtx) -> Option<i128> {
+        let ctx = CostCtx {
+            member: self.member(ctx.member),
+            wish: self.out(ctx.wish),
+            ..*ctx
+        };
+        self.inner.member_cost(&ctx)
+    }
+
+    fn spot_score(&mut self, ctx: &SpotCtx) -> Option<i128> {
+        let ctx = SpotCtx {
+            member: self.member(ctx.member),
+            wish: self.out(ctx.wish),
+            spot: Spot {
+                pos: self.out(ctx.spot.pos),
+                ..ctx.spot
+            },
+            target: ctx.target.map(|f| self.fact(f)),
+            ..*ctx
+        };
+        self.inner.spot_score(&ctx)
+    }
+
+    fn trigger(&mut self, id: u32, view: &SquadView<'_>, now: u32) -> bool {
+        self.inner.trigger(id, &view.with_hex(self.layout), now)
+    }
+
+    fn abort(&mut self, id: u32, view: &SquadView<'_>, ctx: &RowCtx<'_>) -> bool {
+        let ctx = self.row(ctx);
+        self.inner.abort(id, &view.with_hex(self.layout), &ctx)
+    }
+
+    fn channel_delay(&mut self, id: u32, ctx: &ChannelCtx) -> Option<u32> {
+        let ctx = ChannelCtx {
+            from: self.out(ctx.from),
+            to: self.out(ctx.to),
+            ..*ctx
+        };
+        self.inner.channel_delay(id, &ctx)
+    }
+
+    fn report(
+        &mut self,
+        view: &SquadView<'_>,
+        msg: &Message,
+        now: u32,
+        actions: &mut ReportActions<'_>,
+    ) {
+        let msg = Message {
+            pos: self.out(msg.pos),
+            ..*msg
+        };
+        self.inner
+            .report(&view.with_hex(self.layout), &msg, now, actions);
+        let layout = self.layout;
+        actions.map(|a| match a {
+            ReportAction::AddArea(area) => ReportAction::AddArea(Area {
+                pos: layout.to_axial_pos(area.pos),
+                source: layout.to_axial_pos(area.source),
+                ..area
+            }),
+            other => other,
+        });
+    }
 }
