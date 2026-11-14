@@ -392,7 +392,9 @@ above that reads differently.
    taken. An `Engage` is refused while the subject's last known position
    is outside the leash distance from the anchor (the anchor of the
    current or of the just-ended detour, until the character has returned
-   and resumed). A refused detour emits no event. Without a distance leash
+   and resumed; with no detour running, against the anchor the new detour
+   would get). The leash pulls once the character stands beyond the
+   distance, so it may be one step past it for one tick. A refused detour emits no event. Without a distance leash
    nothing is refused.
 6. **Hex.** With a hex layout every position the game gives or gets is in
    offset coordinates, including the positions in the knowledge it passes
