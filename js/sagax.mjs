@@ -1712,6 +1712,8 @@ const PLACE = { none: 0, offset: 1, side: 2, between: 3, tagged: 4, here: 5 };
 const SIDE = { front: 0, left: 1, right: 2, rear: 3 };
 /** The shapes of lib.tactics.formation, numbered as C `SX_SHAPE_*`. */
 export const SHAPE = { line: 0, wedge: 1, column: 2 };
+/** The comparisons of Tactic.addAbortWhen, numbered as C `SX_CMP_*`. */
+const CMP = { '>=': 0, '<=': 1, '==': 2, '!=': 3 };
 const PICKS = Object.keys(PICK);
 const SQUAD_STATUS = ['keep', 'replan', 'signal', 'noPlan'];
 const MEMBER_SIZE = 7;
@@ -1967,6 +1969,20 @@ export class Tactic extends Table {
   /** The plan ends (a replan) when row[input] >= atLeast. */
   addAbort(input, atLeast) {
     this.x.sx_tactic_add_abort(this.h, u32Of(input, 'input'), i32Of(atLeast, 'atLeast'));
+  }
+
+  /**
+   * The plan ends when row[input] compares to value: cmp is '>=' | '<=' | '=='
+   * | '!=' or 0..3 (SX_CMP_*). A column beyond the row never fires.
+   */
+  addAbortWhen(input, cmp, value) {
+    const c = typeof cmp === 'number' ? intIn(cmp, 0, 3, 'cmp') : choice(CMP, cmp, 'cmp');
+    this.x.sx_tactic_add_abort_when(this.h, u32Of(input, 'input'), c, i32Of(value, 'value'));
+  }
+
+  /** Whether the plan ends when its target is gone from the squad's knowledge (true, the default). Off: it is judged with the target's facts missing. */
+  abortIfTargetLost(on) {
+    this.x.sx_tactic_set_abort_if_target_lost(this.h, on ? 1 : 0);
   }
 
   /** The signal never fires by itself (the default). */

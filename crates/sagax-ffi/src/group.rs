@@ -379,6 +379,7 @@ pub extern "C" fn sx_tactic_new(weight: u32, min_skill: u32, needs_target: u32) 
             trigger: Trigger::None,
             min_skill,
             needs_target: needs_target != 0,
+            abort_if_target_lost: true,
         }))
     })
 }
@@ -436,10 +437,42 @@ pub unsafe extern "C" fn sx_tactic_add_abort(
     input: u32,
     at_least: i32,
 ) -> i32 {
-    get!(tactic).0.aborts.push(Abort {
+    get!(tactic)
+        .0
+        .aborts
+        .push(Abort::at_least(input as usize, at_least));
+    0
+}
+
+/// `sx_tactic_add_abort_when`.
+///
+/// # Safety
+/// `tactic` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_add_abort_when(
+    tactic: *mut SxTactic,
+    input: u32,
+    cmp: u32,
+    value: i32,
+) -> i32 {
+    let Some(cmp) = convert::compare(cmp) else {
+        return ERROR_ARGUMENT;
+    };
+    get!(tactic).0.aborts.push(Abort::When {
         input: input as usize,
-        at_least,
+        cmp,
+        value,
     });
+    0
+}
+
+/// `sx_tactic_set_abort_if_target_lost`.
+///
+/// # Safety
+/// `tactic` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_set_abort_if_target_lost(tactic: *mut SxTactic, on: u32) -> i32 {
+    get!(tactic).0.abort_if_target_lost = on != 0;
     0
 }
 

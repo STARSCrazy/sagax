@@ -585,8 +585,11 @@ impl Squad {
             (None, _) => 0,
             (Some(_), Some(i)) => i + 1,
             // The target is gone from the leader's knowledge: the plan has
-            // nothing left to aim at.
-            (Some(_), None) => return Ok(Verdict::Abort),
+            // nothing left to aim at, unless the tactic carries on without.
+            (Some(_), None) if self.tactics[t].abort_if_target_lost => {
+                return Ok(Verdict::Abort);
+            }
+            (Some(_), None) => 0,
         };
         let fact = found.map(|i| s.targets[i]);
         self.row_into(

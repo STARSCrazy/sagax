@@ -2808,6 +2808,7 @@ pub extern "C" fn sx_tactic_new(weight: u32, min_skill: u32, needs_target: u32) 
         trigger: Trigger::None,
         min_skill,
         needs_target: needs_target != 0,
+        abort_if_target_lost: true,
     })))
 }
 
@@ -2920,10 +2921,42 @@ pub unsafe extern "C" fn sx_tactic_add_consideration(
 /// `t` from [`sx_tactic_new`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_tactic_add_abort(t: *mut WasmTactic, input: u32, at_least: i32) -> i32 {
-    tactic!(t).aborts.push(Abort {
+    tactic!(t)
+        .aborts
+        .push(Abort::at_least(input as usize, at_least));
+    0
+}
+
+/// The plan ends when `row[input]` compares to `value` as `cmp`
+/// (`SX_CMP_*`). Returns 0, or `SX_ERROR_ARGUMENT` for an unknown `cmp`.
+///
+/// # Safety
+/// `t` from [`sx_tactic_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_add_abort_when(
+    t: *mut WasmTactic,
+    input: u32,
+    cmp: u32,
+    value: i32,
+) -> i32 {
+    let Some(cmp) = convert::compare(cmp) else {
+        return ERROR_ARGUMENT;
+    };
+    tactic!(t).aborts.push(Abort::When {
         input: input as usize,
-        at_least,
+        cmp,
+        value,
     });
+    0
+}
+
+/// Whether the plan ends when its target is gone (the default). Returns 0.
+///
+/// # Safety
+/// `t` from [`sx_tactic_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_tactic_set_abort_if_target_lost(t: *mut WasmTactic, on: u32) -> i32 {
+    tactic!(t).abort_if_target_lost = on != 0;
     0
 }
 

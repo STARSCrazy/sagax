@@ -646,6 +646,7 @@ fn assign_roles_first_then_distance() {
         trigger: Trigger::None,
         min_skill: 0,
         needs_target: false,
+        abort_if_target_lost: true,
     };
     // Slot 0 wants ranged: member 3, though farthest. Slot 1: the leader,
     // at the wish point. Slot 2: 2 and 4 tie at distance 2, the lower
@@ -996,6 +997,7 @@ fn open_slot_does_not_use_up_specialist() {
         trigger: Trigger::None,
         min_skill: 0,
         needs_target: false,
+        abort_if_target_lost: true,
     };
     // The only ranged member is nearest the open slot's wish point.
     let mut sq = squad_of(Metric::Euclid, &[(1, 0, 0, ROLE_RANGED), (2, 5, 0, 0)]);
@@ -1521,6 +1523,7 @@ fn role_feasibility_is_joint() {
         trigger: Trigger::None,
         min_skill: 0,
         needs_target: false,
+        abort_if_target_lost: true,
     };
     // Two slots each need a ranged member; only one is ranged.
     let mut sq = squad_of(Metric::Euclid, &[(1, 0, 0, ROLE_RANGED), (2, 1, 0, 0)]);
@@ -1613,10 +1616,7 @@ fn no_better_replan_after_signal() {
         let mut sq = squad_of(Metric::Euclid, &four());
         sq.add_tactic(Tactic {
             weight: ONE / 2,
-            aborts: vec![Abort {
-                input: IN_LOSSES,
-                at_least: 1,
-            }],
+            aborts: vec![Abort::at_least(IN_LOSSES, 1)],
             ..tactics::rush()
         });
         sq.add_tactic(Tactic {
@@ -2971,4 +2971,63 @@ fn report_arrives_at_mirrors_orders() {
     assert_eq!(sq.report_arrives_at(1, 10), Some(10));
     assert_eq!(sq.report_arrives_at(3, 10), None);
     assert_eq!(sq.report_arrives_at(99, 10), None);
+}
+
+// --- Abort comparisons and the lost-target switch ---
+
+#[test]
+fn abort_compare() {
+    let fires_with = |cmp, value, input| {
+        let t = Tactic {
+            aborts: vec![Abort::When { input, cmp, value }],
+            ..tactics::rush()
+        };
+        squad::fires(&t, &[0, 0, 5])
+    };
+    assert!(fires_with(Compare::AtLeast, 5, 2));
+    assert!(!fires_with(Compare::AtLeast, 6, 2));
+    assert!(fires_with(Compare::AtMost, 5, 2));
+    assert!(!fires_with(Compare::AtMost, 4, 2));
+    assert!(fires_with(Compare::Equal, 5, 2));
+    assert!(!fires_with(Compare::NotEqual, 5, 2));
+    assert!(fires_with(Compare::NotEqual, 4, 2));
+    for cmp in [
+        Compare::AtLeast,
+        Compare::AtMost,
+        Compare::Equal,
+        Compare::NotEqual,
+    ] {
+        assert!(!fires_with(cmp, 5, 99), "{cmp:?} beyond the row");
+    }
+    // A custom abort never fires until it is matched.
+    let t = Tactic {
+        aborts: vec![Abort::Custom(1)],
+        ..tactics::rush()
+    };
+    assert!(!squad::fires(&t, &[0, 0, 5]));
+}
+
+#[test]
+fn abort_at_least_is_the_old_form() {
+    assert_eq!(
+        Abort::at_least(1, 2),
+        Abort::When {
+            input: 1,
+            cmp: Compare::AtLeast,
+            value: 2
+        }
+    );
+}
+
+#[test]
+fn lost_target_switch_off_keeps_plan() {
+    let (mut sq, _) = active_flank();
+    // The shipped abort on the target's age would fire on the missing fact.
+    sq.tactics[1].abort_if_target_lost = false;
+    sq.tactics[1].aborts.clear();
+    assert!(sq.signal(6));
+    see(&mut sq, 11, 30, 0, 6);
+    assert!(sq.knowledge_mut().remove(10, ENEMY));
+    assert_eq!(sq.check(7, &[], &[], 0), Ok(Status::Keep));
+    assert!(sq.active_plan().is_some());
 }

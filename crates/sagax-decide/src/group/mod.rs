@@ -63,4 +63,4 @@ pub use squad::{
     IN_TARGET_FRIEND_DIST, MAX_EXTRA_COLUMNS, MAX_ROLE_COUNTS, Plan, PlanError, PlanId, RoleCounts,
     Squad, SquadConfig,
 };
-pub use tactic::{Abort, GoalKind, Place, Side, Slot, Start, Tactic, Trigger};
+pub use tactic::{Abort, Compare, GoalKind, Place, Side, Slot, Start, Tactic, Trigger};

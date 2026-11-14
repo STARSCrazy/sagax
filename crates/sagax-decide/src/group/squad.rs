@@ -2,7 +2,7 @@ use super::members::{Group, Member, MemberState};
 use super::orders::{Channel, Order};
 use super::skill::SkillTable;
 use super::spots::{Spot, SpotPick, pick_spot, wish_point};
-use super::tactic::{GoalKind, Slot, Start, Tactic};
+use super::tactic::{Abort, GoalKind, Slot, Start, Tactic};
 use crate::memory::{
     Area, Areas, Evict, Fact, Inbox, Knowledge, Message, Metric, Pos, ZeroCapacity, distance,
 };
@@ -1201,8 +1201,8 @@ impl Squad {
 
 /// True when one of `tactic`'s abort rules fires on `row`.
 pub(super) fn fires(tactic: &Tactic, row: &[i32]) -> bool {
-    tactic
-        .aborts
-        .iter()
-        .any(|ab| row.get(ab.input).is_some_and(|&v| v >= ab.at_least))
+    tactic.aborts.iter().any(|ab| match *ab {
+        Abort::When { input, cmp, value } => row.get(input).is_some_and(|&v| cmp.holds(v, value)),
+        Abort::Custom(_) => false,
+    })
 }

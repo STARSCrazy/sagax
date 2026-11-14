@@ -6,23 +6,23 @@ use std::num::NonZeroUsize;
 
 use sagax_core::{HexLayout, Pos};
 use sagax_decide::group::{
-    CrewEvent, Goal, GoalKind, MemberState, Place, PlanError, PlanId, RoleCounts, Shape, Side,
-    SkillTable, Start, Status as SquadStatus,
+    Compare, CrewEvent, Goal, GoalKind, MemberState, Place, PlanError, PlanId, RoleCounts, Shape,
+    Side, SkillTable, Start, Status as SquadStatus,
 };
 use sagax_decide::memory::Metric;
 use sagax_decide::{Combine, Decider, Pick};
 use sagax_nav::nav::{Budget, Output, Status};
 
 use crate::codes::{
-    COMBINE_FOLLOW, CREW_ACTIVATED, CREW_ARRIVED, CREW_BROKEN, CREW_NO_PLAN, CREW_ORDER,
-    CREW_PLANNED, CREW_SIGNAL, CREW_START, DONE, ERROR_PLAN, FOUND, GOAL_ATTACK, GOAL_CUSTOM,
-    GOAL_HOLD, GOAL_MOVE, GOAL_RETREAT, GOAL_WAIT, GRID_HEX_EVEN_Q, GRID_HEX_EVEN_R,
-    GRID_HEX_ODD_Q, GRID_HEX_ODD_R, IDLE, MEMBER_ACTIVE, MEMBER_GONE, MEMBER_SUSPENDED,
-    METRIC_CHEBYSHEV, METRIC_EUCLID, METRIC_HEX, METRIC_MANHATTAN, PARTIAL, PICK_BEST,
-    PICK_UNIFORM, PICK_WEIGHTED, PLACE_BETWEEN, PLACE_HERE, PLACE_NONE, PLACE_OFFSET, PLACE_SIDE,
-    PLACE_TAGGED, RUNNING, SHAPE_COLUMN, SHAPE_LINE, SHAPE_WEDGE, SIDE_FRONT, SIDE_LEFT, SIDE_REAR,
-    SIDE_RIGHT, SQUAD_KEEP, SQUAD_NO_PLAN, SQUAD_REPLAN, SQUAD_SIGNAL, START_AFTER_TICKS,
-    START_NOW, START_ON_SIGNAL, UNREACHABLE,
+    CMP_AT_LEAST, CMP_AT_MOST, CMP_EQUAL, CMP_NOT_EQUAL, COMBINE_FOLLOW, CREW_ACTIVATED,
+    CREW_ARRIVED, CREW_BROKEN, CREW_NO_PLAN, CREW_ORDER, CREW_PLANNED, CREW_SIGNAL, CREW_START,
+    DONE, ERROR_PLAN, FOUND, GOAL_ATTACK, GOAL_CUSTOM, GOAL_HOLD, GOAL_MOVE, GOAL_RETREAT,
+    GOAL_WAIT, GRID_HEX_EVEN_Q, GRID_HEX_EVEN_R, GRID_HEX_ODD_Q, GRID_HEX_ODD_R, IDLE,
+    MEMBER_ACTIVE, MEMBER_GONE, MEMBER_SUSPENDED, METRIC_CHEBYSHEV, METRIC_EUCLID, METRIC_HEX,
+    METRIC_MANHATTAN, PARTIAL, PICK_BEST, PICK_UNIFORM, PICK_WEIGHTED, PLACE_BETWEEN, PLACE_HERE,
+    PLACE_NONE, PLACE_OFFSET, PLACE_SIDE, PLACE_TAGGED, RUNNING, SHAPE_COLUMN, SHAPE_LINE,
+    SHAPE_WEDGE, SIDE_FRONT, SIDE_LEFT, SIDE_REAR, SIDE_RIGHT, SQUAD_KEEP, SQUAD_NO_PLAN,
+    SQUAD_REPLAN, SQUAD_SIGNAL, START_AFTER_TICKS, START_NOW, START_ON_SIGNAL, UNREACHABLE,
 };
 
 // ---- numbers ------------------------------------------------------------------
@@ -218,6 +218,17 @@ pub const fn start_code(start: Start) -> (u32, u32) {
         Start::Now => (START_NOW, 0),
         Start::AfterTicks(n) => (START_AFTER_TICKS, n),
         Start::OnSignal => (START_ON_SIGNAL, 0),
+    }
+}
+
+/// The comparison of an `SX_CMP_*` value.
+pub fn compare(code: u32) -> Option<Compare> {
+    match code {
+        CMP_AT_LEAST => Some(Compare::AtLeast),
+        CMP_AT_MOST => Some(Compare::AtMost),
+        CMP_EQUAL => Some(Compare::Equal),
+        CMP_NOT_EQUAL => Some(Compare::NotEqual),
+        _ => None,
     }
 }
 

@@ -1610,6 +1610,47 @@ test('gather orders, arrival reports, resume, stale orders, spot radius', () => 
   sq.free();
 });
 
+test('tactic: abort comparisons and lost-target switch', () => {
+  // Column inExtra holds 5; a candidate whose abort rule fires is not planned.
+  const run = (cmp, value, input = SQUAD.inExtra) => {
+    const sq = squadOf('euclid', [[1, 0, 0]]);
+    const t = lib.tactic();
+    t.addSlot({ place: { kind: 'here' } });
+    t.addAbortWhen(input, cmp, value);
+    sq.addTactic(t);
+    sq.setExtraColumns(1);
+    sq.setSkill(255);
+    sq.observe(0, enemy(10, 20, 0));
+    const r = sq.check(0, { extra: [5, 5] }).status;
+    sq.free();
+    return r;
+  };
+  const fires = [['>=', 5], ['<=', 5], ['==', 5], ['!=', 4], [0, 5], [1, 5], [2, 5], [3, 4]];
+  const quiet = [['>=', 6], ['<=', 4], ['!=', 5], [0, 6], [3, 5]];
+  for (const [cmp, value] of fires) assert.equal(run(cmp, value), 'noPlan', `${cmp} ${value}`);
+  for (const [cmp, value] of quiet) assert.equal(run(cmp, value), 'replan', `${cmp} ${value}`);
+  for (const cmp of ['>=', '<=', '==', '!=']) assert.equal(run(cmp, 5, 99), 'replan', `${cmp} beyond the row`);
+  const t = lib.tactic();
+  assert.throws(() => t.addAbortWhen(0, '<', 1), RangeError);
+  assert.throws(() => t.addAbortWhen(0, 4, 1), RangeError);
+  t.free();
+  // The lost-target switch: on (the default) the plan ends, off it is kept.
+  for (const [on, want] of [[undefined, 'noPlan'], [false, 'keep']]) {
+    const sq = squadOf('euclid', [[1, 0, 0]]);
+    const c = lib.tactic();
+    c.addSlot({ place: { kind: 'here' } });
+    if (on !== undefined) c.abortIfTargetLost(on);
+    sq.addTactic(c);
+    sq.setSkill(255);
+    sq.observe(0, enemy(10, 20, 0));
+    assert.equal(sq.check(0).status, 'replan');
+    assert.equal(sq.check(5).status, 'keep');
+    assert.equal(sq.knowledge().remove(10, ENEMY), true);
+    assert.equal(sq.check(6).status, want);
+    sq.free();
+  }
+});
+
 test('plan activation wraps around 2^32', () => {
   const sq = squadOf('euclid', [[1, 0, 0], [2, 1, 0], [3, 0, 1], [4, 1, 1]], { radio: false });
   sq.addTactic(lib.tactics.rush());

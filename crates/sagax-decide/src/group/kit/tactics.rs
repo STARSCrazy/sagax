@@ -63,18 +63,9 @@ fn slot(place: Place, kind: GoalKind) -> Slot {
 /// not seen for [`TARGET_LOST_TICKS`].
 fn usual_aborts() -> Vec<Abort> {
     vec![
-        Abort {
-            input: IN_LOSSES,
-            at_least: 2,
-        },
-        Abort {
-            input: IN_OFF_PLAN,
-            at_least: 2,
-        },
-        Abort {
-            input: IN_TARGET_AGE,
-            at_least: TARGET_LOST_TICKS,
-        },
+        Abort::at_least(IN_LOSSES, 2),
+        Abort::at_least(IN_OFF_PLAN, 2),
+        Abort::at_least(IN_TARGET_AGE, TARGET_LOST_TICKS),
     ]
 }
 
@@ -89,6 +80,7 @@ pub fn rush() -> Tactic {
         trigger: Trigger::None,
         min_skill: 0,
         needs_target: true,
+        abort_if_target_lost: true,
     }
 }
 
@@ -120,6 +112,7 @@ pub fn formation(shape: Shape, spacing: i32) -> Tactic {
         trigger: Trigger::None,
         min_skill: 64,
         needs_target: true,
+        abort_if_target_lost: true,
     }
 }
 
@@ -156,6 +149,7 @@ pub fn flank(sides: u8, dist: i32) -> Tactic {
         },
         min_skill: 128,
         needs_target: true,
+        abort_if_target_lost: true,
     }
 }
 
@@ -180,6 +174,7 @@ pub fn ambush() -> Tactic {
         trigger: Trigger::TargetInRadius(AMBUSH_RADIUS),
         min_skill: 128,
         needs_target: true,
+        abort_if_target_lost: true,
     }
 }
 
@@ -199,6 +194,7 @@ pub fn focus() -> Tactic {
         trigger: Trigger::None,
         min_skill: 64,
         needs_target: true,
+        abort_if_target_lost: true,
     }
 }
 
@@ -228,6 +224,7 @@ pub fn isolate() -> Tactic {
         trigger: Trigger::None,
         min_skill: 192,
         needs_target: true,
+        abort_if_target_lost: true,
     }
 }
 
@@ -248,5 +245,6 @@ pub fn fall_back() -> Tactic {
         trigger: Trigger::None,
         min_skill: 0,
         needs_target: false,
+        abort_if_target_lost: true,
     }
 }

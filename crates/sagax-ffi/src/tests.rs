@@ -1724,6 +1724,90 @@ mod squad {
         (sq, id)
     }
 
+    /// A one-slot tactic over a squad with one enemy at distance 20.
+    unsafe fn custom_squad(tactic: *mut SxTactic) -> *mut SxSquad {
+        let sq = squad_of(EUCLID, &[(1, 0, 0)]);
+        unsafe {
+            let slot = SxSlot {
+                max: 1,
+                place: SxPlace {
+                    kind: PLACE_HERE,
+                    ..SxPlace::default()
+                },
+                ..SxSlot::default()
+            };
+            assert_eq!(sx_tactic_add_slot(tactic, &slot), 0);
+            assert_eq!(sx_squad_add_tactic(sq, tactic), 0);
+            assert_eq!(sx_squad_set_extra_columns(sq, 1), 0);
+            assert_eq!(sx_squad_set_skill(sq, 255), 0);
+            assert_eq!(sx_squad_observe(sq, 0, &enemy(E1, 20, 0), null_mut()), 0);
+        }
+        sq
+    }
+
+    #[test]
+    fn abort_when_codes() {
+        unsafe {
+            let t = sx_tactic_new(ONE_WEIGHT, 0, 1);
+            assert_eq!(sx_tactic_add_abort_when(t, 0, 4, 1), ERROR_ARGUMENT);
+            assert_eq!(sx_tactic_add_abort_when(null_mut(), 0, 0, 1), -1);
+            sx_tactic_free(t);
+            // Column IN_EXTRA holds 5 (a block for no target, one for E1). A
+            // candidate whose rule fires scores 0 and is not planned.
+            let cases = [
+                (0, 5, true),
+                (0, 6, false),
+                (1, 5, true),
+                (1, 4, false),
+                (2, 5, true),
+                (3, 5, false),
+                (3, 4, true),
+            ];
+            for (cmp, value, fires) in cases {
+                let t = sx_tactic_new(ONE_WEIGHT, 0, 1);
+                assert_eq!(sx_tactic_add_abort_when(t, IN_EXTRA as u32, cmp, value), 0);
+                let sq = custom_squad(t);
+                let (mut id, extra) = (0, [5, 5]);
+                let mut at =
+                    |now| sx_squad_check(sq, now, extra.as_ptr(), 2, null(), 0, 0, &mut id);
+                let want = if fires { SQUAD_NO_PLAN } else { SQUAD_REPLAN };
+                assert_eq!(at(0), want, "cmp {cmp} value {value}");
+                sx_squad_free(sq);
+                // A column beyond the row never fires.
+                let t = sx_tactic_new(ONE_WEIGHT, 0, 1);
+                assert_eq!(sx_tactic_add_abort_when(t, 99, cmp, value), 0);
+                let sq = custom_squad(t);
+                let mut at =
+                    |now| sx_squad_check(sq, now, extra.as_ptr(), 2, null(), 0, 0, &mut id);
+                assert_eq!(at(0), SQUAD_REPLAN, "cmp {cmp} on column 99");
+                sx_squad_free(sq);
+            }
+        }
+    }
+
+    #[test]
+    fn tactic_new_aborts_on_lost_target() {
+        unsafe {
+            for (on, want) in [(None, SQUAD_NO_PLAN), (Some(0), SQUAD_KEEP)] {
+                let t = sx_tactic_new(ONE_WEIGHT, 0, 1);
+                if let Some(on) = on {
+                    assert_eq!(sx_tactic_set_abort_if_target_lost(t, on), 0);
+                }
+                let sq = custom_squad(t);
+                let mut id = 0;
+                assert_eq!(check(sq, 0, &mut id), SQUAD_REPLAN);
+                assert_eq!(check(sq, 5, &mut id), SQUAD_KEEP);
+                assert_eq!(
+                    crate::memory::sx_knowledge_remove(sx_squad_knowledge(sq), E1, ENEMY),
+                    1
+                );
+                assert_eq!(check(sq, 6, &mut id), want);
+                sx_squad_free(sq);
+            }
+            assert_eq!(sx_tactic_set_abort_if_target_lost(null_mut(), 1), -1);
+        }
+    }
+
     #[test]
     fn held_back_orders_go_stale() {
         unsafe {

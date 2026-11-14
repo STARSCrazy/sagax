@@ -125,13 +125,58 @@ pub enum Trigger {
     Manual,
 }
 
-/// A rule that ends a tactic: fires when `row[input] >= at_least`.
+/// How a scoring-row value is compared with a limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Abort {
-    /// Column of the scoring row.
-    pub input: usize,
-    /// Threshold, inclusive.
-    pub at_least: i32,
+pub enum Compare {
+    /// `value >= limit`.
+    AtLeast,
+    /// `value <= limit`.
+    AtMost,
+    /// `value == limit`.
+    Equal,
+    /// `value != limit`.
+    NotEqual,
+}
+
+impl Compare {
+    /// Whether `value` meets `limit` under this comparison.
+    pub fn holds(self, value: i32, limit: i32) -> bool {
+        match self {
+            Compare::AtLeast => value >= limit,
+            Compare::AtMost => value <= limit,
+            Compare::Equal => value == limit,
+            Compare::NotEqual => value != limit,
+        }
+    }
+}
+
+/// A rule that ends a tactic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Abort {
+    /// Fires when `cmp` holds between `row[input]` and `value`; a column
+    /// beyond the row never fires.
+    When {
+        /// Column of the scoring row.
+        input: usize,
+        /// The comparison.
+        cmp: Compare,
+        /// The limit, inclusive for `AtLeast` and `AtMost`.
+        value: i32,
+    },
+    /// A rule decided by the caller's own code (matched in a later
+    /// release; until then it never fires).
+    Custom(u32),
+}
+
+impl Abort {
+    /// Fires when `row[input] >= value`.
+    pub const fn at_least(input: usize, value: i32) -> Abort {
+        Abort::When {
+            input,
+            cmp: Compare::AtLeast,
+            value,
+        }
+    }
 }
 
 /// A group plan as data: slots, scoring, abort rules and a trigger.
@@ -151,4 +196,8 @@ pub struct Tactic {
     pub min_skill: u8,
     /// Scored once per known target; without one it is not a candidate.
     pub needs_target: bool,
+    /// Whether the plan ends when its target is gone from the leader's
+    /// knowledge. When false the active row is scored with the target's
+    /// facts missing, like a plan without a target.
+    pub abort_if_target_lost: bool,
 }

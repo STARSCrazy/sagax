@@ -95,6 +95,14 @@ pub const START_AFTER_TICKS: u32 = 1;
 /// `SX_START_ON_SIGNAL`.
 pub const START_ON_SIGNAL: u32 = 2;
 
+/// `SX_CMP_AT_LEAST`.
+pub const CMP_AT_LEAST: u32 = 0;
+/// `SX_CMP_AT_MOST`.
+pub const CMP_AT_MOST: u32 = 1;
+/// `SX_CMP_EQUAL`.
+pub const CMP_EQUAL: u32 = 2;
+/// `SX_CMP_NOT_EQUAL`.
+pub const CMP_NOT_EQUAL: u32 = 3;
 /// `SX_SHAPE_LINE`.
 pub const SHAPE_LINE: u32 = 0;
 /// `SX_SHAPE_WEDGE`.

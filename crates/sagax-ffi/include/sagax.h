@@ -1074,6 +1074,20 @@ int32_t sx_tactic_add_consideration(sx_tactic *tactic, const sx_consideration *c
 /* The plan ends (a replan) when row[input] >= at_least; a column beyond the
  * row never fires. Returns 0. */
 int32_t sx_tactic_add_abort(sx_tactic *tactic, uint32_t input, int32_t at_least);
+/* Comparisons of an abort rule (sx_tactic_add_abort_when). */
+#define SX_CMP_AT_LEAST  0   /* value >= limit */
+#define SX_CMP_AT_MOST   1   /* value <= limit */
+#define SX_CMP_EQUAL     2   /* value == limit */
+#define SX_CMP_NOT_EQUAL 3   /* value != limit */
+/* The plan ends when row[input] compares to value as cmp (SX_CMP_*); a column
+ * beyond the row never fires. Returns 0; SX_ERROR_ARGUMENT for an unknown
+ * cmp. */
+int32_t sx_tactic_add_abort_when(sx_tactic *tactic, uint32_t input, uint32_t cmp, int32_t value);
+/* Whether the plan ends when its target is gone from the squad's knowledge
+ * (on != 0, the default of sx_tactic_new and the shipped tactics). Off: the
+ * plan is judged with the target's facts missing, like a plan without a
+ * target. Returns 0. */
+int32_t sx_tactic_set_abort_if_target_lost(sx_tactic *tactic, uint32_t on);
 /* When the signal fires by itself. Once the signal was given, only the
  * tactic's abort rules end the plan. Each returns 0. */
 /* Never (the default). */
