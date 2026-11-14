@@ -14,6 +14,10 @@
   0.10.0 slim round (a core with a kit, the rules object for a game's own
   pieces) are done. Next: a mission / intention planner that hands goals to
   groups the way groups hand goals to members.
+- **Next slim item:** the remaining per-layer duplicates in C and WASM (the
+  tactic builder, the add-abort and slot codecs, `sine_of`, the route rule
+  decoders) move to `sagax-abi`. `sx_spot_ctx` may gain separate miss and
+  distance fields so C wrappers can keep the exact built-in order.
 - **Walking distance for the squad:** the squad measures distances in
   a straight-line metric (Euclid, Manhattan, Chebyshev or hex). Using the
   real walking distance instead (for `IN_TARGET_DIST`, the keeper's

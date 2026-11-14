@@ -136,8 +136,10 @@ static void intruder_at(int scene_b, uint32_t t, int32_t *out)
 static int32_t cb_spot_score(void *user, const sx_spot_ctx *ctx, int64_t *score)
 {
 	const struct ambush_rules *r = user;
+	int64_t penalty = sees(r, r->intruder, ctx->spot.pos) ? SEEN_PENALTY : 0;
 
-	*score = ctx->built_in + (sees(r, r->intruder, ctx->spot.pos) ? SEEN_PENALTY : 0);
+	/* saturating add: built_in is INT64_MAX when the miss part is huge */
+	*score = ctx->built_in > INT64_MAX - penalty ? INT64_MAX : ctx->built_in + penalty;
 	return 1;
 }
 

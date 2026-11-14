@@ -1638,10 +1638,10 @@ that does only that) and C `sx_path_cost(nav, map, from, to, budget, &cost)`:
 they run a search and return the cost, or nothing when there is no way.
 
 **Spot scores and tags.** The built-in spot score is `(miss << 100) |
-distance`: a spot that lacks a wanted tag ranks above *every* spot that has
-all of them, whatever the distance. So a penalty you add in `spot_score`
-never outranks a missing wanted tag; it only orders spots within the same
-tag class. If your penalty is to matter (a spot the enemy can see), give the
+distance`: a spot that misses a wanted tag always scores worse than *every*
+spot that has all of them, whatever the distance. So whatever penalty you add
+in `spot_score` cannot lift a spot over a missing tag; it only orders spots
+within the same tag class. If your penalty is to matter (a spot the enemy can see), give the
 candidate spots the tags the tactic wants, as the example does (it tags all
 its spots hidden), or replace the score instead of adding to `built_in`.
 
@@ -1690,7 +1690,9 @@ impl SquadRules for AmbushRules {
 static int32_t cb_spot_score(void *user, const sx_spot_ctx *ctx, int64_t *score)
 {
 	const struct ambush_rules *r = user;
-	*score = ctx->built_in + (sees(r, r->intruder, ctx->spot.pos) ? SEEN_PENALTY : 0);
+	int64_t penalty = sees(r, r->intruder, ctx->spot.pos) ? SEEN_PENALTY : 0;
+	/* saturating add: built_in can be INT64_MAX */
+	*score = ctx->built_in > INT64_MAX - penalty ? INT64_MAX : ctx->built_in + penalty;
 	return 1;
 }
 /* ... */

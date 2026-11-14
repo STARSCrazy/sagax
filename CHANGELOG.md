@@ -138,12 +138,11 @@ Behaviour changes (no compile error, so read these):
 - JavaScript skill table entries are whole numbers from 0 to 2^31 - 1 (the
   WebAssembly module takes 32-bit signed numbers); C and Rust take the full
   `u32`.
-- The built-in spot score ranks a spot that lacks a wanted tag above every
-  spot that has all of them, whatever the distance (this is how `pick_spot`
-  always worked). A penalty added in a spot score slot therefore never
-  outranks a missing tag. The shipped ambush scores the group-to-target
-  distance on a curve of 0 to 100 and loses to rush on small maps; the example
-  builds its own consideration.
+- The built-in spot score: a spot that misses a wanted tag always scores worse
+  than any spot that has them all, whatever the distance and whatever penalty
+  you add (this is how `pick_spot` always worked). The shipped ambush scores
+  the group-to-target distance on a curve of 0 to 100 and loses to rush on
+  small maps; the example builds its own consideration.
 
 ## 0.9.0
 

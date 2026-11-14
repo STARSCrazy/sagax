@@ -113,12 +113,17 @@ unsafe extern "C" fn cb_spot_score(
     unsafe {
         let r = &*user.cast::<AmbushRules>();
         let ctx = &*ctx;
-        let extra = if sees(r, r.intruder, ctx.spot.pos) {
+        let penalty: i64 = if sees(r, r.intruder, ctx.spot.pos) {
             SEEN_PENALTY
         } else {
             0
         };
-        *score = ctx.built_in + extra;
+        // saturating add: built_in is INT64_MAX when the miss part is huge
+        *score = if ctx.built_in > i64::MAX - penalty {
+            i64::MAX
+        } else {
+            ctx.built_in + penalty
+        };
         1
     }
 }
