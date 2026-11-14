@@ -1,7 +1,8 @@
 use super::members::{Group, Member, MemberState};
 use super::orders::{Channel, Order};
 use super::rules::{
-    BuiltInRules, CostCtx, PlaceCtx, RowCtx, SpotCtx, SquadRules, SquadView, rank_spots,
+    BuiltInRules, CostCtx, PlaceCtx, ReportAction, RowCtx, SpotCtx, SquadRules, SquadView,
+    rank_spots,
 };
 use super::skill::{MAX_SKILL_ROWS, SkillTable};
 use super::spots::{Spot, SpotPick, heading, wish_point};
@@ -297,6 +298,8 @@ pub(super) struct Scratch {
     pub(super) costs: Vec<Option<i128>>,
     /// `(score, index)` of the spots ranked for one member.
     pub(super) spot_keys: Vec<(i128, usize)>,
+    /// The report actions of one read of the inbox, in report order.
+    pub(super) actions: Vec<ReportAction>,
 }
 
 /// The plan being carried out, with what happened since it became active.
@@ -960,7 +963,14 @@ impl Squad {
                 active,
             );
             self.rule_columns_into(s, rules, (t, fact, now, active));
-            let score = if fires(&self.tactics[t], &s.rows) {
+            let ctx = RowCtx {
+                tactic: t,
+                target: fact,
+                row: &s.rows,
+                now,
+                active,
+            };
+            let score = if self.aborts_fire(rules, &ctx) {
                 0
             } else {
                 // `validate` ruled out the only error a row can cause.
@@ -1443,10 +1453,30 @@ impl Squad {
     }
 }
 
-/// True when one of `tactic`'s abort rules fires on `row`.
+impl Squad {
+    /// True when one of the abort rules of tactic `ctx.tactic` fires on
+    /// `ctx.row`, in list order (stops at the first that fires); an
+    /// [`Abort::Custom`] asks [`SquadRules::abort`].
+    pub(super) fn aborts_fire(&self, rules: &mut dyn SquadRules, ctx: &RowCtx<'_>) -> bool {
+        let view = SquadView::new(self);
+        fires_with(&self.tactics[ctx.tactic], ctx.row, |id| {
+            rules.abort(id, &view, ctx)
+        })
+    }
+}
+
+/// True when one of `tactic`'s abort rules fires on `row`, without rules
+/// (an [`Abort::Custom`] never fires).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn fires(tactic: &Tactic, row: &[i32]) -> bool {
+    fires_with(tactic, row, |_| false)
+}
+
+/// True when one of `tactic`'s abort rules fires on `row`, in list order;
+/// `custom` decides an [`Abort::Custom`].
+fn fires_with(tactic: &Tactic, row: &[i32], mut custom: impl FnMut(u32) -> bool) -> bool {
     tactic.aborts.iter().any(|ab| match *ab {
         Abort::When { input, cmp, value } => row.get(input).is_some_and(|&v| cmp.holds(v, value)),
-        Abort::Custom(_) => false,
+        Abort::Custom(id) => custom(id),
     })
 }

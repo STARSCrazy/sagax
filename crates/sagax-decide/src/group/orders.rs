@@ -1,8 +1,11 @@
 use super::members::MemberState;
-use super::rules::{BuiltInRules, SquadRules};
+use super::rules::{
+    BuiltInRules, ChannelCtx, MAX_REPORT_ACTIONS, ReportAction, ReportActions, RowCtx, SquadRules,
+    SquadView,
+};
 use super::spots::Spot;
 use super::squad::{
-    Active, DangerReport, Goal, PlanError, PlanId, Scratch, Squad, dist, fires, plain_dist,
+    Active, DangerReport, Goal, PlanError, PlanId, Scratch, Squad, dist, plain_dist,
 };
 use super::tactic::{Slot, Start, Trigger};
 use crate::ONE;
@@ -21,6 +24,11 @@ pub const REPORT_ENEMY: u32 = 2;
 /// id. Like [`super::Squad::arrived`], but it counts only once it has
 /// arrived at the leader.
 pub const REPORT_ARRIVED: u32 = 4;
+/// The first report kind a game should use for its own reports: the core
+/// keeps [`REPORT_GOAL_BROKEN`], [`REPORT_ENEMY`] and [`REPORT_ARRIVED`],
+/// and hands every other kind to [`SquadRules::report`]; kinds below 16
+/// may gain a core meaning later.
+pub const REPORT_GAME_FIRST: u32 = 16;
 
 impl Message {
     /// An enemy report from `sender`: the fact's subject, position,
@@ -89,6 +97,10 @@ pub enum Channel {
     },
     /// Never arrives.
     None,
+    /// Timed by the game's rules ([`SquadRules::channel_delay`] gets the id;
+    /// the core never reads it). Needs a rules object (see
+    /// [`Squad::needs_rules`]); without one it never arrives.
+    Custom(u32),
 }
 
 impl Default for Channel {
@@ -105,7 +117,8 @@ impl Default for Channel {
 
 impl Channel {
     /// When an order sent at `now` from `from` reaches `to`; `None` when it
-    /// does not arrive at all.
+    /// does not arrive at all. Always `None` for [`Channel::Custom`]: it
+    /// needs rules (see [`Squad::report_arrives_at_with`]).
     pub fn arrival(self, metric: Metric, from: Pos, to: Pos, now: u32) -> Option<u32> {
         let d = u32::try_from(plain_dist(metric, from, to)).unwrap_or(u32::MAX);
         match self {
@@ -121,7 +134,7 @@ impl Channel {
                 (dist(metric, from, to) <= limit).then(|| arrival(now, 0, d, 1))
             }
             Self::Radio { base, per_unit } => Some(arrival(now, base, d, per_unit)),
-            Self::None => None,
+            Self::None | Self::Custom(_) => None,
         }
     }
 }
@@ -145,8 +158,10 @@ impl Squad {
     /// (counts in [`IN_OFF_PLAN`](super::IN_OFF_PLAN) while the plan it names is active),
     /// [`REPORT_ENEMY`] (a target in the leader's knowledge) and
     /// [`REPORT_ARRIVED`] (as
-    /// [`Squad::arrived`] for the plan it names, if active); other kinds are
-    /// dropped when read.
+    /// [`Squad::arrived`] for the plan it names, if active); every other
+    /// kind goes to [`SquadRules::report`] (in [`Squad::check_with`] and
+    /// [`Squad::plan_with`]; the built-in rules drop it), in arrival order.
+    /// A game's own kinds start at [`REPORT_GAME_FIRST`].
     /// False when the inbox refused it (see [`Inbox::push`](crate::memory::Inbox::push)).
     #[must_use]
     pub fn report(&mut self, msg: Message, arrive_at: u32) -> bool {
@@ -183,9 +198,24 @@ impl Squad {
     /// When a report sent by member `id` at `now` reaches the acting leader:
     /// at once for the leader, else over the channel from its position to
     /// the leader's (as an order the other way). `None` when it never
-    /// arrives, or there is no leader or no such active member.
+    /// arrives, or there is no leader or no such active member; also for a
+    /// [`Channel::Custom`] (use [`Squad::report_arrives_at_with`]).
     pub fn report_arrives_at(&self, id: u32, now: u32) -> Option<u32> {
-        self.arrival_of(id, now)
+        self.report_arrives_at_with(id, now, &mut BuiltInRules)
+    }
+
+    /// [`Squad::report_arrives_at`] with the game's rules: a
+    /// [`Channel::Custom`] asks [`SquadRules::channel_delay`] (with
+    /// [`ChannelCtx::report`] true, from the member to the leader). Squad
+    /// reports themselves keep the `arrive_at` the caller gives
+    /// ([`Squad::report`]).
+    pub fn report_arrives_at_with(
+        &self,
+        id: u32,
+        now: u32,
+        rules: &mut dyn SquadRules,
+    ) -> Option<u32> {
+        self.arrival_of(id, now, true, rules)
     }
 
     /// The leader's own sighting: merged into its knowledge
@@ -204,7 +234,11 @@ impl Squad {
     /// Moves every order whose arrival time has come to the end of `out`, in
     /// the order they were sent; orders for members that are no longer
     /// active (suspended or gone) are dropped. First a pending plan whose
-    /// think time has passed becomes active.
+    /// think time has passed becomes active, except on a squad that needs
+    /// rules ([`Squad::needs_rules`]): there only a call with rules
+    /// activates it (times still count from its `active_at`), so no order
+    /// over a [`Channel::Custom`] is lost. The same holds for
+    /// [`Squad::arrived`] and [`Squad::reinstate`].
     ///
     /// On activation each active member of the plan gets its goal: the
     /// leader at once, the others by their [`Channel`]. Times count from
@@ -220,7 +254,7 @@ impl Squad {
     /// signal, or after [`Squad::reinstate`]) replaces it, and never arrives
     /// earlier than the replaced one would have.
     pub fn orders_due(&mut self, now: u32, out: &mut Vec<Order>) {
-        self.advance(now);
+        self.advance(now, None);
         let group = &self.group;
         self.orders.retain(|(order, at)| {
             let due = now.wrapping_sub(*at) < 1 << 31;
@@ -248,9 +282,25 @@ impl Squad {
     /// still come on top (the delay spreads weak members). After the
     /// signal, [`Squad::check`] no longer replans for a better plan, only
     /// on an abort rule. False when no plan is active or the signal was
-    /// already given.
+    /// already given, and always on a squad that needs rules
+    /// ([`Squad::needs_rules`]): use [`Squad::signal_with`].
     pub fn signal(&mut self, now: u32) -> bool {
-        self.advance(now);
+        if self.needs_rules() {
+            return false;
+        }
+        self.signal_with(now, &mut BuiltInRules)
+    }
+
+    /// [`Squad::signal`] with the game's rules (the second orders go over
+    /// a [`Channel::Custom`] too).
+    pub fn signal_with(&mut self, now: u32, rules: &mut dyn SquadRules) -> bool {
+        self.advance(now, Some(&mut *rules));
+        self.give_signal(now, rules)
+    }
+
+    /// Gives the signal of the active plan at `now` (see [`Squad::signal`]),
+    /// without activating a pending plan first.
+    pub(super) fn give_signal(&mut self, now: u32, rules: &mut dyn SquadRules) -> bool {
         let Some(a) = self.active.as_mut() else {
             return false;
         };
@@ -258,7 +308,7 @@ impl Squad {
             return false;
         }
         a.signal_at = Some(now);
-        self.send(now, true);
+        self.send(now, true, rules);
         true
     }
 
@@ -268,7 +318,7 @@ impl Squad {
     /// a member that has to tell the leader sends a [`REPORT_ARRIVED`]
     /// instead.
     pub fn arrived(&mut self, id: u32, now: u32) -> bool {
-        self.advance(now);
+        self.advance(now, None);
         let Some(a) = self.active.as_mut() else {
             return false;
         };
@@ -287,9 +337,29 @@ impl Squad {
     /// activation: before the signal the plan's goal, after it the second
     /// order (see [`Squad::signal`]; its start is not lined up any more, the
     /// others have started). A member without a goal in the active plan
-    /// gets nothing. False when the id is unknown.
+    /// gets nothing; nor does a member on a [`Channel::Custom`] (use
+    /// [`Squad::reinstate_with`]). False when the id is unknown.
     pub fn reinstate(&mut self, id: u32, now: u32) -> bool {
-        self.advance(now);
+        self.reinstate_inner(id, now, None)
+    }
+
+    /// [`Squad::reinstate`] with the game's rules (the order goes over a
+    /// [`Channel::Custom`] too).
+    pub fn reinstate_with(&mut self, id: u32, now: u32, rules: &mut dyn SquadRules) -> bool {
+        self.reinstate_inner(id, now, Some(rules))
+    }
+
+    fn reinstate_inner(
+        &mut self,
+        id: u32,
+        now: u32,
+        mut rules: Option<&mut dyn SquadRules>,
+    ) -> bool {
+        let lent: Option<&mut dyn SquadRules> = match &mut rules {
+            Some(r) => Some(&mut **r),
+            None => None,
+        };
+        self.advance(now, lent);
         let was = self
             .group
             .index(id)
@@ -314,7 +384,11 @@ impl Squad {
             }
             None => goal,
         };
-        if let Some(t) = self.arrival_of(id, now) {
+        let at = match rules {
+            Some(r) => self.arrival_of(id, now, false, r),
+            None => self.arrival_of(id, now, false, &mut BuiltInRules),
+        };
+        if let Some(t) = at {
             queue(&mut self.orders, Order { member: id, goal }, t, now);
         }
         true
@@ -326,10 +400,18 @@ impl Squad {
         self.reinstate(id, now)
     }
 
-    /// When an order sent at `at` reaches the active member `id`: at once
-    /// for the acting leader, else by its channel; `None` when it does not
-    /// arrive (or there is no leader or no such active member).
-    fn arrival_of(&self, id: u32, at: u32) -> Option<u32> {
+    /// When an order sent at `at` reaches the active member `id` (or, with
+    /// `report`, its report reaches the leader): at once for the acting
+    /// leader, else by its channel, a [`Channel::Custom`] through `rules`;
+    /// `None` when it does not arrive (or there is no leader or no such
+    /// active member).
+    fn arrival_of(
+        &self,
+        id: u32,
+        at: u32,
+        report: bool,
+        rules: &mut dyn SquadRules,
+    ) -> Option<u32> {
         let leader = self.acting_leader()?;
         let m = self.group.index(id).and_then(|i| self.group.get(i))?;
         if m.state != MemberState::Active {
@@ -338,7 +420,27 @@ impl Squad {
         if id == leader.id {
             return Some(at);
         }
-        self.channel(id).arrival(self.metric, leader.pos, m.pos, at)
+        let channel = self.channel(id);
+        let Channel::Custom(custom) = channel else {
+            return channel.arrival(self.metric, leader.pos, m.pos, at);
+        };
+        let (sender, receiver, from, to) = if report {
+            (m.id, leader.id, m.pos, leader.pos)
+        } else {
+            (leader.id, m.id, leader.pos, m.pos)
+        };
+        let ctx = ChannelCtx {
+            sender,
+            receiver,
+            from,
+            to,
+            distance: u32::try_from(plain_dist(self.metric, from, to)).unwrap_or(u32::MAX),
+            now: at,
+            report,
+        };
+        rules
+            .channel_delay(custom, &ctx)
+            .map(|d| at.wrapping_add(d))
     }
 
     /// Watches the plans at `now`; call it regularly, with the same `extra`
@@ -349,14 +451,21 @@ impl Squad {
     /// reports that have arrived are read and expired danger areas dropped
     /// (as in [`Squad::plan`]). Then, in this order:
     ///
-    /// - A plan is pending: [`Status::Keep`] (no replan while thinking).
+    /// - A plan is pending: [`Status::Keep`] (no replan while thinking),
+    ///   or [`Status::Signal`] when a report action gave the signal (see
+    ///   [`SquadRules::report`]).
     /// - No plan is active: it plans; [`Status::Replan`] with the new id, or
     ///   [`Status::NoPlan`] when nothing scores.
     /// - The active tactic needs a target and the leader no longer knows
     ///   it, or an [`Abort`](super::Abort) of the active tactic fires on
     ///   the active plan's row: it plans anew ([`Status::Replan`]); when
     ///   nothing scores the active plan and its orders are dropped
-    ///   ([`Status::NoPlan`]). Also after the signal.
+    ///   ([`Status::NoPlan`]). Also after the signal, and also when a
+    ///   report action of this call asked for the signal (the abort wins:
+    ///   the signal is not given).
+    /// - A report action of this call asked for the signal and it was not
+    ///   given yet: it gives it and returns [`Status::Signal`], without
+    ///   looking for a better plan.
     /// - Another candidate scores more than the active (tactic, target)
     ///   times `1 + hold_bonus` (from skill, [`ONE`] = 1.0): it plans anew
     ///   ([`Status::Replan`]) among the candidates above that bar only, so
@@ -372,8 +481,9 @@ impl Squad {
     ///   [`REPORT_ARRIVED`] came in) or `max_wait` ticks passed since
     ///   activation.
     ///   [`Trigger::TargetInRadius`]: the plan's target, as the leader knows
-    ///   it, is within the radius of the group centre. [`Trigger::None`] and
-    ///   [`Trigger::Manual`] never fire here.
+    ///   it, is within the radius of the group centre.
+    ///   [`Trigger::Custom`]: when [`SquadRules::trigger`] says so.
+    ///   [`Trigger::None`] and [`Trigger::Manual`] never fire here.
     /// - Else [`Status::Keep`].
     ///
     /// A new plan is pending first; the old one stays active until then.
@@ -381,6 +491,10 @@ impl Squad {
     /// counts in [`IN_LOSSES`](super::IN_LOSSES). With no active member left it keeps the
     /// active plan ([`Status::Keep`]) or, without one, returns
     /// [`Status::NoPlan`].
+    ///
+    /// **Rules:** this is [`Squad::check_with`] with [`BuiltInRules`]; a
+    /// squad that needs rules ([`Squad::needs_rules`]) is refused with
+    /// [`PlanError::NeedsRules`].
     pub fn check(
         &mut self,
         now: u32,
@@ -404,24 +518,24 @@ impl Squad {
         rules: &mut dyn SquadRules,
     ) -> Result<Status, PlanError> {
         self.validate()?;
-        self.advance(now);
-        self.read_reports(now);
+        self.advance(now, Some(&mut *rules));
+        let signal = self.read_reports(now, rules);
         self.areas.expire(now);
-        if self.pending.is_some() {
-            return Ok(Status::Keep);
+        let centre = self.centre();
+        // Thinking, or nobody left to judge with: keep the active plan (a
+        // report action may still give its signal).
+        if self.pending.is_some() || (self.active.is_some() && centre.is_none()) {
+            let given = signal && self.give_signal(now, rules);
+            return Ok(if given { Status::Signal } else { Status::Keep });
         }
-        let Some(centre) = self.centre() else {
-            return Ok(if self.active.is_some() {
-                Status::Keep
-            } else {
-                Status::NoPlan
-            });
+        let Some(centre) = centre else {
+            return Ok(Status::NoPlan);
         };
         let verdict = match self.active {
             None => Verdict::Abort,
             Some(_) => {
                 let mut s = std::mem::take(&mut self.scratch);
-                let v = self.judge(&mut s, now, centre, extra, rules);
+                let v = self.judge(&mut s, now, centre, extra, signal, rules);
                 self.scratch = s;
                 v?
             }
@@ -438,22 +552,27 @@ impl Squad {
             Verdict::Better(bar) => Ok(self
                 .plan_now(now, extra, spots, seed, Some(bar), rules)?
                 .map_or(Status::Keep, Status::Replan)),
-            Verdict::Hold if self.trigger_fires(now, centre) => {
-                self.signal(now);
-                Ok(Status::Signal)
+            Verdict::Hold => {
+                // A report action's signal, else the trigger's.
+                let fire = signal || self.trigger_fires(now, centre, rules);
+                Ok(if fire && self.give_signal(now, rules) {
+                    Status::Signal
+                } else {
+                    Status::Keep
+                })
             }
-            Verdict::Hold => Ok(Status::Keep),
         }
     }
 
     /// Makes the pending plan active once its think time has passed, and
-    /// sends its orders.
-    pub(super) fn advance(&mut self, now: u32) {
+    /// sends its orders through `rules`. Without rules a squad that needs
+    /// them ([`Squad::needs_rules`]) keeps the plan pending.
+    pub(super) fn advance(&mut self, now: u32, rules: Option<&mut dyn SquadRules>) {
         let due = self
             .pending
             .as_ref()
             .is_some_and(|p| now.wrapping_sub(p.made_at) >= p.active_at.wrapping_sub(p.made_at));
-        if !due {
+        if !due || (rules.is_none() && self.needs_rules()) {
             return;
         }
         let Some(plan) = self.pending.take() else {
@@ -470,13 +589,16 @@ impl Squad {
             arrived: Vec::new(),
             broken: Vec::new(),
         });
-        self.send(since, false);
+        match rules {
+            Some(r) => self.send(since, false, r),
+            None => self.send(since, false, &mut BuiltInRules),
+        }
     }
 
     /// Queues one order per active member of the active plan, timed from the
     /// leader's position at `at`: the goals as planned, or (`signal`) the
     /// second orders (see [`Squad::signal`]).
-    fn send(&mut self, at: u32, signal: bool) {
+    fn send(&mut self, at: u32, signal: bool, rules: &mut dyn SquadRules) {
         let mut orders = std::mem::take(&mut self.orders);
         let mut added = 0;
         if let Some(a) = &self.active {
@@ -490,7 +612,7 @@ impl Squad {
                 } else {
                     goal
                 };
-                if let Some(t) = self.arrival_of(member, at) {
+                if let Some(t) = self.arrival_of(member, at, false, rules) {
                     queue(&mut orders, Order { member, goal }, t, at);
                     added += 1;
                 }
@@ -519,11 +641,18 @@ impl Squad {
         self.orders = orders;
     }
 
-    /// Reads the reports that have arrived by `now`.
-    pub(super) fn read_reports(&mut self, now: u32) {
+    /// Reads the reports that have arrived by `now`: the core kinds at once,
+    /// every other kind through [`SquadRules::report`], in arrival order;
+    /// then the danger reports; then all report actions, in order. True
+    /// when an action asked for the signal (the caller gives it).
+    pub(super) fn read_reports(&mut self, now: u32, rules: &mut dyn SquadRules) -> bool {
         let mut due = std::mem::take(&mut self.scratch.reports);
         due.clear();
         self.inbox.take_due(now, &mut due);
+        let mut actions = std::mem::take(&mut self.scratch.actions);
+        actions.clear();
+        // Room for every action of this read: the reports do not grow it.
+        actions.reserve(due.len().saturating_mul(MAX_REPORT_ACTIONS));
         for msg in &due {
             match msg.kind {
                 REPORT_GOAL_BROKEN => {
@@ -551,11 +680,28 @@ impl Squad {
                         a.arrived.push(msg.sender);
                     }
                 }
-                _ => {}
+                _ => {
+                    let view = SquadView::new(self);
+                    rules.report(&view, msg, now, &mut ReportActions::new(&mut actions));
+                }
             }
         }
         self.scratch.reports = due;
         self.read_dangers(now);
+        let mut signal = false;
+        for action in &actions {
+            match *action {
+                ReportAction::AddArea(area) => {
+                    self.areas.add(now, area);
+                }
+                ReportAction::Signal => signal = true,
+                ReportAction::Forget { subject } => {
+                    self.knowledge.remove(subject, self.target_kind);
+                }
+            }
+        }
+        self.scratch.actions = actions;
+        signal
     }
 
     /// Adds the danger areas of the danger reports that have arrived by
@@ -580,13 +726,15 @@ impl Squad {
     }
 
     /// Whether the active plan must go (an abort fires), may go (a better
-    /// candidate) or stays.
+    /// candidate) or stays. With `signal` (a report action asked for it),
+    /// as after the signal, only the aborts are checked.
     fn judge(
         &self,
         s: &mut Scratch,
         now: u32,
         centre: Pos,
         extra: &[i32],
+        signal: bool,
         rules: &mut dyn SquadRules,
     ) -> Result<Verdict, PlanError> {
         let Some(a) = &self.active else {
@@ -618,12 +766,19 @@ impl Squad {
             true,
         );
         self.rule_columns_into(s, rules, (t, fact, now, true));
-        if fires(&self.tactics[t], &s.rows) {
+        let ctx = RowCtx {
+            tactic: t,
+            target: fact,
+            row: &s.rows,
+            now,
+            active: true,
+        };
+        if self.aborts_fire(rules, &ctx) {
             return Ok(Verdict::Abort);
         }
         // A started attack is carried through: after the signal only the
         // abort rules end the plan.
-        if a.signal_at.is_some() {
+        if a.signal_at.is_some() || signal {
             return Ok(Verdict::Hold);
         }
         // The active pair stays a candidate even when the targets slot
@@ -649,7 +804,7 @@ impl Squad {
     }
 
     /// Whether the active plan's trigger fires now (not after the signal).
-    fn trigger_fires(&self, now: u32, centre: Pos) -> bool {
+    fn trigger_fires(&self, now: u32, centre: Pos, rules: &mut dyn SquadRules) -> bool {
         let Some(a) = &self.active else {
             return false;
         };
@@ -679,6 +834,7 @@ impl Squad {
                         .and_then(|id| self.knowledge.get(id, self.target_kind))
                         .is_some_and(|f| dist(self.metric, centre, f.pos) <= limit)
             }
+            Trigger::Custom(id) => rules.trigger(id, &SquadView::new(self), now),
             Trigger::None | Trigger::Manual => false,
         }
     }

@@ -59,7 +59,9 @@ pub use kit::{
     tactics,
 };
 pub use members::{Group, Member, MemberState, Nearby, gather};
-pub use orders::{Channel, Order, REPORT_ARRIVED, REPORT_ENEMY, REPORT_GOAL_BROKEN, Status};
+pub use orders::{
+    Channel, Order, REPORT_ARRIVED, REPORT_ENEMY, REPORT_GAME_FIRST, REPORT_GOAL_BROKEN, Status,
+};
 pub use rules::{
     BuiltInRules, ChannelCtx, CostCtx, MAX_REPORT_ACTIONS, PlaceCtx, PlanInfo, ReportAction,
     ReportActions, RowCtx, SpotCtx, SquadRules, SquadView, spot_score_builtin,

@@ -742,3 +742,515 @@ fn view_with_hex_converts_positions() {
     assert_eq!(hex.leader(), Some(1));
     assert_eq!(hex.metric(), Metric::Hex);
 }
+
+// --- Check-side slots: trigger, abort, channel, report ---
+
+/// Members on the x axis (the same distances on a square and a hex grid).
+fn line_squad(metric: Metric, xs: &[i32]) -> Squad {
+    let members: Vec<(u32, i32, i32, u32)> = xs
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| (i as u32 + 1, x, 0, 0))
+        .collect();
+    let mut sq = squad_of(metric, &members);
+    sq.set_skill(255);
+    sq
+}
+
+/// The orders due at `now`, as `(member, now)`.
+fn due(sq: &mut Squad, now: u32) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    sq.orders_due(now, &mut out);
+    out.iter().map(|o| (o.member, now)).collect()
+}
+
+/// Fires the custom trigger from tick `from` on; records what it saw.
+struct FireFrom {
+    from: u32,
+    seen: Vec<(u32, u32, Option<PlanInfo>)>,
+}
+
+impl SquadRules for FireFrom {
+    fn trigger(&mut self, id: u32, view: &SquadView<'_>, now: u32) -> bool {
+        self.seen.push((id, now, view.active_plan()));
+        now >= self.from
+    }
+}
+
+/// The trigger scene: statuses from tick 1 to 42.
+fn trigger_events(metric: Metric) -> (Vec<Status>, FireFrom, Squad) {
+    let mut sq = line_squad(metric, &[0, 2, 4]);
+    sq.add_tactic(Tactic {
+        trigger: Trigger::Custom(3),
+        ..tactics::rush()
+    });
+    see(&mut sq, 10, 20, 0, 0);
+    let mut rules = FireFrom {
+        from: 40,
+        seen: Vec::new(),
+    };
+    sq.plan_with(0, &[], &[], 0, &mut rules).unwrap().unwrap();
+    let statuses = (1..=42)
+        .map(|now| sq.check_with(now, &[], &[], 0, &mut rules).unwrap())
+        .collect();
+    (statuses, rules, sq)
+}
+
+#[test]
+fn trigger_custom_fires_signal() {
+    let (statuses, rules, sq) = trigger_events(Metric::Chebyshev);
+    assert!(sq.needs_rules());
+    assert_eq!(statuses[38], Status::Keep, "tick 39");
+    assert_eq!(statuses[39], Status::Signal, "tick 40");
+    assert_eq!(statuses[40], Status::Keep, "tick 41");
+    assert!(statuses[..39].iter().all(|&s| s == Status::Keep));
+    assert!(sq.signal_given());
+    // Asked from activation (tick 5) to the signal, never after it.
+    assert_eq!(rules.seen.len(), 36);
+    let (id, now, plan) = *rules.seen.last().unwrap();
+    assert_eq!((id, now), (3, 40));
+    let plan = plan.unwrap();
+    assert_eq!(plan.id, sq.active_plan().unwrap().id);
+    assert_eq!((plan.tactic, plan.target, plan.since), (0, Some(10), 5));
+    assert!(!plan.signal_given);
+}
+
+/// Fires custom abort 1 from tick `from` on; records `(id, tactic, target,
+/// active, now)` of every call.
+struct AbortFrom {
+    from: u32,
+    seen: Vec<(u32, usize, Option<u32>, bool, u32)>,
+}
+
+impl SquadRules for AbortFrom {
+    fn abort(&mut self, id: u32, _: &SquadView<'_>, ctx: &RowCtx<'_>) -> bool {
+        self.seen.push((
+            id,
+            ctx.tactic,
+            ctx.target.map(|f| f.subject),
+            ctx.active,
+            ctx.now,
+        ));
+        id == 1 && ctx.now >= self.from
+    }
+}
+
+/// The abort scene: ambush (with only `Abort::Custom(1)`) against rush,
+/// two targets; statuses from tick 1 to 30.
+fn abort_events(metric: Metric) -> (Vec<Status>, AbortFrom, Squad) {
+    let mut sq = line_squad(metric, &[0, 2, 4]);
+    sq.add_tactic(Tactic {
+        aborts: vec![Abort::Custom(1)],
+        ..tactics::ambush()
+    });
+    sq.add_tactic(tactics::rush());
+    sq.set_score_log(true);
+    see(&mut sq, 10, 60, 0, 0);
+    see(&mut sq, 11, 50, 0, 0);
+    let mut rules = AbortFrom {
+        from: 30,
+        seen: Vec::new(),
+    };
+    sq.plan_with(0, &[], &[], 0, &mut rules).unwrap().unwrap();
+    let p = sq.pending_plan().unwrap();
+    assert_eq!((p.tactic, p.target), (0, Some(10)));
+    let statuses = (1..=30)
+        .map(|now| sq.check_with(now, &[], &[], 0, &mut rules).unwrap())
+        .collect();
+    (statuses, rules, sq)
+}
+
+#[test]
+fn abort_custom_replans() {
+    let (statuses, rules, sq) = abort_events(Metric::Chebyshev);
+    assert!(sq.needs_rules());
+    assert!(statuses[..29].iter().all(|&s| s == Status::Keep));
+    let Status::Replan(id) = statuses[29] else {
+        panic!("tick 30: {:?}", statuses[29]);
+    };
+    let p = sq.pending_plan().unwrap();
+    assert_eq!((p.id, p.tactic), (id, 1));
+    let at_30: Vec<_> = rules.seen.iter().filter(|c| c.4 == 30).copied().collect();
+    // First the active row (in the check), then the candidates of the
+    // replan: the active pair is still the active row, the other is not.
+    assert_eq!(
+        at_30,
+        [
+            (1, 0, Some(10), true, 30),
+            (1, 0, Some(10), true, 30),
+            (1, 0, Some(11), false, 30),
+        ]
+    );
+    // Before tick 30 the other candidate was asked as a candidate.
+    assert!(rules.seen.contains(&(1, 0, Some(11), false, 0)));
+    // The ambush candidates scored 0 while the abort fired: only rush was
+    // scored.
+    assert!(!sq.score_log().is_empty());
+    assert!(sq.score_log().iter().all(|e| e.tactic == 1));
+}
+
+/// Custom channel delays: `per * distance`, or never; records every call.
+struct Delay {
+    per: Option<u32>,
+    seen: Vec<(u32, ChannelCtx)>,
+}
+
+impl SquadRules for Delay {
+    fn channel_delay(&mut self, id: u32, ctx: &ChannelCtx) -> Option<u32> {
+        self.seen.push((id, *ctx));
+        self.per.map(|p| p * ctx.distance)
+    }
+}
+
+/// The channel scene: leader at 0, member 2 at 4 on `two`, member 3 at 5
+/// on a radio, member 4 at 6 on a shout; the orders due from tick 1 to 20.
+fn channel_events(metric: Metric, two: Channel, rules: &mut Delay) -> (Vec<(u32, u32)>, Squad) {
+    let mut sq = line_squad(metric, &[0, 4, 5, 6]);
+    sq.add_tactic(tactics::rush());
+    assert!(sq.set_channel(2, two));
+    assert!(sq.set_channel(
+        3,
+        Channel::Radio {
+            base: 1,
+            per_unit: 1
+        }
+    ));
+    assert!(sq.set_channel(4, Channel::Shout { range: 10 }));
+    see(&mut sq, 10, 20, 0, 0);
+    sq.plan_with(0, &[], &[], 0, rules).unwrap().unwrap();
+    let mut orders = Vec::new();
+    for now in 1..=20 {
+        sq.check_with(now, &[], &[], 0, rules).unwrap();
+        orders.extend(due(&mut sq, now));
+    }
+    (orders, sq)
+}
+
+#[test]
+fn channel_custom_times_orders() {
+    let mut rules = Delay {
+        per: Some(2),
+        seen: Vec::new(),
+    };
+    let (orders, sq) = channel_events(Metric::Chebyshev, Channel::Custom(2), &mut rules);
+    assert!(sq.needs_rules());
+    // Active at 5: the leader at once, member 2 after 2 * 4.
+    assert!(orders.contains(&(1, 5)));
+    assert!(orders.contains(&(2, 13)));
+    assert_eq!(rules.seen.len(), 1);
+    let (id, ctx) = rules.seen[0];
+    assert_eq!(id, 2);
+    assert_eq!(
+        ctx,
+        ChannelCtx {
+            sender: 1,
+            receiver: 2,
+            from: [0, 0, 0],
+            to: [4, 0, 0],
+            distance: 4,
+            now: 5,
+            report: false,
+        }
+    );
+    // Radio and shout keep the ticks they have with a plain squad.
+    let mut plain = Delay {
+        per: None,
+        seen: Vec::new(),
+    };
+    let (today, _) = channel_events(Metric::Chebyshev, Channel::default(), &mut plain);
+    let others = |o: &[(u32, u32)]| -> Vec<(u32, u32)> {
+        o.iter()
+            .copied()
+            .filter(|&(m, _)| m == 3 || m == 4)
+            .collect()
+    };
+    assert_eq!(others(&orders), others(&today));
+    // Radio 1 + 5, shout 6 (in goal order).
+    assert_eq!(others(&today), [(4, 11), (3, 11)]);
+    // A custom channel that does not arrive: no order for member 2.
+    let mut never = Delay {
+        per: None,
+        seen: Vec::new(),
+    };
+    let (lost, sq) = channel_events(Metric::Chebyshev, Channel::Custom(2), &mut never);
+    assert!(lost.iter().all(|&(m, _)| m != 2));
+    assert_eq!(never.seen.len(), 1);
+    assert_eq!(
+        Channel::Custom(2).arrival(Metric::Chebyshev, [0; 3], [4, 0, 0], 5),
+        None
+    );
+    // Reports over the custom channel, from the member to the leader.
+    assert_eq!(sq.report_arrives_at(2, 30), None);
+    rules.seen.clear();
+    assert_eq!(sq.report_arrives_at_with(2, 30, &mut rules), Some(38));
+    assert_eq!(sq.report_arrives_at_with(1, 30, &mut rules), Some(30));
+    assert_eq!(
+        rules.seen,
+        [(
+            2,
+            ChannelCtx {
+                sender: 2,
+                receiver: 1,
+                from: [4, 0, 0],
+                to: [0, 0, 0],
+                distance: 4,
+                now: 30,
+                report: true,
+            }
+        )]
+    );
+}
+
+/// Records the kind and tick of every report it gets.
+#[derive(Default)]
+struct Reports(Vec<(u32, u32)>);
+
+impl SquadRules for Reports {
+    fn report(&mut self, _: &SquadView<'_>, msg: &Message, now: u32, _: &mut ReportActions<'_>) {
+        self.0.push((msg.kind, now));
+    }
+}
+
+fn kind(kind: u32, sender: u32) -> Message {
+    Message {
+        kind,
+        sender,
+        ..Message::default()
+    }
+}
+
+#[test]
+fn report_slot_gets_unknown_kinds() {
+    assert_eq!(REPORT_GAME_FIRST, 16);
+    let mut sq = line_squad(Metric::Chebyshev, &[0, 2]);
+    sq.add_tactic(tactics::rush());
+    see(&mut sq, 10, 20, 0, 0);
+    let mut rules = Reports::default();
+    sq.plan_with(0, &[], &[], 0, &mut rules).unwrap().unwrap();
+    let plan = sq.pending_plan().unwrap().id;
+    let enemy = Fact {
+        subject: 11,
+        pos: [30, 0, 0],
+        seen_at: 1,
+        ..Fact::default()
+    };
+    for (msg, at) in [
+        (Message::goal_broken(2, plan), 10),
+        (kind(3, 2), 10),
+        (Message::enemy(2, enemy), 10),
+        (kind(16, 2), 10),
+        (Message::arrived(2, plan), 10),
+        (kind(99, 2), 12),
+    ] {
+        assert!(sq.report(msg, at));
+    }
+    for now in 1..=13 {
+        sq.check_with(now, &[], &[], 0, &mut rules).unwrap();
+    }
+    assert_eq!(rules.0, [(3, 10), (16, 10), (99, 12)]);
+    // The core kinds still did their part.
+    assert!(sq.knowledge().get(11, ENEMY).is_some());
+}
+
+/// Report kinds of [`Acts`].
+const KIND_A: u32 = 16;
+const KIND_B: u32 = 17;
+const KIND_FULL: u32 = 18;
+
+/// A's area.
+fn area_a() -> Area {
+    Area {
+        kind: 3,
+        pos: [9, 9, 0],
+        radius: 1,
+        lifetime: 100,
+        ..Area::default()
+    }
+}
+
+/// A adds an area (and signals if `signal`); B looks for A's area (and
+/// forgets target `forget`); FULL tries five actions.
+#[derive(Default)]
+struct Acts {
+    signal: bool,
+    forget: Option<u32>,
+    b_saw_area: Vec<bool>,
+    pushed: Vec<bool>,
+}
+
+impl SquadRules for Acts {
+    fn report(&mut self, view: &SquadView<'_>, msg: &Message, _: u32, act: &mut ReportActions<'_>) {
+        match msg.kind {
+            KIND_A => {
+                assert!(act.add_area(area_a()));
+                if self.signal {
+                    assert!(act.signal());
+                }
+            }
+            KIND_B => {
+                self.b_saw_area
+                    .push(view.areas().any(|a| a.pos == area_a().pos));
+                if let Some(s) = self.forget {
+                    assert!(act.forget(s));
+                }
+            }
+            KIND_FULL => {
+                for s in 0..5 {
+                    self.pushed.push(act.forget(900 + s));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Rush on target 10 (target 11 farther), active at 5.
+fn acts_squad(rules: &mut Acts) -> Squad {
+    let mut sq = line_squad(Metric::Chebyshev, &[0, 2]);
+    sq.add_tactic(tactics::rush());
+    see(&mut sq, 10, 20, 0, 0);
+    see(&mut sq, 11, 25, 0, 0);
+    sq.plan_with(0, &[], &[], 0, rules).unwrap().unwrap();
+    assert_eq!(sq.check_with(5, &[], &[], 0, rules), Ok(Status::Keep));
+    assert_eq!(sq.active_plan().unwrap().target, Some(10));
+    sq
+}
+
+#[test]
+fn report_actions_apply_after_all_reports() {
+    // A's signal alone: the signal is given.
+    let mut rules = Acts {
+        signal: true,
+        ..Acts::default()
+    };
+    let mut sq = acts_squad(&mut rules);
+    assert!(sq.report(kind(KIND_A, 2), 10));
+    assert!(sq.report(kind(KIND_B, 2), 10));
+    assert_eq!(
+        sq.check_with(10, &[], &[], 0, &mut rules),
+        Ok(Status::Signal)
+    );
+    assert!(sq.signal_given());
+    // B did not see A's area; after the call it is there.
+    assert_eq!(rules.b_saw_area, [false]);
+    assert!(sq.areas().iter().any(|a| a.pos == area_a().pos));
+
+    // A's signal and B's forget of the active target: the lost target
+    // wins, the signal is not given.
+    let mut rules = Acts {
+        signal: true,
+        forget: Some(10),
+        ..Acts::default()
+    };
+    let mut sq = acts_squad(&mut rules);
+    assert!(sq.report(kind(KIND_A, 2), 10));
+    assert!(sq.report(kind(KIND_B, 2), 10));
+    let status = sq.check_with(10, &[], &[], 0, &mut rules);
+    assert!(matches!(status, Ok(Status::Replan(_))), "{status:?}");
+    assert!(!sq.signal_given());
+    assert_eq!(sq.pending_plan().unwrap().target, Some(11));
+    assert!(sq.knowledge().get(10, ENEMY).is_none());
+    // While the new plan is pending a signal action still signals the
+    // active plan.
+    rules.forget = None;
+    assert!(sq.report(kind(KIND_A, 2), 11));
+    assert_eq!(
+        sq.check_with(11, &[], &[], 0, &mut rules),
+        Ok(Status::Signal)
+    );
+    assert!(sq.signal_given());
+
+    // At most four actions per report.
+    let mut rules = Acts::default();
+    let mut sq = acts_squad(&mut rules);
+    assert!(sq.report(kind(KIND_FULL, 2), 10));
+    assert_eq!(sq.check_with(10, &[], &[], 0, &mut rules), Ok(Status::Keep));
+    assert_eq!(rules.pushed, [true, true, true, true, false]);
+}
+
+#[test]
+fn report_actions_do_not_grow_after_warm_up() {
+    let mut rules = Acts::default();
+    let mut sq = acts_squad(&mut rules);
+    let mut after_two = None;
+    for now in 6..=60u32 {
+        for _ in 0..3 {
+            assert!(sq.report(kind(KIND_FULL, 2), now));
+        }
+        sq.check_with(now, &[], &[], 0, &mut rules).unwrap();
+        if now == 7 {
+            after_two = Some(sq.scratch.actions.capacity());
+            assert!(sq.scratch.actions.capacity() >= 3 * MAX_REPORT_ACTIONS);
+        }
+    }
+    assert_eq!(Some(sq.scratch.actions.capacity()), after_two);
+}
+
+#[test]
+fn plain_calls_refuse_custom_parts() {
+    let mut sq = line_squad(Metric::Chebyshev, &[0, 4]);
+    sq.add_tactic(tactics::rush());
+    see(&mut sq, 10, 20, 0, 0);
+    assert!(!sq.needs_rules());
+    assert!(sq.set_channel(2, Channel::Custom(1)));
+    assert!(sq.needs_rules());
+    assert_eq!(sq.plan(0, &[], &[], 0), Err(PlanError::NeedsRules));
+    assert_eq!(sq.check(0, &[], &[], 0), Err(PlanError::NeedsRules));
+    let mut rules = Delay {
+        per: Some(2),
+        seen: Vec::new(),
+    };
+    let id = sq.plan_with(0, &[], &[], 0, &mut rules).unwrap().unwrap();
+    assert_eq!(sq.pending_plan().unwrap().active_at, 5);
+    // Plain calls do not activate the due plan.
+    assert_eq!(due(&mut sq, 5), []);
+    assert_eq!(sq.active_plan(), None);
+    assert_eq!(sq.take_activated(), None);
+    assert!(!sq.arrived(1, 5));
+    assert_eq!(sq.active_plan(), None);
+    // The next call with rules does, timed from `active_at`.
+    assert_eq!(sq.check_with(6, &[], &[], 0, &mut rules), Ok(Status::Keep));
+    assert_eq!(sq.take_activated(), Some(id));
+    assert_eq!(SquadView::new(&sq).active_plan().unwrap().since, 5);
+    assert_eq!(rules.seen[0].1.now, 5);
+    assert_eq!(due(&mut sq, 6), [(1, 6)]);
+    assert_eq!(due(&mut sq, 12), []);
+    assert_eq!(due(&mut sq, 13), [(2, 13)]);
+    // The plain signal refuses; with rules it is given.
+    assert!(!sq.signal(7));
+    assert!(!sq.signal_given());
+    assert!(sq.signal_with(7, &mut rules));
+    assert!(sq.signal_given());
+    // A suspended member on the custom channel: the plain reinstate puts
+    // it back without an order, with rules it gets one at its delay.
+    assert!(sq.group_mut().suspend(2));
+    assert!(sq.reinstate(2, 20));
+    let state = |sq: &Squad| sq.group().iter().find(|m| m.id == 2).unwrap().state;
+    assert_eq!(state(&sq), MemberState::Active);
+    assert!((20..=60).all(|now| due(&mut sq, now).is_empty()));
+    assert!(sq.group_mut().suspend(2));
+    assert!(sq.reinstate_with(2, 70, &mut rules));
+    assert_eq!(state(&sq), MemberState::Active);
+    assert_eq!(due(&mut sq, 77), []);
+    assert_eq!(due(&mut sq, 78), [(2, 78)]);
+}
+
+#[test]
+fn custom_parts_square_and_hex() {
+    let (square, ..) = trigger_events(Metric::Chebyshev);
+    let (hex, ..) = trigger_events(Metric::Hex);
+    assert_eq!(square, hex);
+    let (square, rs, _) = abort_events(Metric::Chebyshev);
+    let (hex, rh, _) = abort_events(Metric::Hex);
+    assert_eq!(square, hex);
+    assert_eq!(rs.seen, rh.seen);
+    let delay = || Delay {
+        per: Some(2),
+        seen: Vec::new(),
+    };
+    let (mut rs, mut rh) = (delay(), delay());
+    let (square, _) = channel_events(Metric::Chebyshev, Channel::Custom(2), &mut rs);
+    let (hex, _) = channel_events(Metric::Hex, Channel::Custom(2), &mut rh);
+    assert_eq!(square, hex);
+    assert_eq!(rs.seen, rh.seen);
+}

@@ -4,8 +4,10 @@
 //! does what the core does without rules, so a game overrides only what it
 //! needs; [`BuiltInRules`] is all defaults. The game owns the rules object
 //! and lends it per call ([`Squad::plan_with`], [`Squad::check_with`]); the
-//! squad never stores it. While a slot runs it sees the squad only through
-//! a read-only [`SquadView`].
+//! squad never stores it ([`Squad::signal_with`],
+//! [`Squad::reinstate_with`] and [`Squad::report_arrives_at_with`] lend it
+//! too, for sending over a [`Channel::Custom`]). While a slot runs it sees
+//! the squad only through a read-only [`SquadView`].
 //!
 //! **Call order.** Slots are called in this fixed order, never in hash
 //! order, and no slot gets a random number:
@@ -14,7 +16,9 @@
 //!   1. [`SquadRules::keep_target`] for every known target, in knowledge
 //!      order ([`Squad::targets`]).
 //!   2. Per candidate, in candidate order (tactic order, then target
-//!      order): [`SquadRules::columns`].
+//!      order): [`SquadRules::columns`], then [`SquadRules::abort`] for the
+//!      tactic's [`Abort::Custom`]s in list order (the aborts stop at the
+//!      first that fires; a candidate whose abort fires scores 0).
 //!   3. [`SquadRules::place`] for every [`Place::Custom`] of the chosen
 //!      tactic: slots in order, a slot's `gather` before its `place`.
 //!   4. [`SquadRules::member_cost`]: slot-major, then the active members
@@ -23,13 +27,31 @@
 //!   5. [`SquadRules::spot_score`]: members in assignment order; per member
 //!      its gather spots, then its place spots; the free spots within the
 //!      spot radius in index order.
-//! - In a check ([`Squad::check_with`]): [`SquadRules::columns`] of the
-//!   active row, then (unless the signal was given) the candidates as in a
-//!   plan (steps 1 and 2); a replan then runs a whole plan (steps 1 to 5).
+//! - In a check ([`Squad::check_with`]): [`SquadRules::report`] for every
+//!   report of a non-core kind, in arrival order; then the report actions
+//!   of all of them are applied, in order (after the danger reports of the
+//!   call, before any abort); then [`SquadRules::columns`] and
+//!   [`SquadRules::abort`] of the active row; then (unless the signal was
+//!   given or asked for) the candidates as in a plan (steps 1 and 2); a
+//!   replan then runs a whole plan (steps 1 to 5); last
+//!   [`SquadRules::trigger`] of a [`Trigger::Custom`], while the plan
+//!   holds and the signal was not given. [`Squad::plan_with`] reads the
+//!   reports the same way first (and gives an asked-for signal).
+//! - [`SquadRules::channel_delay`] whenever an order goes over a
+//!   [`Channel::Custom`]: on activation and on the signal per goal in the
+//!   plan's goal order, on [`Squad::reinstate_with`] for that member. In
+//!   the squad, channels time orders only; reports keep the `arrive_at`
+//!   the caller gives ([`Squad::report`]), and
+//!   [`Squad::report_arrives_at_with`] tells when one would arrive.
 //!
-//! [`SquadRules::trigger`], [`SquadRules::abort`],
-//! [`SquadRules::channel_delay`] and [`SquadRules::report`] are declared
-//! with their defaults, but the core does not call them yet.
+//! **Without rules.** A squad that needs rules ([`Squad::needs_rules`])
+//! fails loudly instead of losing orders: [`Squad::plan`] and
+//! [`Squad::check`] return [`PlanError::NeedsRules`];
+//! [`Squad::orders_due`], [`Squad::arrived`] and [`Squad::reinstate`] do
+//! not activate a due plan (the next call with rules does, its times still
+//! counted from [`Plan::active_at`](super::Plan::active_at));
+//! [`Squad::signal`] returns false; and no plain call sends over a
+//! [`Channel::Custom`].
 //!
 //! **Defaults** (what [`BuiltInRules`] does):
 //!
@@ -43,16 +65,16 @@
 //! | `trigger` | never fires |
 //! | `abort` | never fires |
 //! | `channel_delay` | never arrives |
-//! | `report` | drops the report |
+//! | `report` | drops the report (no action) |
 //!
 //! Costs and scores are `i128`, lower is better; ties go to the lower
 //! member index or spot index.
 
 use super::members::Member;
-use super::orders::Status;
+use super::orders::{Channel, Status};
 use super::spots::{Spot, SpotPick};
 use super::squad::{Goal, PlanError, PlanId, Squad};
-use super::tactic::{Place, Tactic};
+use super::tactic::{Abort, Place, Tactic, Trigger};
 use crate::memory::{Area, Fact, Message, Metric, Pos, distance};
 use sagax_core::HexLayout;
 
@@ -106,31 +128,41 @@ pub trait SquadRules {
         Some(ctx.built_in)
     }
 
-    /// Slot 6, **trigger**: whether the custom trigger `id` of the active
-    /// plan fires at `now`. Default: never. (Not called yet.)
+    /// Slot 6, **trigger**: whether the [`Trigger::Custom`]`(id)` of the
+    /// active plan fires at `now` (asked in [`Squad::check_with`] while the
+    /// plan holds and its signal was not given). Default: never.
     fn trigger(&mut self, id: u32, view: &SquadView<'_>, now: u32) -> bool {
         let _ = (id, view, now);
         false
     }
 
-    /// Slot 7, **abort**: whether the custom abort `id` fires on a row.
-    /// Default: never. (Not called yet.)
+    /// Slot 7, **abort**: whether the [`Abort::Custom`]`(id)` of tactic
+    /// `ctx.tactic` fires on its row: the active plan's
+    /// ([`RowCtx::active`] true) in a check, or a candidate's (true only for
+    /// the active (tactic, target)), which then scores 0. Default: never.
     fn abort(&mut self, id: u32, view: &SquadView<'_>, ctx: &RowCtx<'_>) -> bool {
         let _ = (id, view, ctx);
         false
     }
 
-    /// Slot 8, **channel delay**: the delay in ticks of the custom channel
-    /// `id`, or `None` when the message does not arrive. Default: never
-    /// arrives. (Not called yet.)
+    /// Slot 8, **channel delay**: the delay in ticks of the
+    /// [`Channel::Custom`]`(id)`, or `None` when the message does not
+    /// arrive; it arrives at `ctx.now + delay` (wrapping). Default: never
+    /// arrives.
     fn channel_delay(&mut self, id: u32, ctx: &ChannelCtx) -> Option<u32> {
         let _ = (id, ctx);
         None
     }
 
     /// Slot 9, **report**: the leader reads a report of a kind the core
-    /// does not know; `actions` takes what the squad should do about it.
-    /// Default: drops it. (Not called yet.)
+    /// does not know (every kind but 1, 2 and 4; a game's own start at
+    /// [`REPORT_GAME_FIRST`](super::REPORT_GAME_FIRST)), in arrival order;
+    /// `actions` takes what the squad should do about it. The core applies
+    /// the actions of all reports of the call at one point, after the last
+    /// report (see the [module](self)): a later report's `view` does not
+    /// show an earlier one's actions yet. A [`ReportAction::Signal`] is
+    /// given only if no abort fires and the target is not lost in the
+    /// same call. Default: drops it.
     fn report(
         &mut self,
         view: &SquadView<'_>,
@@ -271,7 +303,9 @@ pub enum ReportAction {
     },
 }
 
-/// The actions of one report, at most [`MAX_REPORT_ACTIONS`].
+/// The actions of one report, at most [`MAX_REPORT_ACTIONS`]. The squad's
+/// buffer is kept between calls, so handing actions back allocates nothing
+/// once it has grown.
 #[derive(Debug)]
 pub struct ReportActions<'a> {
     out: &'a mut Vec<ReportAction>,
@@ -294,18 +328,21 @@ impl<'a> ReportActions<'a> {
         !full
     }
 
-    /// Adds a danger area; false when the report has its
-    /// [`MAX_REPORT_ACTIONS`] already.
+    /// Adds a danger area (`since` becomes the tick of the call, as
+    /// [`Areas::add`](crate::memory::Areas::add)); false when the report has
+    /// its [`MAX_REPORT_ACTIONS`] already.
     pub fn add_area(&mut self, area: Area) -> bool {
         self.push(ReportAction::AddArea(area))
     }
 
-    /// Gives the signal; false when full.
+    /// Gives the signal of the active plan, if it was not given yet; false
+    /// when full.
     pub fn signal(&mut self) -> bool {
         self.push(ReportAction::Signal)
     }
 
-    /// Forgets a target; false when full.
+    /// Forgets the target with this subject (of the target kind); false
+    /// when full.
     pub fn forget(&mut self, subject: u32) -> bool {
         self.push(ReportAction::Forget { subject })
     }
@@ -497,22 +534,26 @@ pub(super) fn rank_spots(
 
 impl Squad {
     /// True when the squad has parts only a rules object decides: a tactic
-    /// with a [`Place::Custom`] or an [`Abort::Custom`](super::Abort::Custom),
-    /// or rule columns ([`SquadConfig::rule_columns`](super::SquadConfig::rule_columns)).
-    /// Then [`Squad::plan`] and [`Squad::check`] refuse with
-    /// [`PlanError::NeedsRules`]; use [`Squad::plan_with`] and
-    /// [`Squad::check_with`].
+    /// with a [`Place::Custom`], a [`Trigger::Custom`] or an
+    /// [`Abort::Custom`], a member on a [`Channel::Custom`], or rule columns
+    /// ([`SquadConfig::rule_columns`](super::SquadConfig::rule_columns)).
+    /// Then the plain calls fail loudly (see the [module](self)); use
+    /// [`Squad::plan_with`], [`Squad::check_with`] and the other `_with`
+    /// calls.
     pub fn needs_rules(&self) -> bool {
         let custom = |p: &Place| matches!(p, Place::Custom(_));
         self.rule_columns > 0
             || self.tactics.iter().any(|t| {
-                t.aborts
-                    .iter()
-                    .any(|a| matches!(a, super::Abort::Custom(_)))
+                matches!(t.trigger, Trigger::Custom(_))
+                    || t.aborts.iter().any(|a| matches!(a, Abort::Custom(_)))
                     || t.slots
                         .iter()
                         .any(|s| custom(&s.place) || s.gather.as_ref().is_some_and(custom))
             })
+            || self
+                .channels
+                .iter()
+                .any(|(m, c)| matches!(c, Channel::Custom(_)) && self.group.index(*m).is_some())
     }
 
     /// [`Squad::plan`] with the game's rules; see the [rules](super::rules)
@@ -526,8 +567,10 @@ impl Squad {
         rules: &mut dyn SquadRules,
     ) -> Result<Option<PlanId>, PlanError> {
         self.validate()?;
-        self.advance(now);
-        self.read_reports(now);
+        self.advance(now, Some(&mut *rules));
+        if self.read_reports(now, rules) {
+            self.give_signal(now, rules);
+        }
         self.areas.expire(now);
         self.plan_now(now, extra, spots, seed, None, rules)
     }

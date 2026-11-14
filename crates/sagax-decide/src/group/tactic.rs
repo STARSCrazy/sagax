@@ -130,6 +130,12 @@ pub enum Trigger {
     TargetInRadius(i64),
     /// Only when the caller gives it.
     Manual,
+    /// When the game's rules say so
+    /// ([`SquadRules::trigger`](super::SquadRules::trigger) gets the id; the
+    /// core never reads it). Needs a rules object (see
+    /// [`Squad::needs_rules`](super::Squad::needs_rules)); without one it
+    /// never fires.
+    Custom(u32),
 }
 
 /// How a scoring-row value is compared with a limit.
@@ -170,8 +176,11 @@ pub enum Abort {
         /// The limit, inclusive for `AtLeast` and `AtMost`.
         value: i32,
     },
-    /// A rule decided by the caller's own code (matched in a later
-    /// release; until then it never fires).
+    /// A rule decided by the game's rules
+    /// ([`SquadRules::abort`](super::SquadRules::abort) gets the id and the
+    /// row; the core never reads the id). Needs a rules object (see
+    /// [`Squad::needs_rules`](super::Squad::needs_rules)); without one it
+    /// never fires.
     Custom(u32),
 }
 
