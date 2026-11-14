@@ -24,10 +24,12 @@ pub const IN_TARGET_AGE: usize = 2;
 /// the metric (for [`Metric::Euclid`] the rounded-down root; no target:
 /// `i32::MAX`).
 pub const IN_TARGET_DIST: usize = 3;
-/// Built-in row column: active members with [`ROLE_RANGED`].
-pub const IN_RANGED: usize = 4;
-/// Built-in row column: active members with [`ROLE_AREA`].
-pub const IN_AREA: usize = 5;
+/// Built-in row column: active members with the first role of
+/// [`SquadConfig::roles`].
+pub const IN_ROLE_0: usize = 4;
+/// Built-in row column: active members with the second role of
+/// [`SquadConfig::roles`].
+pub const IN_ROLE_1: usize = 5;
 /// Built-in row column: ticks since the active plan became active, in the
 /// row of the active (tactic, target); 0 in the row of any other candidate.
 pub const IN_PLAN_AGE: usize = 6;
@@ -35,15 +37,47 @@ pub const IN_PLAN_AGE: usize = 6;
 /// target, measured as [`IN_TARGET_DIST`]; -1 without a target or without
 /// another known target (a curve starting at 0 reads it as 0).
 pub const IN_TARGET_FRIEND_DIST: usize = 7;
-/// First caller column (see [`Squad::set_extra_columns`]).
+/// First caller column, with at most two roles in [`SquadConfig::roles`];
+/// with more roles use [`Squad::extra_start`].
+#[deprecated(note = "use Squad::extra_start")]
 pub const IN_EXTRA: usize = 8;
 /// Most caller columns a row may have ([`Squad::set_extra_columns`]).
 pub const MAX_EXTRA_COLUMNS: usize = 1024;
+/// Most entries of the role list ([`SquadConfig::roles`]).
+pub const MAX_ROLE_COUNTS: usize = 8;
 
-/// Role bit counted by [`IN_RANGED`]: fights from a distance.
-pub const ROLE_RANGED: u32 = 1;
-/// Role bit counted by [`IN_AREA`]: hits an area (throws into crowds).
-pub const ROLE_AREA: u32 = 2;
+/// The role list of a squad: up to [`MAX_ROLE_COUNTS`] role masks. Each
+/// mask gets one row column that counts the active members having all its
+/// bits (see [`Squad::role_column`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct RoleCounts {
+    masks: [u32; MAX_ROLE_COUNTS],
+    len: u8,
+}
+
+impl RoleCounts {
+    /// No role column.
+    pub const NONE: RoleCounts = RoleCounts {
+        masks: [0; MAX_ROLE_COUNTS],
+        len: 0,
+    };
+
+    /// A role list of `masks`; `None` above [`MAX_ROLE_COUNTS`].
+    pub fn new(masks: &[u32]) -> Option<RoleCounts> {
+        if masks.len() > MAX_ROLE_COUNTS {
+            return None;
+        }
+        let mut list = Self::NONE;
+        list.masks[..masks.len()].copy_from_slice(masks);
+        list.len = masks.len() as u8;
+        Some(list)
+    }
+
+    /// The masks, in column order.
+    pub fn as_slice(&self) -> &[u32] {
+        &self.masks[..usize::from(self.len)]
+    }
+}
 
 /// The number of a plan; each new plan gets a higher one (wrapping).
 pub type PlanId = u32;
@@ -129,7 +163,7 @@ pub struct Plan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PlanError {
     /// A consideration of tactic `tactic` reads column `input`, but a row
-    /// has only [`IN_EXTRA`] + [`Squad::set_extra_columns`] columns.
+    /// has only [`Squad::extra_start`] + [`Squad::set_extra_columns`] columns.
     InputOutOfRange {
         /// Index of the tactic.
         tactic: usize,
@@ -267,21 +301,13 @@ pub struct SquadConfig {
     pub dangers: usize,
     /// How distances are measured.
     pub metric: Metric,
-}
-
-impl Default for SquadConfig {
-    /// 8 members, 32 facts, 8 areas, 16 inbox reports, 8 danger reports,
-    /// [`Metric::Euclid`].
-    fn default() -> Self {
-        Self {
-            members: 8,
-            memory: 32,
-            areas: 8,
-            inbox: 16,
-            dangers: 8,
-            metric: Metric::Euclid,
-        }
-    }
+    /// The role list: one row column per mask, counting the active members
+    /// that have all its bits. The first two keep the columns
+    /// [`IN_ROLE_0`] and [`IN_ROLE_1`], later ones follow after column 7
+    /// (see [`Squad::role_column`]).
+    pub roles: RoleCounts,
+    /// The skill table the squad starts with (see [`Squad::set_skill_table`]).
+    pub skill_table: SkillTable,
 }
 
 /// A danger report on its way to the leader (see [`Squad::report_danger`]).
@@ -319,6 +345,7 @@ pub struct Squad {
     pub(super) dangers_cap: usize,
     pub(super) activated: Option<PlanId>,
     pub(super) metric: Metric,
+    pub(super) roles: RoleCounts,
     pub(super) tactics: Vec<Tactic>,
     pub(super) decider: Decider,
     pub(super) skill: u8,
@@ -352,10 +379,11 @@ impl Squad {
             dangers_cap: config.dangers,
             activated: None,
             metric: config.metric,
+            roles: config.roles,
             tactics: Vec::new(),
             decider: Decider::new(),
             skill: 0,
-            table: SkillTable::default(),
+            table: config.skill_table,
             leader: None,
             target_kind: 0,
             extra_columns: 0,
@@ -546,7 +574,7 @@ impl Squad {
     /// this first. (An [`Abort`](super::Abort) on a column beyond the row
     /// never fires.)
     pub fn validate(&self) -> Result<(), PlanError> {
-        let stride = IN_EXTRA + self.extra_columns;
+        let stride = self.row_width();
         for (t, tactic) in self.tactics.iter().enumerate() {
             if tactic.slots.len() > usize::from(u8::MAX) {
                 return Err(PlanError::TooManySlots { tactic: t });
@@ -563,8 +591,30 @@ impl Squad {
         Ok(())
     }
 
+    /// The row column of role `i` of the role list: 0 and 1 are
+    /// [`IN_ROLE_0`] and [`IN_ROLE_1`], role `i >= 2` is column
+    /// `8 + i - 2`. `None` beyond the list.
+    pub fn role_column(&self, i: usize) -> Option<usize> {
+        (i < self.roles.as_slice().len()).then(|| match i {
+            0 => IN_ROLE_0,
+            1 => IN_ROLE_1,
+            _ => 8 + i - 2,
+        })
+    }
+
+    /// The first caller column: 8, plus one for every role beyond two.
+    /// Caller columns ([`Squad::set_extra_columns`]) start here.
+    pub fn extra_start(&self) -> usize {
+        8 + self.roles.as_slice().len().saturating_sub(2)
+    }
+
+    /// The row width: [`Squad::extra_start`] plus the caller columns.
+    fn row_width(&self) -> usize {
+        self.extra_start() + self.extra_columns
+    }
+
     /// How many caller columns each scoring row has after the built-in ones
-    /// (from [`IN_EXTRA`] on; default 0). See [`Squad::plan`] for the
+    /// (from [`Squad::extra_start`] on; default 0). See [`Squad::plan`] for the
     /// layout of `extra`. False (nothing changes) above
     /// [`MAX_EXTRA_COLUMNS`].
     #[must_use]
@@ -665,16 +715,20 @@ impl Squad {
                 .filter(|(_, m)| m.roles & bit == bit)
                 .count()
         };
+        let extra_start = self.extra_start();
         row.clear();
-        row.resize(IN_EXTRA + self.extra_columns, 0);
+        row.resize(self.row_width(), 0);
         row[IN_LOSSES] = to_i32(
             self.group
                 .iter()
                 .filter(|m| m.state == MemberState::Gone)
                 .count(),
         );
-        row[IN_RANGED] = to_i32(count_role(ROLE_RANGED));
-        row[IN_AREA] = to_i32(count_role(ROLE_AREA));
+        for (i, &mask) in self.roles.as_slice().iter().enumerate() {
+            if let Some(col) = self.role_column(i) {
+                row[col] = to_i32(count_role(mask));
+            }
+        }
         row[IN_TARGET_AGE] = i32::MAX;
         row[IN_TARGET_DIST] = i32::MAX;
         row[IN_TARGET_FRIEND_DIST] = -1;
@@ -703,7 +757,7 @@ impl Squad {
             let n = self.extra_columns;
             for c in 0..n {
                 let at = b.checked_mul(n).and_then(|i| i.checked_add(c));
-                row[IN_EXTRA + c] = at.and_then(|i| extra.get(i)).copied().unwrap_or(0);
+                row[extra_start + c] = at.and_then(|i| extra.get(i)).copied().unwrap_or(0);
             }
         }
     }

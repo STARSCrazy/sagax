@@ -169,7 +169,7 @@ pub unsafe extern "C" fn sx_crew_config_default(out: *mut SxCrewConfig) -> i32 {
 }
 
 /// `sx_crew_new`: null if `config` is null, a capacity is 0, the metric or
-/// grid is unknown, or a hex grid comes without `SX_METRIC_HEX`.
+/// grid is unknown, `role_count` is above 8, or a hex grid comes without `SX_METRIC_HEX`.
 ///
 /// # Safety
 /// `config` is null or valid.
@@ -193,6 +193,8 @@ pub unsafe extern "C" fn sx_crew_new(config: *const SxCrewConfig) -> *mut SxCrew
                 inbox: s.inbox as usize,
                 dangers: s.dangers as usize,
                 metric: convert::metric(s.metric)?,
+                roles: convert::roles(s.role_count, &s.role_masks)?,
+                ..SquadConfig::default()
             },
             arrive_radius: c.arrive_radius,
             hex_layout: layout,

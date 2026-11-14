@@ -928,20 +928,25 @@ typedef struct sx_keeper sx_keeper;
 
 /* Columns of the scoring row every tactic is scored on (put them in
  * sx_consideration.input or sx_tactic_add_abort). The game's own columns
- * follow from SX_IN_EXTRA on (see sx_squad_set_extra_columns). */
+ * follow from sx_squad_extra_start (SX_IN_EXTRA with at most two roles; see
+ * sx_squad_set_extra_columns). */
 #define SX_IN_LOSSES      0   /* members marked gone and still listed (never reset by a new
                                * plan; sx_squad_remove_member stops counting one) */
 #define SX_IN_OFF_PLAN    1   /* active members whose goal of the active plan broke */
 #define SX_IN_TARGET_AGE  2   /* ticks since the target was seen; no target: INT32_MAX */
 #define SX_IN_TARGET_DIST 3   /* group centre to target (Euclid: the root); no target: INT32_MAX */
-#define SX_IN_RANGED      4   /* active members with SX_ROLE_RANGED */
-#define SX_IN_AREA        5   /* active members with SX_ROLE_AREA */
+#define SX_IN_ROLE_0      4   /* active members with the first mask of the role list */
+#define SX_IN_ROLE_1      5   /* active members with the second mask of the role list */
+#define SX_IN_RANGED      4   /* = SX_IN_ROLE_0: with the default list, SX_ROLE_RANGED */
+#define SX_IN_AREA        5   /* = SX_IN_ROLE_1: with the default list, SX_ROLE_AREA */
 #define SX_IN_PLAN_AGE    6   /* ticks since the active plan became active (its own row only) */
 #define SX_IN_TARGET_FRIEND_DIST 7 /* target to the nearest other known target (Euclid: the
                                     * root); no target or no other target: -1 */
-#define SX_IN_EXTRA       8   /* first column of the game's own */
+#define SX_IN_EXTRA       8   /* first column of the game's own, with at most two role
+                               * columns; else sx_squad_extra_start */
+#define SX_MAX_ROLE_COUNTS 8  /* most entries of the role list */
 
-/* Role bits the built-in columns count; the others are the game's. */
+/* Role bits the default role list counts; the others are the game's. */
 #define SX_ROLE_RANGED 1
 #define SX_ROLE_AREA   2
 
@@ -1172,15 +1177,22 @@ typedef struct sx_squad_config {
 	uint32_t inbox;             /* most waiting member reports */
 	uint32_t dangers;           /* most waiting danger reports */
 	uint32_t metric;            /* SX_METRIC_* */
+	uint32_t role_count;        /* entries of role_masks in use, at most SX_MAX_ROLE_COUNTS */
+	uint32_t role_masks[8];     /* the role list: one scoring column counts the active
+	                             * members that have all bits of a mask. Entries 0 and 1
+	                             * are columns SX_IN_ROLE_0 and SX_IN_ROLE_1, entry i >= 2
+	                             * is column 8 + i - 2. Fewer than two: the free columns
+	                             * read 0. */
 } sx_squad_config;
 
 /* Fill *out with the defaults: 8 members, 32 facts, 8 areas, 16 inbox
- * reports, 8 danger reports, SX_METRIC_EUCLID. Returns 0; SX_ERROR_ARGUMENT
+ * reports, 8 danger reports, SX_METRIC_EUCLID, two roles {SX_ROLE_RANGED,
+ * SX_ROLE_AREA}. Returns 0; SX_ERROR_ARGUMENT
  * for a null out. */
 int32_t sx_squad_config_default(sx_squad_config *out);
 /* A squad as configured. Skill 0, the default skill table, target kind 0,
- * no tactics. Null if config is null, a capacity is 0 or the metric is
- * unknown. */
+ * no tactics. Null if config is null, a capacity is 0, the metric is
+ * unknown or role_count is above 8. */
 sx_squad *sx_squad_new(const sx_squad_config *config);
 void sx_squad_free(sx_squad *squad);
 
@@ -1247,6 +1259,10 @@ int32_t sx_squad_set_target_kind(sx_squad *squad, uint32_t kind);
  * on (default 0, at most 1024). Returns 0; SX_ERROR_ARGUMENT above 1024
  * (nothing changes). */
 int32_t sx_squad_set_extra_columns(sx_squad *squad, uint32_t count);
+/* The first column of the game's own: 8, plus one for every role beyond two
+ * (so SX_IN_EXTRA with the default list). SX_ERROR_ARGUMENT for a null
+ * squad. */
+int32_t sx_squad_extra_start(sx_squad *squad);
 /* How far (inclusive, in the squad's metric, x and y; Euclid compares
  * squares) a spot may be from a slot's wish point to be taken, in both
  * phases; beyond it a spot does not count, and with none within the wish
@@ -1704,14 +1720,16 @@ _Static_assert(offsetof(sx_order, goal) == 4, "sx_order.goal layout");
 _Static_assert(sizeof(sx_plan) == 28, "sx_plan layout");
 _Static_assert(offsetof(sx_plan, goal_count) == 20, "sx_plan.goal_count layout");
 _Static_assert(offsetof(sx_plan, has_target) == 24, "sx_plan.has_target layout");
-_Static_assert(sizeof(sx_squad_config) == 24, "sx_squad_config layout");
+_Static_assert(sizeof(sx_squad_config) == 60, "sx_squad_config layout");
 _Static_assert(offsetof(sx_squad_config, metric) == 20, "sx_squad_config.metric layout");
+_Static_assert(offsetof(sx_squad_config, role_count) == 24, "sx_squad_config.role_count layout");
+_Static_assert(offsetof(sx_squad_config, role_masks) == 28, "sx_squad_config.role_masks layout");
 _Static_assert(sizeof(sx_member_inputs) == 20, "sx_member_inputs layout");
 _Static_assert(offsetof(sx_member_inputs, discipline) == 16, "sx_member_inputs.discipline layout");
-_Static_assert(sizeof(sx_crew_config) == 32, "sx_crew_config layout");
+_Static_assert(sizeof(sx_crew_config) == 68, "sx_crew_config layout");
 _Static_assert(offsetof(sx_crew_config, squad) == 0, "sx_crew_config.squad layout");
-_Static_assert(offsetof(sx_crew_config, arrive_radius) == 24, "sx_crew_config.arrive_radius layout");
-_Static_assert(offsetof(sx_crew_config, hex_grid) == 28, "sx_crew_config.hex_grid layout");
+_Static_assert(offsetof(sx_crew_config, arrive_radius) == 60, "sx_crew_config.arrive_radius layout");
+_Static_assert(offsetof(sx_crew_config, hex_grid) == 64, "sx_crew_config.hex_grid layout");
 _Static_assert(sizeof(sx_crew_event) == 88, "sx_crew_event layout");
 _Static_assert(offsetof(sx_crew_event, start_at) == 12, "sx_crew_event.start_at layout");
 _Static_assert(offsetof(sx_crew_event, goal) == 16, "sx_crew_event.goal layout");

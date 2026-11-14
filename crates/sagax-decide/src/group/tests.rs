@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use super::*;
 use crate::memory::{Metric, Pos, ZeroCapacity};
 
@@ -461,7 +463,105 @@ fn squad_config_default_values() {
         (c.members, c.memory, c.areas, c.inbox, c.dangers, c.metric),
         (8, 32, 8, 16, 8, Metric::Euclid)
     );
+    assert_eq!(c.roles.as_slice(), [ROLE_RANGED, ROLE_AREA]);
+    assert_eq!(c.skill_table, SkillTable::default());
     assert!(Squad::new(c).is_ok());
+}
+
+#[test]
+fn skill_table_from_config() {
+    let mut table = SkillTable::default();
+    table.think_ticks[0] = 7;
+    let mut sq = Squad::new(SquadConfig {
+        skill_table: table,
+        ..SquadConfig::default()
+    })
+    .unwrap();
+    sq.group_mut().add(Member {
+        id: 1,
+        pos: [0; 3],
+        roles: 0,
+        skill: 0,
+        state: MemberState::Active,
+    });
+    sq.set_target_kind(ENEMY);
+    assert!(sq.set_leader(1));
+    sq.add_tactic(tactics::rush());
+    see(&mut sq, 10, 20, 0, 0);
+    sq.plan(100, &[], &[], 0).unwrap().unwrap();
+    assert_eq!(sq.pending_plan().unwrap().active_at, 107);
+}
+
+/// The scoring row of a squad with `roles`, one member per entry of
+/// `members` (roles bits) at the origin, one target 7 away, `extra` caller
+/// columns whose block of the target holds `extra_block`.
+fn row_with(roles: Option<RoleCounts>, members: &[u32], extra_block: &[i32]) -> (Squad, Vec<i32>) {
+    let mut config = SquadConfig::default();
+    if let Some(r) = roles {
+        config.roles = r;
+    }
+    let mut sq = Squad::new(config).unwrap();
+    for (i, &bits) in members.iter().enumerate() {
+        sq.group_mut().add(Member {
+            id: i as u32 + 1,
+            pos: [0; 3],
+            roles: bits,
+            skill: 0,
+            state: MemberState::Active,
+        });
+    }
+    sq.set_target_kind(ENEMY);
+    assert!(sq.set_extra_columns(extra_block.len()));
+    see(&mut sq, 10, 7, 0, 0);
+    let fact = *sq.knowledge().iter().next().unwrap();
+    let mut extra = vec![0; extra_block.len()];
+    extra.extend_from_slice(extra_block);
+    let mut row = Vec::new();
+    sq.row_into(&mut row, 0, [0; 3], Some(&fact), Some(1), &extra, false);
+    (sq, row)
+}
+
+#[test]
+fn role_columns_layout() {
+    // Default list: the row is exactly 0.9's.
+    let (sq, row) = row_with(None, &[ROLE_RANGED, ROLE_AREA, 0], &[]);
+    assert_eq!(row, [0, 0, 0, 7, 1, 1, 0, -1]);
+    assert_eq!(sq.extra_start(), 8);
+    assert_eq!(
+        (sq.role_column(0), sq.role_column(1), sq.role_column(2)),
+        (Some(4), Some(5), None)
+    );
+    assert_eq!((IN_ROLE_0, IN_ROLE_1, IN_RANGED, IN_AREA), (4, 5, 4, 5));
+
+    // One role: column 4 counts it, column 5 reads 0.
+    let (sq, row) = row_with(
+        RoleCounts::new(&[ROLE_AREA]),
+        &[ROLE_RANGED, ROLE_AREA],
+        &[],
+    );
+    assert_eq!(row, [0, 0, 0, 7, 1, 0, 0, -1]);
+    assert_eq!(sq.extra_start(), 8);
+    assert_eq!(sq.role_column(1), None);
+
+    // Three roles: the third sits at column 8, the caller columns move to 9.
+    let (sq, row) = row_with(RoleCounts::new(&[1, 2, 4]), &[4, 0], &[55]);
+    assert_eq!(row, [0, 0, 0, 7, 0, 0, 0, -1, 1, 55]);
+    assert_eq!(sq.extra_start(), 9);
+    assert_eq!(sq.role_column(2), Some(8));
+    assert!(sq.validate().is_ok());
+
+    // No roles: columns 4 and 5 read 0.
+    let (sq, row) = row_with(Some(RoleCounts::NONE), &[ROLE_RANGED, ROLE_AREA], &[]);
+    assert_eq!(row, [0, 0, 0, 7, 0, 0, 0, -1]);
+    assert_eq!(sq.extra_start(), 8);
+
+    // More than eight roles do not fit.
+    assert_eq!(
+        RoleCounts::new(&[1; 8]).map(|r| r.as_slice().len()),
+        Some(8)
+    );
+    assert_eq!(RoleCounts::new(&[1; 9]), None);
+    assert_eq!(MAX_ROLE_COUNTS, 8);
 }
 
 #[test]

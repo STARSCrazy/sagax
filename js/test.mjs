@@ -1518,6 +1518,29 @@ test('plans: goals, orders by channel, signal lines up the start, errors', () =>
   sq.free();
 });
 
+test('squad: role list', () => {
+  const extraStart = (roles) => {
+    const sq = lib.squad(roles === undefined ? {} : { roles });
+    const at = sq.extraStart();
+    sq.free();
+    return at;
+  };
+  assert.equal(extraStart(), 8);
+  assert.equal(extraStart(['area']), 8);
+  assert.equal(extraStart([]), 8);
+  assert.equal(extraStart(['ranged', 'area', 4]), 9);
+  assert.equal(extraStart([1, 2, 4, 8, 16, 32, 64, 128]), 14);
+  assert.throws(() => lib.squad({ roles: [1, 2, 4, 8, 16, 32, 64, 128, 256] }), RangeError);
+  assert.throws(() => lib.squad({ roles: ['archer'] }), RangeError);
+  assert.equal(SQUAD.inRole0, 4);
+  assert.equal(SQUAD.inRole1, 5);
+  // the crew takes the same list
+  const crew = lib.crew({ squad: { roles: ['ranged', 'area', 4] } });
+  assert.equal(crew.squad().extraStart(), 9);
+  crew.free();
+  assert.throws(() => lib.crew({ squad: { roles: new Array(9).fill(1) } }), RangeError);
+});
+
 /** An elite squad of four with rush and a 2-side flank, enemy 10 at (20, 0), all hearing at once; the flank is active at 5. */
 function activeFlank() {
   const sq = squadOf('euclid', [[1, 0, 0], [2, 1, 0], [3, 0, 1], [4, 1, 1]], { radio: false });

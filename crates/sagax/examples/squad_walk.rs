@@ -74,6 +74,7 @@ fn scene_crew() -> Crew {
             inbox: 8,
             dangers: 4,
             metric: Metric::Chebyshev,
+            ..SquadConfig::default()
         },
         ..CrewConfig::default()
     })

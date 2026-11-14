@@ -1,4 +1,4 @@
-use crate::{ONE, Pick};
+use crate::Pick;
 
 /// What a squad's skill changes, in four levels: index `skill / 64`
 /// (0 = weak 0..=63, 1 = 64..=127, 2 = 128..=191, 3 = elite 192..=255).
@@ -16,7 +16,7 @@ pub struct SkillTable {
     /// Most ticks a member starts late (picked by seed per member).
     pub timing_spread: [u32; 4],
     /// Bonus of the active plan over a new one, and the members' discipline
-    /// ([`ONE`] = 1.0): [`Squad::check`](super::Squad::check) replans only
+    /// ([`crate::ONE`] = 1.0): [`Squad::check`](super::Squad::check) replans only
     /// for a candidate scoring more than the active one times
     /// `1 + hold_bonus`.
     pub hold_bonus: [u32; 4],
@@ -63,32 +63,10 @@ impl SkillTable {
     }
 }
 
-impl Default for SkillTable {
-    /// Weak squads pick by chance among the top 3, think 2 s, miss spots by
-    /// up to 2 ranks and start up to 1 s apart; elite squads pick the best,
-    /// think 5 ticks, take the best spot and start together. A new plan must
-    /// beat the active one by 12.5 % (weak) up to 50 % (elite); members
-    /// give a goal up after 1 s (weak) up to 4 s (elite) of postponing it.
-    fn default() -> Self {
-        Self {
-            pick: [
-                Pick::Weighted { top: 3 },
-                Pick::Weighted { top: 2 },
-                Pick::Weighted { top: 2 },
-                Pick::Best,
-            ],
-            think_ticks: [34, 20, 10, 5],
-            spot_rank_error: [2, 1, 1, 0],
-            timing_spread: [17, 10, 5, 0],
-            hold_bonus: [ONE / 8, ONE / 4, ONE * 3 / 8, ONE / 2],
-            give_up_ticks: [17, 34, 51, 68],
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ONE;
 
     #[test]
     fn skill_for_reads_the_level() {

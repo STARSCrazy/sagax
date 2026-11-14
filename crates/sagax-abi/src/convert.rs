@@ -6,8 +6,8 @@ use std::num::NonZeroUsize;
 
 use sagax_core::{HexLayout, Pos};
 use sagax_decide::group::{
-    CrewEvent, Goal, GoalKind, MemberState, Place, PlanError, PlanId, Shape, Side, SkillTable,
-    Start, Status as SquadStatus,
+    CrewEvent, Goal, GoalKind, MemberState, Place, PlanError, PlanId, RoleCounts, Shape, Side,
+    SkillTable, Start, Status as SquadStatus,
 };
 use sagax_decide::memory::Metric;
 use sagax_decide::{Combine, Decider, Pick};
@@ -229,6 +229,15 @@ pub fn shape(code: u32) -> Option<Shape> {
         SHAPE_COLUMN => Some(Shape::Column),
         _ => None,
     }
+}
+
+/// The role list of a squad config: the first `count` of `masks`. `None`
+/// above 8 entries (`SX_MAX_ROLE_COUNTS`) or when `masks` holds fewer than
+/// `count`.
+pub fn roles(count: u32, masks: &[u32]) -> Option<RoleCounts> {
+    masks
+        .get(..usize::try_from(count).ok()?)
+        .and_then(RoleCounts::new)
 }
 
 /// The number of sides of a flank tactic: 2 or 3, nothing else.

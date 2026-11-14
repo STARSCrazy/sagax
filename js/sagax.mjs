@@ -1678,11 +1678,13 @@ export const SQUAD = {
   inOffPlan: 1, // active members whose goal of the active plan broke
   inTargetAge: 2, // ticks since the target was seen
   inTargetDist: 3, // group centre to target
-  inRanged: 4, // active members with roleRanged
-  inArea: 5, // active members with roleArea
+  inRole0: 4, // active members with the first entry of the role list
+  inRole1: 5, // active members with the second entry of the role list
+  inRanged: 4, // = inRole0: with the default role list, roleRanged
+  inArea: 5, // = inRole1: with the default role list, roleArea
   inPlanAge: 6, // ticks since the active plan became active (its own row only)
   inTargetFriendDist: 7, // target to its nearest other known target; none: -1
-  inExtra: 8, // first column of the game's own (setExtraColumns)
+  inExtra: 8, // first column of the game's own with at most two roles; else Squad.extraStart()
   roleRanged: 1,
   roleArea: 2,
   tagCover: 1,
@@ -1693,6 +1695,7 @@ export const SQUAD = {
   reportEnemy: 2, // subject, pos, seenAt, strength, data: a target (told)
   reportArrived: 4, // sender: the member; data: the plan id: at its gather spot
   maxExtraColumns: 1024, // most columns setExtraColumns takes
+  maxRoles: 8, // most entries of the role list
 };
 
 const ROLE = { ranged: SQUAD.roleRanged, area: SQUAD.roleArea };
@@ -1999,10 +2002,22 @@ export class Tactic extends Table {
  *
  * Targets come only from the squad's own knowledge (observe, enemy reports).
  * Config keys and defaults: members 8, memory 32, areas 8, inbox 16, dangers 8,
- * metric 'euclid'. The old keys groupCap, memoryCap, areaCap and inboxCap
- * still work (0.9 only); an old and a new key for the same field is a TypeError.
+ * metric 'euclid', roles ['ranged', 'area']. roles is the role list: one
+ * scoring column per entry (a name or a bit mask, at most 8, else RangeError)
+ * that counts the active members having it; entries 0 and 1 are the columns
+ * SQUAD.inRole0 and inRole1, later ones follow after column 7, and
+ * extraStart() says where the game's own columns begin. The old keys groupCap,
+ * memoryCap, areaCap and inboxCap still work (0.9 only); an old and a new key
+ * for the same field is a TypeError.
  */
-/** The numbers sx_squad_new takes for a squad config (see Squad). */
+/** The role masks of a squad config's roles (names or bits, at most 8). */
+function rolesOf(roles) {
+  if (!Array.isArray(roles)) throw new TypeError('Sagax: roles must be a list');
+  if (roles.length > SQUAD.maxRoles) throw new RangeError(`Sagax: at most ${SQUAD.maxRoles} roles`);
+  return roles.map((r) => (typeof r === 'string' ? choice(ROLE, r, 'roles') : bitsOf(r, ROLE, 'roles')));
+}
+
+/** The numbers sx_squad_new takes for a squad config (see Squad), and the role masks to put in the scratch buffer. */
 function squadConfigOf(config) {
   const field = (name, old, fallback) => {
     if (config[name] !== undefined && config[old] !== undefined) {
@@ -2016,7 +2031,8 @@ function squadConfigOf(config) {
   const inbox = field('inbox', 'inboxCap', 16);
   const dangers = capacityOf(config.dangers ?? 8);
   const m = choice(METRIC, config.metric ?? 'euclid', 'metric');
-  return [members, memory, areas, inbox, dangers, m];
+  const masks = rolesOf(config.roles ?? ['ranged', 'area']);
+  return { numbers: [members, memory, areas, inbox, dangers, m, masks.length], masks };
 }
 
 export class Squad extends Table {
@@ -2028,7 +2044,14 @@ export class Squad extends Table {
       super(x, 'sx_squad', config.handle, config.owner);
       return;
     }
-    super(x, 'sx_squad', x.sx_squad_new(...squadConfigOf(config)));
+    const { numbers, masks } = squadConfigOf(config);
+    putScratch(x, masks);
+    super(x, 'sx_squad', x.sx_squad_new(...numbers));
+  }
+
+  /** The first column of the game's own (SQUAD.inExtra, plus one for every role beyond two). */
+  extraStart() {
+    return this.x.sx_squad_extra_start(this.h);
   }
 
   #out(count) {
@@ -2510,10 +2533,11 @@ export class Crew extends Table {
   #squad = null;
 
   constructor(x, { squad = {}, arriveRadius = 0, hex = null } = {}) {
-    const config = squadConfigOf(squad);
+    const { numbers, masks } = squadConfigOf(squad);
     const layout = hex === null ? 0 : layoutOf(hex);
-    if (layout !== 0 && config[5] !== METRIC.hex) throw new RangeError("Sagax: a hex crew needs squad metric 'hex'");
-    super(x, 'sx_crew', x.sx_crew_new(...config, u32Of(arriveRadius, 'arriveRadius'), layout));
+    if (layout !== 0 && numbers[5] !== METRIC.hex) throw new RangeError("Sagax: a hex crew needs squad metric 'hex'");
+    putScratch(x, masks);
+    super(x, 'sx_crew', x.sx_crew_new(...numbers, u32Of(arriveRadius, 'arriveRadius'), layout));
     /** Moves on with every call that changes the crew (lent keepers go stale). */
     this.epoch = 0;
   }
@@ -2663,7 +2687,7 @@ function shapeOf(shape) {
 }
 
 Object.assign(Sagax.prototype, {
-  /** A squad {members, memory, areas, inbox, dangers, metric = 'euclid'}; see Squad. */
+  /** A squad {members, memory, areas, inbox, dangers, metric = 'euclid', roles = ['ranged', 'area']}; see Squad. */
   squad(options) {
     return new Squad(this.x, options);
   },

@@ -7,7 +7,7 @@ use sagax_decide::group::{Crew, CrewConfig, CrewEvent, GoalKeeper, Squad, SquadC
 use super::{
     ERROR_ARGUMENT, FACT_SIZE, GOAL_SIZE, Held, Lend, MEMBER_SIZE, WasmKeeper, WasmSquad,
     boxed_squad, drop_squad, fact_of, fact_record, goal_record, member_of, plan_error_to,
-    plan_input, scratch_copy,
+    plan_input, role_list, scratch_copy,
 };
 use sagax_abi::convert::{self, to_i32, u32_of};
 
@@ -88,7 +88,8 @@ macro_rules! crew_ref {
 
 /// A crew (see `sx_crew_new` in `sagax.h`); `hex` 0 for none, else the
 /// layout 1 .. 4 (`SX_GRID_HEX_*`). Null if a capacity is 0, the metric or
-/// layout is unknown, or a layout comes without the hex metric.
+/// layout is unknown, `role_count` is above 8 (the masks are read from the
+/// scratch buffer), or a layout comes without the hex metric.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn sx_crew_new(
@@ -98,10 +99,14 @@ pub extern "C" fn sx_crew_new(
     inbox: u32,
     dangers: u32,
     metric: i32,
+    role_count: u32,
     arrive_radius: u32,
     hex: u32,
 ) -> *mut WasmCrew {
     let Some(metric) = u32_of(metric).and_then(convert::metric) else {
+        return std::ptr::null_mut();
+    };
+    let Some(roles) = role_list(role_count) else {
         return std::ptr::null_mut();
     };
     let hex_layout = match hex {
@@ -119,6 +124,8 @@ pub extern "C" fn sx_crew_new(
             inbox: inbox as usize,
             dangers: dangers as usize,
             metric,
+            roles,
+            ..SquadConfig::default()
         },
         arrive_radius,
         hex_layout,

@@ -590,6 +590,10 @@ pub struct SxSquadConfig {
     pub dangers: u32,
     /// `SX_METRIC_*`.
     pub metric: u32,
+    /// How many of `role_masks` are used (at most 8).
+    pub role_count: u32,
+    /// The role list: one scoring column per mask (see `sx_squad_extra_start`).
+    pub role_masks: [u32; 8],
 }
 
 /// `sx_squad_config_default`.
@@ -608,6 +612,9 @@ pub unsafe extern "C" fn sx_squad_config_default(out: *mut SxSquadConfig) -> i32
         Metric::Chebyshev => 2,
         Metric::Hex => 3,
     };
+    let mut role_masks = [0; 8];
+    let roles = c.roles.as_slice();
+    role_masks[..roles.len()].copy_from_slice(roles);
     // SAFETY: see above.
     unsafe {
         put(
@@ -619,14 +626,16 @@ pub unsafe extern "C" fn sx_squad_config_default(out: *mut SxSquadConfig) -> i32
                 inbox: c.inbox as u32,
                 dangers: c.dangers as u32,
                 metric,
+                role_count: roles.len() as u32,
+                role_masks,
             },
         );
     }
     0
 }
 
-/// `sx_squad_new`: null if `config` is null, a capacity is 0 or the metric
-/// is unknown.
+/// `sx_squad_new`: null if `config` is null, a capacity is 0, the metric is
+/// unknown or `role_count` is above 8.
 ///
 /// # Safety
 /// `config` is null or valid.
@@ -644,6 +653,8 @@ pub unsafe extern "C" fn sx_squad_new(config: *const SxSquadConfig) -> *mut SxSq
             inbox: c.inbox as usize,
             dangers: c.dangers as usize,
             metric: convert::metric(c.metric)?,
+            roles: convert::roles(c.role_count, &c.role_masks)?,
+            ..SquadConfig::default()
         })
         .ok()?;
         Some(SxSquad {
@@ -1088,6 +1099,16 @@ pub unsafe extern "C" fn sx_squad_set_extra_columns(squad: *mut SxSquad, count: 
     } else {
         ERROR_ARGUMENT
     }
+}
+
+/// `sx_squad_extra_start`: the first column of the game's own (8, plus one
+/// for every role beyond two).
+///
+/// # Safety
+/// `squad` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_extra_start(squad: *mut SxSquad) -> i32 {
+    to_i32(squad!(squad).extra_start())
 }
 
 /// `sx_squad_set_spot_radius`.

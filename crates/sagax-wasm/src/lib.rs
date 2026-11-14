@@ -2502,8 +2502,9 @@ pub extern "C" fn sx_sweep_heading(base: i32, elapsed: u32, step_ticks: u32, cou
 
 use sagax_abi::convert::{CombineTarget, SkillCodes};
 use sagax_decide::group::{
-    Abort, Channel, Goal, GoalKeeper, Member, MemberState, Nearby, Order, Place, Plan, PlanError,
-    SkillTable, Slot, Spot, Squad, SquadConfig, Tactic, Trigger, gather, tactics,
+    Abort, Channel, Goal, GoalKeeper, MAX_ROLE_COUNTS, Member, MemberState, Nearby, Order, Place,
+    Plan, PlanError, RoleCounts, SkillTable, Slot, Spot, Squad, SquadConfig, Tactic, Trigger,
+    gather, tactics,
 };
 
 /// Numbers per member record: id, x, y, z, roles, skill, state.
@@ -2530,6 +2531,16 @@ const SKILL_SIZE: usize = 28;
 /// The first `count` numbers of the scratch buffer, copied.
 fn scratch_copy(count: usize) -> Option<Vec<i32>> {
     SCRATCH.with(|s| s.borrow().get(..count).map(<[i32]>::to_vec))
+}
+
+/// The role list of `count` masks in the scratch buffer; `None` above 8.
+fn role_list(count: u32) -> Option<RoleCounts> {
+    if count as usize > MAX_ROLE_COUNTS {
+        return None;
+    }
+    let masks = scratch_copy(count as usize)?;
+    let masks: Vec<u32> = masks.iter().map(|&m| m as u32).collect();
+    convert::roles(count, &masks)
 }
 
 /// Writes `values` to the start of the scratch buffer (it has room).
@@ -3050,8 +3061,9 @@ macro_rules! squad {
     };
 }
 
-/// A squad (see `sx_squad_new` in `sagax.h`). Null if a capacity is 0 or the
-/// metric is unknown.
+/// A squad (see `sx_squad_new` in `sagax.h`). The `role_count` role masks
+/// are read from the scratch buffer. Null if a capacity is 0, the metric is
+/// unknown or `role_count` is above 8.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_squad_new(
     members: u32,
@@ -3060,8 +3072,12 @@ pub extern "C" fn sx_squad_new(
     inbox: u32,
     dangers: u32,
     metric: i32,
+    role_count: u32,
 ) -> *mut WasmSquad {
     let Some(metric) = u32_of(metric).and_then(convert::metric) else {
+        return std::ptr::null_mut();
+    };
+    let Some(roles) = role_list(role_count) else {
         return std::ptr::null_mut();
     };
     let Ok(squad) = Squad::new(SquadConfig {
@@ -3071,6 +3087,8 @@ pub extern "C" fn sx_squad_new(
         inbox: inbox as usize,
         dangers: dangers as usize,
         metric,
+        roles,
+        ..SquadConfig::default()
     }) else {
         return std::ptr::null_mut();
     };
@@ -3487,6 +3505,16 @@ pub unsafe extern "C" fn sx_squad_set_extra_columns(s: *mut WasmSquad, count: u3
     } else {
         ERROR_ARGUMENT
     }
+}
+
+/// The first column of the game's own (8, plus one for every role beyond
+/// two); -1 for a null handle.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_extra_start(s: *mut WasmSquad) -> i32 {
+    to_i32(squad!(s).squad.extra_start())
 }
 
 /// How far a spot may be from a slot's wish point; negative: the default

@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use super::*;
 use sagax_abi::codes::{IDLE, PARTIAL};
 use sagax_nav::nav::ANY_LEVEL;
@@ -879,9 +881,10 @@ mod squad {
     };
     use sagax_abi::codes::*;
     use sagax_decide::group::{
-        IN_AREA, IN_EXTRA, IN_LOSSES, IN_OFF_PLAN, IN_PLAN_AGE, IN_RANGED, IN_TARGET_AGE,
-        IN_TARGET_DIST, IN_TARGET_FRIEND_DIST, MAX_EXTRA_COLUMNS, REPORT_ARRIVED, REPORT_ENEMY,
-        REPORT_GOAL_BROKEN, ROLE_AREA, ROLE_RANGED, TAG_CHOKE, TAG_COVER, TAG_HIDDEN, TAG_HIGH,
+        IN_AREA, IN_EXTRA, IN_LOSSES, IN_OFF_PLAN, IN_PLAN_AGE, IN_RANGED, IN_ROLE_0, IN_ROLE_1,
+        IN_TARGET_AGE, IN_TARGET_DIST, IN_TARGET_FRIEND_DIST, MAX_EXTRA_COLUMNS, REPORT_ARRIVED,
+        REPORT_ENEMY, REPORT_GOAL_BROKEN, ROLE_AREA, ROLE_RANGED, TAG_CHOKE, TAG_COVER, TAG_HIDDEN,
+        TAG_HIGH,
     };
     use std::mem::{offset_of, size_of};
     use std::ptr::{null, null_mut};
@@ -897,6 +900,8 @@ mod squad {
     const ONE_WEIGHT: u32 = 65535;
     const EUCLID: u32 = 0;
     const CHEBYSHEV: u32 = 2;
+    /// The default role list as a mask array.
+    const ROLES: [u32; 8] = [ROLE_RANGED, ROLE_AREA, 0, 0, 0, 0, 0, 0];
 
     /// The value of `#define name value` in `sagax.h`.
     pub(super) fn define(name: &str) -> i64 {
@@ -958,6 +963,8 @@ mod squad {
             inbox: 8,
             dangers: 8,
             metric,
+            role_count: 2,
+            role_masks: ROLES,
         });
         assert!(!sq.is_null());
         unsafe {
@@ -1001,6 +1008,8 @@ mod squad {
             ("SX_IN_OFF_PLAN", IN_OFF_PLAN as i64),
             ("SX_IN_TARGET_AGE", IN_TARGET_AGE as i64),
             ("SX_IN_TARGET_DIST", IN_TARGET_DIST as i64),
+            ("SX_IN_ROLE_0", IN_ROLE_0 as i64),
+            ("SX_IN_ROLE_1", IN_ROLE_1 as i64),
             ("SX_IN_RANGED", IN_RANGED as i64),
             ("SX_IN_AREA", IN_AREA as i64),
             ("SX_IN_PLAN_AGE", IN_PLAN_AGE as i64),
@@ -1234,11 +1243,43 @@ mod squad {
                 (c.members, c.memory, c.areas, c.inbox, c.dangers, c.metric),
                 (8, 32, 8, 16, 8, EUCLID)
             );
-            assert_eq!(size_of::<SxSquadConfig>(), 24);
+            assert_eq!(size_of::<SxSquadConfig>(), 60);
+            assert_eq!((c.role_count, c.role_masks), (2, ROLES));
             assert_eq!(sx_squad_config_default(null_mut()), ERROR_ARGUMENT);
             let sq = sx_squad_new(&c);
             assert!(!sq.is_null());
             sx_squad_free(sq);
+        }
+    }
+
+    #[test]
+    fn squad_config_roles() {
+        unsafe {
+            let mut c = SxSquadConfig::default();
+            assert_eq!(sx_squad_config_default(&mut c), 0);
+            assert_eq!((c.role_count, c.role_masks[..2].to_vec()), (2, vec![1, 2]));
+            let sq = sx_squad_new(&c);
+            assert_eq!(sx_squad_extra_start(sq), 8);
+            sx_squad_free(sq);
+            let three = SxSquadConfig {
+                role_count: 3,
+                role_masks: [1, 2, 4, 0, 0, 0, 0, 0],
+                ..c
+            };
+            let sq = sx_squad_new(&three);
+            assert_eq!(sx_squad_extra_start(sq), 9);
+            sx_squad_free(sq);
+            let none = SxSquadConfig { role_count: 0, ..c };
+            let sq = sx_squad_new(&none);
+            assert_eq!(sx_squad_extra_start(sq), 8);
+            sx_squad_free(sq);
+            let eight = SxSquadConfig { role_count: 8, ..c };
+            let sq = sx_squad_new(&eight);
+            assert_eq!(sx_squad_extra_start(sq), 14);
+            sx_squad_free(sq);
+            let nine = SxSquadConfig { role_count: 9, ..c };
+            assert!(sx_squad_new(&nine).is_null());
+            assert_eq!(sx_squad_extra_start(null_mut()), ERROR_ARGUMENT);
         }
     }
 
@@ -1278,6 +1319,8 @@ mod squad {
                 inbox: 4,
                 dangers: 1,
                 metric: EUCLID,
+                role_count: 2,
+                role_masks: ROLES,
             });
             assert_eq!(sx_squad_add_member(sq, &member(1, 0, 0, 0)), 0);
             assert_eq!(sx_squad_add_member(sq, &member(2, 1, 0, 0)), 1);
@@ -1347,6 +1390,8 @@ mod squad {
                 inbox: 8,
                 dangers: 8,
                 metric: EUCLID,
+                role_count: 2,
+                role_masks: ROLES,
             };
             for broken in [
                 SxSquadConfig { members: 0, ..base },
@@ -2540,7 +2585,13 @@ mod conventions {
             ),
             layout!("sx_order", SxOrder, goal),
             layout!("sx_plan", SxPlan, goal_count, has_target),
-            layout!("sx_squad_config", SxSquadConfig, metric),
+            layout!(
+                "sx_squad_config",
+                SxSquadConfig,
+                metric,
+                role_count,
+                role_masks
+            ),
             layout!("sx_member_inputs", SxMemberInputs, discipline),
             layout!(
                 "sx_crew_config",
@@ -3265,6 +3316,9 @@ mod crew {
             zero_inbox.squad.inbox = 0;
             assert!(sx_crew_new(&zero_inbox).is_null());
             assert!(sx_crew_new(&crew_config(4, 9, 0)).is_null(), "metric");
+            let mut nine = crew_config(4, CHEBYSHEV, 0);
+            nine.squad.role_count = 9;
+            assert!(sx_crew_new(&nine).is_null(), "role count");
             assert!(sx_crew_new(&crew_config(4, 0, 1)).is_null(), "hex, Euclid");
             assert!(sx_crew_new(&crew_config(4, 3, 5)).is_null(), "grid");
             let hex = sx_crew_new(&crew_config(4, 3, 1));
@@ -3359,10 +3413,12 @@ mod crew {
         assert_eq!(offset_of!(SxCrewEvent, start_at), 12);
         assert_eq!(offset_of!(SxCrewEvent, goal), 16);
         assert_eq!(offset_of!(SxCrewEvent, has_start_at), 84);
-        assert_eq!(size_of::<SxCrewConfig>(), 32);
+        assert_eq!(size_of::<SxCrewConfig>(), 68);
+        assert_eq!(offset_of!(SxSquadConfig, role_count), 24);
+        assert_eq!(offset_of!(SxSquadConfig, role_masks), 28);
         assert_eq!(offset_of!(SxCrewConfig, squad), 0);
-        assert_eq!(offset_of!(SxCrewConfig, arrive_radius), 24);
-        assert_eq!(offset_of!(SxCrewConfig, hex_grid), 28);
+        assert_eq!(offset_of!(SxCrewConfig, arrive_radius), 60);
+        assert_eq!(offset_of!(SxCrewConfig, hex_grid), 64);
         assert_eq!(size_of::<SxMemberInputs>(), 20);
         let names = [
             "SX_CREW_PLANNED",

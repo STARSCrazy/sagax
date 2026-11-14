@@ -24,17 +24,6 @@ pub struct CrewConfig {
     pub hex_layout: Option<HexLayout>,
 }
 
-impl Default for CrewConfig {
-    /// [`SquadConfig::default`], arrive radius 0, no hex layout.
-    fn default() -> Self {
-        Self {
-            squad: SquadConfig::default(),
-            arrive_radius: 0,
-            hex_layout: None,
-        }
-    }
-}
-
 /// Why [`Crew::new`] refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CrewError {

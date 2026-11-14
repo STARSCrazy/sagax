@@ -29,6 +29,7 @@
 
 mod crew;
 pub mod keeper;
+mod kit;
 mod members;
 mod orders;
 mod skill;
@@ -39,22 +40,27 @@ mod tactic;
 #[cfg(test)]
 mod crew_tests;
 #[cfg(test)]
+mod layout_tests;
+#[cfg(test)]
 mod tests;
 
 pub use crew::{Crew, CrewConfig, CrewError, CrewEvent};
 #[allow(deprecated)]
 pub use keeper::discipline;
 pub use keeper::{GOAL_OPTION_RANGE, GoalKeeper, KeeperInputs};
+pub use kit::{
+    IN_AREA, IN_RANGED, ROLE_AREA, ROLE_RANGED, Shape, TAG_CHOKE, TAG_COVER, TAG_HIDDEN, TAG_HIGH,
+    tactics,
+};
 pub use members::{Group, Member, MemberState, Nearby, gather};
 pub use orders::{Channel, Order, REPORT_ARRIVED, REPORT_ENEMY, REPORT_GOAL_BROKEN, Status};
 pub use skill::SkillTable;
 pub use spots::{Spot, SpotPick, heading, pick_spot, wish_point};
+#[allow(deprecated)]
+pub use squad::IN_EXTRA;
 pub use squad::{
-    Goal, IN_AREA, IN_EXTRA, IN_LOSSES, IN_OFF_PLAN, IN_PLAN_AGE, IN_RANGED, IN_TARGET_AGE,
-    IN_TARGET_DIST, IN_TARGET_FRIEND_DIST, MAX_EXTRA_COLUMNS, Plan, PlanError, PlanId, ROLE_AREA,
-    ROLE_RANGED, Squad, SquadConfig,
+    Goal, IN_LOSSES, IN_OFF_PLAN, IN_PLAN_AGE, IN_ROLE_0, IN_ROLE_1, IN_TARGET_AGE, IN_TARGET_DIST,
+    IN_TARGET_FRIEND_DIST, MAX_EXTRA_COLUMNS, MAX_ROLE_COUNTS, Plan, PlanError, PlanId, RoleCounts,
+    Squad, SquadConfig,
 };
-pub use tactic::{
-    Abort, GoalKind, Place, Shape, Side, Slot, Start, TAG_CHOKE, TAG_COVER, TAG_HIDDEN, TAG_HIGH,
-    Tactic, Trigger, tactics,
-};
+pub use tactic::{Abort, GoalKind, Place, Side, Slot, Start, Tactic, Trigger};
