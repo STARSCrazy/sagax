@@ -121,6 +121,12 @@ fn guard(name: char, leeway: Leeway, pos: Pos) -> Guard {
         id: u32::from(name),
         subject_kind: SEEN,
         lost_after: 3,
+        // Search points stay on the 16 x 8 map.
+        search: PointPattern {
+            min: (0, 0),
+            max: (MAP_WIDTH - 1, 7),
+            ..MissionConfig::default().search
+        },
         ..MissionConfig::default()
     };
     let mut mission = Mission::new(config, Motive::guard_place(WEST)).unwrap();

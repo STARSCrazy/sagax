@@ -779,6 +779,37 @@ fn refused_while_attacker_outside_leash() {
 }
 
 #[test]
+fn default_search_pattern_is_in_cells() {
+    // The default pattern moves the search around the last known place:
+    // a FLEXIBLE lost-search visits at least two distinct points.
+    let mut m = mission(MissionConfig::default());
+    m.set_plan(&Plan::once(&[Step::wait(500)])).unwrap();
+    let mut k = knowledge();
+    let mut attacker = fact(5, [20, 20, 0]);
+    attacker.seen_at = 0;
+    k.learn(0, attacker);
+    m.tick(0, [20, 20, 0], &k, 0);
+    assert!(m.detour(0, Detour::Engage(5), &k));
+    let mut pos = [20, 20, 0];
+    let mut points = Vec::new();
+    for now in 1..60 {
+        let action = m.tick(now, pos, &k, 0).action;
+        if let Action::Search(at) = action
+            && !points.contains(&at)
+        {
+            points.push(at);
+        }
+        pos = step_toward(pos, action);
+    }
+    assert!(points.len() >= 2, "{points:?}");
+    assert!(
+        points
+            .iter()
+            .all(|p| (p[0] - 20).abs().max((p[1] - 20).abs()) <= 6)
+    );
+}
+
+#[test]
 fn flexible_guard_searches_then_resumes_patrol() {
     let mut m = mission(MissionConfig::default());
     assert_eq!(m.leeway(), Leeway::FLEXIBLE);

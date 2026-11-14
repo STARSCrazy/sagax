@@ -18,7 +18,7 @@ pub use sagax_decide::group::{
     BuiltInRules, Crew, CrewConfig, CrewEvent, Goal, GoalKeeper, KeeperInputs, Member, MemberState,
     Spot, Squad, SquadConfig, SquadRules, SquadView, Tactic, tactics,
 };
-pub use sagax_decide::memory::{Areas, Evict, Fact, Knowledge, Message, Metric};
+pub use sagax_decide::memory::{Areas, Evict, Fact, Knowledge, Message, Metric, PointPattern};
 pub use sagax_decide::mission::{
     Action, BreakReason, Detour, DetourEnd, Event, Fail, Leash, Leeway, Mission, MissionConfig,
     MissionRules, Motive, OnLost, Plan, Step, Where,

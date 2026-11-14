@@ -92,13 +92,13 @@ t=38 B step=- action=search 15,3 events=-
 t=39 A step=2 action=go 12,3 events=-
 t=39 B step=- action=search 15,3 events=-
 t=40 A step=2 action=go 12,3 events=-
-t=40 B step=- action=search 15,3 events=-
+t=40 B step=- action=search 15,0 events=-
 t=41 A step=2 action=go 12,3 events=-
-t=41 B step=- action=search 15,3 events=-
+t=41 B step=- action=search 15,0 events=-
 t=42 A step=2 action=go 12,3 events=-
-t=42 B step=- action=search 15,3 events=-
+t=42 B step=- action=search 15,0 events=-
 t=43 A step=2 action=go 12,3 events=-
-t=43 B step=- action=search 15,3 events=-
+t=43 B step=- action=search 15,6 events=-
 t=44 A step=0 action=go 4,3 events=done:2,looped
 t=44 B step=2 action=go 12,3 events=detour_end:lost,returned
 t=45 A step=0 action=go 4,3 events=-
@@ -302,6 +302,14 @@ fn flexible_chases_loses_sight_searches_returns_and_resumes() {
         .filter(|r| matches!(r.action, Action::Search(_)))
         .count();
     assert_eq!(search, 6, "searches 6 ticks, then gives up");
+    let points: std::collections::BTreeSet<Pos> = chase
+        .iter()
+        .filter_map(|r| match r.action {
+            Action::Search(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert!(points.len() >= 2, "walks a search around: {points:?}");
     // It resumes at the step it left; nothing broke.
     assert_eq!(back.step, Some(2));
     assert!(

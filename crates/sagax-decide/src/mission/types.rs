@@ -492,7 +492,9 @@ pub struct MissionConfig {
     pub reached_signal: u32,
     /// How distances are measured.
     pub metric: Metric,
-    /// The pattern of search points.
+    /// The pattern of search points. The mission works in cells, so the
+    /// distances of the default are in cells (set `min` and `max` for a
+    /// bounded map).
     pub search: PointPattern,
     /// Hex layout: positions of the game are then offset coordinates.
     pub hex_layout: Option<HexLayout>,
@@ -505,8 +507,9 @@ pub struct MissionConfig {
 impl Default for MissionConfig {
     /// Id 0, 16 steps, 8 playbook slots, subject kind 0, enemy bit 1,
     /// defeated bit 2, arrive radius 0, lost after 30, pause 50, safe
-    /// distance 12, reached signal 0, Chebyshev, the default search
-    /// pattern, no hex layout, no extra columns, [`Pick::Best`].
+    /// distance 12, reached signal 0, Chebyshev, a search pattern in cells
+    /// (heading step 0x62, first distance 1, offsets 0, 0x20, -0x20 at
+    /// distances 2, 4, 6, unclamped), no hex layout, no extra columns, [`Pick::Best`].
     fn default() -> Self {
         Self {
             id: 0,
@@ -521,7 +524,11 @@ impl Default for MissionConfig {
             safe_distance: 12,
             reached_signal: 0,
             metric: Metric::Chebyshev,
-            search: PointPattern::default(),
+            search: PointPattern {
+                first_distance: 1,
+                distances: vec![2, 4, 6],
+                ..PointPattern::default()
+            },
             hex_layout: None,
             extra_columns: 0,
             pick: Pick::Best,
