@@ -1,4 +1,4 @@
-/* Sagax from C: find a way through a small map and print it.
+/* Sagax from C: a way, a decision and a crew on a small map.
  * Build and run: sh examples/c/run.sh */
 
 #include <stdio.h>
@@ -40,9 +40,8 @@ int main(void)
 		fprintf(stderr, "sagax library too old\n");
 		return 1;
 	}
-	rules.grid = SX_GRID_SQUARE;
-	rules.cost_straight = 10;
-	rules.cost_diagonal = 14;
+	if (sx_rules_default(SX_GRID_SQUARE, SX_PRESET_OCTILE, &rules) != 0)
+		return 1;
 	rules.node_capacity = W * H;
 	nav = sx_nav_new(&rules);
 	map.step = step;
@@ -92,6 +91,38 @@ int main(void)
 		       candidates[choice.candidate].option, candidates[choice.candidate].target,
 		       choice.score);
 		sx_decider_free(d);
+	}
+
+	/* A crew: one member sees an enemy, the squad plans. */
+	{
+		sx_crew_config config;
+		sx_crew_event events[8];
+		sx_crew *crew;
+		sx_member member = {0};
+		sx_fact enemy = {0};
+		uint32_t total;
+		int32_t count;
+
+		sx_crew_config_default(&config);
+		config.squad.metric = SX_METRIC_CHEBYSHEV;
+		crew = sx_crew_new(&config);
+		member.id = 1;
+		member.skill = 128;
+		member.state = SX_MEMBER_ACTIVE;
+		sx_crew_add_member(crew, &member);
+		sx_squad_set_target_kind(sx_crew_squad(crew), 1);
+		sx_squad_add_rush(sx_crew_squad(crew));
+		enemy.subject = 11;
+		enemy.kind = 1;
+		enemy.pos[0] = 10;
+		sx_crew_observe(crew, 0, &enemy, NULL);
+		count = sx_crew_tick(crew, 0, NULL, 0, NULL, 0, 7, events, 8, &total);
+		if (count < 1 || events[0].kind != SX_CREW_PLANNED) {
+			fprintf(stderr, "no plan\n");
+			return 1;
+		}
+		printf("crew: plan %u after %u event(s)\n", (unsigned)events[0].plan, (unsigned)total);
+		sx_crew_free(crew);
 	}
 
 	/* A guard: patrol, chase when seen, search when lost, give up after a while. */

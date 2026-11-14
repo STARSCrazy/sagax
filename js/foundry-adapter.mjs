@@ -27,8 +27,8 @@ const HEX_LAYOUT_BY_GRID_TYPE = { 2: HEX.oddR, 3: HEX.evenR, 4: HEX.oddQ, 5: HEX
  * @param {object} options
  * @param {Token|TokenDocument} options.walker  the token that moves (placeable or document)
  * @param {(Token|TokenDocument)[]} options.enemies  tokens whose reach costs extra to leave (at most 32)
- * @param {(t) => number} options.reachOf  reach radius in cells
- * @param {number} [options.leaveCost=4]  extra cost for leaving one enemy's reach
+ * @param {(t) => number} options.reachOf  reach radius in cells (rounded down)
+ * @param {number} [options.leaveCost=4]  extra cost for leaving one enemy's reach (rounded down)
  * @returns {{grid, toCell(point), toPoint(cell), cellOf(tokenDocument), walkerCell}}
  *   the grid already carries the rules (square or hex)
  */
@@ -102,11 +102,11 @@ export function buildCombatGrid(lib, { walker, enemies = [], reachOf = () => 1, 
   // cannot shrink the next one's reach; then the leave cost is switched on.
   grid.setLeaveCost(0);
   const reaches = enemies.slice(0, 32).map((enemy) => {
-    const r = reachOf(enemy);
+    const r = Math.floor(reachOf(enemy)); // whole cells: a fraction would throw
     return r > 0 ? grid.reachable(cellOf(docOf(enemy)), r).cells : [];
   });
   reaches.forEach((cells, zone) => cells.forEach((c) => grid.addZone(c.x, c.y, zone)));
-  grid.setLeaveCost(leaveCost);
+  grid.setLeaveCost(Math.floor(leaveCost)); // whole cost: a fraction would throw
 
   return { grid, rules, toCell, toPoint, cellOf, walkerCell: cellOf(docOf(walker)) };
 }

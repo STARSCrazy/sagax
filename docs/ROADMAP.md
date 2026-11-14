@@ -8,10 +8,29 @@
   visibly poor ways.
 - **Faster D\* Lite**: after a change some neighbours are asked twice. A
   per-edge cost query would avoid that.
-- **Decisions, next steps:** memory of the world (0.7.0) and group tactics
-  (0.8.0: squad leader, orders, signal, skill) are done. Next: a mission /
-  intention planner that hands goals to groups the way groups hand goals to
-  members.
+- **Decisions, next steps:** memory of the world (0.7.0), group tactics
+  (0.8.0: squad leader, orders, signal, skill) and the 0.9.0 API round (one
+  set of conventions, the `Crew`, the `sagax` crate with its prelude) are
+  done. Next: a mission / intention planner that hands goals to groups the
+  way groups hand goals to members.
+- **Walking distance for the squad:** the squad measures distances in
+  a straight-line metric (Euclid, Manhattan, Chebyshev or hex). Using the
+  real walking distance instead (for `IN_TARGET_DIST`, the keeper's
+  distance to its goal and the channel delays) was designed in the 0.9.0
+  round and put off, because four questions need an answer first: the
+  *shape* (a callback `Squad::set_distance(fn)`, C function pointer, JS
+  function, or a table the game fills), the *units* (path cost or cells),
+  what to do when the target is *unreachable* (infinite, or the partial
+  way's end), and the *cost* (a search per member per tick is too much; who
+  caches). Until then the game can feed its own distances through the
+  `extra` columns of the scoring row.
+- **Hex distance in offset coordinates:** a `Metric::HexOffset(layout)` that
+  measures directly in the map's offset columns and rows was dropped. Offset
+  coordinates cannot be averaged or turned, and a distance from deltas needs
+  the row's parity, so every block that does arithmetic on positions would
+  have to know the layout. The AI blocks stay axial; the `Crew` converts
+  (`CrewConfig::hex_layout`) and everything else converts at the edge with
+  `to_axial` / `from_axial` (see "Hex" in the guide).
 - **Group tactics, deferred from the 0.8.0 design:** a trace sink (every
   tactic score, the pick, each slot assignment and abort check, like the
   `Decider`'s trace) and a skill-driven chance that a member ignores its

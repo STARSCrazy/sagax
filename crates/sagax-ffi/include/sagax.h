@@ -29,9 +29,12 @@
  *     sx_result.status, never in the return value.
  *   - Enum parameters (SX_GRID_*, SX_OUT_*, SX_METRIC_*, ...) are uint32_t.
  *   - Time: now comes right after the handle and the ids that name what the
- *     call addresses; payloads come after now; seed is the last input. The
- *     exceptions are listed in USAGE (sx_alertness_stimulus, sx_progress_start,
- *     sx_progress_update).
+ *     call addresses; payloads come after now; seed is the last input.
+ *     Exceptions (see the guide): sx_alertness_stimulus, sx_progress_start and
+ *     sx_progress_update keep their order, because moving now would swap two
+ *     numbers of one type; the arrive_at calls sx_inbox_push, sx_squad_report,
+ *     sx_squad_report_danger and sx_crew_report_danger take the payload first
+ *     and then the tick it arrives (that is not the time of the call).
  * Lists of a way always begin with the start and end at the last cell.
  *
  * Memory: a handle reserves everything for rules.node_capacity cells when it
@@ -46,7 +49,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 8
+#define SX_API_VERSION 9
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -133,7 +136,10 @@ int32_t sx_rules_default(uint32_t grid, uint32_t preset, sx_rules *out);
  * of levels levels, all open (extra cost 0, no walls). sx_grid_map gives the
  * sx_map for every search; it is valid while the grid lives. A move keeps
  * its level unless a link (a stair, a ramp) sends it to another one. Square
- * and hex grids alike: on hex grids dx, dy is the hex neighbour's offset. */
+ * and hex grids alike: on hex grids dx, dy is the hex neighbour's offset.
+ * One search at a time per sx_grid: a search reads the grid through its map
+ * and takes it as unchanged; do not share one sx_grid between threads while
+ * searches run, and do not change it from a callback. */
 typedef struct sx_grid sx_grid;
 
 sx_grid *sx_grid_new(int32_t width, int32_t height, int32_t levels); /* 0 if a size is <= 0 */
@@ -143,11 +149,15 @@ void sx_grid_free(sx_grid *grid);
 int32_t sx_grid_set(sx_grid *grid, sx_point cell, int32_t cost);
 /* A wall between cell and its neighbour dx, dy away on the same level, both
  * ways. Returns 0, or SX_ERROR_ARGUMENT for a null grid, a cell off the grid
- * or an offset that is no neighbour. */
+ * or an offset that is no neighbour (none of the 8 square offsets). On a hex
+ * grid pass only the six real neighbours of that layout (which offsets they
+ * are depends on the row or column); a square diagonal that is no hex
+ * neighbour is accepted but never walked, so it does nothing useful. */
 int32_t sx_grid_add_wall(sx_grid *grid, sx_point cell, int32_t dx, int32_t dy);
 /* A move from a toward b arrives on b's level, and back. Returns 1, or 0
  * (nothing changed) unless a and b are neighbours on the grid;
- * SX_ERROR_ARGUMENT for a null grid. */
+ * SX_ERROR_ARGUMENT for a null grid. On a hex grid a and b must be real hex
+ * neighbours of that layout, as for sx_grid_add_wall. */
 int32_t sx_grid_link(sx_grid *grid, sx_point a, sx_point b);
 /* Writes the grid's map to out. Returns 0, or SX_ERROR_ARGUMENT for a null
  * pointer. */
@@ -1534,7 +1544,8 @@ int32_t sx_crew_set_gone(sx_crew *crew, uint32_t id);
 int32_t sx_crew_set_pos(sx_crew *crew, uint32_t id, const int32_t *pos);
 /* As sx_squad_observe. */
 int32_t sx_crew_observe(sx_crew *crew, uint32_t now, const sx_fact *fact, sx_fact *evicted);
-/* As sx_squad_report_danger. */
+/* As sx_squad_report_danger: returns 1 if stored, 0 if the danger queue is
+ * full (nothing stored). */
 int32_t sx_crew_report_danger(sx_crew *crew, uint32_t sender, const int32_t *centre,
                               const int32_t *shooter, uint32_t arrive_at);
 /* Runs the group at now with extra, spots and seed as for sx_squad_check:

@@ -1,5 +1,196 @@
 # Changelog
 
+## 0.9.0
+
+The API round. 0.9 changes how the three interfaces look, not what the
+blocks compute: every scene test keeps its tick numbers (the one change in
+a result is listed under "Behaviour changes"). A change either fails to
+compile, or fails loudly, or is listed below; old names stay as deprecated
+aliases for 0.9 where that was cheap (Rust `#[deprecated]` forwarders, C
+macros, JavaScript method aliases) and go in 0.10. **C API version 9.**
+`SX_API_VERSION` is now 9, so a game built with the new header refuses an
+older library.
+
+### New
+
+- **`Crew`** (Rust `sagax_decide::group::Crew`, C `sx_crew_*`, JavaScript
+  `lib.crew()`): a `Squad` with one `GoalKeeper` per member, run as one call
+  per tick that reports `Planned`, `Activated`, `Signal`, `Order`, `Start`,
+  `Arrived`, `Broken` and `NoPlan`. It converts hex positions
+  (`CrewConfig::hex_layout`, C `hex_grid`, JavaScript `hex`), sends honest
+  arrival and goal-broken reports over the member's channel, drops the goals
+  of a dead plan, and lends its squad and keepers to C and JavaScript.
+  `member_inputs(id, now)` and `member_chose(id, now, goal_won)` close the
+  loop with the member's own decider.
+- **The `sagax` crate** (`crates/sagax`) with `sagax::prelude`: one `use` for
+  a path, a decision and a crew. The parts are `sagax::nav`, `sagax::decide`
+  and `sagax::debug`. `Decider::choose(candidates, rows, pick, seed)` takes
+  rows instead of a flat buffer and returns `Result<Option<Choice>,
+  DecideError>`.
+- **Rule presets:** `GridRules::preset(Preset::Octile | Preset::Tabletop)`,
+  `Topology::hex(layout, preset)`, C `sx_rules_default(grid, preset, &rules)`
+  with `SX_PRESET_OCTILE` and `SX_PRESET_TABLETOP`, JavaScript `{ preset:
+  'octile' | 'tabletop' }`.
+- **A ready map with levels:** `DenseGrid::with_levels`, `get_at`, `set_at`,
+  `add_wall_at`, `link` (stairs and ramps); C `sx_grid_new`, `sx_grid_set`,
+  `sx_grid_add_wall`, `sx_grid_link`, `sx_grid_map`, `sx_grid_free`;
+  JavaScript `lib.grid(w, h, { preset, levels })` and `grid.link(a, b)`.
+- **`Budget`** (`Unlimited` or `Cells(NonZeroUsize)`) for search budgets and
+  `Status::Idle` ("nothing to continue"; C `SX_IDLE`).
+- **Positions:** `Pos`, `Cell` and `HexLayout` live in `sagax-core` and are
+  shared by navigation and the AI blocks (`Cell::from(pos)`, `cell.pos()`,
+  `HexLayout::to_axial_pos`, `from_axial_pos`); C `sx_point_to_pos`,
+  `sx_pos_to_point`, `sx_hex_to_axial`, `sx_hex_from_axial`; JavaScript
+  `lib.hex.toAxial` and `lib.hex.fromAxial`, and every position as `[x, y,
+  z]`, `{x, y, z}` or `{x, y, level}`.
+- **Squad:** `SquadConfig` (and `sx_squad_config`, `sx_squad_config_default`),
+  typed danger reports (`report_danger`, with a danger queue), `take_activated`,
+  `report_arrives_at`, typed channel and trigger setters (see the table).
+- **Member side:** `KeeperInputs` (`IN_*` columns, C `SX_KEEPER_IN_*`,
+  `sx_member_inputs`), `GoalKeeper::add_goal_option` and `set_current`,
+  `Goal::start_tick` and `awaits_arrival`, `SkillTable::*_for` (one call per
+  value), `Message::enemy`, `arrived` and `goal_broken` (C `sx_report_*`,
+  JavaScript `Report`).
+- `Areas::cell_cost(to, start, goal)`, the one way to feed danger areas to
+  the path search (C `sx_areas_move_cost` and JavaScript `areas.cellCost`).
+- **C layout checks:** `sagax.h` ends with `_Static_assert`s (C11) for the
+  size and key offsets of every value struct, so a header and a library that
+  disagree fail to compile.
+- **Examples:** one squad scene in three languages that print the same lines
+  and are diffed in the checks: `cargo run -p sagax --example squad_walk`,
+  `examples/c/squad.c`, `examples/js/squad.mjs`; `examples/js/quickstart.mjs`;
+  `examples/c/quickstart.c` gains a crew. `docs/QUICKSTART.md` is new; the
+  guide has a Conventions section, a hex section and a group section that
+  starts with the `Crew`.
+- In JavaScript every handle has `[Symbol.dispose]` and the same "used after
+  free()" guard; `Progress`, `Interval`, `Alertness` and `lib.arrival` run in
+  the WebAssembly module, so they match C and Rust exactly.
+
+### Migration table, 0.8 to 0.9
+
+Rust:
+
+| 0.8 | 0.9 |
+|---|---|
+| `GridRules::default()` | no `Default`; `GridRules::preset(Preset::Octile)` is the same numbers (straight 10, diagonal 14), `Preset::Tabletop` is 1 and 1 |
+| `find_path(.., usize::MAX)`, `reachable(.., budget: usize)` | `Budget::UNLIMITED`; `Budget::from(NonZeroUsize)` (a plain `usize` does not compile; D* Lite budgets are still `usize`) |
+| `Navigator::resume` | `Navigator::continue_search` (`resume` is a deprecated forwarder) |
+| `Report.status: Option<Status>` | `Report.status: Status`; `Status::Idle` (the default) means nothing to continue |
+| `hex::HexMap` (trait for hex maps) | removed; a hex map implements `CellMap`, asked with offsets (`dx`, `dy`) |
+| `CellMap::steps(..)` | takes the offsets as a slice, `steps(from, offsets: &[(i32, i32)], out: &mut [Option<i32>])` |
+| `DenseGrid::walls`, `set_walls`, `walls_mut` | `wall_bits`, `set_wall_bits`, `wall_bits_mut` (no alias; see "Behaviour changes" for the bit meaning on hex) |
+| `Areas::move_cost(from, to, start, goal)` | `Areas::cell_cost(to: Cell, start: Cell, goal: Cell)` (`move_cost` is a deprecated forwarder) |
+| `sagax_nav` types `Cell`, `HexLayout`, `Pos` | defined in `sagax-core`, still re-exported by `sagax-nav` and `sagax-decide` (same paths work) |
+| `Knowledge::learn(fact, now)`, `merge(fact, now)` | `learn(now, fact)`, `merge(now, fact)` |
+| `Knowledge::learn_message(msg, source, now)`, `merge_message(..)` | `learn_message(now, msg, source)`, `merge_message(now, msg, source)` |
+| `Outbox::post(msg, now, delay, cooldown)` | `post(now, msg, delay, cooldown)` |
+| `Areas::add(area, now)` | `add(now, area)` |
+| `Decider::record(candidate, now)` | `record(now, candidate)` |
+| `GoalKeeper::set(goal, now)` | `set(now, goal)` |
+| `Squad::observe(fact, now)` | `observe(now, fact)` |
+| `Squad::new(members, memory, areas, inbox, metric)` | `Squad::new(SquadConfig { members, memory, areas, inbox, dangers, metric })`; the new `dangers` is the danger queue and must be above 0 |
+| `Squad::resume(id, now)` | `Squad::reinstate(id, now)` (`resume` is a deprecated forwarder) |
+| `GoalKeeper::postpone(now)` | `GoalKeeper::goal_postponed(now)` (deprecated forwarder) |
+| `GoalKeeper::resume(now)` | `GoalKeeper::goal_won(now)` (deprecated forwarder) |
+| `keeper::discipline(skill, &table)` | `SkillTable::hold_bonus_for(skill)` (`discipline` is a deprecated forwarder) |
+| `REPORT_DANGER` message with packed `strength` and `data` | `Squad::report_danger(sender, centre, shooter, arrive_at)`; a message of kind 3 is dropped when read |
+| builders that answer `false` (`add_consideration`, `add_weighted`, `set_option_combine`, `set_rank`, `set_cooldown`, `Inbox::push`, `Squad::report`, `set_extra_columns`, `set_leader`, `set_channel`) | `#[must_use]`: a thrown-away answer warns |
+| the `squad` example of `sagax-decide` | `cargo run -p sagax --example squad_walk` |
+
+C:
+
+| 0.8 | 0.9 |
+|---|---|
+| `sx_nav_create`, `sx_nav_destroy` (and `flow`, `dstar`) | `sx_nav_new`, `sx_nav_free` (and `flow`, `dstar`); the old names are macros for 0.9 |
+| enum parameters `int32_t` (`rules.grid`, outputs, metrics, `evict`, `sx_route` rule, `sx_sine` kind, combine) | `uint32_t`; "all options" and "follow the decider" of `sx_decider_set_combine` are `SX_ALL_OPTIONS` and `SX_COMBINE_FOLLOW` (`0xFFFFFFFFu`, what -1 was) |
+| bare `-1` error documented | only `SX_ERROR_*` (same values) |
+| `sx_decider_record(d, cand, now)` | `sx_decider_record(d, now, cand)` |
+| `sx_knowledge_learn(k, fact, now, ..)`, `sx_knowledge_merge(..)` | `sx_knowledge_learn(k, now, fact, ..)`, `sx_knowledge_merge(k, now, fact, ..)` |
+| `sx_knowledge_learn_message(k, msg, source, now, ..)`, `sx_knowledge_merge_message(..)` | `sx_knowledge_learn_message(k, now, msg, source, ..)`, `sx_knowledge_merge_message(..)` |
+| `sx_outbox_post(o, msg, now, delay, cooldown)` | `sx_outbox_post(o, now, msg, delay, cooldown)`; returns `SX_POSTED` (0) or the refusal |
+| `sx_areas_add(a, area, now)` | `sx_areas_add(a, now, area)` |
+| `sx_keeper_set(k, goal, now)` | `sx_keeper_set(k, now, goal)` |
+| `sx_squad_observe(sq, fact, now, ..)` | `sx_squad_observe(sq, now, fact, ..)` |
+| `int32_t sx_timers_left(t, id, now, uint32_t *out)` | `int64_t sx_timers_left(t, id, now)` (returns the time left) |
+| `int32_t sx_alertness_value(a, uint32_t *out)` | `int64_t sx_alertness_value(a)` (returns the value) |
+| `int32_t sx_areas_cost(..)` | `int64_t sx_areas_cost(..)` (returns the cost; negative is `SX_ERROR_*`) |
+| `sx_squad_targets(sq, out, cap)` | `sx_squad_targets(sq, out, cap, uint32_t *total)`; returns how many were written, `*total` how many exist (may be null) |
+| `sx_squad_new(members, memory, areas, inbox, metric)` | `sx_squad_new(const sx_squad_config *)`; `sx_squad_config_default` fills it (and adds the `dangers` queue) |
+| `sx_squad_resume(sq, id, now)` | `sx_squad_reinstate`; `sx_squad_resume` is a macro for 0.9, the exported symbol is gone |
+| `sx_squad_set_channel(sq, id, SX_CHANNEL_*, a, b)` and `SX_CHANNEL_*` | `sx_squad_set_shout(sq, id, range)`, `sx_squad_set_radio(sq, id, base, per_unit)`, `sx_squad_set_silent(sq, id)` |
+| `sx_squad_add_shipped(sq, SX_TACTIC_*, param)` and `SX_TACTIC_*` | `sx_squad_add_rush`, `_formation(sq, SX_SHAPE_*, spacing)`, `_flank(sq, sides, dist)` (2 or 3 sides), `_ambush`, `_focus`, `_isolate`, `_fall_back` |
+| `sx_tactic_set_trigger(t, SX_TRIGGER_*, value)` and `SX_TRIGGER_*` | `sx_tactic_trigger_none`, `_all_arrived(t, max_wait)`, `_target_in_radius(t, radius)`, `_manual` |
+| `SX_REPORT_DANGER` | `sx_squad_report_danger(sq, sender, centre, shooter, arrive_at)` and `sx_crew_report_danger` (return 1 if stored, 0 when the danger queue is full) |
+| `sx_keeper_postpone`, `sx_keeper_resume` | `sx_keeper_goal_postponed`, `sx_keeper_goal_won` (macros for the old names in 0.9) |
+| `sx_discipline(skill, table)` | `sx_skill_table_hold_bonus_for(table, skill)` (`sx_discipline` stays, forwards, deprecated in the header comment) |
+| status 0 had no name | `SX_IDLE` |
+| `examples/c/squad.c` (gather, custom tactic, orders_due) | the same scene as the Rust and JavaScript examples, with `sx_grid`, `sx_nav_*` and `sx_crew_*` |
+
+JavaScript:
+
+| 0.8 | 0.9 |
+|---|---|
+| `lib.grid(w, h)` with default costs | a `preset` (or explicit costs) is required, `TypeError` without; `{ preset: 'tabletop' }` is the old JavaScript default (step 1), `'octile'` the Rust one |
+| navigation cells `{x, y}` | `{x, y, level}`; area and flow cells `{x, y, level, cost}`; grid views hold `width * height * levels` entries |
+| `learn(fact, now)`, `merge(fact, now)` | `learn(now, fact)`, `merge(now, fact)` |
+| `learnMessage(msg, source, now)`, `mergeMessage(..)` | `learnMessage(now, msg, source)`, `mergeMessage(now, msg, source)` |
+| `outbox.post(msg, now, ..)`, `areas.add(area, now)`, `decider.record(cand, now)`, `keeper.set(goal, now)`, `squad.observe(fact, now)` | `post(now, msg, ..)`, `add(now, area)`, `record(now, cand)`, `set(now, goal)`, `observe(now, fact)`; the old order throws |
+| `lib.squad({ groupCap, memoryCap, areaCap, inboxCap, metric })` | `{ members, memory, areas, inbox, dangers, metric }`; the old keys work for 0.9, both keys for one field are a `TypeError` |
+| `squad.setChannel(id, { ... })` | `setShout(id, range)`, `setRadio(id, base, perUnit)`, `setSilent(id)` |
+| `tactic.setTrigger(..)` | `triggerNone()`, `triggerAllArrived(maxWait)`, `triggerTargetInRadius(radius)`, `triggerManual()` |
+| `SQUAD.reportDanger` (report kind 3) | `squad.reportDanger({ sender, centre, shooter }, arriveAt)`; a message of kind 3 throws `RangeError` |
+| `squad.resume(id, now)`, `keeper.postpone(now)`, `keeper.resume(now)` | `reinstate`, `goalPostponed`, `goalWon` (the old names are aliases for 0.9) |
+| `lib.discipline(skill, table)` | `lib.holdBonusFor(table, skill)` (`discipline` forwards) |
+| `grid.addHexWall(x, y, dir)` with `dir` outside 0..5, `grid.addWall` with a non-neighbour offset: ignored | `RangeError` |
+| `grid.walls()`, `grid.setWalls()` on a hex grid | throw `TypeError` (the bits changed meaning); use `addWall` / `addHexWall` |
+| `contains`, `addWall`, `addHexWall`, `hexNeighbors`, `setZones`, `addZone`, `pathTo`, `flowCost` on level 0 only | take `x, y` or one position and honour the level |
+| roles, tags, fact `source`, report kind as numbers | strings (`'ranged'`, `'cover'`, `'own'`, `'goalBroken'`, ...); numbers still work |
+| `Progress`, `Interval`, `Alertness` in JavaScript | the same constructors and fields, but they run in the WebAssembly module and need `loadSagax` first |
+| `grid.reachable(cell, r)`, `setLeaveCost`, costs, budgets: coerced | whole numbers only; a fraction throws `RangeError` (the Foundry adapter now rounds its reach radius and leave cost down with `Math.floor`, so it keeps working) |
+
+Behaviour changes (no compile error, so read these):
+
+- **A danger area's `data` is now the sender**, the member that reported the
+  shot (it was the shooter's id, which is now `source`). Nothing else in the
+  scenes changed: every tick number is identical.
+- **Hex wall bits are offset bits.** Bit `i` of a `DenseGrid`'s wall bits is
+  the `DIRECTIONS[i]` offset on square and hex alike (it was hex direction `i`
+  on hex). `add_wall` and `addHexWall` are unchanged and work for hex
+  neighbours; only code that wrote raw bits (`set_wall_bits`, JavaScript
+  `setWalls`, raw WebAssembly memory) is affected.
+- **A level outside `0 .. levels` is off the grid** for a `DenseGrid` and
+  `sx_grid`. Before, a one-level `DenseGrid` ignored the level of a cell, so a
+  search "on level 3" worked; now it finds nothing.
+- **JavaScript fails loudly where it used to coerce:** a fraction, a negative
+  time, a zone above 31, a missing `preset`, a non-neighbour wall, an unknown
+  string constant, a position with both `z` and `level` that disagree
+  (`RangeError`), a value of the wrong type (`TypeError`), `Area` without
+  `radius` and `lifetime`. The older wrappers no longer "still coerce", and a
+  `decide` seed may now be a `BigInt`. `reachable(cell, r)` and `leaveCost` take
+  whole numbers.
+- `sx_squad_orders_due` (and `Squad.ordersDue`) on a crew's squad returns
+  `SX_ERROR_ARGUMENT` (throws `TypeError`): the crew takes the orders. In Rust,
+  do not call `Squad::orders_due` on `crew.squad_mut()`.
+- Crew handles lent to C and JavaScript: the squad lives until
+  `sx_crew_free`; a keeper is valid until the next call that changes the
+  crew, and a stale keeper fails with `SX_ERROR_ARGUMENT` (JavaScript: an
+  error that says "stale").
+- Time order: the calls that take the tick a message arrives at keep the
+  payload first (`Inbox::push(msg, arrive_at)`, `Squad::report(msg, arrive_at)`,
+  `report_danger(.., arrive_at)` and their C and JavaScript twins), and
+  `Alertness::stimulus`, `Progress::start` and `Progress::update` keep
+  `now` where it was. All other time arguments move to the front.
+- A hex `link` or `add_wall` with a square diagonal that is not a hex
+  neighbour of that layout is accepted and never walked.
+- WebAssembly: the raw exports (not the JavaScript wrapper) carry levels in
+  every cell, take typed squad calls, and `sx_arrival` is new. The exports are
+  internal to `js/sagax.mjs`.
+- Only one search at a time per `sx_grid`: do not share one between threads
+  while searches run.
+- `sagax-ffi` builds as `cdylib` and `staticlib` and has no rustdoc page (it
+  is a C API); the benchmark is the ignored test `bench_parts`
+  (`cargo test -p sagax-ffi --release -- --ignored --nocapture bench_parts`).
+
 ## 0.8.0
 
 - Group tactics, in `sagax-decide` (module `group`): a squad leader plans

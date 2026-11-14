@@ -74,8 +74,8 @@ fn wall_line() -> Walls {
 }
 
 #[test]
-fn version_is_8() {
-    assert_eq!(sx_api_version(), 8);
+fn version_is_9() {
+    assert_eq!(sx_api_version(), 9);
 }
 
 #[test]
@@ -992,7 +992,7 @@ mod squad {
         assert_eq!(size_of::<SxOrder>(), 72);
         assert_eq!(size_of::<SxPlan>(), 28);
         assert_eq!(size_of::<SxSkillTable>(), 100);
-        assert_eq!(define("SX_API_VERSION"), 8);
+        assert_eq!(define("SX_API_VERSION"), 9);
         assert_eq!(define("SX_ERROR_PLAN"), i64::from(ERROR_PLAN));
         assert_eq!(define("SX_IDLE"), i64::from(crate::IDLE));
         let core = [

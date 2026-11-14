@@ -1,60 +1,170 @@
 # Guide
 
-What to use for which case, how to call it, and where the pitfalls are. The
-exact contracts are in `crates/sagax-ffi/include/sagax.h` (C),
-`js/sagax.mjs` (JavaScript) and the Rust docs (`cargo doc -p sagax-nav --open`).
+What to use for which case, how to call it, and where the pitfalls are. New
+here? [QUICKSTART.md](QUICKSTART.md) does a path, a decision and a squad in
+five minutes. The exact contracts are in `crates/sagax-ffi/include/sagax.h`
+(C), `js/sagax.mjs` (JavaScript) and the Rust docs (`cargo doc -p sagax
+--open`; the `sagax` crate and its `prelude` bring the common names, the
+parts are `sagax::nav`, `sagax::decide` and `sagax::debug`).
 
 ## Conventions
 
-The same rules hold in Rust, C and JavaScript.
+The same rules hold in Rust, C and JavaScript, and every section of this
+guide shows its calls in that order: Rust, C, JavaScript. Names that
+changed in 0.9 are listed in the migration table of the
+[CHANGELOG](../CHANGELOG.md); the old names stay as deprecated aliases for
+0.9 where that was cheap and go in 0.10.
 
-- **Time and seed.** `now` is the game's own count (frames, turns, seconds;
-  it may wrap around, ages are wrapping differences). It comes right after
-  the handle and after the ids that name what the call addresses; payloads
-  come after `now`; `seed` is always the last input, out parameters follow
-  it. So `known.learn(now, fact)`, `outbox.post(now, msg, delay, cooldown)`,
-  `areas.add(now, area)`, `decider.record(now, candidate)`,
-  `keeper.set(now, goal)`, `squad.observe(now, fact)`, but
-  `squad.resume(id, now)` and `timers.set(id, now, duration)`. The same
-  order in C: `sx_knowledge_learn(k, now, fact, evicted)`,
-  `sx_outbox_post(o, now, msg, delay, cooldown)`. A call written in the old
-  order (fact first, then time) does not compile in Rust and C, and throws
-  in JavaScript.
-  Three calls keep their order on purpose, because moving the time would
-  swap two numbers of the same type and compile silently:
-  `Alertness::stimulus(amount, now, cfg)`, `Progress::start(value, now)`
-  and `Progress::update(value, now, min_gain)` (C `sx_alertness_stimulus`,
-  `sx_progress_start`, `sx_progress_update`).
-- **C return values.** A yes/no question returns 1 or 0. A count or an index
-  is returned directly; a function with nothing to report returns 0. A
-  scalar answer is returned directly when it fits (`int64_t` for the times
-  and costs that do not fit `int32_t`: `sx_timers_left`,
-  `sx_alertness_value`, `sx_areas_cost`), structs come through out
-  parameters. A function that writes a list returns how many entries it
-  wrote and, where the full count matters, takes an optional
-  `uint32_t *total` (`sx_squad_targets`). Where a function may drop a stored
-  item (`sx_knowledge_learn`, `sx_knowledge_merge`), the return value is how
-  many were dropped (0 or 1). `sx_inbox_push` answers yes/no (1 stored, 0
+### Positions
+
+A position is `[x, y, z]` (Rust `Pos = [i32; 3]`; `z` is the level of a
+cell, `Cell::from(pos)`, `cell.pos()`). C passes it as `int32_t[3]`;
+`sx_point_to_pos` and `sx_pos_to_point` convert from and to `sx_point`.
+JavaScript takes `[x, y, z]`, `{x, y, z}` and `{x, y, level}` wherever a
+position goes into an AI block and into the grid calls (`contains`,
+`setCost`, `block`, `addWall`, `setZones`, `addZone`, `pathTo`, `flowCost`
+take `x, y` or one position); a position with both `z` and `level` that
+disagree throws `RangeError`. Cells that JavaScript returns from a search
+are `{x, y, level}` (areas and flow answers `{x, y, level, cost}`).
+
+**Hex warning:** on a hex grid the AI blocks (memory, groups) work with
+*axial* coordinates `(q, r)`, not with the columns and rows of your grid.
+See Hex, next.
+
+A level outside `0 .. levels` is off the grid: a `DenseGrid` or `sx_grid`
+treats such a cell as blocked and a search through it finds nothing (before
+0.9 a one-level `DenseGrid` ignored the level).
+
+### Hex
+
+- The **navigation** (`Navigator`, `DenseGrid`, `sx_grid`, `sx_nav_*`, the
+  JavaScript `grid`) works in the offset cells of your map (`x` the column,
+  `y` the row, in the layout you gave: odd or even rows shifted right for
+  pointy tops, odd or even columns shifted down for flat tops).
+- The **AI blocks** (`Knowledge`, `Areas`, `route`, `Squad`; `Metric::Hex`)
+  work with axial `(q, r)` in `x`, `y`. The hex metric measures the axial
+  distance.
+- **The crew converts for you.** With `CrewConfig::hex_layout` (C
+  `sx_crew_config.hex_grid`, JavaScript `lib.crew({ hex: 'oddR' })`; the
+  squad's metric must then be hex) the crew takes and returns offset
+  coordinates: member positions, spots, facts, danger reports, order and
+  goal positions. The squad and the keepers inside hold axial ones; calls on
+  `crew.squad_mut()` / `sx_crew_squad` and `crew.keeper` use axial
+  coordinates.
+- **Without the crew, convert at the edge:** `HexLayout::to_axial_pos` and
+  `from_axial_pos` (`to_axial(x, y)` and `from_axial(q, r)` for two
+  numbers), C `sx_hex_to_axial` and `sx_hex_from_axial`, JavaScript
+  `lib.hex.toAxial(pos, 'oddR')` and `lib.hex.fromAxial(pos, 'oddR')`. All
+  keep `z`.
+- **Walls and links** on a hex grid take real neighbours of that layout:
+  which `(dx, dy)` offsets they are depends on the row or column
+  (`grid.hexNeighbors(x, y)`, `addHexWall(x, y, dir)`). A square diagonal
+  that is not a hex neighbour is accepted by `add_wall` and `link` but is
+  never walked, so it does nothing useful. The wall bits of a `DenseGrid`
+  are offset bits (bit `i` is `DIRECTIONS[i]`) on square and hex alike since
+  0.9; JavaScript `walls()` and `setWalls()` throw on a hex grid, use
+  `addWall` / `addHexWall`.
+
+### Time and seed
+
+`now` is the game's own count (frames, turns, seconds; it may wrap around,
+ages are wrapping differences). It comes right after the handle and after the
+ids that name what the call addresses; payloads come after `now`; `seed` is
+always the last input, out parameters follow it. So
+`known.learn(now, fact)`, `outbox.post(now, msg, delay, cooldown)`,
+`areas.add(now, area)`, `decider.record(now, candidate)`,
+`keeper.set(now, goal)`, `squad.observe(now, fact)`,
+`crew.reinstate(id, now)`, `timers.set(id, now, duration)`. The same order
+in C: `sx_knowledge_learn(k, now, fact, evicted)`,
+`sx_outbox_post(o, now, msg, delay, cooldown)`. A call written in the old
+order (fact first, then time) does not compile in Rust and C, and throws in
+JavaScript (`TypeError`: a fact is not a time).
+
+There are two groups of exceptions, on purpose:
+
+- Calls where moving the time would swap two numbers of the same type and
+  compile silently: `Alertness::stimulus(amount, now, cfg)`,
+  `Progress::start(value, now)` and `Progress::update(value, now, min_gain)`
+  (C `sx_alertness_stimulus`, `sx_progress_start`, `sx_progress_update`).
+- Calls that take the tick *a message arrives at* instead of the time of the
+  call; the payload comes first, then the arrival: `Inbox::push(msg,
+  arrive_at)`, `Squad::report(msg, arrive_at)`, `Squad::report_danger(sender,
+  centre, shooter, arrive_at)` and `Crew::report_danger(...)` (C
+  `sx_inbox_push`, `sx_squad_report`, `sx_squad_report_danger`,
+  `sx_crew_report_danger`; JavaScript `inbox.push(msg, arriveAt)`,
+  `squad.report(msg, arriveAt)`, `squad.reportDanger(report, arriveAt)`,
+  `crew.reportDanger(report, arriveAt)`). `arrive_at` is a tick in the
+  future, not "now". `Squad::report_arrives_at(id, now)` tells which one.
+
+### C
+
+- **Return values.** A yes/no question returns 1 or 0. A count or an index is
+  returned directly; a function with nothing to report returns 0. A scalar
+  answer is returned directly when it fits (`int64_t` for the times and costs
+  that do not fit `int32_t`: `sx_timers_left`, `sx_alertness_value`,
+  `sx_areas_cost`), structs come through out parameters. A function that
+  writes a list returns how many entries it wrote and, where the full count
+  matters, takes an optional `uint32_t *total` (`sx_squad_targets`,
+  `sx_crew_tick`). Where a function may drop a stored item
+  (`sx_knowledge_learn`, `sx_knowledge_merge`), the return value is how many
+  were dropped (0 or 1). `sx_inbox_push` answers yes/no (1 stored, 0
   refused); `sx_outbox_post` returns `SX_POSTED` (0) or the reason it was
-  refused.
-- **C errors** are negative and only the `SX_ERROR_*` constants (a null
-  pointer, a number out of range). The headers and this guide never say a
-  bare "-1" for an error.
-- **C enum parameters are `uint32_t`:** `SX_GRID_*`, `SX_OUT_*`,
-  `SX_METRIC_*`, `SX_EVICT_*`, `SX_ROUTE_*`, `SX_SINE_*`, `SX_COMBINE_*`.
-  "All options" and "follow the decider" of `sx_decider_set_combine` are
-  `SX_ALL_OPTIONS` and `SX_COMBINE_FOLLOW` (both `0xFFFFFFFFu`, what -1 was).
-- **C lifecycle.** Every handle has `_new` and `_free`: `sx_nav_new` /
+  refused; `sx_squad_report_danger` and `sx_crew_report_danger` return 1 if
+  stored and 0 when the danger queue is full.
+- **Errors** are negative and only the `SX_ERROR_*` constants (a null
+  pointer, a number out of range). The header and this guide never say a bare
+  "-1" for an error.
+- **Enum parameters are `uint32_t`:** `SX_GRID_*`, `SX_OUT_*`, `SX_METRIC_*`,
+  `SX_EVICT_*`, `SX_ROUTE_*`, `SX_SINE_*`, `SX_COMBINE_*`, `SX_PRESET_*`,
+  `SX_SHAPE_*`. "All options" and "follow the decider" of
+  `sx_decider_set_combine` are `SX_ALL_OPTIONS` and `SX_COMBINE_FOLLOW` (both
+  `0xFFFFFFFFu`, what -1 was).
+- **Lifecycle.** Every handle has `_new` and `_free`: `sx_nav_new` /
   `sx_nav_free`, `sx_flow_new` / `sx_flow_free`, `sx_dstar_new` /
-  `sx_dstar_free`. The old `_create` / `_destroy` names are macros for 0.9
-  and gone in 0.10.
-- **Positions.** A position is `[x, y, z]` (Rust `sagax_core::Pos`; `z` is
-  the level of a cell, `Cell::from(pos)`, `cell.pos()`). C passes it as
-  `int32_t[3]`; `sx_point_to_pos` and `sx_pos_to_point` convert from and to
-  `sx_point`. JavaScript takes `[x, y, z]`, `{x, y, z}` and `{x, y, level}`
-  wherever a position goes into an AI block. Hex converters keep `z`:
-  `HexLayout::to_axial_pos`, `sx_hex_to_axial`, `lib.hex.toAxial(pos,
-  'oddR')` give `[q, r, z]`, and the `from` forms give offset cells back.
+  `sx_dstar_free`, `sx_grid_new` / `sx_grid_free`, `sx_crew_new` /
+  `sx_crew_free`. The old `_create` / `_destroy` names are macros for 0.9 and
+  gone in 0.10.
+- **Layout checks.** At the end of `sagax.h`, a C11 compiler checks every
+  value struct (`sizeof` and key field offsets) against the numbers the
+  library was built with, so a header and a library that disagree fail to
+  compile. `sx_map` and `sx_areas_cost_ctx` hold pointers and are not
+  checked.
+- **Threads.** One handle per thread. One search at a time per `sx_grid`: a
+  search reads the grid through its map and takes it as unchanged, so do not
+  share one `sx_grid` between threads while searches run, and do not change
+  it from a callback.
+
+### JavaScript
+
+- **Errors.** A number that is not an integer, or out of its range, throws
+  `RangeError`; a value of the wrong type throws `TypeError`. A position of
+  the wrong shape is a `RangeError` (one validation path for all positions).
+  Nothing is coerced quietly: fractions, `-1` for a time, a zone above 31, a
+  budget of `2.5` all throw. `reachable(cell, r)` and `leaveCost` take whole
+  cells and whole costs. Time arguments are validated (`0 .. 2^32 - 1`).
+- **Handles.** Every handle class has `free()` and, where the runtime has it,
+  `[Symbol.dispose]` (so `using grid = lib.grid(...)` works). A call after
+  `free()` throws `Error('Sagax: used after free()')`. A handle lent by
+  another (a crew's squad and keepers) throws too once it is stale.
+- **String constants** instead of numbers: roles `'ranged'` and `'area'`, tags
+  `'cover'`, `'high'`, `'hidden'`, `'choke'`, a fact `source` of `'own'`,
+  `'heard'` or `'told'`, a report kind of `'enemy'`, `'arrived'` or
+  `'goalBroken'` (numbers still work for your own bits).
+- **Value classes** (`Progress`, `Interval`, `Alertness`, `lib.arrival`) run
+  in the WebAssembly module now and need `loadSagax` to have run first.
+- **Seeds** may be a number or a `BigInt` (full 64 bits), also for `decide`.
+
+### Rust
+
+- Builders that can fail return `Result` (a capacity of 0 is an error) or
+  `bool`; the ones that answer `false` for an unknown id or a full table are
+  `#[must_use]`, so a thrown-away answer warns.
+- `Budget` is `Unlimited` or `Cells(NonZeroUsize)`; `Budget::UNLIMITED` and
+  `NonZeroUsize::into()` are the two ways to write one. A search call takes
+  `impl Into<Budget>`; a plain `usize` no longer compiles.
+- `GridRules` has no `Default`: pick `GridRules::preset(Preset::Octile)`
+  (straight 10, diagonal 14) or `Preset::Tabletop` (every step 1).
+- `use sagax::prelude::*;` is enough for a path, a decision and a crew.
 
 ## 1. Which building block?
 
@@ -69,24 +179,26 @@ The same rules hold in Rust, C and JavaScript.
 | The map changes while a walker is on its way | D* Lite | `sx_dstar_*` | `grid.dstar*` |
 | What should I do, and to whom? | Decisions (utility AI) | `sx_decider_*` | `lib.decider()` |
 | Patrol, chase, search: behaviour over time | State machine | `sx_machine_*` | `lib.machine()` |
-| Who did I see, where, how long ago; where is it dangerous | Memory of the world | `sx_sightings_*`, `sx_zones_*`, ... | `lib.sightings()`, `lib.zones()` |
-| Several characters act together: flank, ambush, advance in line | Group tactics | `sx_squad_*`, `sx_keeper_*`, `sx_gather` | `lib.squad()`, `lib.tactics`, `lib.keeper()` |
+| Who did I see, where, how long ago; where is it dangerous | Memory of the world | `sx_knowledge_*`, `sx_areas_*`, ... | `lib.knowledge()`, `lib.areas()` |
+| Several characters act together: flank, ambush, advance in line | Group tactics | `sx_crew_*` (the loop), `sx_squad_*`, `sx_keeper_*`, `sx_gather` | `lib.crew()` (the loop), `lib.squad()`, `lib.tactics`, `lib.keeper()` |
 
 Everything works on square and hex grids and in every interface.
 
 **The same shape everywhere:**
 
 - **Rules** (square or hex, costs, memory) are given once when the handle is
-  made: C `sx_rules`, JS `lib.grid(w, h, rules)`, Rust
-  `Navigator::new(topology, capacity)`.
+  made: Rust `Navigator::new(topology, capacity)` with `GridRules::preset`, C
+  `sx_rules` (`sx_rules_default` fills it from a preset), JS
+  `lib.grid(w, h, { preset })`. There is no default cost: every game picks
+  `Octile` (straight 10, diagonal 14) or `Tabletop` (every step 1).
 - Every search answers with a **result**: status, cells of the whole way,
   cost, cells expanded, whether the node capacity was too small.
-- **Status**: running (budget used up, continue later), found, partial (goal
-  unreachable, way to the closest reachable cell), unreachable, done (area
-  or field complete).
+- **Status**: idle (nothing to continue), running (budget used up, continue
+  later), found, partial (goal unreachable, way to the closest reachable
+  cell), unreachable, done (area or field complete).
 - **Ways always begin with the start** and end at the last cell, as every
   cell, as turning points or smoothed.
-- **Budget 0 means no limit.**
+- **Budget 0 means no limit** (Rust `Budget::UNLIMITED`).
 
 **Rules of thumb:**
 
@@ -97,14 +209,75 @@ Everything works on square and hex grids and in every interface.
   walker*. It needs its own memory per walker.
 - **Formations** work on whole cells: every member gets its own cell.
 
-**Hex grids:** C `rules.grid = SX_GRID_HEX_*`, JS `{ hex: HEX.oddR }`, Rust
-`Topology::Hex`. The step callback is asked with `dx, dy` = offset to the
-neighbour cell. Formation slots: "forward" is the walking direction,
+**Hex grids:** Rust `Topology::hex(layout, preset)`, C `rules.grid =
+SX_GRID_HEX_*`, JS `{ hex: HEX.oddR, preset }`. The step callback is asked
+with `dx, dy` = offset to the neighbour cell. Positions of the AI blocks are
+axial there: see Hex in the Conventions. Formation slots: "forward" is the walking direction,
 "right" the direction 60° clockwise of it; `(0, 1)` front right, `(-1, 0)`
 behind, `(-1, 1)` back right. Wedge: `Formation::wedge_hex` /
 `FORMATION.wedgeHex`.
 
-## 2. C
+## 2. Rust
+
+```rust
+use sagax::prelude::*;
+
+let mut map = DenseGrid::new(64, 64);
+map.set(10, 5, DenseGrid::BLOCKED);
+map.add_wall(3, 3, 1, 0);                    // a wall between two cells, both ways
+let mut nav = Navigator::new(Topology::Square(GridRules::preset(Preset::Octile)), 4096);
+let start = Cell::new(0, 0, 0);
+let goals = [Cell::new(40, 9, ANY_LEVEL)];   // ANY_LEVEL: any level of that cell
+let report = nav.find_path(&mut map, start, &goals, Budget::UNLIMITED);
+assert_eq!(report.status, NavStatus::Found);
+let corners = nav.output(&mut map, Output::Smooth);
+```
+
+`Navigator` bundles search (to one or several goals), `continue_search`,
+reachable areas (`reachable`, `area`, `path_to`), `flee`, outputs and
+formations. `Report::status` is a `Status`: `Idle` (no search to go on with;
+the default), `Running`, `Found`, `Partial`, `Unreachable`, `Done`. Underneath:
+`Search` (A*/Dijkstra with a budget), `flow::FlowField`, `dstar::DStarLite`,
+`smooth`, `formation` and `topology::Topology` (square or hex at run time).
+Your own maps implement `grid::CellMap` (one trait for square and hex; the
+step callback is asked with `dx, dy` = the offset to the neighbour cell) or
+`Graph` (anything); a `&mut` map is a map too. `DenseGrid` is a ready map
+with levels (`with_levels`, `get_at`, `set_at`, `add_wall_at`, `link`).
+
+Over several frames (`Budget::from(NonZeroUsize)`; many small steps end
+exactly like one big one):
+
+```rust
+use std::num::NonZeroUsize;
+
+let slice = Budget::from(NonZeroUsize::new(500).unwrap());
+let mut r = nav.find_path(&mut map, start, &goals, slice);
+while r.status == NavStatus::Running {
+    r = nav.continue_search(&mut map, slice);   // next frame, map unchanged
+}
+```
+
+Fleeing and the reachable area:
+
+```rust
+let threats = [Cell::new(5, 5, 0)];
+let r = nav.flee(&mut map, start, &threats, 60);       // within 60 cost
+let r = nav.reachable(&mut map, start, 120, Budget::UNLIMITED);
+let cells: Vec<_> = nav.area().collect();              // (Cell, cost)
+let (cell, _cost) = cells[7];
+let cost = nav.path_to(cell);                          // None: not in the area
+```
+
+Levels, stairs and hex:
+
+```rust
+let mut floors = DenseGrid::with_levels(16, 16, 2);
+floors.link(Cell::new(4, 4, 0), Cell::new(5, 4, 1));   // a stair: both ways
+floors.set_at(Cell::new(6, 6, 1), DenseGrid::BLOCKED);
+let hex_nav = Navigator::new(Topology::hex(HexLayout::OddR, Preset::Tabletop), 400);
+```
+
+## 3. C
 
 Build `cargo build --release -p sagax-ffi`; link `target/release/sagax.dll`
 (Windows) or `libsagax.so` / `libsagax.dylib`. Header:
@@ -114,11 +287,10 @@ Build `cargo build --release -p sagax-ffi`; link `target/release/sagax.dll`
 ### Basics
 
 ```c
-sx_rules rules = {0};
-rules.grid = SX_GRID_SQUARE;            /* or SX_GRID_HEX_ODD_R ... */
-rules.cost_straight = 10;  rules.cost_diagonal = 14;
-rules.node_capacity = 32768;
-sx_nav *nav = sx_nav_new(&rules);    /* once, reuse; 0: invalid rules */
+sx_rules rules;
+sx_rules_default(SX_GRID_SQUARE, SX_PRESET_OCTILE, &rules);  /* or SX_GRID_HEX_ODD_R ... */
+rules.node_capacity = 32768;           /* cells one search may touch (the default) */
+sx_nav *nav = sx_nav_new(&rules);      /* once, reuse; 0: invalid rules */
 
 sx_map map = {0};
 map.step = my_step;              /* (ctx, x, y, level, dx, dy) -> level or -1 */
@@ -134,6 +306,10 @@ int n = sx_nav_find_path(nav, &map, start, &goal, 1, 4000, SX_OUT_TURNS, pts, 64
  * even if pts was too small. */
 ```
 
+- `sx_rules_default(grid, preset, &rules)` fills the rules with the costs of
+  a preset (`SX_PRESET_OCTILE`: straight 10, diagonal 14; `SX_PRESET_TABLETOP`:
+  every step 1; there is no preset 0); you can still set the fields of
+  `sx_rules` yourself.
 - Return values: entries written (≥ 0) or an error (< 0). How a search
   ended is only in `r.status`.
 - Outputs: `SX_OUT_CELLS` (every cell), `SX_OUT_TURNS` (turning points),
@@ -144,6 +320,30 @@ int n = sx_nav_find_path(nav, &map, start, &goal, 1, 4000, SX_OUT_TURNS, pts, 64
 - One handle per thread. No allocation during a search while
   `node_capacity` suffices (`r.node_limit_hit` reports it).
 
+### A ready map: `sx_grid`
+
+A game without a map structure of its own can use `sx_grid`: cells with an
+extra cost, walls and levels, all in the library.
+
+```c
+sx_grid *grid = sx_grid_new(24, 12, 2);                 /* width, height, levels */
+sx_grid_set(grid, (sx_point){12, 3, 0}, -1);            /* cost < 0 blocks a cell */
+sx_grid_set(grid, (sx_point){6, 6, 0}, 5);              /* 5 extra to enter */
+sx_grid_add_wall(grid, (sx_point){3, 3, 0}, 1, 0);      /* between (3,3) and (4,3), both ways */
+sx_grid_link(grid, (sx_point){4, 4, 0}, (sx_point){5, 4, 1});  /* a stair: arrive on level 1 */
+sx_map map;
+sx_grid_map(grid, &map);                                /* valid while the grid lives */
+/* ... sx_nav_find_path(nav, &map, ...) ... */
+sx_grid_free(grid);
+```
+
+`examples/c/squad.c` builds its map this way. A move keeps its level unless
+a link sends it to another one; positions are `sx_point` everywhere. A
+cell off the grid (also a level outside `0 .. levels - 1`) gives
+`SX_ERROR_ARGUMENT`. On a hex grid `link` and `sx_grid_add_wall` take only
+real hex neighbours (see Hex in the Conventions). One search at a time per
+`sx_grid`.
+
 ### Over several frames
 
 ```c
@@ -153,7 +353,8 @@ n = sx_nav_continue(nav, &map, 500, pts, NULL, 64, &r);
 ```
 
 Many small steps end exactly like one big one. On `SX_RUNNING`, `pts`
-already holds the best way so far.
+already holds the best way so far. `sx_nav_continue` before any search gives
+`r.status == SX_IDLE`.
 
 Several goals: `sx_point exits[] = {...}; sx_nav_find_path(nav, &map, start,
 exits, n, ...)` gives the way to the cheapest one, in one search.
@@ -242,56 +443,46 @@ Needs: if a move from A to B is possible, so is the move from B to A
 `compute` works through everything reachable from the goal, so set a budget
 and spread it over frames.
 
-## 3. JavaScript
+## 4. JavaScript
 
 ```js
 import { loadSagax, HEX, FORMATION } from './sagax.mjs';
 const lib = await loadSagax(wasmUrlOrBytes);     // URL in the browser, bytes in Node
 
-const grid = lib.grid(30, 20);                    // square, diagonal step costs 1
-const hexGrid = lib.grid(30, 20, { hex: HEX.oddR, step: 1 });
+const grid = lib.grid(30, 20, { preset: 'tabletop' });   // square, every step costs 1
+const octile = lib.grid(30, 20, { preset: 'octile' });   // straight 10, diagonal 14
+const hexGrid = lib.grid(30, 20, { hex: HEX.oddR, preset: 'tabletop' });
+const floors = lib.grid(30, 20, { preset: 'tabletop', levels: 2 });
 grid.block(5, 5); grid.addWall(3, 3, 1, 0);
 grid.addZone(4, 4, 0); grid.setLeaveCost(4);      // leaving zone 0 costs 4
 grid.setCosts(uint32Array);                       // whole map at once
+floors.link({ x: 4, y: 4, level: 0 }, { x: 5, y: 4, level: 1 });   // a stair, both ways
 
 const way = grid.findPath(a, b, { output: 'turns', budget: 0 });
-// way.status: 'found' | 'partial' | 'running' (then grid.continue()) | 'unreachable'
+// way.status: 'found' | 'partial' | 'running' (then grid.continue()) | 'unreachable' | 'idle'
 const corners = grid.way('smooth');               // the same way, smoothed
 const exit = grid.findPath(a, [e1, e2, e3]);      // to the nearest of several goals
 const away = grid.flee(a, [enemy], 6);            // away from threats, within 6
-const area = grid.reachable(a, 6).cells;          // [{x, y, cost}]
-const back = grid.pathTo(9, 4);                   // way to one of them, or null
+const area = grid.reachable(a, 6).cells;          // [{x, y, level, cost}]
+const back = grid.pathTo(area[3]);                // way to one of them, or null
 const { leader, members } = grid.formation(FORMATION.wedge(3));
 grid.buildFlow([{ x: 3, y: 4 }]);
-const steps = grid.flowNext(walkers);             // [{x, y, cost}] per walker
+const steps = grid.flowNext(walkers);             // [{x, y, level, cost}] per walker
 grid.dstarBegin(a, b); grid.dstarCompute();       // {status: 'found', cells, ...}
 grid.free();
 ```
 
+`lib.grid(w, h)` without a `preset` (or explicit `straight` and `diagonal`
+costs; on hex `step`) throws `TypeError`: a grid has no default cost.
+Explicit values override the preset. Cells in a way are `{x, y, level}`; any
+position form of the Conventions goes in (`{x, y}`, `{x, y, level}`,
+`[x, y, z]`). `budget` 0 is no limit. `reachable(cell, r)`, `leaveCost`
+and every cost are whole numbers: a fraction throws.
+
 `js/foundry-adapter.mjs` builds a grid from a Foundry VTT scene (walls,
-tokens, enemy zones of control). Flow fields and D* Lite do not suit zones
-with a leave cost (one-way costs); use `findPath` / `reachable` there.
-
-## 4. Rust
-
-```rust
-use sagax_nav::grid::{Cell, DenseGrid, GridRules};
-use sagax_nav::nav::{ANY_LEVEL, Navigator, Output, Status};
-use sagax_nav::topology::Topology;
-
-let mut map = DenseGrid::new(64, 64);
-let mut nav = Navigator::new(Topology::Square(GridRules::default()), 4096);
-let r = nav.find_path(&mut map, Cell::new(0, 0, 0), &[Cell::new(40, 9, ANY_LEVEL)], usize::MAX);
-assert_eq!(r.status, Some(Status::Found));
-let corners = nav.output(&mut map, Output::Smooth);
-```
-
-`Navigator` bundles search (to one or several goals), `resume`, reachable
-areas (`reachable`, `area`, `path_to`), `flee`, outputs and formations. Underneath: `Search` (A*/Dijkstra with a
-budget), `flow::FlowField`, `dstar::DStarLite`, `smooth`, `formation` and
-`topology::Topology` (square or hex at run time). Your own maps implement
-`grid::CellMap` (square), `hex::HexMap` (hex) or `Graph` (anything); a
-`&mut` map is a map too.
+tokens, enemy zones of control; the reach radius and the leave cost are
+rounded down to whole cells and costs). Flow fields and D* Lite do not suit
+zones with a leave cost (one-way costs); use `findPath` / `reachable` there.
 
 ## 5. Ways as input for decisions
 
@@ -307,7 +498,8 @@ Game AI often weighs options by ways, not by straight-line distance:
 - **Escape:** exits as goals, or `flee`; `r.status` tells whether there is a
   way out at all.
 - **Danger:** zones to avoid as extra `move_cost`; then the cost already
-  counts the risk.
+  counts the risk. Remembered danger areas feed the search with
+  `Areas::cell_cost` (section 8, "Areas to path costs").
 - **Movement budget with zones:** with a leave cost, `cost` mixes walking
   and penalty. JavaScript ways also give `steps` (walking and terrain only)
   and `zonesLeft` (zones left, e.g. attacks of opportunity provoked), so
@@ -343,6 +535,41 @@ weight.
   flee). The target number is yours (token, cell index, weapon); Sagax only
   carries it along.
 
+Rust:
+
+```rust
+let mut d = Decider::new();
+let a = d.add_option(ONE);
+let b = d.add_option(ONE);
+assert!(d.add_consideration(a, Consideration::new(0, Curve::Linear, 0, 10)));
+assert!(d.add_consideration(b, Consideration::new(0, Curve::Linear, 0, 10)));
+let candidates = [Candidate::new(a, 0), Candidate::new(b, 0)];
+let rows = [[2], [8]];                       // one row of raw inputs per candidate
+let choice = d.choose(&candidates, &rows, Pick::Best, 0).unwrap();
+assert!(matches!(choice, Some(Choice { candidate: 1, .. })));
+```
+
+`choose` takes the rows as they are and returns `Err(DecideError::RowLengths)`
+for rows of different or wrong length, `Ok(None)` if every score is 0. Under
+it, `decide` / `decide_traced` (any `sagax_core::Sink<DecideEvent>`) take one
+flat slice of inputs and a stride, and write the scores.
+
+C:
+
+```c
+sx_decider *d = sx_decider_new();
+int32_t attack = sx_decider_add_option(d, SX_ONE);
+sx_consideration near = {0, SX_CURVE_INVERSE, 1, 10};
+sx_decider_add_consideration(d, (uint32_t)attack, &near);
+sx_candidate cands[2] = {{(uint32_t)attack, 7}, {(uint32_t)attack, 8}};
+int32_t inputs[2] = {6, 2};                 /* one row of stride 1 per candidate */
+sx_choice choice;
+if (sx_decider_decide(d, cands, 2, inputs, 1, SX_PICK_BEST, 0, seed, NULL, &choice) == 1)
+	/* cands[choice.candidate] */;
+sx_decider_set_trace(d, on_event, ctx);     /* SX_DECIDE_FACTOR / SCORED / CHOSEN */
+sx_decider_free(d);
+```
+
 JavaScript:
 
 ```js
@@ -361,25 +588,6 @@ const choice = d.decide([
 d.setTrace(true); /* ... */ d.takeTrace();   // [{kind: 'factor'|'scored'|'chosen', ...}]
 d.free();
 ```
-
-C:
-
-```c
-sx_decider *d = sx_decider_new();
-int32_t attack = sx_decider_add_option(d, SX_ONE);
-sx_consideration near = {0, SX_CURVE_INVERSE, 1, 10};
-sx_decider_add_consideration(d, attack, &near);
-sx_candidate cands[2] = {{attack, 7}, {attack, 8}};
-int32_t inputs[2] = {6, 2};                 /* one row of stride 1 per candidate */
-sx_choice choice;
-if (sx_decider_decide(d, cands, 2, inputs, 1, SX_PICK_BEST, 0, seed, NULL, &choice) == 1)
-	/* cands[choice.candidate] */;
-sx_decider_set_trace(d, on_event, ctx);     /* SX_DECIDE_FACTOR / SCORED / CHOSEN */
-sx_decider_free(d);
-```
-
-Rust: `sagax_decide::Decider` with `add_option`, `add_consideration`,
-`decide` / `decide_traced` (any `sagax_core::Sink<DecideEvent>`).
 
 ### Putting factors together
 
@@ -453,10 +661,12 @@ const flee = d.addOption(1, [
 ], { rank: 1 });
 ```
 
-C: `sx_decider_add_weighted` (pull, `SX_APPLY_*`), `sx_decider_set_combine`
-(`SX_COMBINE_*`, option `SX_ALL_OPTIONS` for all), `sx_decider_set_rank`,
-`sx_decider_set_current`. Rust: `add_weighted`, `set_combine`,
-`set_option_combine`, `set_rank`, `set_current`.
+Rust: `add_weighted`, `set_combine`, `set_option_combine`, `set_rank`,
+`set_current` (the builders answer `false` for an unknown option and are
+`#[must_use]`). C: `sx_decider_add_weighted` (pull, `SX_APPLY_*`),
+`sx_decider_set_combine` (`SX_COMBINE_*`, option `SX_ALL_OPTIONS` for all;
+`SX_COMBINE_FOLLOW` follows the decider), `sx_decider_set_rank`,
+`sx_decider_set_current`.
 
 ### Memory: cooldowns and "not again so soon"
 
@@ -521,7 +731,7 @@ whole behaviour for turn-based tactics, real-time strategy, stealth or
 action games. **The game decides what is perceived** (no sight lines or
 hearing in here): it says "seen", "heard", and gives positions. The blocks
 keep it, pass it on and let it fade. Positions are integers `[x, y, z]` (on
-a hex grid use axial `(q, r)` in `x`, `y`), time is the game's own `u32`
+a hex grid use axial `(q, r)` in `x`, `y`; see Hex in the Conventions), time is the game's own `u32`
 count (frames or rounds; ages use wrapping subtraction), no random numbers,
 and sizes are fixed at creation. **Every time and limit is a parameter:** try
 a short memory against a long one, a slow message against a fast one, and
@@ -577,10 +787,10 @@ game (`SEEN`, `NOISE`, `LIT`, ...) are your own numbers.
   let mut ids = Vec::new();
   route(Route::Nearest(3), (x, y), &free, Metric::Euclid, 16, &mut ids);
   let mut inbox = Inbox::new(4)?;                        // one per receiver
-  inbox.push(msg, arrival(now, 0, dist, 2));             // false if refused
+  inbox.push(msg, arrival(now, 0, dist, 2));             // payload, then the arrival tick; false if refused
   let mut got = Vec::new();
   inbox.take_due(now, &mut got);                         // arrived, in push order
-  for m in &got { known.merge_message(m, SOURCE_TOLD, now); }
+  for m in &got { known.merge_message(now, m, SOURCE_TOLD); }
   ```
 
   Rules of `route`: `Route::Nearest(k)` (nearest first, a tie keeps the
@@ -720,7 +930,7 @@ A noise is a message nobody sends on purpose: build a `Message` with
 `keep_if_sender_gone: 1`, `route(Route::InRange(loudness), ...)` over all
 guards whatever they do, `Inbox::push` it with `arrival` (base 0 and
 `per_unit` 0 for "heard at once"), and let each receiver
-`learn_message(&m, SOURCE_HEARD, now)` and raise its `Alertness`. A louder
+`learn_message(now, &m, SOURCE_HEARD)` and raise its `Alertness`. A louder
 noise reaches further because `r` is the loudness. The stealth guard example
 does this in round 2.
 
@@ -778,13 +988,17 @@ static int32_t move_cost(void *ctx, int32_t x, int32_t y, int32_t lv,
 	int64_t extra;
 	if (sx_areas_blocks(g->areas, cell, g->start, g->goal) == 1) return -1;
 	extra = sx_areas_cost(g->areas, cell, g->start, g->goal);   /* returned directly */
+	if (extra < 0) return -1;      /* an SX_ERROR_* (bad pointer): a set-up bug, forbid the move */
 	return extra > INT32_MAX - 1 ? INT32_MAX - 1 : (int32_t)extra;
 }
 ```
 
 The same works on hex grids, since the game converts the cell to a position.
 In JavaScript, call `a.blocks(cell, start, goal)` and `a.cost(cell, start,
-goal)` while building the grid's walls and costs before the search.
+goal)` while building the grid's walls and costs before the search. When the
+areas are kept in cell coordinates, `Areas::cell_cost(to, start, goal)` (C
+`sx_areas_move_cost`, JavaScript `areas.cellCost`) does both in one call:
+section 8, "Areas to path costs".
 
 ## 8. Group tactics
 
@@ -792,17 +1006,211 @@ Several characters should act together: advance side by side, come from
 several sides and strike at the same moment, hold an ambush. Hand-written,
 that is a squad AI per game. The blocks of `sagax_decide::group` give the
 parts: a **squad leader** that plans from what it knows, **goals** that
-reach the members as messages, and **tactics as data**. The game keeps
-control of who is a group and what the roles mean. Same rules as the memory
-blocks: integer only, wrap-safe `u32` time (any unit, all durations the
-same one), seeds from the game, ties to the lower index or id, capacities
-set once. After warm-up nothing allocates except one `Vec` per new plan
-(its goals).
+reach the members as messages, and **tactics as data**. The **`Crew`** runs
+those parts as one loop per tick, so a game starts there and reaches for the
+blocks only when it needs more control. The game keeps control of who is a
+group and what the roles mean. Same rules as the memory blocks: integer
+only, wrap-safe `u32` time (any unit, all durations the same one), seeds from
+the game, ties to the lower index or id, capacities set once. After warm-up
+nothing allocates except one `Vec` per new plan (its goals).
 
-The snippets assume `use sagax_decide::group::*;` and
-`use sagax_decide::memory::*;`. `ENEMY` is your fact kind for enemies,
-`now` your tick (`u32`), `spots` your candidate places (`Vec<Spot>`, see
-below) and `seed` your `u64` for this decision.
+The Rust snippets assume `use sagax::prelude::*;` and, where named,
+`sagax::decide::group::{Channel, Shape, ...}`. `ENEMY` is your fact kind for
+enemies, `now` your tick (`u32`), `spots` your candidate places
+(`Vec<Spot>`, see below) and `seed` your `u64` for this decision.
+
+### The Crew
+
+A `Crew` is a `Squad` with one `GoalKeeper` per member. Per game tick you
+tell it where the members are, call `tick`, read the events, and for each
+member ask for the row of its own decider and, once it decided, tell the
+crew what it chose. The crew moves nobody: walking, shooting and animation
+are yours. Channels, tactics, skill and the leader are set on the crew's own
+squad (`crew.squad_mut()`, C `sx_crew_squad`, JavaScript `crew.squad()`).
+
+Rust (`crates/sagax/examples/squad_walk.rs`, set-up and one tick):
+
+```rust
+let mut crew = Crew::new(CrewConfig {
+    squad: SquadConfig {
+        members: 4,
+        memory: 8,
+        areas: 4,
+        inbox: 8,
+        dangers: 4,
+        metric: Metric::Chebyshev,
+    },
+    ..CrewConfig::default()
+})
+.unwrap();
+for (id, x, y) in MEMBERS {
+    let member = Member {
+        id,
+        pos: [x, y, 0],
+        roles: 0,
+        skill: SKILL,
+        state: MemberState::Active,
+    };
+    assert!(crew.add_member(member).is_some());
+}
+let sq = crew.squad_mut();
+for (id, ..) in MEMBERS {
+    if id != 1 {
+        assert!(sq.set_channel(id, RADIO));
+    }
+}
+assert!(sq.set_leader(1));
+sq.set_skill(SKILL);
+sq.set_target_kind(ENEMY);
+sq.add_tactic(tactics::rush());
+sq.add_tactic(tactics::formation(Shape::Line, 2));
+sq.add_tactic(tactics::flank(3, 4));
+crew.observe(
+    0,
+    Fact {
+        subject: 10,
+        kind: ENEMY,
+        pos: [20, 5, 0],
+        seen_at: 0,
+        ..Fact::default()
+    },
+);
+```
+
+```rust
+// every tick t:
+crew.tick(t, &[], &spots, SEED, &mut events).unwrap();
+for e in &events {
+    // Planned, Activated, Signal, Order, Start, Arrived, Broken, NoPlan:
+    // the game turns them into walking, shooting, animation
+}
+// each member decides: its goal or something else
+for w in &mut walkers {
+    let inputs = crew.member_inputs(w.id, t).unwrap();
+    let discipline = u32::try_from(inputs.discipline).unwrap_or(0);
+    crew.keeper(w.id)
+        .unwrap()
+        .set_current(&mut w.decider, w.goal_option, discipline);
+    let candidates = [
+        Candidate::new(w.goal_option, 0),
+        Candidate::new(w.idle_option, 0),
+    ];
+    let row = inputs.as_row();
+    let choice = w
+        .decider
+        .choose(&candidates, &[row, row], Pick::Best, 0)
+        .unwrap();
+    w.on_goal = choice.is_some_and(|c| c.candidate == 0);
+    assert!(crew.member_chose(w.id, t, w.on_goal));
+}
+```
+
+The goal is one option among the member's own (`GoalKeeper::add_goal_option`
+makes it and gives it a decider row of five inputs); `member_chose(id, now,
+goal_won)` says whether it won: `true` keeps the goal, `false` postpones it
+(see Two levels). C (`examples/c/squad.c`, the same scene):
+
+```c
+sx_crew_config config;
+sx_crew_config_default(&config);
+config.squad.members = MEMBERS;       /* memory, areas, inbox, dangers, metric ... */
+config.squad.metric = SX_METRIC_CHEBYSHEV;
+sx_crew *crew = sx_crew_new(&config);
+sx_crew_add_member(crew, &m);         /* an sx_member: id, pos, skill, state */
+sx_squad *squad = sx_crew_squad(crew);
+sx_squad_set_radio(squad, id, 2, 1);  /* base 2 ticks, 1 per cell */
+sx_squad_set_leader(squad, 1);
+sx_squad_add_flank(squad, 3, 4);
+sx_crew_observe(crew, 0, &seen, NULL);
+
+/* every tick t: */
+n = sx_crew_tick(crew, t, NULL, 0, spots, 4, SEED, events, EVENTS, &total);
+for (i = 0; i < n; i++) { /* events[i].kind: SX_CREW_PLANNED ... SX_CREW_NO_PLAN */ }
+/* each member: */
+sx_crew_member_inputs(crew, id, t, &in);   /* in.has_goal, in.dist, in.age, in.signal, in.discipline */
+sx_keeper_set_current(sx_crew_keeper(crew, id), decider, goal_option, (uint32_t)in.discipline);
+/* ... decide ... */
+sx_crew_member_chose(crew, id, t, goal_won);
+```
+
+`sx_crew_tick` writes at most `cap` events and puts the number of all of
+them to `*total` (may be NULL); a buffer that is too small changes nothing
+else. JavaScript (`examples/js/squad.mjs`, the same scene):
+
+```js
+const crew = lib.crew({ squad: { members: 4, memory: 8, areas: 4, inbox: 8, dangers: 4, metric: 'chebyshev' } });
+for (const [id, x, y] of MEMBERS) crew.addMember({ id, pos: { x, y, level: 0 }, skill: SKILL });
+const sq = crew.squad();
+for (const [id] of MEMBERS) if (id !== 1) sq.setRadio(id, 2, 1);
+sq.setLeader(1);
+sq.addTactic(lib.tactics.flank(3, 4));
+crew.observe(0, { subject: 10, kind: ENEMY, pos: { x: 20, y: 5, level: 0 }, seenAt: 0 });
+
+// every tick t:
+for (const e of crew.tick(t, { spots: SPOTS, seed: SEED })) {
+  // e.kind: 'planned' | 'activated' | 'signal' | 'order' | 'start' | 'arrived' | 'broken' | 'noPlan'
+}
+const inputs = crew.memberInputs(id, t);   // { hasGoal, dist, age, signal, discipline, row }
+crew.keeper(id).setCurrent(decider, goalOption, inputs.discipline);
+const choice = decider.decide([{ option: goalOption, inputs: inputs.row }, { option: idleOption, inputs: inputs.row }]);
+crew.memberChose(id, t, choice !== null && choice.index === 0);
+```
+
+What `tick` reports, in the order of its steps (the Rust `CrewEvent`, C
+`SX_CREW_*` and JavaScript `kind` all carry the same set):
+
+| Event | Meaning |
+|---|---|
+| `Planned(plan)` | the leader made a new plan; it is pending while the squad "thinks" |
+| `Activated(plan)` | that plan is in force; members without a goal in it have none now |
+| `Signal` | the leader gave the signal (the attack starts) |
+| `Order { member, goal, start_at }` | an order reached a member and is in its keeper; `start_at` is the tick it starts, or none if it starts on the signal |
+| `Start { member }` | a member's start tick has come (once per order) |
+| `Arrived { member }` | a member stands on its first spot (within `arrive_radius`, same level) and told the leader over its channel (once per goal) |
+| `Broken { member }` | a member gave its goal up (postponed longer than its skill's give-up time) and told the leader (once per goal) |
+| `NoPlan` | no plan is active and none could be made; if a plan just ended, every keeper is cleared |
+
+On a real run the signal comes at tick 51 and all four attackers start at
+tick 57 (see the trace in the [quickstart](QUICKSTART.md#4-the-whole-walk));
+the radio makes the members arrive at ticks 33, 41, 45 and 45, and the
+signal lines their attacks up.
+
+More about the crew:
+
+- **Members** come and go with `add_member`, `remove_member`, `suspend`
+  (out of play, e.g. a cut-scene: no goal, never "broken"), `reinstate(id,
+  now)` (back in play with its current goal, its keeper clock restarts) and
+  `set_gone` (dead). A suspended or gone member gets no `Start`, no arrival
+  and no `Broken`. The crew reads a squad you change through `squad_mut()`
+  at the next tick.
+- **Reports:** `crew.report_danger(sender, centre, shooter, arrive_at)` puts
+  a danger report on its way to the leader (C `sx_crew_report_danger` returns
+  1 if stored and 0 when the danger queue is full; JavaScript
+  `crew.reportDanger`). The area it makes has `data` = the sender. The
+  leader's own sightings go in with `observe(now, fact)`.
+- **Goals of a dead plan** are dropped: when a replan leaves a member out, or
+  the active plan ends (`NoPlan`), the keepers are cleared, so `member_inputs`
+  shows `has_goal` 0 and the member gets no stale `Start`, `Arrived` or
+  `Broken`. A refused arrival report (inbox full) is tried again next tick
+  and gives its event only when it was accepted.
+- **Hex:** a crew with a hex layout takes and returns offset coordinates (see
+  Hex in the Conventions). The tick's spots are offset coordinates too.
+- **Allowed calls on the squad:** do not call `orders_due` on a crew's
+  squad: the crew takes the orders itself (C `sx_squad_orders_due` returns
+  `SX_ERROR_ARGUMENT`, JavaScript `ordersDue` throws `TypeError`).
+- **Lent handles (C and JavaScript).** `sx_crew_squad` and `sx_crew_keeper`
+  (JavaScript `crew.squad()`, `crew.keeper(id)`) lend handles that the crew
+  owns. The squad is valid until `sx_crew_free`; calling `sx_squad_free` on
+  it does nothing. A keeper handle is valid until the next call that
+  *changes* the crew (anything but `sx_crew_member_inputs`, `sx_crew_goal`,
+  `sx_crew_squad` and `sx_crew_keeper`; reads do not count) and while its
+  member is in the group; after that every `sx_keeper_*` call on it returns
+  `SX_ERROR_ARGUMENT` (JavaScript: throws an error that says "stale"), so
+  fetch it again. A keeper handle never reaches another member's keeper.
+  There is one handle per member id, the same each time.
+- **Capacities** are fixed at `new`. After the first ticks (a hex crew's spot
+  buffer grows once, to the largest spot list) the crew allocates nothing
+  beyond what the squad does.
 
 ### Two levels
 
@@ -813,52 +1221,112 @@ below) and `seed` your `u64` for this decision.
    (shoot, take cover, flee). It normally wins; a surprise makes another
    option win, and the member picks the goal up again when things calm down.
 
-The member's inputs come from `GoalKeeper::inputs`: has goal, distance to
-the goal spot, goal age, signal given, discipline. Give the goal option the
+The member's inputs come from `GoalKeeper::inputs` (or `member_inputs` of the
+crew): has goal, distance to the goal spot, goal age, signal given,
+discipline. `GoalKeeper::add_goal_option(decider, weight)` adds the goal
+option and `keeper.set_current(decider, option, discipline)` gives it the
 *current bonus* of the decider (section 6) so it is not dropped lightly;
-`discipline(skill, &table)` says how much, so elite members cling longer.
-Call `postpone` when another option wins and `resume` when the goal wins
-again. A goal postponed for `give_up_ticks` is *broken*:
+`SkillTable::hold_bonus_for(skill)` says how much, so elite members cling
+longer. Call `goal_postponed(now)` when another option wins and
+`goal_won(now)` when the goal wins again (the crew does it in
+`member_chose`). A goal postponed for `give_up_ticks` is *broken*:
 `keeper.broken(now, give_up_ticks)` is your cue to send a
-`REPORT_GOAL_BROKEN` back, and the plan may change.
+`Message::goal_broken(id, plan)` back, and the plan may change.
 
 **The game's orders come first.** `sq.group_mut().suspend(id)` (on the
-`Group`; C `sx_squad_suspend`, JS `sq.suspend`) takes a member out (a
-cut-scene, a player command): it gets no goal, does not count as off plan,
-slot assignment skips it, and its keeper's clock stands still.
-`sq.resume(id, now)` (on the `Squad`; C `sx_squad_resume`, JS
-`sq.resume(id, now)`) puts it back **and sends it its current goal** of
+`Group`; C `sx_squad_suspend`, JS `sq.suspend`; on a crew `crew.suspend(id)`)
+takes a member out (a cut-scene, a player command): it gets no goal, does not
+count as off plan, slot assignment skips it, and its keeper's clock stands
+still. `sq.reinstate(id, now)` (on the `Squad`; C `sx_squad_reinstate`, JS
+`sq.reinstate(id, now)`) puts it back **and sends it its current goal** of
 the active plan over its channel: before the signal the plan's goal, after
 it the signal order (its start is not lined up any more, the others have
 started). `Group::resume` alone only flips the state and the member stays
 without orders. A suspension never produces "goal broken"; only `report`
 does. On the member side, `GoalKeeper::suspend` / `unsuspend` stop and
-restart the keeper's clock (and `GoalKeeper::resume` is something else: the
-goal won again after a `postpone`).
+restart the keeper's clock.
 
-### The squad and its memory (no cheating)
+### The blocks by hand
+
+What `Crew::tick` does, step by step, is a public call of `Squad` or
+`GoalKeeper` each; so a game that needs another order, another message or its
+own bookkeeping builds the loop itself. Rust, one tick for a squad and its
+keepers:
 
 ```rust
-let mut sq = Squad::new(8, 16, 4, 8, Metric::Chebyshev)?;   // members, facts, areas, inbox
-sq.group_mut().add(Member { id: 1, pos: [0, 0, 0], roles: ROLE_RANGED,
-                            skill: 192, state: MemberState::Active });
-sq.set_leader(1);
+let mut sq = Squad::new(SquadConfig {
+    members: 8,
+    memory: 16,
+    areas: 4,
+    inbox: 8,
+    dangers: 8,
+    metric: Metric::Chebyshev,
+})?;
+assert!(sq.group_mut().add(Member { id: 1, pos: [0, 0, 0], roles: 0, skill: 192,
+                                    state: MemberState::Active }).is_some());
+assert!(sq.set_leader(1));
 sq.set_skill(192);
 sq.set_target_kind(ENEMY);                 // which fact kind counts as a target
-sq.set_channel(2, Channel::Radio { base: 2, per_unit: 1 });
+assert!(sq.set_channel(2, Channel::Radio { base: 2, per_unit: 1 }));
 sq.add_tactic(tactics::flank(3, 4));
 sq.add_tactic(tactics::formation(Shape::Line, 2));
 sq.add_tactic(tactics::rush());
+sq.observe(0, fact);                        // the leader sees an enemy
+
+// every tick (`keepers`: one GoalKeeper per member, in group order):
+// 1.-2. the leader checks its plan
+match sq.check(now, &[], &spots, seed)? {
+    SquadStatus::Replan(_id) => { /* a new plan is pending (Planned) */ }
+    SquadStatus::Signal => { /* the attack starts now (Signal) */ }
+    SquadStatus::Keep | SquadStatus::NoPlan => {}
+}
+// 3. a plan that became active (Activated)
+if let Some(_plan) = sq.take_activated() {}
+// 4. orders that reached their member go into its keeper (Order)
+sq.orders_due(now, &mut orders);
+for o in &orders {
+    let i = sq.group().index(o.member).unwrap();
+    keepers[i].set(now, o.goal);
+}
+// 6. a member that stands on its spot tells the leader over its channel (Arrived)
+if goal.awaits_arrival() && at_the_spot {
+    let msg = Message::arrived(id, goal.plan);
+    if let Some(at) = sq.report_arrives_at(id, now) {
+        let _ = sq.report(msg, at);       // false: the inbox is full, try next tick
+    }
+}
+// 7. a goal postponed for too long (Broken)
+if keeper.broken(now, table.give_up_ticks_for(skill)) {
+    // send Message::goal_broken(id, plan) the same way
+}
 ```
+
+Step 5 (`Start`) is `now` reaching `goal.start_tick(received)`; the crew
+keeps those ticks for you. C: `sx_squad_check`, `sx_squad_take_activated`,
+`sx_squad_orders_due`, `sx_keeper_set`, `sx_report_arrived`,
+`sx_squad_report_arrives_at`, `sx_squad_report`, `sx_keeper_broken`,
+`sx_goal_start_tick`, `sx_goal_awaits_arrival`. JavaScript:
+`sq.check`, `sq.takeActivated()`, `sq.ordersDue(now)`, `keeper.set(now,
+goal)`, `sq.reportArrivesAt(id, now)`, `sq.report(message, arriveAt)`,
+`keeper.broken(...)`, `lib.startTick(goal, received)`,
+`lib.awaitsArrival(goal)`.
+
+### The squad and its memory (no cheating)
 
 **The leader plans only with what it knows.** The squad keeps its own
 `Knowledge`, `Areas` and inbox. They are filled only by the leader's own
 sightings (`sq.observe(now, fact)`) and by member reports that *arrive*
-(`sq.report(message, arrive_at)`, kinds `REPORT_ENEMY`, `REPORT_DANGER`,
-`REPORT_GOAL_BROKEN`, `REPORT_ARRIVED`). Targets are read from this memory
-(`sq.targets()`), never from the true world; the game's `extra` row only
-adds columns on top (at most `MAX_EXTRA_COLUMNS`, 1024). A shout or radio
-delay on the report is your own `route` / `arrival` from section 7.
+(`sq.report(message, arrive_at)`, kinds `REPORT_ENEMY`, `REPORT_ARRIVED`,
+`REPORT_GOAL_BROKEN`; build them with `Message::enemy`, `Message::arrived`,
+`Message::goal_broken`, C `sx_report_enemy`, `sx_report_arrived`,
+`sx_report_goal_broken`, JavaScript `Report.enemy`, `Report.arrived`,
+`Report.goalBroken`). A danger has its own call:
+`sq.report_danger(sender, centre, shooter, arrive_at)` (a message of kind 3
+is dropped in Rust and C and throws in JavaScript; `REPORT_DANGER` is gone).
+Targets are read from this memory (`sq.targets()`), never from the true
+world; the game's `extra` row only adds columns on top (at most
+`MAX_EXTRA_COLUMNS`, 1024). A shout or radio delay on the report is your own
+`route` / `arrival` from section 7, or `sq.report_arrives_at(id, now)`.
 
 **Forgetting.** `plan` and `check` drop danger areas past their lifetime by
 themselves. The leader's knowledge is aged by the game, as for any
@@ -880,29 +1348,17 @@ measured from the leader's position.
 
 ### Planning, orders, signal
 
-```rust
-// every tick:
-match sq.check(now, &[], &spots, seed)? {
-    Status::Replan(id) => { /* a new plan is pending while the squad "thinks" */ }
-    Status::Signal => { /* the attack starts now */ }
-    Status::Keep | Status::NoPlan => {}
-}
-let mut orders = Vec::new();
-sq.orders_due(now, &mut orders);          // goals whose message has arrived
-for o in &orders { give_to_member(o.member, o.goal); }
-// a member reached its gather spot:
-sq.arrived(member_id, now);
-```
-
 `check` makes the first plan and replans; `plan` forces one. A new plan is
 *pending* for the think time from the skill table (`think_ticks`), then it
 becomes *active* and the orders go out: the leader's at once, the others by
 their `Channel` (`Shout { range }` arrives after one tick per unit of
 distance and only within range, `Radio { base, per_unit }` anywhere, `None`
 never). **The default channel is `Radio { base: 0, per_unit: 0 }`, which
-arrives at once:** set real channels (`set_channel`) for every member if
-orders should take time. **Making and spreading a plan costs ticks:** a plan
-can be stale when it arrives, as in a real chain of command.
+arrives at once:** set real channels for every member if orders should take
+time (Rust `set_channel(id, Channel::...)`, C `sx_squad_set_shout`,
+`sx_squad_set_radio`, `sx_squad_set_silent`, JavaScript `sq.setShout`,
+`sq.setRadio`, `sq.setSilent`). **Making and spreading a plan costs ticks:** a
+plan can be stale when it arrives, as in a real chain of command.
 
 **What an order means.** `goal.pos` is where to go now; `goal.kind` and
 `goal.start` say what to do there and when. A member gets at most one order
@@ -918,16 +1374,16 @@ active member has arrived, or `max_wait` ticks after the gather orders went
 out, whichever comes first; then `check` returns `Status::Signal`. Arrival
 reaches the leader as a `REPORT_ARRIVED` message (sender: the member, data:
 the plan id) through `sq.report(msg, arrive_at)`, with whatever delay the
-member's way of telling has; `sq.arrived(id, now)` is the shortcut without
-delay, as if the leader saw it. You can also call `sq.signal(now)` by hand
-(`Trigger::Manual`), or use `TargetInRadius`. On the signal each member
-gets a second order: its place at the target (`then_pos`) with the slot's
-own kind (attack). The orders line up: `start` is `AfterTicks(n)`, the time
-until the slowest second order arrives (plus the slot's own `AfterTicks`,
-if any), so **all members start at the same tick** however far the radio or
-shout travels; the member's `start_delay` (the timing spread of weak
-squads) comes on top. See `crates/sagax-decide/examples/squad.rs` for the
-whole scene.
+member's way of telling has (the crew does this for you);
+`sq.arrived(id, now)` is the shortcut without delay, as if the leader saw it.
+You can also call `sq.signal(now)` by hand (`Trigger::Manual`), or use
+`TargetInRadius`. On the signal each member gets a second order: its place at
+the target (`then_pos`) with the slot's own kind (attack). The orders line
+up: `start` is `AfterTicks(n)`, the time until the slowest second order
+arrives (plus the slot's own `AfterTicks`, if any), so **all members start at
+the same tick** however far the radio or shout travels; the member's
+`start_delay` (the timing spread of weak squads) comes on top. See
+`crates/sagax/examples/squad_walk.rs` for the whole scene.
 
 **No "Better" replan after the signal.** Before the signal `check` replans
 when another tactic beats the active one by more than the hold bonus of the
@@ -957,7 +1413,11 @@ The numbers in brackets are the defaults, in ticks. All random effects use
 the caller's seed mixed with member index and tick, so a replay is
 identical. Weak enemies therefore look weak: they plan late, take poor
 spots, start unevenly and give up their goal sooner. The defaults assume
-about 17 ticks per second; scale them for your time unit.
+about 17 ticks per second; scale them for your time unit. Each value for one
+skill is a call of its own: `SkillTable::think_ticks_for(skill)`,
+`timing_spread_for`, `hold_bonus_for`, `give_up_ticks_for`,
+`spot_rank_error_for`, `pick_for` (C `sx_skill_table_*_for`, JavaScript
+`lib.thinkTicksFor(table, skill)` and so on).
 
 ### Spots with few tags
 
@@ -991,14 +1451,16 @@ party; nobody forces you to.
 
 ### Areas to path costs
 
-Danger areas the squad remembers (`sq.areas()`, filled from
-`REPORT_DANGER`) and the game's own `Areas` become path costs with
-`Areas::move_cost(from, to, start, goal)` (Rust), `sx_areas_move_cost`
-(C) and `lib.areasMoveCost(areas, from, to, start, goal)` (JS). Only the
-cell moved to is judged: blocked by an area that holds neither start nor
-goal gives `None` / `-1`, otherwise the extra cost (at most `INT32_MAX - 1`
-in C and JavaScript). The level is the `z` coordinate. A "go around the
-place the shooter stood" route needs nothing else.
+Danger areas the squad remembers (`sq.areas()`, filled from `report_danger`)
+and the game's own `Areas` become path costs in one way:
+`Areas::cell_cost(to, start, goal)` (Rust, on `Cell`s), `sx_areas_move_cost`
+(C, an `sx_move_cost_fn`) and `areas.cellCost(cell, start, goal)` (JS; the
+older `lib.areasMoveCost(areas, from, to, start, goal)` does the same). Only
+the cell moved to is judged: blocked by an area that holds neither start nor
+goal gives `None` / `-1` / `null`, otherwise the extra cost (at most
+`INT32_MAX - 1` in C and JavaScript). The level is the `z` coordinate. A "go
+around the place the shooter stood" route needs nothing else. (Rust
+`Areas::move_cost` is deprecated for 0.9: it took a `from` it never used.)
 
 **Units:** these adapters compare the cells directly with the areas, so the
 areas (and start and goal) must be in the map's cell coordinates `(x, y,
@@ -1021,15 +1483,18 @@ static int32_t my_move_cost(void *ctx, int32_t x, int32_t y, int32_t lv,
 }
 ```
 
-### The same in C and JavaScript
+### The blocks in C and JavaScript
 
 ```c
-sx_squad *sq = sx_squad_new(8, 16, 4, 8, SX_METRIC_CHEBYSHEV);
+sx_squad_config config;
+sx_squad_config_default(&config);          /* 8 members, 32 facts, 8 areas, 16 inbox, 8 dangers, Euclid */
+config.metric = SX_METRIC_CHEBYSHEV;
+sx_squad *sq = sx_squad_new(&config);
 sx_member m = { .id = 1, .roles = SX_ROLE_RANGED, .skill = 192 };
 sx_squad_add_member(sq, &m);
 sx_squad_set_leader(sq, 1);
 sx_squad_set_skill(sq, 192);
-sx_squad_add_shipped(sq, SX_TACTIC_FLANK, 4);
+sx_squad_add_flank(sq, 3, 4);              /* also _rush, _formation, _ambush, _focus, _isolate, _fall_back */
 uint32_t plan_id;
 int32_t st = sx_squad_check(sq, now, NULL, 0, spots, n_spots, seed, &plan_id);
 sx_order due[8];
@@ -1037,8 +1502,8 @@ int32_t n = sx_squad_orders_due(sq, now, due, 8);
 ```
 
 ```js
-const sq = lib.squad({ groupCap: 8, memoryCap: 16, areaCap: 4, inboxCap: 8, metric: 'chebyshev' });
-sq.addMember({ id: 1, pos: [0, 0, 0], roles: SQUAD.roleRanged, skill: 192 });
+const sq = lib.squad({ members: 8, memory: 16, areas: 4, inbox: 8, dangers: 8, metric: 'chebyshev' });
+sq.addMember({ id: 1, pos: [0, 0, 0], roles: ['ranged'], skill: 192 });
 sq.setLeader(1); sq.setSkill(192); sq.setTargetKind(ENEMY);
 sq.addTactic(lib.tactics.flank(3, 4));
 sq.observe(now, { subject: 9, kind: ENEMY, pos: [20, 0, 0], seenAt: now });
@@ -1046,25 +1511,27 @@ const { status } = sq.check(now, { spots, seed });        // 'keep' | 'replan' |
 for (const order of sq.ordersDue(now)) give(order);
 ```
 
-The tactics are data: `lib.tactic(...)` / `sx_squad_add_tactic` build your
-own from slots (role bits, count, place, goal kind, start), scoring
-considerations over the row (`SQUAD.inLosses`, `inTargetDist`, ...), abort
-rules and a trigger. `validate` finds a tactic that reads a column the row
-does not have, or one with more than 255 slots. A slot's `gather_dist`
-(C `sx_slot.gather_dist`, JS `gatherDist`, which defaults to `dist` there)
-is the distance of its gather place.
+The tactics are data: `lib.tactic(...)` / `sx_tactic_new` build your own from
+slots (role bits, count, place, goal kind, start), scoring considerations
+over the row (`SQUAD.inLosses`, `inTargetDist`, ...), abort rules and a
+trigger (C `sx_tactic_trigger_none`, `_all_arrived`, `_target_in_radius`,
+`_manual`; JavaScript `tactic.triggerNone()`, `triggerAllArrived(maxWait)`,
+`triggerTargetInRadius(radius)`, `triggerManual()`). `validate` finds a
+tactic that reads a column the row does not have, or one with more than 255
+slots. A slot's `gather_dist` (C `sx_slot.gather_dist`, JS `gatherDist`,
+which defaults to `dist` there) is the distance of its gather place.
 
-**JavaScript note:** the group wrappers (`Squad`, `Keeper`, tactics,
-`gather`) throw `RangeError` on a time outside `0 .. 2^32 - 1`, an id or
-skill out of range and so on. The older wrappers coerce such values quietly;
-the new ones do not, because a wrong time would silently skew every age.
+**JavaScript note:** the group wrappers (`Squad`, `Keeper`, `Crew`, tactics,
+`gather`) throw on a time outside `0 .. 2^32 - 1`, an id or skill out of range
+and so on, as every wrapper now does (see the Conventions).
 
 ### Debugging the plan
 
-`validate` before the first tick, then watch `Status` and `active_plan()` /
-`pending_plan()` (tactic, target, think time, when it became active). The
-example `squad` prints the whole sequence: sighting, plan, orders by radio,
-arrival at the gather spots, signal, attack.
+`validate` before the first tick, then watch the events (or `Status`) and
+`active_plan()` / `pending_plan()` (tactic, target, think time, when it
+became active). The example `squad_walk` prints the whole sequence:
+sighting, plan, orders by radio, arrival at the gather spots, signal,
+attack.
 
 ## 9. Debugging and logging
 
@@ -1094,13 +1561,27 @@ Typical uses: colour the expanded cells to see why a search is slow, log
 the `finished` event with `expanded` to find costly searches, and follow
 `improved` to see why a way goes where it goes.
 
+
 ## 10. Pitfalls
 
 - Costs are integers ≥ 0. `move_cost` is an *extra* on top of the step cost.
+- There is no default cost for a grid: pick a preset (Rust `GridRules::preset`,
+  C `sx_rules_default`, JS `{ preset }`).
 - `SX_ANY_LEVEL` (-1, Rust `ANY_LEVEL`) as goal level means any level; D*
   Lite needs an exact level.
 - `SX_PARTIAL` is the best partial way, not an error.
 - Lists are cut when the buffer is too small; `r.cells` still counts all.
 - Flow fields and D* Lite assume moves that work both ways.
+- A level outside `0 .. levels` is off the grid, not ignored.
+- On hex grids the AI blocks use axial positions and the navigation uses
+  offset cells; let the crew convert (`hex_layout`) or convert at the edge.
+  `link` and `add_wall` take real hex neighbours only.
+- One search at a time per `sx_grid`; do not share one between threads while
+  searches run.
+- JavaScript throws where it used to coerce: fractions, negative or huge
+  times, zones above 31, a missing `preset`. `reachable(cell, r)` and
+  `leaveCost` take whole numbers.
+- Crew handles lent to C or JavaScript (squad, keepers) end with the crew; a
+  keeper is stale after the next call that changes the crew.
 - Load the library at run time, check `sx_api_version()`, and fall back to
   your own code if it is missing or too old.
