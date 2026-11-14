@@ -54,13 +54,13 @@ pub use kit::{
 };
 pub use members::{Group, Member, MemberState, Nearby, gather};
 pub use orders::{Channel, Order, REPORT_ARRIVED, REPORT_ENEMY, REPORT_GOAL_BROKEN, Status};
-pub use skill::SkillTable;
+pub use skill::{MAX_SKILL_ROWS, SkillTable};
 pub use spots::{Spot, SpotPick, heading, pick_spot, wish_point};
 #[allow(deprecated)]
 pub use squad::IN_EXTRA;
 pub use squad::{
     Goal, IN_LOSSES, IN_OFF_PLAN, IN_PLAN_AGE, IN_ROLE_0, IN_ROLE_1, IN_TARGET_AGE, IN_TARGET_DIST,
     IN_TARGET_FRIEND_DIST, MAX_EXTRA_COLUMNS, MAX_ROLE_COUNTS, Plan, PlanError, PlanId, RoleCounts,
-    Squad, SquadConfig,
+    ScoreEntry, Squad, SquadConfig,
 };
 pub use tactic::{Abort, Compare, GoalKind, Place, Side, Slot, Start, Tactic, Trigger};

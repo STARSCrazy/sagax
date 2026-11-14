@@ -1,65 +1,80 @@
 use crate::Pick;
 
-/// What a squad's skill changes, in four levels: index `skill / 64`
-/// (0 = weak 0..=63, 1 = 64..=127, 2 = 128..=191, 3 = elite 192..=255).
+/// Most rows a [`SkillTable`] can have.
+pub const MAX_SKILL_ROWS: usize = 8;
+
+/// What a squad's skill changes, in up to eight levels: the first `rows`
+/// entries of every array are used, and a skill picks the row
+/// `skill * rows / 256` (see [`SkillTable::level`]). With 4 rows these are
+/// the quarters 0..=63 (weak) up to 192..=255 (elite).
 ///
 /// The defaults are numbers to tune; a game can change any entry. Times are
 /// in the caller's ticks (the defaults assume about 17 ticks per second).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SkillTable {
+    /// How many rows are used, 1 ..= [`MAX_SKILL_ROWS`].
+    pub rows: u8,
     /// How the tactic is chosen among the scored candidates.
-    pub pick: [Pick; 4],
+    pub pick: [Pick; MAX_SKILL_ROWS],
     /// Ticks from making a plan until it becomes active.
-    pub think_ticks: [u32; 4],
+    pub think_ticks: [u32; MAX_SKILL_ROWS],
     /// Most ranks a member's spot may be off the best one (picked by seed).
-    pub spot_rank_error: [u8; 4],
+    pub spot_rank_error: [u8; MAX_SKILL_ROWS],
     /// Most ticks a member starts late (picked by seed per member).
-    pub timing_spread: [u32; 4],
+    pub timing_spread: [u32; MAX_SKILL_ROWS],
     /// Bonus of the active plan over a new one, and the members' discipline
     /// ([`crate::ONE`] = 1.0): [`Squad::check`](super::Squad::check) replans only
     /// for a candidate scoring more than the active one times
     /// `1 + hold_bonus`.
-    pub hold_bonus: [u32; 4],
+    pub hold_bonus: [u32; MAX_SKILL_ROWS],
     /// Ticks a member may postpone its goal before it reports it broken.
-    pub give_up_ticks: [u32; 4],
+    pub give_up_ticks: [u32; MAX_SKILL_ROWS],
 }
 
 impl SkillTable {
-    /// The level (row index) for `skill`: `skill / 64`.
-    pub const fn level(skill: u8) -> usize {
-        (skill / 64) as usize
+    /// The level (row index) for `skill`: `skill * rows / 256`, with `rows`
+    /// clamped to 1 ..= [`MAX_SKILL_ROWS`] (for a table changed by hand).
+    pub const fn level(&self, skill: u8) -> usize {
+        let rows = if self.rows == 0 {
+            1
+        } else if self.rows as usize > MAX_SKILL_ROWS {
+            MAX_SKILL_ROWS
+        } else {
+            self.rows as usize
+        };
+        skill as usize * rows / 256
     }
 
     /// How the tactic is chosen at `skill`'s level.
     pub const fn pick_for(&self, skill: u8) -> Pick {
-        self.pick[Self::level(skill)]
+        self.pick[self.level(skill)]
     }
 
     /// Ticks from making a plan until it is active, at `skill`'s level.
     pub const fn think_ticks_for(&self, skill: u8) -> u32 {
-        self.think_ticks[Self::level(skill)]
+        self.think_ticks[self.level(skill)]
     }
 
     /// Most ranks a spot may be off the best one, at `skill`'s level.
     pub const fn spot_rank_error_for(&self, skill: u8) -> u8 {
-        self.spot_rank_error[Self::level(skill)]
+        self.spot_rank_error[self.level(skill)]
     }
 
     /// Most ticks a member starts late, at `skill`'s level.
     pub const fn timing_spread_for(&self, skill: u8) -> u32 {
-        self.timing_spread[Self::level(skill)]
+        self.timing_spread[self.level(skill)]
     }
 
     /// Bonus of the active plan over a new one, and the member's discipline
     /// at `skill`'s level.
     pub const fn hold_bonus_for(&self, skill: u8) -> u32 {
-        self.hold_bonus[Self::level(skill)]
+        self.hold_bonus[self.level(skill)]
     }
 
     /// Ticks a member may postpone its goal before it reports it broken,
     /// at `skill`'s level.
     pub const fn give_up_ticks_for(&self, skill: u8) -> u32 {
-        self.give_up_ticks[Self::level(skill)]
+        self.give_up_ticks[self.level(skill)]
     }
 }
 
@@ -81,5 +96,24 @@ mod tests {
         assert_eq!(t.timing_spread_for(0), 17);
         assert_eq!(t.pick_for(255), Pick::Best);
         assert_eq!(t.pick_for(0), Pick::Weighted { top: 3 });
+    }
+
+    #[test]
+    fn skill_rows_scale_the_level() {
+        let table = |rows| SkillTable {
+            rows,
+            ..SkillTable::default()
+        };
+        let t = table(4);
+        assert!((0..=255u8).all(|s| t.level(s) == usize::from(s) / 64));
+        let t = table(1);
+        assert!((0..=255u8).all(|s| t.level(s) == 0));
+        let t = table(8);
+        assert_eq!((t.level(31), t.level(32), t.level(255)), (0, 1, 7));
+        let t = table(3);
+        assert_eq!([85, 86, 170, 171].map(|s| t.level(s)), [0, 1, 1, 2]);
+        // A table changed by hand to rows 0 or 9 still clamps.
+        assert_eq!(table(0).level(255), 0);
+        assert_eq!(table(9).level(255), 7);
     }
 }

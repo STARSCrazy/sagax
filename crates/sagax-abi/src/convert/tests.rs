@@ -120,6 +120,11 @@ fn skill_codes_round_trip() {
     let mut bad = codes;
     bad.pick[2] = 3;
     assert_eq!(skill_table(&bad), None);
+    for rows in [0, 9, 256] {
+        let mut bad = codes;
+        bad.rows = rows;
+        assert_eq!(skill_table(&bad), None);
+    }
 }
 
 #[test]
@@ -184,6 +189,10 @@ fn statuses_and_errors() {
             input: 9
         }),
         (ERROR_PLAN, 2, 9)
+    );
+    assert_eq!(
+        plan_error(PlanError::OptionsChanged),
+        (ERROR_PLAN, u32::MAX, u32::MAX)
     );
     assert_eq!(
         plan_error(PlanError::TooManySlots { tactic: 1 }),

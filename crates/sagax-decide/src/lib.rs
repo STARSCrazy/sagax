@@ -643,7 +643,9 @@ impl Decider {
         self.score_traced(0, candidate, row, &mut NoopSink)
     }
 
-    fn score_traced<S: Sink<DecideEvent>>(
+    /// [`Decider::score`] with events; `index` is the candidate's index in
+    /// them.
+    pub fn score_traced<S: Sink<DecideEvent>>(
         &self,
         index: usize,
         candidate: Candidate,

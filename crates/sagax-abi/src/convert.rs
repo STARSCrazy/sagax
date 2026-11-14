@@ -272,32 +272,40 @@ pub fn member_state(code: u32) -> Option<MemberState> {
 
 // ---- skill table --------------------------------------------------------------
 
-/// A skill table as numbers: four levels per row, picks as `SX_PICK_*`.
+/// A skill table as numbers: up to eight rows per array, picks as
+/// `SX_PICK_*`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SkillCodes {
+    /// How many rows are used (1 ..= 8).
+    pub rows: u32,
     /// `SX_PICK_*` per level.
-    pub pick: [u32; 4],
+    pub pick: [u32; 8],
     /// `top` of the pick per level.
-    pub pick_top: [u32; 4],
+    pub pick_top: [u32; 8],
     /// Ticks from making a plan until it is active.
-    pub think_ticks: [u32; 4],
+    pub think_ticks: [u32; 8],
     /// Most ticks a member starts late.
-    pub timing_spread: [u32; 4],
+    pub timing_spread: [u32; 8],
     /// Bonus of the active plan, and the members' discipline.
-    pub hold_bonus: [u32; 4],
+    pub hold_bonus: [u32; 8],
     /// Ticks a member may postpone its goal.
-    pub give_up_ticks: [u32; 4],
+    pub give_up_ticks: [u32; 8],
     /// Most ranks a member's spot may be off the best one.
-    pub spot_rank_error: [u8; 4],
+    pub spot_rank_error: [u8; 8],
 }
 
-/// The skill table of its numbers; `None` for an unknown pick.
+/// The skill table of its numbers; `None` for `rows` 0 or above 8 or an
+/// unknown pick (also in an unused row).
 pub fn skill_table(codes: &SkillCodes) -> Option<SkillTable> {
-    let mut pick = [Pick::Best; 4];
+    let rows = u8::try_from(codes.rows)
+        .ok()
+        .filter(|r| (1..=8).contains(r))?;
+    let mut pick = [Pick::Best; 8];
     for (i, p) in pick.iter_mut().enumerate() {
         *p = Pick::from_u32(codes.pick[i], codes.pick_top[i])?;
     }
     Some(SkillTable {
+        rows,
         pick,
         think_ticks: codes.think_ticks,
         spot_rank_error: codes.spot_rank_error,
@@ -315,6 +323,7 @@ pub fn skill_codes(table: &SkillTable) -> SkillCodes {
         Pick::Uniform { top } => (PICK_UNIFORM, top),
     });
     SkillCodes {
+        rows: u32::from(table.rows),
         pick: pick.map(|p| p.0),
         pick_top: pick.map(|p| p.1),
         think_ticks: table.think_ticks,
@@ -368,11 +377,13 @@ pub const fn squad_status(status: SquadStatus) -> (i32, Option<PlanId>) {
 }
 
 /// `(SX_ERROR_PLAN, tactic, input)` of a plan error; the input is
-/// `u32::MAX` where there is no column.
+/// `u32::MAX` where there is no column; for `OptionsChanged` both are
+/// `u32::MAX`.
 pub fn plan_error(error: PlanError) -> (i32, u32, u32) {
     let (tactic, input) = match error {
         PlanError::InputOutOfRange { tactic, input } => (tactic, input),
         PlanError::TooManySlots { tactic } => (tactic, u32::MAX),
+        PlanError::OptionsChanged => (usize::MAX, u32::MAX),
     };
     (ERROR_PLAN, u32::try_from(tactic).unwrap_or(u32::MAX), input)
 }

@@ -1,5 +1,4 @@
 use super::members::MemberState;
-use super::skill::SkillTable;
 use super::spots::Spot;
 use super::squad::{
     Active, DangerReport, Goal, PlanError, PlanId, Scratch, Squad, dist, fires, plain_dist,
@@ -618,7 +617,7 @@ impl Squad {
                 other = other.max(score);
             }
         }
-        let bonus = u64::from(self.table.hold_bonus[SkillTable::level(self.skill)]);
+        let bonus = u64::from(self.table.hold_bonus[self.table.level(self.skill)]);
         let bar = u64::from(mine) + u64::from(mine) * bonus / u64::from(ONE);
         Ok(if u64::from(other) > bar {
             Verdict::Better(bar)

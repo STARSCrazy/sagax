@@ -7,6 +7,7 @@ use sagax_abi::convert::{self, CombineTarget};
 use sagax_core::CallbackSink;
 use sagax_decide::{Apply, Candidate, Consideration, Curve, DecideEvent, Decider, Pick};
 
+use super::group::Held;
 use super::{ERROR_ARGUMENT, create, destroy, guarded, slice_of, to_i32};
 
 const FACTOR: i32 = 1;
@@ -66,7 +67,7 @@ pub struct SxDecideEvent {
 }
 
 impl SxDecideEvent {
-    fn of(e: DecideEvent) -> Self {
+    pub(crate) fn of(e: DecideEvent) -> Self {
         match e {
             DecideEvent::Factor {
                 candidate,
@@ -110,7 +111,7 @@ pub type DecideTraceFn = unsafe extern "C" fn(*mut c_void, *const SxDecideEvent)
 
 /// `sx_decider`.
 pub struct SxDecider {
-    decider: Decider,
+    decider: Held<Decider>,
     candidates: Vec<Candidate>,
     scores: Vec<u32>,
     trace: Option<(DecideTraceFn, *mut c_void)>,
@@ -121,6 +122,17 @@ impl SxDecider {
     pub(crate) fn decider_mut(&mut self) -> &mut Decider {
         &mut self.decider
     }
+
+    /// A handle on a decider held elsewhere (the squad's), with its own
+    /// scratch buffers.
+    pub(crate) fn held(decider: Held<Decider>) -> Self {
+        Self {
+            decider,
+            candidates: Vec::new(),
+            scores: Vec::new(),
+            trace: None,
+        }
+    }
 }
 
 /// `sx_decider_new`.
@@ -128,7 +140,7 @@ impl SxDecider {
 pub extern "C" fn sx_decider_new() -> *mut SxDecider {
     create(|| {
         Some(SxDecider {
-            decider: Decider::new(),
+            decider: Held::Own(Decider::new()),
             candidates: Vec::new(),
             scores: Vec::new(),
             trace: None,
@@ -136,12 +148,17 @@ pub extern "C" fn sx_decider_new() -> *mut SxDecider {
     })
 }
 
-/// `sx_decider_free`.
+/// `sx_decider_free`: does nothing for a decider lent by `sx_squad_decider`.
 ///
 /// # Safety
-/// `decider` is null or from [`sx_decider_new`] and not used again.
+/// `decider` is null, from [`sx_decider_new`] and not used again, or lent
+/// by `sx_squad_decider`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_decider_free(decider: *mut SxDecider) {
+    // SAFETY: null or valid (see above).
+    if unsafe { decider.as_ref() }.is_some_and(|d| d.decider.is_lent()) {
+        return;
+    }
     // SAFETY: see above.
     unsafe { destroy(decider) }
 }

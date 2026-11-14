@@ -8,7 +8,7 @@ use sagax_decide::group::{
 use sagax_decide::{Consideration, Curve};
 
 use super::crew::SxCrew;
-use super::decide::{SxConsideration, SxDecider};
+use super::decide::{SxConsideration, SxDecideEvent, SxDecider};
 use super::memory::{SxArea, SxAreas, SxFact, SxKnowledge, SxMessage, pos3, put};
 use super::{ERROR_ARGUMENT, create, destroy, guarded, slice_of, to_i32};
 use sagax_abi::convert;
@@ -264,26 +264,29 @@ pub struct SxPlan {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SxSkillTable {
+    /// How many rows are used (1 ..= 8).
+    pub rows: u32,
     /// `SX_PICK_*` per level.
-    pub pick: [u32; 4],
+    pub pick: [u32; 8],
     /// `top` of the pick per level.
-    pub pick_top: [u32; 4],
+    pub pick_top: [u32; 8],
     /// Ticks from making a plan until it is active.
-    pub think_ticks: [u32; 4],
+    pub think_ticks: [u32; 8],
     /// Most ticks a member starts late.
-    pub timing_spread: [u32; 4],
+    pub timing_spread: [u32; 8],
     /// Bonus of the active plan, and the members' discipline.
-    pub hold_bonus: [u32; 4],
+    pub hold_bonus: [u32; 8],
     /// Ticks a member may postpone its goal.
-    pub give_up_ticks: [u32; 4],
+    pub give_up_ticks: [u32; 8],
     /// Most ranks a member's spot may be off the best one.
-    pub spot_rank_error: [u8; 4],
+    pub spot_rank_error: [u8; 8],
 }
 
 impl SxSkillTable {
     fn of(t: &SkillTable) -> Self {
         let c = convert::skill_codes(t);
         Self {
+            rows: c.rows,
             pick: c.pick,
             pick_top: c.pick_top,
             think_ticks: c.think_ticks,
@@ -296,6 +299,7 @@ impl SxSkillTable {
 
     fn table(&self) -> Option<SkillTable> {
         convert::skill_table(&convert::SkillCodes {
+            rows: self.rows,
             pick: self.pick,
             pick_top: self.pick_top,
             think_ticks: self.think_ticks,
@@ -531,6 +535,30 @@ pub(crate) enum Held<T> {
     /// Lent by a crew (see `sx_crew_squad`, `sx_crew_keeper`), which frees
     /// the handle with itself. Freeing the handle does nothing.
     Lent(Lend<T>),
+    /// Lent by a squad handle (see `sx_squad_decider`), which frees the
+    /// handle with itself. Freeing the handle does nothing.
+    Inside(Inside<T>),
+}
+
+/// A value inside a squad, reached through its handle anew on every call.
+pub(crate) struct Inside<T> {
+    /// The squad handle, which frees this handle with itself.
+    pub(crate) root: *mut SxSquad,
+    /// The value in the squad.
+    pub(crate) get: fn(&mut Squad) -> &mut T,
+}
+
+impl<T> Inside<T> {
+    /// The value, or `None` for a stale squad handle.
+    fn reach<'a>(&self) -> Option<&'a mut T> {
+        // SAFETY: `root` is the squad handle that made this one and frees it
+        // with itself, so it is alive while this handle is. This handle is
+        // its own allocation, and the C interface is single-threaded per
+        // squad, so no other reference into the squad is alive during this
+        // call; the reference is used only within it.
+        let squad = unsafe { &mut *self.root };
+        squad.squad.get_mut().map(self.get)
+    }
 }
 
 /// A value lent by a crew. Only the crew's root pointer is kept: the value
@@ -571,6 +599,7 @@ impl<T> Held<T> {
         match self {
             Self::Own(t) => Some(t),
             Self::Lent(l) => l.reach().map(|t| &*t),
+            Self::Inside(i) => i.reach().map(|t| &*t),
         }
     }
 
@@ -579,11 +608,12 @@ impl<T> Held<T> {
         match self {
             Self::Own(t) => Some(t),
             Self::Lent(l) => l.reach(),
+            Self::Inside(i) => i.reach(),
         }
     }
 
     pub(crate) const fn is_lent(&self) -> bool {
-        matches!(self, Self::Lent(_))
+        matches!(self, Self::Lent(_) | Self::Inside(_))
     }
 }
 
@@ -605,6 +635,17 @@ pub struct SxSquad {
     pub(crate) squad: Held<Squad>,
     /// Orders taken from the squad and not yet handed out (beyond a cap).
     pub(crate) due: Vec<Order>,
+    /// The decider handle lent by `sx_squad_decider` (null until asked),
+    /// freed with the squad.
+    pub(crate) decider: *mut SxDecider,
+}
+
+impl Drop for SxSquad {
+    fn drop(&mut self) {
+        // SAFETY: made by `sx_squad_decider` with `Box::into_raw` for this
+        // squad only and freed here once; `sx_decider_free` leaves it alone.
+        unsafe { destroy(self.decider) };
+    }
 }
 
 /// `sx_squad_config`.
@@ -693,6 +734,7 @@ pub unsafe extern "C" fn sx_squad_new(config: *const SxSquadConfig) -> *mut SxSq
         Some(SxSquad {
             squad: Held::Own(squad),
             due: Vec::new(),
+            decider: std::ptr::null_mut(),
         })
     })
 }
@@ -891,8 +933,11 @@ pub unsafe extern "C" fn sx_squad_set_skill_table(
     let Some(table) = input!(table).table() else {
         return ERROR_ARGUMENT;
     };
-    s.set_skill_table(table);
-    0
+    if s.set_skill_table(table) {
+        0
+    } else {
+        ERROR_ARGUMENT
+    }
 }
 
 /// `sx_squad_skill_table`.
@@ -1028,7 +1073,7 @@ pub unsafe extern "C" fn sx_skill_table_pick_for(
     let Some((t, s)) = (unsafe { table_and_skill(table, skill) }) else {
         return ERROR_ARGUMENT;
     };
-    let level = SkillTable::level(s);
+    let level = t.level(s);
     let coded = SxSkillTable::of(&t);
     // SAFETY: non-null and writable (see above).
     unsafe {
@@ -1036,6 +1081,89 @@ pub unsafe extern "C" fn sx_skill_table_pick_for(
         top.write(coded.pick_top[level]);
     }
     0
+}
+
+/// `sx_squad_decider`: the squad's decider, lent until `sx_squad_free`;
+/// `sx_decider_free` does nothing to it. One handle per squad. Null for a
+/// null squad.
+///
+/// # Safety
+/// `squad` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_decider(squad: *mut SxSquad) -> *mut SxDecider {
+    // SAFETY: null or valid (see above).
+    let Some(s) = (unsafe { squad.as_mut() }) else {
+        return std::ptr::null_mut();
+    };
+    if s.decider.is_null() {
+        s.decider = create(|| {
+            Some(SxDecider::held(Held::Inside(Inside {
+                root: squad,
+                get: Squad::decider_mut,
+            })))
+        });
+    }
+    s.decider
+}
+
+/// `sx_score_event`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SxScoreEvent {
+    /// Index of the tactic.
+    pub tactic: u32,
+    /// The target's subject id (when `has_target`).
+    pub target: u32,
+    /// 1 if `target` is set.
+    pub has_target: u8,
+    /// The event; its candidate is the index in the candidate list.
+    pub event: SxDecideEvent,
+}
+
+/// `sx_squad_set_score_log`.
+///
+/// # Safety
+/// `squad` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_score_log(squad: *mut SxSquad, on: u32) -> i32 {
+    squad!(squad).set_score_log(on != 0);
+    0
+}
+
+/// `sx_squad_score_log`: returns how many events were written; `total` (may
+/// be null) gets the number of all of them.
+///
+/// # Safety
+/// `squad` is null or valid; `out` is null or has room for `cap` events;
+/// `total` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_score_log(
+    squad: *mut SxSquad,
+    out: *mut SxScoreEvent,
+    cap: u32,
+    total: *mut u32,
+) -> i32 {
+    let s = &mut squad!(squad);
+    if out.is_null() && cap > 0 {
+        return ERROR_ARGUMENT;
+    }
+    let log = s.score_log();
+    let mut written = 0usize;
+    for (i, e) in log.iter().take(cap as usize).enumerate() {
+        // SAFETY: within `cap` (see above).
+        unsafe {
+            out.add(i).write(SxScoreEvent {
+                tactic: u32::try_from(e.tactic).unwrap_or(u32::MAX),
+                target: e.target.unwrap_or(0),
+                has_target: u8::from(e.target.is_some()),
+                event: SxDecideEvent::of(e.event),
+            });
+        }
+        written += 1;
+    }
+    // SAFETY: null or writable (see above).
+    unsafe { put(total, u32::try_from(log.len()).unwrap_or(u32::MAX)) };
+    to_i32(written)
 }
 
 /// `sx_discipline`: the old name of `sx_skill_table_hold_bonus_for`.

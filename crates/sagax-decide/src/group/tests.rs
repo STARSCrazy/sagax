@@ -383,7 +383,7 @@ fn shipped_tactics_valid() {
 // ---- Squad planning ----
 
 use crate::memory::{Area, Fact};
-use crate::{Consideration, Curve, ONE};
+use crate::{Candidate, Combine, Consideration, Curve, DecideEvent, ONE};
 
 /// Fact kind the squad tests use for enemies.
 const ENEMY: u32 = 1;
@@ -1202,7 +1202,7 @@ fn hold_bonus_prevents_flicker() {
             ..tactics::rush()
         });
         assert!(sq.set_extra_columns(1));
-        sq.set_skill_table(table);
+        assert!(sq.set_skill_table(table));
         sq.set_skill(255);
         see(&mut sq, 10, 20, 0, 0);
         assert!(matches!(
@@ -1227,7 +1227,7 @@ fn hold_bonus_prevents_flicker() {
     assert_eq!(sq.check(9, &[0, 100], &[], 0), Ok(Status::Keep));
     // Without a bonus, 0.6 is enough.
     let mut sq = build(SkillTable {
-        hold_bonus: [0; 4],
+        hold_bonus: [0; 8],
         ..SkillTable::default()
     });
     assert!(matches!(
@@ -2155,7 +2155,8 @@ fn game_orders_first() {
     let w = s.walker(3);
     w.keeper.goal_postponed(20);
     w.keeper.suspend();
-    let give_up = SkillTable::default().give_up_ticks[SkillTable::level(192)];
+    let table = SkillTable::default();
+    let give_up = table.give_up_ticks[table.level(192)];
     assert!(150 > 20 + give_up);
     for t in 20..=150 {
         s.tick(t);
@@ -3030,4 +3031,126 @@ fn lost_target_switch_off_keeps_plan() {
     assert!(sq.knowledge_mut().remove(10, ENEMY));
     assert_eq!(sq.check(7, &[], &[], 0), Ok(Status::Keep));
     assert!(sq.active_plan().is_some());
+}
+
+// --- Skill rows, the squad's decider and the score log ---
+
+#[test]
+fn set_skill_table_rejects_rows() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    let before = *sq.skill_table();
+    for rows in [0, 9] {
+        let table = SkillTable {
+            rows,
+            think_ticks: [1; 8],
+            ..before
+        };
+        assert!(!sq.set_skill_table(table));
+        assert_eq!(*sq.skill_table(), before);
+    }
+    assert!(sq.set_skill_table(SkillTable { rows: 8, ..before }));
+    assert_eq!(sq.skill_table().rows, 8);
+    let bad = SquadConfig {
+        skill_table: SkillTable { rows: 9, ..before },
+        ..SquadConfig::default()
+    };
+    assert_eq!(Squad::new(bad).err(), Some(ZeroCapacity));
+}
+
+#[test]
+fn three_row_table_plans() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::rush());
+    assert!(sq.set_skill_table(SkillTable {
+        rows: 3,
+        think_ticks: [9, 6, 3, 3, 3, 3, 3, 3],
+        ..SkillTable::default()
+    }));
+    sq.set_skill(200);
+    see(&mut sq, 10, 20, 0, 0);
+    sq.plan(100, &[], &[], 0).unwrap().unwrap();
+    assert_eq!(sq.pending_plan().unwrap().active_at, 100 + 3);
+}
+
+#[test]
+fn decider_reachable() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    assert!(sq.set_extra_columns(2));
+    let a = sq.extra_start();
+    sq.add_tactic(Tactic {
+        considerations: vec![
+            Consideration::new(a as u32, Curve::Linear, 0, 100),
+            Consideration::new(a as u32 + 1, Curve::Linear, 0, 100),
+        ],
+        weight: ONE,
+        ..tactics::rush()
+    });
+    let mut row = vec![0; a + 2];
+    row[a] = 50;
+    row[a + 1] = 80;
+    let cand = Candidate::new(0, 10);
+    let product = sq.decider().score(cand, &row).unwrap();
+    assert!(
+        sq.decider_mut()
+            .set_option_combine(0, Some(Combine::Minimum))
+    );
+    let min = sq.decider().score(cand, &row).unwrap();
+    assert_eq!(min, ONE / 2);
+    assert_ne!(min, product);
+    assert_eq!(sq.validate(), Ok(()));
+    sq.decider_mut().add_option(ONE);
+    assert_eq!(sq.validate(), Err(PlanError::OptionsChanged));
+}
+
+#[test]
+fn score_log_lists_candidates() {
+    let mut sq = squad_of(Metric::Euclid, &four());
+    sq.add_tactic(tactics::rush());
+    sq.add_tactic(tactics::focus());
+    sq.set_skill(255);
+    see(&mut sq, 10, 20, 0, 0);
+    see(&mut sq, 11, 30, 0, 0);
+    sq.plan(0, &[], &[], 0).unwrap().unwrap();
+    assert!(sq.score_log().is_empty(), "off by default");
+    sq.set_score_log(true);
+    sq.plan(1, &[], &[], 0).unwrap().unwrap();
+    let scored: Vec<(usize, Option<u32>, u32)> = sq
+        .score_log()
+        .iter()
+        .filter_map(|e| match e.event {
+            DecideEvent::Scored { score, .. } => Some((e.tactic, e.target, score)),
+            _ => None,
+        })
+        .collect();
+    let keys: Vec<(usize, Option<u32>)> = scored.iter().map(|s| (s.0, s.1)).collect();
+    assert_eq!(
+        keys,
+        [(0, Some(10)), (0, Some(11)), (1, Some(10)), (1, Some(11))]
+    );
+    // The scores are the ones the plan used: rush is 1/4 flat, focus is
+    // weighted by the target distance.
+    assert_eq!(scored[0].2, ONE / 4);
+    assert_eq!(scored[1].2, ONE / 4);
+    assert!(scored[2].2 > scored[3].2);
+    let candidates: Vec<usize> = sq
+        .score_log()
+        .iter()
+        .filter_map(|e| match e.event {
+            DecideEvent::Scored { candidate, .. } => Some(candidate),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(candidates, [0, 1, 2, 3]);
+    assert!(
+        sq.score_log()
+            .iter()
+            .any(|e| matches!(e.event, DecideEvent::Factor { .. }))
+    );
+    // The next check scores again: the log holds that scoring only.
+    let before = sq.score_log().len();
+    let _ = sq.check(10, &[], &[], 0).unwrap();
+    assert_eq!(sq.score_log().len(), before);
+    sq.set_score_log(false);
+    let _ = sq.check(11, &[], &[], 0).unwrap();
+    assert!(sq.score_log().is_empty());
 }

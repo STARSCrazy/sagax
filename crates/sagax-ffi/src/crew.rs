@@ -219,6 +219,7 @@ pub unsafe extern "C" fn sx_crew_new(config: *const SxCrewConfig) -> *mut SxCrew
             get: squad_of,
         }),
         due: Vec::new(),
+        decider: std::ptr::null_mut(),
     }));
     // SAFETY: `root` was just made by `create` (Box::into_raw) and nothing
     // else refers to it yet.

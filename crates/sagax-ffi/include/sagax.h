@@ -1103,26 +1103,30 @@ int32_t sx_tactic_trigger_manual(sx_tactic *tactic);
 
 /* -- skill: how well a squad plans and acts -- */
 
-/* What a squad's skill changes, in four levels: skill / 64 (0 weak ..
- * 3 elite). Times in the game's ticks. */
+/* What a squad's skill changes, in rows 0 .. rows - 1 (1 to 8 rows): a
+ * skill (0 .. 255) takes row skill * rows / 256 (0 weak, the last row
+ * elite). Entries beyond rows are unused. Times in the game's ticks. */
 typedef struct sx_skill_table {
-	uint32_t pick[4];           /* SX_PICK_*: how the tactic is chosen */
-	uint32_t pick_top[4];       /* how many of the best take part (0 all) */
-	uint32_t think_ticks[4];    /* from making a plan until it is active */
-	uint32_t timing_spread[4];  /* most ticks a member starts late (by seed) */
-	uint32_t hold_bonus[4];     /* SX_ONE = 1.0: a new plan must score more than the active
+	uint32_t rows;              /* 1 .. 8 */
+	uint32_t pick[8];           /* SX_PICK_*: how the tactic is chosen */
+	uint32_t pick_top[8];       /* how many of the best take part (0 all) */
+	uint32_t think_ticks[8];    /* from making a plan until it is active */
+	uint32_t timing_spread[8];  /* most ticks a member starts late (by seed) */
+	uint32_t hold_bonus[8];     /* SX_ONE = 1.0: a new plan must score more than the active
 	                             * one times 1 + bonus; also the members' discipline */
-	uint32_t give_up_ticks[4];  /* how long a member may postpone its goal */
-	uint8_t spot_rank_error[4]; /* most ranks a spot may be off the best (by seed) */
+	uint32_t give_up_ticks[8];  /* how long a member may postpone its goal */
+	uint8_t spot_rank_error[8]; /* most ranks a spot may be off the best (by seed) */
 } sx_skill_table;
 
-/* The default table: weak squads pick by chance among the top 3, think 34
- * ticks, miss spots by up to 2 ranks and start up to 17 ticks apart; elite
- * squads pick the best, think 5 ticks and start together. Returns 0. */
+/* The default table: 4 rows (the other four copy the last). Weak squads
+ * pick by chance among the top 3, think 34 ticks, miss spots by up to 2
+ * ranks and start up to 17 ticks apart; elite squads pick the best, think 5
+ * ticks and start together. Returns 0. */
 int32_t sx_skill_table_default(sx_skill_table *out);
 /* One entry of the table at the level of a member's own skill (0 .. 255,
- * level skill / 64); table null: the default. Return it, or SX_ERROR_ARGUMENT
- * (for a skill above 255 or a table with a bad pick). hold_bonus is also the
+ * row skill * rows / 256); table null: the default. Return it, or
+ * SX_ERROR_ARGUMENT (for a skill above 255, rows 0 or above 8, or a table
+ * with a bad pick). hold_bonus is also the
  * member's discipline (SX_ONE = 1.0). */
 int64_t sx_skill_table_think_ticks_for(const sx_skill_table *table, uint32_t skill);
 int64_t sx_skill_table_timing_spread_for(const sx_skill_table *table, uint32_t skill);
@@ -1244,12 +1248,41 @@ int32_t sx_squad_leader(sx_squad *squad, uint32_t *id);
 int32_t sx_squad_set_skill(sx_squad *squad, uint32_t skill);
 /* Returns the skill (0 .. 255). */
 int32_t sx_squad_skill(sx_squad *squad);
-/* Returns 0; SX_ERROR_ARGUMENT for an unknown pick (the table is then not
- * changed). */
+/* Returns 0; SX_ERROR_ARGUMENT for an unknown pick or rows 0 or above 8 (the
+ * table is then not changed). */
 int32_t sx_squad_set_skill_table(sx_squad *squad, const sx_skill_table *table);
 /* Fill *out with the squad's table. Returns 0; SX_ERROR_ARGUMENT for a null
  * out. */
 int32_t sx_squad_skill_table(sx_squad *squad, sx_skill_table *out);
+
+/* The decider that scores the squad's tactics: option i is tactic i. Lent:
+ * sx_decider_free does nothing to it, it is valid until sx_squad_free (a
+ * crew's squad: until sx_crew_free), and the same handle comes back each
+ * time. Its combine, rank, cooldown and current action are free to change
+ * (its own sx_decider_* calls); adding options or considerations is not:
+ * sx_squad_validate, plan and check then return SX_ERROR_PLAN with tactic
+ * and input UINT32_MAX when the option count no longer matches the tactics.
+ * Null for a null squad. */
+sx_decider *sx_squad_decider(sx_squad *squad);
+
+/* One event of the last scoring in sx_squad_plan or sx_squad_check. */
+typedef struct sx_score_event {
+	uint32_t tactic;            /* the tactic's index */
+	uint32_t target;            /* the candidate's target (subject id), if has_target */
+	uint8_t has_target;         /* 0 for a tactic without a target */
+	sx_decide_event event;      /* SX_DECIDE_FACTOR or SX_DECIDE_SCORED; candidate is the
+	                             * index in the candidate list (tactic order, then target
+	                             * order) */
+} sx_score_event;
+
+/* Switch the score log on (on != 0) or off (default; off clears it).
+ * Returns 0. */
+int32_t sx_squad_set_score_log(sx_squad *squad, uint32_t on);
+/* The events of the last scoring in plan or check (cleared at its start;
+ * empty while off): the first cap go to out (may be null if cap is 0).
+ * Returns how many were written; total (may be null) gets how many there
+ * are. */
+int32_t sx_squad_score_log(sx_squad *squad, sx_score_event *out, uint32_t cap, uint32_t *total);
 /* How orders (and reports) reach the member; the default is radio 0, 0: at
  * once. The leader always has its own orders at once. Distances run from the
  * leader in the squad's metric (Euclid: the root). Each returns 1, or 0 if
@@ -1357,10 +1390,11 @@ int32_t sx_squad_add_fall_back(sx_squad *squad);
  * then). */
 int32_t sx_squad_add_tactic(sx_squad *squad, sx_tactic *tactic);
 /* Check that every consideration reads a column the rows have (SX_IN_EXTRA
- * + extra columns, or a decider memory input) and no tactic has more than
- * 255 slots. Returns 0, or SX_ERROR_PLAN with the tactic's index and the
+ * + extra columns, or a decider memory input), no tactic has more than
+ * 255 slots and the squad's decider (sx_squad_decider) still has one option
+ * per tactic. Returns 0, or SX_ERROR_PLAN with the tactic's index and the
  * column (UINT32_MAX for too many slots) to *tactic and *input (each may be
- * null). plan and check run this first. */
+ * null); both UINT32_MAX for a changed option count. plan and check run this first. */
 int32_t sx_squad_validate(sx_squad *squad, uint32_t *tactic, uint32_t *input);
 
 /* Make a new plan and keep it pending; it becomes active think_ticks (from
@@ -1716,9 +1750,11 @@ _Static_assert(offsetof(sx_slot, place) == 8, "sx_slot.place layout");
 _Static_assert(offsetof(sx_slot, gather) == 28, "sx_slot.gather layout");
 _Static_assert(offsetof(sx_slot, dist) == 68, "sx_slot.dist layout");
 _Static_assert(offsetof(sx_slot, gather_dist) == 72, "sx_slot.gather_dist layout");
-_Static_assert(sizeof(sx_skill_table) == 100, "sx_skill_table layout");
-_Static_assert(offsetof(sx_skill_table, hold_bonus) == 64, "sx_skill_table.hold_bonus layout");
-_Static_assert(offsetof(sx_skill_table, spot_rank_error) == 96, "sx_skill_table.spot_rank_error layout");
+_Static_assert(sizeof(sx_skill_table) == 204, "sx_skill_table layout");
+_Static_assert(offsetof(sx_skill_table, hold_bonus) == 132, "sx_skill_table.hold_bonus layout");
+_Static_assert(offsetof(sx_skill_table, spot_rank_error) == 196, "sx_skill_table.spot_rank_error layout");
+_Static_assert(sizeof(sx_score_event) == 36, "sx_score_event layout");
+_Static_assert(offsetof(sx_score_event, event) == 12, "sx_score_event.event layout");
 _Static_assert(sizeof(sx_goal) == 68, "sx_goal layout");
 _Static_assert(offsetof(sx_goal, pos) == 8, "sx_goal.pos layout");
 _Static_assert(offsetof(sx_goal, then_pos) == 20, "sx_goal.then_pos layout");

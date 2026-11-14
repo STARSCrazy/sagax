@@ -800,7 +800,7 @@ const DECIDE_STRIDE: usize = 6;
 
 /// A decider with its buffers.
 pub struct WasmDecider {
-    decider: Decider,
+    decider: Held<Decider>,
     input: Vec<i32>,
     candidates: Vec<Candidate>,
     rows: Vec<i32>,
@@ -824,7 +824,7 @@ macro_rules! decider {
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_decider_new() -> *mut WasmDecider {
     Box::into_raw(Box::new(WasmDecider {
-        decider: Decider::new(),
+        decider: Held::Own(Decider::new()),
         input: Vec::new(),
         candidates: Vec::new(),
         rows: Vec::new(),
@@ -835,15 +835,23 @@ pub extern "C" fn sx_decider_new() -> *mut WasmDecider {
     }))
 }
 
-/// Frees a decider.
+/// Frees a decider; does nothing for the squad's (see [`sx_squad_decider`]),
+/// which is freed with the squad.
 ///
 /// # Safety
-/// `d` is null or from [`sx_decider_new`] and not used again.
+/// `d` is null, from [`sx_decider_new`] and not used again, or from
+/// [`sx_squad_decider`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_decider_free(d: *mut WasmDecider) {
-    if !d.is_null() {
+    // SAFETY: null or valid (see above).
+    match unsafe { d.as_ref() } {
+        None
+        | Some(WasmDecider {
+            decider: Held::Via { .. },
+            ..
+        }) => {}
         // SAFETY: see above.
-        drop(unsafe { Box::from_raw(d) });
+        Some(_) => drop(unsafe { Box::from_raw(d) }),
     }
 }
 
@@ -2524,9 +2532,14 @@ const GOAL_SIZE: usize = 20;
 // An order record is the member's id and a goal record (21 numbers); a
 // plan record is id, tactic, target, made at, active at, goal count, has
 // target (7 numbers), then one order record per goal.
-/// Numbers per skill table: pick, pick top, think ticks, timing spread, hold
-/// bonus, give up ticks, spot rank error; four levels each.
-const SKILL_SIZE: usize = 28;
+/// Numbers per skill table: the rows, then pick, pick top, think ticks,
+/// timing spread, hold bonus, give up ticks, spot rank error; eight levels
+/// each.
+const SKILL_SIZE: usize = 1 + 7 * 8;
+/// Numbers per score log event: tactic, target, has target, then the
+/// decision event (kind 1 factor or 2 scored, candidate, consideration,
+/// input, value, score).
+const SCORE_STRIDE: usize = 9;
 
 /// The first `count` numbers of the scratch buffer, copied.
 fn scratch_copy(count: usize) -> Option<Vec<i32>> {
@@ -2652,30 +2665,34 @@ fn put_order(out: &mut Vec<i32>, member: u32, goal: &Goal) {
 fn skill_record(t: &SkillTable) -> [i32; SKILL_SIZE] {
     let c = convert::skill_codes(t);
     let mut r = [0; SKILL_SIZE];
-    for i in 0..4 {
-        r[i] = c.pick[i] as i32;
-        r[4 + i] = c.pick_top[i] as i32;
-        r[8 + i] = c.think_ticks[i] as i32;
-        r[12 + i] = c.timing_spread[i] as i32;
-        r[16 + i] = c.hold_bonus[i] as i32;
-        r[20 + i] = c.give_up_ticks[i] as i32;
-        r[24 + i] = i32::from(c.spot_rank_error[i]);
+    r[0] = c.rows as i32;
+    for i in 0..8 {
+        r[1 + i] = c.pick[i] as i32;
+        r[9 + i] = c.pick_top[i] as i32;
+        r[17 + i] = c.think_ticks[i] as i32;
+        r[25 + i] = c.timing_spread[i] as i32;
+        r[33 + i] = c.hold_bonus[i] as i32;
+        r[41 + i] = c.give_up_ticks[i] as i32;
+        r[49 + i] = i32::from(c.spot_rank_error[i]);
     }
     r
 }
 
-/// The table of a record; `None` for an unknown pick or a negative number
-/// (a skill table has no negative entry).
+/// The table of a record; `None` for rows 0 or above 8, an unknown pick or a
+/// negative number (a skill table has no negative entry).
 fn skill_from(r: &[i32]) -> Option<SkillTable> {
-    let mut c = SkillCodes::default();
-    for i in 0..4 {
-        c.pick[i] = u32_of(r[i])?;
-        c.pick_top[i] = u32_of(r[4 + i])?;
-        c.think_ticks[i] = u32_of(r[8 + i])?;
-        c.timing_spread[i] = u32_of(r[12 + i])?;
-        c.hold_bonus[i] = u32_of(r[16 + i])?;
-        c.give_up_ticks[i] = u32_of(r[20 + i])?;
-        c.spot_rank_error[i] = u8::try_from(r[24 + i]).ok()?;
+    let mut c = SkillCodes {
+        rows: u32_of(r[0])?,
+        ..SkillCodes::default()
+    };
+    for i in 0..8 {
+        c.pick[i] = u32_of(r[1 + i])?;
+        c.pick_top[i] = u32_of(r[9 + i])?;
+        c.think_ticks[i] = u32_of(r[17 + i])?;
+        c.timing_spread[i] = u32_of(r[25 + i])?;
+        c.hold_bonus[i] = u32_of(r[33 + i])?;
+        c.give_up_ticks[i] = u32_of(r[41 + i])?;
+        c.spot_rank_error[i] = u8::try_from(r[49 + i]).ok()?;
     }
     convert::skill_table(&c)
 }
@@ -3009,7 +3026,7 @@ pub unsafe extern "C" fn sx_tactic_trigger_manual(t: *mut WasmTactic) -> i32 {
     0
 }
 
-/// The default skill table (28 numbers) in the scratch buffer. Returns 0.
+/// The default skill table (57 numbers) in the scratch buffer. Returns 0.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_skill_table_default() -> i32 {
     scratch_put(&skill_record(&SkillTable::default()));
@@ -3058,8 +3075,8 @@ pub extern "C" fn sx_skill_pick_for(skill: u32, custom: u32) -> i32 {
         return ERROR_ARGUMENT;
     };
     let record = skill_record(&t);
-    let level = SkillTable::level(s);
-    scratch_put(&[record[level], record[4 + level]]);
+    let level = t.level(s);
+    scratch_put(&[record[1 + level], record[9 + level]]);
     0
 }
 
@@ -3082,6 +3099,8 @@ pub struct WasmSquad {
     /// Handles onto the squad's own knowledge and areas, freed with it.
     knowledge: *mut WasmKnowledge,
     areas: *mut WasmAreas,
+    /// The handle on the squad's decider, freed with it.
+    decider: *mut WasmDecider,
 }
 
 macro_rules! squad {
@@ -3137,6 +3156,7 @@ fn boxed_squad(squad: Held<Squad>) -> *mut WasmSquad {
         due: Vec::new(),
         knowledge: std::ptr::null_mut(),
         areas: std::ptr::null_mut(),
+        decider: std::ptr::null_mut(),
     }));
     // SAFETY: `s` was just made; the squad stays at this address until
     // drop_squad, which frees the two handles first.
@@ -3156,11 +3176,24 @@ fn boxed_squad(squad: Held<Squad>) -> *mut WasmSquad {
             },
             record: [0; AREA_SIZE],
         }));
+        (*s).decider = Box::into_raw(Box::new(WasmDecider {
+            decider: Held::Via {
+                root: s,
+                get: Squad::decider_mut,
+            },
+            input: Vec::new(),
+            candidates: Vec::new(),
+            rows: Vec::new(),
+            scores: Vec::new(),
+            trace_on: false,
+            trace: Vec::new(),
+            out: Vec::new(),
+        }));
     }
     s
 }
 
-/// Frees a squad handle from [`boxed_squad`] with its two handles.
+/// Frees a squad handle from [`boxed_squad`] with its three handles.
 ///
 /// # Safety
 /// `s` is from [`boxed_squad`] and not used again.
@@ -3170,6 +3203,7 @@ unsafe fn drop_squad(s: *mut WasmSquad) {
         let w = Box::from_raw(s);
         drop(Box::from_raw(w.knowledge));
         drop(Box::from_raw(w.areas));
+        drop(Box::from_raw(w.decider));
     }
 }
 
@@ -3220,6 +3254,68 @@ pub unsafe extern "C" fn sx_squad_knowledge(s: *mut WasmSquad) -> *mut WasmKnowl
 pub unsafe extern "C" fn sx_squad_areas(s: *mut WasmSquad) -> *mut WasmAreas {
     // SAFETY: see above.
     unsafe { s.as_ref() }.map_or(std::ptr::null_mut(), |w| w.areas)
+}
+
+/// The squad's decider (option `i` is tactic `i`), for every `sx_decider_*`
+/// call that does not add options. It belongs to the squad
+/// (sx_decider_free does nothing to it); the same handle comes back each
+/// time.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_decider(s: *mut WasmSquad) -> *mut WasmDecider {
+    // SAFETY: see above.
+    unsafe { s.as_ref() }.map_or(std::ptr::null_mut(), |w| w.decider)
+}
+
+/// Switches the score log on (1) or off (0, clears it). Returns 0.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_score_log(s: *mut WasmSquad, on: i32) -> i32 {
+    squad!(s).squad.set_score_log(on != 0);
+    0
+}
+
+/// Moves the events of the last scoring in plan or check to the out buffer
+/// (9 numbers each, see `SCORE_STRIDE`) and returns how many.
+///
+/// # Safety
+/// `s` from [`sx_squad_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_score_log(s: *mut WasmSquad) -> i32 {
+    let w = squad!(s);
+    w.out.clear();
+    for e in w.squad.score_log() {
+        let (kind, candidate, consideration, input, value, score) = match e.event {
+            DecideEvent::Factor {
+                candidate,
+                consideration,
+                input,
+                value,
+            } => (1, candidate, to_i32(consideration), input, value, 0),
+            DecideEvent::Scored {
+                candidate,
+                product,
+                score,
+            } => (2, candidate, -1, 0, product, score),
+            DecideEvent::Chosen { candidate, score } => (3, candidate, -1, 0, 0, score),
+        };
+        w.out.extend([
+            to_i32(e.tactic),
+            e.target.unwrap_or(0) as i32,
+            i32::from(e.target.is_some()),
+            kind,
+            to_i32(candidate),
+            consideration,
+            input,
+            value as i32,
+            score as i32,
+        ]);
+    }
+    to_i32(w.out.len() / SCORE_STRIDE)
 }
 
 /// Adds the member record (7 numbers) in the scratch buffer at the end.
@@ -3354,8 +3450,9 @@ pub unsafe extern "C" fn sx_squad_skill(s: *mut WasmSquad) -> i32 {
     i32::from(squad!(s).squad.skill())
 }
 
-/// Sets the skill table from the scratch buffer (28 numbers). Returns 0;
-/// -1 for an unknown pick or a spot rank error above 255.
+/// Sets the skill table from the scratch buffer (57 numbers). Returns 0;
+/// -1 for an unknown pick, rows 0 or above 8, or a spot rank error above
+/// 255 (nothing changes).
 ///
 /// # Safety
 /// `s` from [`sx_squad_new`].
@@ -3365,11 +3462,14 @@ pub unsafe extern "C" fn sx_squad_set_skill_table(s: *mut WasmSquad) -> i32 {
     let Some(table) = scratch_copy(SKILL_SIZE).as_deref().and_then(skill_from) else {
         return ERROR_ARGUMENT;
     };
-    w.squad.set_skill_table(table);
-    0
+    if w.squad.set_skill_table(table) {
+        0
+    } else {
+        ERROR_ARGUMENT
+    }
 }
 
-/// The skill table (28 numbers) to the out buffer. Returns 0.
+/// The skill table (57 numbers) to the out buffer. Returns 0.
 ///
 /// # Safety
 /// `s` from [`sx_squad_new`].
@@ -3654,7 +3754,8 @@ fn plan_error_to(out: &mut Vec<i32>, e: PlanError) -> i32 {
     // No column: -1 in the out buffer.
     let (code, tactic, input) = convert::plan_error(e);
     out.clear();
-    out.extend([to_i32(tactic), input as i32]);
+    // `u32::MAX` (no tactic or column) is -1.
+    out.extend([tactic as i32, input as i32]);
     code
 }
 

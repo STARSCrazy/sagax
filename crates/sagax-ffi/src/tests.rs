@@ -999,7 +999,8 @@ mod squad {
         assert_eq!(size_of::<SxGoal>(), 68);
         assert_eq!(size_of::<SxOrder>(), 72);
         assert_eq!(size_of::<SxPlan>(), 28);
-        assert_eq!(size_of::<SxSkillTable>(), 100);
+        assert_eq!(size_of::<SxSkillTable>(), 204);
+        assert_eq!(size_of::<SxScoreEvent>(), 36);
         assert_eq!(define("SX_API_VERSION"), 9);
         assert_eq!(define("SX_ERROR_PLAN"), i64::from(ERROR_PLAN));
         assert_eq!(define("SX_IDLE"), i64::from(IDLE));
@@ -1223,6 +1224,7 @@ mod squad {
         ];
         assert_eq!(plan, [0, 4, 8, 12, 16, 20, 24]);
         let table = [
+            offset_of!(SxSkillTable, rows),
             offset_of!(SxSkillTable, pick),
             offset_of!(SxSkillTable, pick_top),
             offset_of!(SxSkillTable, think_ticks),
@@ -1231,7 +1233,8 @@ mod squad {
             offset_of!(SxSkillTable, give_up_ticks),
             offset_of!(SxSkillTable, spot_rank_error),
         ];
-        assert_eq!(table, [0, 16, 32, 48, 64, 80, 96]);
+        assert_eq!(table, [0, 4, 36, 68, 100, 132, 164, 196]);
+        assert_eq!(offset_of!(SxScoreEvent, event), 12);
     }
 
     #[test]
@@ -1992,24 +1995,195 @@ mod squad {
         unsafe {
             let mut table = SxSkillTable::default();
             assert_eq!(sx_skill_table_default(&mut table), 0);
-            assert_eq!(table.think_ticks, [34, 20, 10, 5]);
-            assert_eq!(table.pick, [1, 1, 1, 0]);
-            assert_eq!(table.pick_top, [3, 2, 2, 0]);
-            assert_eq!(table.spot_rank_error, [2, 1, 1, 0]);
+            assert_eq!(table.rows, 4);
+            assert_eq!(table.think_ticks, [34, 20, 10, 5, 5, 5, 5, 5]);
+            assert_eq!(table.pick, [1, 1, 1, 0, 0, 0, 0, 0]);
+            assert_eq!(table.pick_top, [3, 2, 2, 0, 0, 0, 0, 0]);
+            assert_eq!(table.spot_rank_error, [2, 1, 1, 0, 0, 0, 0, 0]);
             assert_eq!(sx_discipline(0, &table), i32::from(u16::MAX) / 8);
             assert_eq!(sx_discipline(255, null()), i32::from(u16::MAX) / 2);
             assert_eq!(sx_discipline(256, null()), ERROR_ARGUMENT);
 
             let sq = squad_of(CHEBYSHEV, &[(1, 0, 0), (2, 1, 0)]);
-            table.think_ticks = [1, 2, 3, 4];
+            table.think_ticks = [1, 2, 3, 4, 4, 4, 4, 4];
             assert_eq!(sx_squad_set_skill_table(sq, &table), 0);
             let mut back = SxSkillTable::default();
             assert_eq!(sx_squad_skill_table(sq, &mut back), 0);
-            assert_eq!(back.think_ticks, [1, 2, 3, 4]);
+            assert_eq!(back.think_ticks, [1, 2, 3, 4, 4, 4, 4, 4]);
             table.pick[2] = 3;
             assert_eq!(sx_squad_set_skill_table(sq, &table), ERROR_ARGUMENT);
             assert_eq!(sx_squad_skill_table(sq, &mut back), 0);
             assert_eq!(back.pick[2], 1, "a refused table changes nothing");
+            sx_squad_free(sq);
+        }
+    }
+
+    #[test]
+    fn skill_table_rows() {
+        unsafe {
+            let sq = squad_of(CHEBYSHEV, &[(1, 0, 0), (2, 1, 0)]);
+            let mut table = SxSkillTable::default();
+            assert_eq!(sx_skill_table_default(&mut table), 0);
+            for rows in [0, 9] {
+                table.rows = rows;
+                assert_eq!(sx_squad_set_skill_table(sq, &table), ERROR_ARGUMENT);
+            }
+            let mut back = SxSkillTable::default();
+            assert_eq!(sx_squad_skill_table(sq, &mut back), 0);
+            assert_eq!(back.rows, 4, "a refused table changes nothing");
+            // Three rows: skill 200 is level 2.
+            table.rows = 3;
+            table.think_ticks = [9, 6, 3, 3, 3, 3, 3, 3];
+            assert_eq!(sx_squad_set_skill_table(sq, &table), 0);
+            assert_eq!(sx_squad_skill_table(sq, &mut back), 0);
+            assert_eq!(back, table);
+            assert_eq!(sx_skill_table_think_ticks_for(&table, 200), 3);
+            assert_eq!(sx_skill_table_think_ticks_for(&table, 85), 9);
+            assert_eq!(sx_skill_table_think_ticks_for(&table, 86), 6);
+            table.rows = 9;
+            assert_eq!(
+                sx_skill_table_think_ticks_for(&table, 0),
+                i64::from(ERROR_ARGUMENT)
+            );
+            sx_squad_free(sq);
+        }
+    }
+
+    /// A squad with one tactic scored on two extra columns (50 and 80 of 100).
+    unsafe fn two_factor_squad() -> *mut SxSquad {
+        unsafe {
+            let sq = squad_of(CHEBYSHEV, &[(1, 0, 0), (2, 1, 0)]);
+            assert_eq!(sx_squad_set_extra_columns(sq, 2), 0);
+            let first = sx_squad_extra_start(sq) as u32;
+            let tactic = sx_tactic_new(ONE_WEIGHT, 0, 0);
+            for input in [first, first + 1] {
+                let c = SxConsideration {
+                    input,
+                    curve: 0,
+                    min: 0,
+                    max: 100,
+                };
+                assert_eq!(sx_tactic_add_consideration(tactic, &c), 0);
+            }
+            let slot = SxSlot {
+                min: 1,
+                max: 1,
+                place: SxPlace {
+                    kind: PLACE_HERE,
+                    ..SxPlace::default()
+                },
+                kind: GOAL_HOLD,
+                ..SxSlot::default()
+            };
+            assert_eq!(sx_tactic_add_slot(tactic, &slot), 0);
+            assert_eq!(sx_squad_add_tactic(sq, tactic), 0);
+            sq
+        }
+    }
+
+    unsafe fn tactic_score(sq: *mut SxSquad) -> u32 {
+        use crate::decide::{SxCandidate, SxChoice, sx_decider_decide};
+        unsafe {
+            let first = sx_squad_extra_start(sq) as usize;
+            let mut row = vec![0i32; first + 2];
+            row[first] = 50;
+            row[first + 1] = 80;
+            let cand = SxCandidate {
+                option: 0,
+                target: 0,
+            };
+            let (mut score, mut choice) = (0u32, SxChoice::default());
+            let d = sx_squad_decider(sq);
+            assert_eq!(
+                sx_decider_decide(
+                    d,
+                    &cand,
+                    1,
+                    row.as_ptr(),
+                    row.len() as i32,
+                    0,
+                    0,
+                    0,
+                    &mut score,
+                    &mut choice
+                ),
+                1
+            );
+            score
+        }
+    }
+
+    #[test]
+    fn lent_squad_decider() {
+        use crate::decide::{sx_decider_free, sx_decider_set_combine};
+        unsafe {
+            let sq = two_factor_squad();
+            let d = sx_squad_decider(sq);
+            assert!(!d.is_null());
+            assert_eq!(sx_squad_decider(sq), d, "one handle per squad");
+            let product = tactic_score(sq);
+            assert_eq!(sx_decider_set_combine(d, 0, 2), 0);
+            let min = tactic_score(sq);
+            assert!(min.abs_diff(ONE_WEIGHT / 2) <= 1, "{min}");
+            assert_ne!(min, product);
+            // Freeing a lent decider does nothing.
+            sx_decider_free(d);
+            assert_eq!(sx_decider_set_combine(d, 0, 0), 0);
+            assert_eq!(tactic_score(sq), product);
+            // A changed option count is a plan error.
+            assert_eq!(sx_squad_validate(sq, null_mut(), null_mut()), 0);
+            assert_eq!(crate::decide::sx_decider_add_option(d, ONE_WEIGHT), 1);
+            let (mut tactic, mut input) = (0, 0);
+            assert_eq!(sx_squad_validate(sq, &mut tactic, &mut input), ERROR_PLAN);
+            assert_eq!((tactic, input), (u32::MAX, u32::MAX));
+            assert!(sx_squad_decider(null_mut()).is_null());
+            sx_squad_free(sq);
+        }
+    }
+
+    #[test]
+    fn score_log_cap_and_total() {
+        unsafe {
+            let sq = squad_of(CHEBYSHEV, &[(1, 0, 0), (2, 1, 0), (3, 0, 1), (4, 1, 1)]);
+            assert_eq!(sx_squad_add_rush(sq), 0);
+            assert_eq!(sx_squad_add_focus(sq), 1);
+            assert_eq!(sx_squad_set_skill(sq, 255), 0);
+            assert_eq!(sx_squad_observe(sq, 0, &enemy(E1, 20, 0), null_mut()), 0);
+            assert_eq!(sx_squad_observe(sq, 0, &enemy(E2, 30, 0), null_mut()), 0);
+            let mut id = 0;
+            assert_eq!(sx_squad_plan(sq, 1, null(), 0, null(), 0, 0, &mut id), 1);
+            let mut total = 99;
+            assert_eq!(sx_squad_score_log(sq, null_mut(), 0, &mut total), 0);
+            assert_eq!(total, 0, "off by default");
+            assert_eq!(sx_squad_set_score_log(sq, 1), 0);
+            assert_eq!(sx_squad_plan(sq, 2, null(), 0, null(), 0, 0, &mut id), 1);
+            assert_eq!(sx_squad_score_log(sq, null_mut(), 0, &mut total), 0);
+            // Four candidates, scored events at least; focus has a factor each.
+            assert!(total >= 6, "{total}");
+            let mut all = vec![SxScoreEvent::default(); total as usize];
+            assert_eq!(
+                sx_squad_score_log(sq, all.as_mut_ptr(), total, null_mut()),
+                total as i32
+            );
+            let scored: Vec<(u32, u32, u8)> = all
+                .iter()
+                .filter(|e| e.event.kind == 2)
+                .map(|e| (e.tactic, e.target, e.has_target))
+                .collect();
+            assert_eq!(scored, [(0, E1, 1), (0, E2, 1), (1, E1, 1), (1, E2, 1)]);
+            // A smaller cap writes that many and still counts all.
+            let mut two = [SxScoreEvent::default(); 2];
+            let mut seen = 0;
+            assert_eq!(sx_squad_score_log(sq, two.as_mut_ptr(), 2, &mut seen), 2);
+            assert_eq!((seen, two[0], two[1]), (total, all[0], all[1]));
+            assert_eq!(
+                sx_squad_score_log(sq, null_mut(), 1, &mut seen),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(sx_squad_set_score_log(sq, 0), 0);
+            assert_eq!(sx_squad_score_log(sq, null_mut(), 0, &mut seen), 0);
+            assert_eq!(seen, 0);
+            assert_eq!(sx_squad_set_score_log(null_mut(), 1), ERROR_ARGUMENT);
             sx_squad_free(sq);
         }
     }
@@ -2593,8 +2767,8 @@ mod conventions {
         use crate::crew::{SxCrewConfig, SxCrewEvent, SxMemberInputs};
         use crate::decide::{SxCandidate, SxChoice, SxConsideration, SxDecideEvent};
         use crate::group::{
-            SxGatherCandidate, SxGoal, SxMember, SxOrder, SxPlace, SxPlan, SxSkillTable, SxSlot,
-            SxSpot, SxSquadConfig,
+            SxGatherCandidate, SxGoal, SxMember, SxOrder, SxPlace, SxPlan, SxScoreEvent,
+            SxSkillTable, SxSlot, SxSpot, SxSquadConfig,
         };
         use crate::machine::SxChange;
         use crate::memory::{
@@ -2654,6 +2828,7 @@ mod conventions {
                 gather_dist
             ),
             layout!("sx_skill_table", SxSkillTable, hold_bonus, spot_rank_error),
+            layout!("sx_score_event", SxScoreEvent, event),
             layout!(
                 "sx_goal",
                 SxGoal,

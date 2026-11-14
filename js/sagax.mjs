@@ -575,11 +575,19 @@ const DECIDE_TRACE = [null, 'factor', 'scored', 'chosen'];
  *   // c: {index, option, target, score, scores} or null if every score is 0
  */
 export class Decider extends Handle {
-  constructor(x) {
+  /** A lent decider (the squad's, see Squad.decider) comes with its owner: the squad frees it. */
+  constructor(x, lent = null) {
     super();
     this.x = x;
-    this.handle = x.sx_decider_new();
+    this.owner = lent ? lent.owner : null;
+    this.handle = lent ? lent.handle : x.sx_decider_new();
     this.inputCount = 0;
+  }
+
+  get h() {
+    const handle = super.h;
+    if (this.owner) void this.owner.h; // throws after the owner was freed
+    return handle;
   }
 
   /**
@@ -726,7 +734,9 @@ export class Decider extends Handle {
     return events;
   }
 
+  /** Frees the decider. Using it afterwards throws. The squad's own decider is freed with the squad (this does nothing). */
   free() {
+    if (this.owner) return;
     if (this.handle) this.x.sx_decider_free(this.handle);
     this.handle = 0;
   }
@@ -1720,18 +1730,25 @@ const MEMBER_SIZE = 7;
 const GOAL_SIZE = 20;
 const ORDER_SIZE = 21;
 const PLAN_SIZE = 7;
-const SKILL_SIZE = 28;
+const SKILL_SIZE = 1 + 7 * 8;
+const SCORE_SIZE = 9;
+const MAX_SKILL_ROWS = 8;
 const I32_MIN = -0x80000000;
 const I32_MAX = 0x7fffffff;
 
 /** A tactic reads a column the scoring rows do not have (see Squad.validate). */
 export class PlanError extends RangeError {
   constructor(tactic, input) {
-    super(`Sagax: tactic ${tactic} reads column ${input}, beyond the row`);
+    super(tactic === 0xffffffff && input === 0xffffffff
+      ? "Sagax: the squad's decider has a different number of options than the squad has tactics"
+      : `Sagax: tactic ${tactic} reads column ${input}, beyond the row`);
     this.tactic = tactic;
     this.input = input;
   }
 }
+
+/** The PlanError of the out buffer's tactic and column (-1 is none: UINT32_MAX). */
+const planErrorOf = ([tactic, input]) => new PlanError(tactic === -1 ? u32(tactic) : tactic, u32(input));
 
 /** An integer from lo to hi: a TypeError if v is not a number at all, else a RangeError if it is not a whole number in range. */
 function intIn(v, lo, hi, what) {
@@ -1789,10 +1806,17 @@ function bitsOf(v, table, what) {
 /** A skill table entry: a whole number from 0 to 2147483647 (the module reads the numbers as i32). */
 const entryOf = (v, what) => intIn(v, 0, I32_MAX, what);
 
-/** Four numbers of a skill table row, checked. */
-function levels(list, check, what) {
-  if (!Array.isArray(list) || list.length !== 4) throw new RangeError(`Sagax: ${what} must have 4 levels`);
-  return list.map((v) => check(v, what));
+/** The rows of a skill table, 1 to 8. */
+function rowsOf(t) {
+  return intIn(t?.rows, 1, MAX_SKILL_ROWS, 'rows');
+}
+
+/** The rows numbers of a skill table entry, checked, padded to 8 with the last. */
+function levels(list, check, what, rows) {
+  if (!Array.isArray(list) || list.length !== rows) throw new RangeError(`Sagax: ${what} must have ${rows} levels (rows)`);
+  const checked = list.map((v) => check(v, what));
+  while (checked.length < MAX_SKILL_ROWS) checked.push(checked[rows - 1]);
+  return checked;
 }
 
 /** Writes integers (u32 as their bit pattern) to the scratch buffer. */
@@ -1867,21 +1891,25 @@ function ordersOf(all, n, from = 0) {
 }
 
 function skillValues(t) {
-  const pick = levels(t.pick, (p, what) => choice(PICK, p, what), 'pick');
+  const rows = rowsOf(t);
+  const pick = levels(t.pick, (p, what) => choice(PICK, p, what), 'pick', rows);
   return [
+    rows,
     ...pick,
-    ...levels(t.pickTop, entryOf, 'pickTop'),
-    ...levels(t.thinkTicks, entryOf, 'thinkTicks'),
-    ...levels(t.timingSpread, entryOf, 'timingSpread'),
-    ...levels(t.holdBonus, entryOf, 'holdBonus'),
-    ...levels(t.giveUpTicks, entryOf, 'giveUpTicks'),
-    ...levels(t.spotRankError, u8Of, 'spotRankError'),
+    ...levels(t.pickTop, entryOf, 'pickTop', rows),
+    ...levels(t.thinkTicks, entryOf, 'thinkTicks', rows),
+    ...levels(t.timingSpread, entryOf, 'timingSpread', rows),
+    ...levels(t.holdBonus, entryOf, 'holdBonus', rows),
+    ...levels(t.giveUpTicks, entryOf, 'giveUpTicks', rows),
+    ...levels(t.spotRankError, u8Of, 'spotRankError', rows),
   ].map(i32);
 }
 
 function skillOf(r) {
-  const row = (i) => r.slice(i * 4, i * 4 + 4).map(u32);
+  const rows = u32(r[0]);
+  const row = (i) => r.slice(1 + i * 8, 1 + i * 8 + rows).map(u32);
   return {
+    rows,
     pick: row(0).map((p) => PICKS[p]),
     pickTop: row(1),
     thinkTicks: row(2),
@@ -2054,6 +2082,7 @@ function squadConfigOf(config) {
 export class Squad extends Table {
   #knowledge = null;
   #areas = null;
+  #decider = null;
 
   constructor(x, config = {}) {
     if (config instanceof Lent) {
@@ -2077,8 +2106,7 @@ export class Squad extends Table {
   /** Throws PlanError for ERROR_PLAN, RangeError for other errors. */
   #checked(r) {
     if (r === ERROR_PLAN) {
-      const [tactic, input] = this.#out(2);
-      throw new PlanError(tactic, u32(input));
+      throw planErrorOf(this.#out(2));
     }
     if (r < 0) throw new RangeError('Sagax: bad squad arguments');
     return r;
@@ -2157,7 +2185,10 @@ export class Squad extends Table {
     return this.x.sx_squad_skill(this.h);
   }
 
-  /** Sets the skill table (see lib.skillTable for its shape). */
+  /**
+   * Sets the skill table (see lib.skillTable for its shape): rows 1 to 8, and
+   * every list has rows entries. Throws a RangeError for any other rows.
+   */
   setSkillTable(table) {
     const values = skillValues(table);
     const h = this.h;
@@ -2168,6 +2199,51 @@ export class Squad extends Table {
   skillTable() {
     this.x.sx_squad_skill_table(this.h);
     return skillOf(this.#out(SKILL_SIZE));
+  }
+
+  /**
+   * The decider that scores the squad's tactics (a Decider; option i is tactic
+   * i; freed with the squad, and using it after squad.free() throws). Its
+   * combine, rank, cooldown and current action are free to change; adding
+   * options is not: plan, check and validate then throw a PlanError (tactic
+   * and input 4294967295).
+   */
+  decider() {
+    this.#decider ??= new Decider(this.x, new Lent(this.x.sx_squad_decider(this.h), this));
+    return this.#decider;
+  }
+
+  /** Switches the score log on or off (off by default; off clears it). */
+  setScoreLog(on) {
+    this.x.sx_squad_set_score_log(this.h, on ? 1 : 0);
+  }
+
+  /**
+   * The events of the last scoring in plan or check (cleared at its start; empty
+   * while the log is off): [{tactic, target (null without one), kind, candidate,
+   * consideration, input, value, score}], kind 'factor' (value: the factor of the
+   * raw input) or 'scored' (value: the product before the weight; consideration
+   * -1, input 0). candidate is the index in the candidate list: the tactics in
+   * order, each once per known target.
+   */
+  scoreLog() {
+    const n = this.x.sx_squad_score_log(this.h);
+    const raw = this.#out(n * SCORE_SIZE);
+    const events = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const o = i * SCORE_SIZE;
+      events[i] = {
+        tactic: raw[o],
+        target: raw[o + 2] === 1 ? u32(raw[o + 1]) : null,
+        kind: DECIDE_TRACE[raw[o + 3]],
+        candidate: raw[o + 4],
+        consideration: raw[o + 5],
+        input: raw[o + 6],
+        value: u32(raw[o + 7]),
+        score: u32(raw[o + 8]),
+      };
+    }
+    return events;
   }
 
   /**
@@ -2300,11 +2376,11 @@ export class Squad extends Table {
     return this.#checked(r);
   }
 
-  /** null if every consideration reads a column the rows have and no tactic has more than 255 slots, else {tactic, input} (input 4294967295 for too many slots). */
+  /** null if every consideration reads a column the rows have, no tactic has more than 255 slots and the decider has one option per tactic, else {tactic, input} (input 4294967295 for too many slots; both 4294967295 for a changed option count). */
   validate() {
     if (this.x.sx_squad_validate(this.h) === 0) return null;
     const [tactic, input] = this.#out(2);
-    return { tactic, input: u32(input) };
+    return { tactic: tactic === -1 ? u32(tactic) : tactic, input: u32(input) };
   }
 
   #run(call, now, { extra = [], spots = [], seed = 0 } = {}) {
@@ -2640,8 +2716,7 @@ export class Crew extends Table {
     putScratch(this.x, values);
     const n = this.x.sx_crew_tick(h, t, extra.length, spots.length, low, high);
     if (n === ERROR_PLAN) {
-      const [tactic, input] = this.#out(2);
-      throw new PlanError(tactic, u32(input));
+      throw planErrorOf(this.#out(2));
     }
     if (n < 0) throw new RangeError('Sagax: bad crew arguments');
     const all = this.#out(n * CREW_EVENT_SIZE);
@@ -2719,7 +2794,7 @@ Object.assign(Sagax.prototype, {
   tactic({ weight = 1, minSkill = 0, needsTarget = true } = {}) {
     return new Tactic(this.x, this.x.sx_tactic_new(fixed(weight, 'weight'), u8Of(minSkill, 'minSkill'), needsTarget ? 1 : 0));
   },
-  /** The default skill table {pick, pickTop, thinkTicks, timingSpread, holdBonus, giveUpTicks, spotRankError}, four levels each (skill / 64). */
+  /** The default skill table {rows, pick, pickTop, thinkTicks, timingSpread, holdBonus, giveUpTicks, spotRankError}: rows (1 to 8; 4 here) entries each, a skill takes the row skill * rows / 256. */
   skillTable() {
     const ptr = this.x.sx_scratch(SKILL_SIZE);
     this.x.sx_skill_table_default();

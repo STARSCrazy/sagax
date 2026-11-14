@@ -2332,11 +2332,12 @@ test('skill table: negative throws', () => {
   assert.deepEqual(sq.skillTable(), table, 'nothing changed');
   // the raw module refuses a negative entry too (it never wraps to u32)
   const x = lib.x;
-  const record = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  // rows, then 7 lists of 8 (pick, pickTop, thinkTicks, ...): think ticks 1
+  const record = [4, ...Array(16).fill(0), ...Array(8).fill(1), ...Array(32).fill(0)];
   const put = (values) => new Int32Array(x.memory.buffer, x.sx_scratch(values.length), values.length).set(values);
   put(record);
   assert.equal(x.sx_squad_set_skill_table(sq.h), 0);
-  put(record.map((v, i) => (i === 9 ? -1 : v)));
+  put(record.map((v, i) => (i === 18 ? -1 : v)));
   assert.equal(x.sx_squad_set_skill_table(sq.h), -1);
   sq.free();
 });
@@ -2405,3 +2406,89 @@ test('SHAPE matches C', () => {
 });
 
 console.log(`${passed} tests passed`);
+
+test('squad: skill rows, decider and score log', () => {
+  // rows 1 to 8: the arrays have rows entries, a skill takes row skill * rows / 256
+  const sq = squadOf('euclid', [[1, 0, 0], [2, 1, 0], [3, 0, 1], [4, 1, 1]], { radio: false });
+  const table = sq.skillTable();
+  assert.equal(table.rows, 4);
+  const three = { ...table, rows: 3, pick: ['best', 'best', 'best'], pickTop: [0, 0, 0], thinkTicks: [9, 6, 3], timingSpread: [0, 0, 0], holdBonus: [0, 0, 0], giveUpTicks: [5, 5, 5], spotRankError: [0, 0, 0] };
+  sq.setSkillTable(three);
+  assert.deepEqual(sq.skillTable(), three);
+  assert.equal(lib.thinkTicksFor(three, 85), 9);
+  assert.equal(lib.thinkTicksFor(three, 86), 6);
+  assert.equal(lib.thinkTicksFor(three, 171), 3);
+  for (const rows of [0, 9, 1.5]) {
+    assert.throws(() => sq.setSkillTable({ ...table, rows }), RangeError, `rows ${rows}`);
+  }
+  assert.throws(() => sq.setSkillTable({ ...table, rows: 3 }), RangeError, 'lists must have rows entries');
+  assert.deepEqual(sq.skillTable(), three, 'nothing changed');
+  const eight = { ...table, rows: 8, pick: Array(8).fill('best'), pickTop: Array(8).fill(0), thinkTicks: [1, 2, 3, 4, 5, 6, 7, 8], timingSpread: Array(8).fill(0), holdBonus: Array(8).fill(0), giveUpTicks: Array(8).fill(9), spotRankError: Array(8).fill(0) };
+  sq.setSkillTable(eight);
+  assert.deepEqual(sq.skillTable().thinkTicks, [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.equal(lib.thinkTicksFor(eight, 255), 8);
+  assert.equal(lib.thinkTicksFor(eight, 31), 1);
+  assert.equal(lib.thinkTicksFor(eight, 32), 2);
+  sq.setSkillTable(three);
+  sq.setSkill(200);
+  sq.addTactic(lib.tactics.rush());
+  sq.observe(0, enemy(10, 20, 0));
+  sq.plan(100);
+  assert.equal(sq.pendingPlan().activeAt, 103, 'skill 200 is row 2 of 3');
+
+  // the decider: option i is tactic i
+  const first = sq.extraStart();
+  const two = lib.tactic({ weight: 1, needsTarget: false });
+  two.addSlot({ min: 1, max: 1, place: { kind: 'here' }, kind: 'hold' });
+  two.addConsideration({ input: first, curve: 'linear', min: 0, max: 100 });
+  two.addConsideration({ input: first + 1, curve: 'linear', min: 0, max: 100 });
+  assert.equal(sq.addTactic(two), 1);
+  sq.setExtraColumns(2);
+  sq.setScoreLog(true);
+  const scoreOf = (tactic) => sq.scoreLog().find((e) => e.kind === 'scored' && e.tactic === tactic).score;
+  // the candidates without a target take the first block, the target the second
+  const extra = [50, 80, 0, 0];
+  sq.plan(200, { extra });
+  const product = scoreOf(1);
+  const d = sq.decider();
+  assert.equal(sq.decider(), d, 'one handle');
+  d.setCombine('minimum', 1);
+  sq.plan(300, { extra });
+  const min = scoreOf(1);
+  assert.notEqual(min, product);
+  assert.ok(Math.abs(min - Math.round(ONE / 2)) <= 1, `${min}`);
+  d.free(); // lent: nothing happens
+  d.setCombine(null, 1);
+  sq.plan(400, { extra });
+  assert.equal(scoreOf(1), product);
+  d.addOption(1);
+  assert.throws(() => sq.plan(500, { extra }), (e) => e instanceof PlanError && e.tactic === 0xffffffff && e.input === 0xffffffff);
+  assert.deepEqual(sq.validate(), { tactic: 0xffffffff, input: 0xffffffff });
+  sq.free();
+  assert.throws(() => d.setRank(0, 1), /free/, 'a lent decider ends with its squad');
+});
+
+test('squad: score log lists the candidates', () => {
+  const sq = squadOf('euclid', [[1, 0, 0], [2, 1, 0], [3, 0, 1], [4, 1, 1]], { radio: false });
+  sq.addTactic(lib.tactics.rush());
+  sq.addTactic(lib.tactics.focus());
+  sq.setSkill(255);
+  sq.observe(0, enemy(10, 20, 0));
+  sq.observe(0, enemy(11, 30, 0));
+  sq.plan(1);
+  assert.deepEqual(sq.scoreLog(), [], 'off by default');
+  sq.setScoreLog(true);
+  sq.plan(2);
+  const log = sq.scoreLog();
+  const scored = log.filter((e) => e.kind === 'scored');
+  assert.deepEqual(scored.map((e) => [e.tactic, e.target, e.candidate]), [[0, 10, 0], [0, 11, 1], [1, 10, 2], [1, 11, 3]]);
+  assert.equal(scored[0].score, Math.floor(ONE / 4));
+  assert.ok(scored[2].score > scored[3].score);
+  assert.ok(log.some((e) => e.kind === 'factor' && e.tactic === 1));
+  assert.ok(log.every((e) => e.kind === 'factor' || e.consideration === -1));
+  sq.check(10);
+  assert.equal(sq.scoreLog().filter((e) => e.kind === 'scored').length, 4, 'the next scoring replaces the log');
+  sq.setScoreLog(false);
+  assert.deepEqual(sq.scoreLog(), []);
+  sq.free();
+});

@@ -1,12 +1,13 @@
 use super::members::{Group, Member, MemberState};
 use super::orders::{Channel, Order};
-use super::skill::SkillTable;
+use super::skill::{MAX_SKILL_ROWS, SkillTable};
 use super::spots::{Spot, SpotPick, pick_spot, wish_point};
 use super::tactic::{Abort, GoalKind, Slot, Start, Tactic};
 use crate::memory::{
     Area, Areas, Evict, Fact, Inbox, Knowledge, Message, Metric, Pos, ZeroCapacity, distance,
 };
-use crate::{Candidate, Decider, INPUT_SINCE_OPTION, choose, mix};
+use crate::{Candidate, DecideEvent, Decider, INPUT_SINCE_OPTION, choose, mix};
+use sagax_core::{NoopSink, Sink};
 
 /// Built-in row column: own losses, every member marked gone (also the
 /// leader) that is still listed, however long ago; the count does not reset
@@ -176,6 +177,9 @@ pub enum PlanError {
         /// Index of the tactic.
         tactic: usize,
     },
+    /// The decider has a different number of options than the squad has
+    /// tactics (see [`Squad::decider_mut`]).
+    OptionsChanged,
 }
 
 impl std::fmt::Display for PlanError {
@@ -187,6 +191,7 @@ impl std::fmt::Display for PlanError {
             Self::TooManySlots { tactic } => {
                 write!(f, "tactic {tactic} has more than 255 slots")
             }
+            Self::OptionsChanged => write!(f, "the decider has options the tactics do not"),
         }
     }
 }
@@ -228,6 +233,37 @@ pub(super) fn plain_dist(metric: Metric, a: Pos, b: Pos) -> i32 {
     clamp_i32(d)
 }
 
+/// One event of the last scoring (see [`Squad::set_score_log`]): what a
+/// consideration or a candidate's score was, and for which tactic and target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ScoreEntry {
+    /// Index of the tactic.
+    pub tactic: usize,
+    /// The candidate's target (its subject id); `None` for a tactic without
+    /// one.
+    pub target: Option<u32>,
+    /// A [`DecideEvent::Factor`] or [`DecideEvent::Scored`]; its candidate
+    /// index is the index in the candidate list of the scoring.
+    pub event: DecideEvent,
+}
+
+/// Collects the events of one candidate into the score log.
+struct LogSink<'a> {
+    out: &'a mut Vec<ScoreEntry>,
+    tactic: usize,
+    target: Option<u32>,
+}
+
+impl Sink<DecideEvent> for LogSink<'_> {
+    fn emit(&mut self, event: DecideEvent) {
+        self.out.push(ScoreEntry {
+            tactic: self.tactic,
+            target: self.target,
+            event,
+        });
+    }
+}
+
 /// Reused buffers, so planning does not allocate once they have grown.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Scratch {
@@ -245,6 +281,7 @@ pub(super) struct Scratch {
     pub(super) then_taken: Vec<bool>,
     pub(super) near: Vec<(i128, usize)>,
     pub(super) reports: Vec<Message>,
+    pub(super) log: Vec<ScoreEntry>,
 }
 
 /// The plan being carried out, with what happened since it became active.
@@ -265,6 +302,11 @@ impl Active {
     pub(super) fn has(&self, member: u32) -> bool {
         self.plan.goals.iter().any(|(m, _)| *m == member)
     }
+}
+
+/// Whether the table's row count is in range.
+fn rows_ok(table: &SkillTable) -> bool {
+    (1..=MAX_SKILL_ROWS).contains(&usize::from(table.rows))
 }
 
 /// Most slots still short of their minimum that [`Squad::plan`] checks
@@ -350,6 +392,7 @@ pub struct Squad {
     pub(super) decider: Decider,
     pub(super) skill: u8,
     pub(super) table: SkillTable,
+    pub(super) log_scores: bool,
     pub(super) leader: Option<u32>,
     pub(super) target_kind: u32,
     pub(super) extra_columns: usize,
@@ -365,9 +408,10 @@ pub struct Squad {
 
 impl Squad {
     /// A squad with the capacities and metric of `config`. The knowledge
-    /// drops the oldest fact when full. A capacity of 0 is an error.
+    /// drops the oldest fact when full. A capacity or the skill table out of
+    /// range (`rows` 0 or more than [`MAX_SKILL_ROWS`]) is an error.
     pub fn new(config: SquadConfig) -> Result<Self, ZeroCapacity> {
-        if config.dangers == 0 {
+        if config.dangers == 0 || !rows_ok(&config.skill_table) {
             return Err(ZeroCapacity);
         }
         Ok(Self {
@@ -384,6 +428,7 @@ impl Squad {
             decider: Decider::new(),
             skill: 0,
             table: config.skill_table,
+            log_scores: false,
             leader: None,
             target_kind: 0,
             extra_columns: 0,
@@ -455,9 +500,45 @@ impl Squad {
         self.skill
     }
 
-    /// Replaces the skill table (default [`SkillTable::default`]).
-    pub fn set_skill_table(&mut self, table: SkillTable) {
+    /// Replaces the skill table (default [`SkillTable::default`]). False
+    /// (nothing changes) when `rows` is 0 or more than [`MAX_SKILL_ROWS`].
+    #[must_use]
+    pub fn set_skill_table(&mut self, table: SkillTable) -> bool {
+        if !rows_ok(&table) {
+            return false;
+        }
         self.table = table;
+        true
+    }
+
+    /// The decider that scores the tactics: option `i` is tactic `i`, and
+    /// its considerations are the tactic's. Combine, rank, cooldown and the
+    /// current action are free to change through [`Squad::decider_mut`];
+    /// adding or removing options is not ([`Squad::validate`] refuses it
+    /// with [`PlanError::OptionsChanged`]).
+    pub fn decider(&self) -> &Decider {
+        &self.decider
+    }
+
+    /// The decider to change how the tactics are scored (see
+    /// [`Squad::decider`]).
+    pub fn decider_mut(&mut self) -> &mut Decider {
+        &mut self.decider
+    }
+
+    /// Switches the score log on or off (off by default; off clears it).
+    pub fn set_score_log(&mut self, on: bool) {
+        self.log_scores = on;
+        if !on {
+            self.scratch.log.clear();
+        }
+    }
+
+    /// The `Factor` and `Scored` events of the last scoring in
+    /// [`Squad::plan`] or [`Squad::check`], in candidate order (cleared at the
+    /// start of a scoring). Empty while the log is off.
+    pub fn score_log(&self) -> &[ScoreEntry] {
+        &self.scratch.log
     }
 
     /// The skill table.
@@ -570,10 +651,14 @@ impl Squad {
 
     /// Checks that every consideration of every tactic reads a column the
     /// rows have (or one of the decider's memory inputs), and that no tactic
-    /// has more than 255 slots. [`Squad::plan`] and [`Squad::check`] run
+    /// has more than 255 slots, and that the decider still has one option per
+    /// tactic. [`Squad::plan`] and [`Squad::check`] run
     /// this first. (An [`Abort`](super::Abort) on a column beyond the row
     /// never fires.)
     pub fn validate(&self) -> Result<(), PlanError> {
+        if self.decider.option_count() != self.tactics.len() {
+            return Err(PlanError::OptionsChanged);
+        }
         let stride = self.row_width();
         for (t, tactic) in self.tactics.iter().enumerate() {
             if tactic.slots.len() > usize::from(u8::MAX) {
@@ -784,6 +869,7 @@ impl Squad {
             }
         }
         s.scores.clear();
+        s.log.clear();
         for k in 0..s.candidates.len() {
             let (t, target) = s.candidates[k];
             let fact = target.map(|i| s.targets[i]);
@@ -806,15 +892,25 @@ impl Squad {
                 0
             } else {
                 // `validate` ruled out the only error a row can cause.
-                self.decider
-                    .score(Candidate::new(t as u32, id.unwrap_or(0)), &s.rows)
-                    .map_err(|e| PlanError::InputOutOfRange {
+                let candidate = Candidate::new(t as u32, id.unwrap_or(0));
+                if self.log_scores {
+                    let mut sink = LogSink {
+                        out: &mut s.log,
                         tactic: t,
-                        input: match e {
-                            crate::DecideError::InputOutOfRange { input, .. } => input,
-                            _ => u32::MAX,
-                        },
-                    })?
+                        target: id,
+                    };
+                    self.decider.score_traced(k, candidate, &s.rows, &mut sink)
+                } else {
+                    self.decider
+                        .score_traced(k, candidate, &s.rows, &mut NoopSink)
+                }
+                .map_err(|e| PlanError::InputOutOfRange {
+                    tactic: t,
+                    input: match e {
+                        crate::DecideError::InputOutOfRange { input, .. } => input,
+                        _ => u32::MAX,
+                    },
+                })?
             };
             s.scores.push(score);
         }
@@ -984,7 +1080,7 @@ impl Squad {
         else {
             return Ok(None);
         };
-        let level = SkillTable::level(self.skill);
+        let level = self.table.level(self.skill);
 
         s.targets.clear();
         s.targets.extend(self.targets().copied());
