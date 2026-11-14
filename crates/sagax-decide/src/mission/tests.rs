@@ -673,3 +673,356 @@ fn new_rejects_more_steps_than_u16_numbers() {
         Some(MissionError::TooManySteps)
     );
 }
+
+// ---- Detours ----
+
+fn attack(pos: Pos) -> Action {
+    Action::Attack { subject: 5, pos }
+}
+
+/// A guard holding the gate at (0, 0) under `leeway`, after one tick there.
+fn guard_at_gate(leeway: Leeway) -> Mission {
+    let mut m = mission(MissionConfig::default());
+    m.set_leeway(leeway);
+    m.set_plan(&Plan::looping(&[Step::hold(Where::Fixed([0, 0, 0]))]))
+        .unwrap();
+    assert_eq!(
+        m.tick(0, [0, 0, 0], &knowledge(), 0).action,
+        Action::Hold([0, 0, 0])
+    );
+    m
+}
+
+#[test]
+fn strict_guard_steps_three_and_returns() {
+    let gate = [0, 0, 0];
+    let mut m = guard_at_gate(Leeway::STRICT);
+    let mut k = knowledge();
+    k.learn(0, fact(5, [1, 0, 0]));
+    assert!(m.detour(0, Detour::Engage(5), &k));
+    assert!(m.in_detour());
+    let mut pos = gate;
+    let mut trace = Vec::new();
+    for now in 1..=10 {
+        // The attacker walks away one cell per tick, and the guard sees it.
+        k.set_pos(5, KIND, [now as i32 + 1, 0, 0]);
+        k.touch(5, KIND, now);
+        let out = m.tick(now, pos, &k, 0);
+        trace.push((pos, out.action, out.events().to_vec()));
+        pos = step_toward(pos, out.action);
+    }
+    use Event::{DetourEnded, DetourStarted, Returned};
+    let home = Action::GoTo(gate);
+    let expected: Vec<(Pos, Action, Vec<Event>)> = vec![
+        ([0, 0, 0], attack([2, 0, 0]), vec![DetourStarted]),
+        ([1, 0, 0], attack([3, 0, 0]), vec![]),
+        ([2, 0, 0], attack([4, 0, 0]), vec![]),
+        ([3, 0, 0], attack([5, 0, 0]), vec![]),
+        // One cell past the leash: the leash pulls.
+        ([4, 0, 0], home, vec![DetourEnded(DetourEnd::Leash)]),
+        ([3, 0, 0], home, vec![]),
+        ([2, 0, 0], home, vec![]),
+        ([1, 0, 0], home, vec![]),
+        ([0, 0, 0], Action::Hold(gate), vec![Returned]),
+        ([0, 0, 0], Action::Hold(gate), vec![]),
+    ];
+    assert_eq!(trace, expected);
+    assert!(!m.in_detour() && !m.returning());
+    assert_eq!(m.step_index(), Some(0));
+    // The attacker is far outside the leash now: no new detour.
+    assert!(!m.detour(11, Detour::Engage(5), &k));
+}
+
+#[test]
+fn refused_while_attacker_outside_leash() {
+    let mut m = guard_at_gate(Leeway::STRICT);
+    let mut k = knowledge();
+    // An unknown subject is refused.
+    assert!(!m.detour(0, Detour::Engage(5), &k));
+    k.learn(0, fact(5, [4, 0, 0]));
+    for now in 1..10 {
+        k.touch(5, KIND, now);
+        assert!(!m.detour(now, Detour::Engage(5), &k));
+        let out = m.tick(now, [0, 0, 0], &k, 0);
+        assert!(out.events().is_empty());
+        assert_eq!(out.action, Action::Hold([0, 0, 0]));
+    }
+    // Within the leash it is taken; without a distance leash always.
+    k.set_pos(5, KIND, [3, 0, 0]);
+    assert!(m.detour(10, Detour::Engage(5), &k));
+    let mut m = guard_at_gate(Leeway::FREE);
+    k.set_pos(5, KIND, [99, 0, 0]);
+    assert!(m.detour(1, Detour::Engage(5), &k));
+}
+
+#[test]
+fn flexible_guard_searches_then_resumes_patrol() {
+    let mut m = mission(MissionConfig::default());
+    assert_eq!(m.leeway(), Leeway::FLEXIBLE);
+    let OnLost::Search { ticks: search, .. } = Leeway::FLEXIBLE.leash.on_lost else {
+        panic!("FLEXIBLE searches")
+    };
+    let lost_after = m.config().lost_after;
+    m.set_plan(&Plan::looping(&[
+        Step::go_to([2, 0, 0]),
+        Step::wait(10),
+        Step::go_to([0, 0, 0]),
+    ]))
+    .unwrap();
+    let mut k = knowledge();
+    let mut pos = [0, 0, 0];
+    // Ticks 0 and 1 walk, the wait begins at tick 2.
+    for now in 0..5 {
+        pos = step_toward(pos, m.tick(now, pos, &k, 0).action);
+    }
+    assert_eq!(m.step_index(), Some(1));
+    // At tick 5 the wait has run 3 of its 10 ticks. The attacker is seen
+    // once at tick 4, never again.
+    let mut attacker = fact(5, [4, 0, 0]);
+    attacker.seen_at = 4;
+    k.learn(4, attacker);
+    assert!(m.detour(5, Detour::Engage(5), &k));
+    let mut log = Vec::new();
+    for now in 5..200 {
+        let out = m.tick(now, pos, &k, 0);
+        let (action, events) = (out.action, out.events().to_vec());
+        log.push((now, action, events, m.step_index()));
+        pos = step_toward(pos, action);
+    }
+    let first = |e: Event| log.iter().find(|l| l.2.contains(&e)).unwrap().0;
+    assert_eq!(first(Event::DetourStarted), 5);
+    let lost_at = 4 + lost_after + 1;
+    for l in &log {
+        if l.0 < lost_at {
+            assert_eq!(l.1, attack([4, 0, 0]), "tick {}", l.0);
+        } else if l.0 < lost_at + search {
+            assert!(matches!(l.1, Action::Search(_)), "tick {}", l.0);
+        }
+    }
+    assert_eq!(first(Event::DetourEnded(DetourEnd::Lost)), lost_at + search);
+    let back = first(Event::Returned);
+    let at_back = &log[(back - 5) as usize];
+    assert_eq!(at_back.3, Some(1));
+    assert_eq!(at_back.1, Action::Wait);
+    // The wait goes on with the 7 ticks it had left.
+    assert_eq!(first(Event::StepDone(1)), back + 7);
+}
+
+#[test]
+fn free_guard_keeps_on_until_defeated() {
+    let mut m = guard_at_gate(Leeway::FREE);
+    let defeated = m.config().defeated_bits;
+    let mut k = knowledge();
+    k.learn(0, fact(5, [2, 0, 0]));
+    assert!(m.detour(0, Detour::Engage(5), &k));
+    let mut pos = [0, 0, 0];
+    for now in 1..80 {
+        // The attacker runs to (11, 0) and is not seen after tick 10.
+        if now <= 10 {
+            k.set_pos(5, KIND, [now as i32 + 1, 0, 0]);
+            k.touch(5, KIND, now);
+        }
+        let out = m.tick(now, pos, &k, 0);
+        assert!(
+            !out.events()
+                .iter()
+                .any(|e| matches!(e, Event::DetourEnded(_))),
+            "tick {now}"
+        );
+        assert!(matches!(out.action, Action::Attack { subject: 5, .. }));
+        pos = step_toward(pos, out.action);
+    }
+    assert_eq!(pos, [11, 0, 0]);
+    k.set_data(5, KIND, defeated);
+    let out = m.tick(80, pos, &k, 0);
+    assert_eq!(out.events(), &[Event::DetourEnded(DetourEnd::Defeated)]);
+    assert_eq!(out.action, Action::GoTo([0, 0, 0]));
+    assert!(m.returning());
+}
+
+#[test]
+fn forgotten_target_ends_detour() {
+    let mut m = mission(MissionConfig::default());
+    m.set_plan(&Plan::once(&[Step::wait(50)])).unwrap();
+    let mut k = knowledge();
+    k.learn(0, fact(5, [2, 0, 0]));
+    m.tick(0, [0, 0, 0], &k, 0);
+    assert!(m.detour(0, Detour::Engage(5), &k));
+    assert_eq!(m.tick(1, [1, 0, 0], &k, 0).action, attack([2, 0, 0]));
+    k.remove(5, KIND);
+    let out = m.tick(2, [1, 0, 0], &k, 0);
+    assert_eq!(out.events(), &[Event::DetourEnded(DetourEnd::Forgotten)]);
+    assert_eq!(out.action, Action::GoTo([0, 0, 0]));
+    let out = m.tick(3, [0, 0, 0], &k, 0);
+    assert_eq!(out.events(), &[Event::Returned]);
+    assert_eq!(out.action, Action::Wait);
+}
+
+#[test]
+fn leash_ticks_wrap() {
+    let mut m = mission(MissionConfig::default());
+    m.set_leeway(Leeway {
+        leash: Leash {
+            distance: None,
+            ticks: Some(5),
+            on_lost: OnLost::Return,
+        },
+        ..Leeway::FREE
+    });
+    m.set_plan(&Plan::once(&[Step::wait(50)])).unwrap();
+    let start = u32::MAX - 2;
+    let mut k = knowledge();
+    let mut attacker = fact(5, [2, 0, 0]);
+    attacker.seen_at = start;
+    k.learn(start, attacker);
+    m.tick(start, [0, 0, 0], &k, 0);
+    assert!(m.detour(start, Detour::Engage(5), &k));
+    for i in 1..=5 {
+        let now = start.wrapping_add(i);
+        k.touch(5, KIND, now);
+        let out = m.tick(now, [0, 0, 0], &k, 0);
+        assert_eq!(out.action, attack([2, 0, 0]), "tick {now}");
+    }
+    let now = start.wrapping_add(6);
+    k.touch(5, KIND, now);
+    let out = m.tick(now, [0, 0, 0], &k, 0);
+    assert_eq!(
+        out.events(),
+        &[Event::DetourEnded(DetourEnd::Leash), Event::Returned]
+    );
+}
+
+#[test]
+fn flee_until_safe_or_arrived() {
+    let mut m = mission(MissionConfig {
+        safe_distance: 3,
+        ..MissionConfig::default()
+    });
+    m.set_plan(&Plan::once(&[Step::wait(50)])).unwrap();
+    let mut k = knowledge();
+    k.learn(0, fact(7, [-1, 0, 0]));
+    m.tick(0, [0, 0, 0], &k, 0);
+    let away = Detour::Flee {
+        from: Where::Subject(7),
+        to: None,
+    };
+    assert!(m.detour(0, away, &k));
+    // Away from the threat: as far beyond as it is behind.
+    let out = m.tick(1, [0, 0, 0], &k, 0);
+    assert_eq!(out.events(), &[Event::DetourStarted]);
+    assert_eq!(out.action, Action::Flee([1, 0, 0]));
+    assert_eq!(m.tick(2, [2, 0, 0], &k, 0).action, Action::Flee([5, 0, 0]));
+    // 4 > 3 from the threat: safe.
+    let out = m.tick(3, [3, 0, 0], &k, 0);
+    assert_eq!(out.events(), &[Event::DetourEnded(DetourEnd::Safe)]);
+    assert_eq!(out.action, Action::GoTo([0, 0, 0]));
+
+    // To a place the game gives.
+    let to = Detour::Flee {
+        from: Where::Fixed([-1, 0, 0]),
+        to: Some([0, 2, 0]),
+    };
+    assert!(m.detour(4, to, &k));
+    assert_eq!(m.tick(4, [0, 1, 0], &k, 0).action, Action::Flee([0, 2, 0]));
+    let out = m.tick(5, [0, 2, 0], &k, 0);
+    assert_eq!(out.events(), &[Event::DetourEnded(DetourEnd::Arrived)]);
+
+    // The point away stays in the bounds of the map.
+    let mut m = mission(MissionConfig {
+        search: PointPattern {
+            min: (0, 0),
+            ..PointPattern::default()
+        },
+        ..MissionConfig::default()
+    });
+    m.tick(0, [0, 0, 0], &k, 0);
+    let from_right = Detour::Flee {
+        from: Where::Fixed([1, 1, 0]),
+        to: None,
+    };
+    assert!(m.detour(0, from_right, &k));
+    assert_eq!(m.tick(1, [0, 0, 0], &k, 0).action, Action::Flee([0, 0, 0]));
+}
+
+#[test]
+fn custom_detour_ends_by_game_and_keeps_first_anchor() {
+    let mut m = mission(MissionConfig::default());
+    m.set_plan(&Plan::once(&[Step::wait(50)])).unwrap();
+    let k = knowledge();
+    m.tick(0, [0, 0, 0], &k, 0);
+    let custom = Detour::Custom {
+        kind: 3,
+        at: Where::Fixed([4, 4, 0]),
+        param: 1,
+    };
+    assert!(m.detour(0, custom, &k));
+    for now in 1..5 {
+        let out = m.tick(now, [now as i32, 0, 0], &k, 0);
+        assert_eq!(
+            out.action,
+            Action::Custom {
+                kind: 3,
+                pos: Some([4, 4, 0]),
+                param: 1
+            }
+        );
+    }
+    // A new detour replaces it; the anchor stays the first one.
+    assert!(m.detour(5, custom, &k));
+    assert_eq!(
+        m.tick(5, [5, 0, 0], &k, 0).events(),
+        &[Event::DetourStarted]
+    );
+    m.end_detour();
+    let out = m.tick(6, [5, 0, 0], &k, 0);
+    assert_eq!(out.events(), &[Event::DetourEnded(DetourEnd::Ended)]);
+    assert_eq!(out.action, Action::GoTo([0, 0, 0]));
+}
+
+#[test]
+fn resumes_at_once_when_step_goes_elsewhere() {
+    let mut m = mission(MissionConfig::default());
+    m.set_plan(&Plan::once(&[Step::go_to([9, 0, 0])])).unwrap();
+    let k = knowledge();
+    m.tick(0, [0, 0, 0], &k, 0);
+    let custom = Detour::Custom {
+        kind: 1,
+        at: Where::Here,
+        param: 0,
+    };
+    assert!(m.detour(0, custom, &k));
+    m.tick(1, [0, 3, 0], &k, 0);
+    m.end_detour();
+    let out = m.tick(2, [0, 3, 0], &k, 0);
+    assert_eq!(
+        out.events(),
+        &[Event::DetourEnded(DetourEnd::Ended), Event::Returned]
+    );
+    assert_eq!(out.action, Action::GoTo([9, 0, 0]));
+    assert_eq!(m.step_index(), Some(0));
+}
+
+#[test]
+fn hex_detour_in_offset() {
+    let mut m = mission(MissionConfig {
+        metric: Metric::Hex,
+        hex_layout: Some(HexLayout::OddR),
+        ..MissionConfig::default()
+    });
+    m.set_leeway(Leeway::STRICT);
+    // The gate at offset (3, 2); the attacker at offset (3, 3), a neighbour.
+    m.set_plan(&Plan::looping(&[Step::hold(Where::Fixed([3, 2, 0]))]))
+        .unwrap();
+    let mut k = knowledge();
+    k.learn(0, fact(5, [3, 3, 0]));
+    m.tick(0, [3, 2, 0], &k, 0);
+    assert!(m.detour(0, Detour::Engage(5), &k));
+    assert_eq!(m.tick(1, [3, 2, 0], &k, 0).action, attack([3, 3, 0]));
+    m.end_detour();
+    assert_eq!(m.tick(2, [3, 3, 0], &k, 0).action, Action::GoTo([3, 2, 0]));
+    // On the gate's row, offset (6, 2) is three hexes away, (7, 2) four.
+    k.set_pos(5, KIND, [7, 2, 0]);
+    assert!(!m.detour(3, Detour::Engage(5), &k));
+    k.set_pos(5, KIND, [6, 2, 0]);
+    assert!(m.detour(3, Detour::Engage(5), &k));
+}

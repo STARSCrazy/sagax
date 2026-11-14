@@ -6,6 +6,11 @@ use super::types::{
 };
 use crate::memory::{Fact, Knowledge, Metric, Pos, distance, points_around};
 
+#[path = "detour.rs"]
+mod detour;
+
+use detour::DetourState;
+
 /// What one [`Mission::tick`] gives the game: the action to take now and
 /// what happened on the way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +38,10 @@ enum Activity {
     Wander,
     /// The plan ended or broke: nothing to do until given a new plan.
     Stopped,
+    /// A detour runs; what ran before waits in [`DetourState::resume`].
+    Detour,
+    /// The detour ended: walking back to the anchor before resuming.
+    Returning,
 }
 
 /// The running step and what it keeps while it runs.
@@ -88,6 +97,9 @@ pub struct Mission {
     pending_start: bool,
     activity: Activity,
     step: StepState,
+    /// Where the character stood at the last tick (internal coordinates).
+    last_pos: Option<Pos>,
+    detour: DetourState,
     events: Vec<Event>,
 }
 
@@ -115,6 +127,8 @@ impl Mission {
             pending_start: false,
             activity: Activity::Idle,
             step: StepState::default(),
+            last_pos: None,
+            detour: DetourState::new(),
             events: Vec::with_capacity(MAX_EVENTS),
         })
     }
@@ -145,8 +159,10 @@ impl Mission {
     }
 
     /// Copies `plan` into the mission; its first step begins at the next
-    /// tick, whatever ran before. Errors on an empty plan or one with more
-    /// than `max_steps` steps (the mission keeps what it had).
+    /// tick, whatever ran before. During a detour (or the walk back) the
+    /// detour goes on and the new plan begins when the character resumes.
+    /// Errors on an empty plan or one with more than `max_steps` steps (the
+    /// mission keeps what it had).
     pub fn set_plan(&mut self, plan: &Plan) -> Result<(), MissionError> {
         let len = plan.steps().len();
         if len == 0 {
@@ -158,7 +174,10 @@ impl Mission {
         self.plan.copy_from(plan);
         self.has_plan = true;
         self.pending_start = true;
-        self.activity = Activity::Plan;
+        match self.activity {
+            Activity::Detour | Activity::Returning => self.detour.resume = Activity::Plan,
+            _ => self.activity = Activity::Plan,
+        }
         self.step = StepState::default();
         Ok(())
     }
@@ -168,7 +187,8 @@ impl Mission {
         self.has_plan.then_some(&self.plan)
     }
 
-    /// Index of the step that runs, while a plan runs.
+    /// Index of the step that runs, while a plan runs (not during a detour
+    /// or the walk back).
     pub fn step_index(&self) -> Option<usize> {
         (self.activity == Activity::Plan).then_some(self.step.index)
     }
@@ -191,6 +211,9 @@ impl Mission {
     /// After the last step a looping plan emits [`Event::Looped`] and starts
     /// again; otherwise [`Event::PlanDone`] and the action is
     /// [`Action::None`].
+    ///
+    /// During a detour the detour runs instead and no fail condition is
+    /// checked; see [`Mission::detour`].
     pub fn tick(&mut self, now: u32, pos: Pos, knowledge: &Knowledge, flags: u64) -> Output<'_> {
         self.events.clear();
         let view = View {
@@ -199,10 +222,17 @@ impl Mission {
             knowledge,
             flags,
         };
+        self.last_pos = Some(view.pos);
+        if self.detour.announce {
+            self.detour.announce = false;
+            self.emit(Event::DetourStarted);
+        }
         let action = match self.activity {
             Activity::Idle | Activity::Stopped => Action::None,
             Activity::Wander => Action::Wander,
             Activity::Plan => self.run_plan(view),
+            Activity::Detour => self.run_detour(view),
+            Activity::Returning => self.run_return(view),
         };
         Output {
             action: self.action_out(action),
@@ -323,11 +353,8 @@ impl Mission {
             },
             StepKind::Search { centre, radius, .. } => {
                 let centre = self.resolve(centre, view)?;
-                let mut point = self.search_point(centre, radius);
-                if self.arrived(view.pos, point) {
-                    self.step.search_point = (self.step.search_point + 1) % self.search_points();
-                    point = self.search_point(centre, radius);
-                }
+                let (i, point) = self.search_step(self.step.search_point, centre, radius, view.pos);
+                self.step.search_point = i;
                 Action::Search(point)
             }
             StepKind::Hold(at) => Action::Hold(self.resolve(at, view)?),
@@ -403,21 +430,34 @@ impl Mission {
         self.config.search.offsets.len() + 1
     }
 
-    /// The search point the step goes to now, around `centre` (internal
-    /// coordinates). Points farther than `radius` from the centre are
-    /// skipped (the step's counter moves past them); `radius` 0 is no
-    /// limit. When every point is skipped, the centre.
-    fn search_point(&mut self, centre: Pos, radius: u32) -> Pos {
+    /// The point a search with counter `point` around `centre` goes to
+    /// for a character standing at `at`, moving on to the next point once
+    /// it is there. Returns the new counter and the point (internal
+    /// coordinates).
+    fn search_step(&self, point: usize, centre: Pos, radius: u32, at: Pos) -> (usize, Pos) {
+        let (i, p) = self.search_point(point, centre, radius);
+        if self.arrived(at, p) {
+            self.search_point((i + 1) % self.search_points(), centre, radius)
+        } else {
+            (i, p)
+        }
+    }
+
+    /// The search point from counter `start` on, around `centre` (internal
+    /// coordinates), with the counter it was found at. Points farther than
+    /// `radius` from the centre are skipped (the counter moves past them);
+    /// `radius` 0 is no limit. When every point is skipped, the centre and
+    /// `start`.
+    fn search_point(&self, start: usize, centre: Pos, radius: u32) -> (usize, Pos) {
         let points = self.search_points();
         for j in 0..points {
-            let i = (self.step.search_point + j) % points;
+            let i = (start + j) % points;
             let p = self.pattern_point(i, centre);
             if radius == 0 || self.within(centre, p, radius) {
-                self.step.search_point = i;
-                return p;
+                return (i, p);
             }
         }
-        centre
+        (start, centre)
     }
 
     /// Point `i` of the search pattern around `centre` (internal
