@@ -173,7 +173,8 @@ motive is about (guard area, target area). The default plan per kind:
   position; with no subject, attack the nearest known enemy (facts of the
   enemy kind, config) or search where one was last known.
 - `Reach`: go to the place, then signal "reached" (a signal number from the
-  config).
+  config), then hold the place (so the signal is not sent again
+  and again).
 - `Custom`: none; the game must give a plan or a playbook.
 
 ### Leash and leeway
@@ -407,3 +408,9 @@ above that reads differently.
    ticks; a `Fact` condition on an unknown fact is false; the mission's
    id (for the seed and `points_around`) is a config field; the Euclid
    distance column is the rounded root, like the squad's.
+8. Built during the build: the default plan has preference ONE/2 and the
+   built-in widening plan 3/4·ONE, so a playbook plan can beat both;
+   candidate `Fail::Custom` conditions are asked before `columns` and
+   `score`; widening plans are candidates only on a real break (a fail or
+   an impossible step), never at a plan end or before the first plan; a
+   strict character always walks back to the anchor after a detour.
