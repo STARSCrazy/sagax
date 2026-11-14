@@ -16,19 +16,19 @@
 //!
 //! The JS wrapper (`js/sagax.mjs`) hides the raw calls.
 
+use sagax_abi::codes::{CUT_CORNERS, ERROR_ARGUMENT, FOUND, FOUR_WAYS, RUNNING, UNREACHABLE};
+use sagax_abi::convert::{self, nav_status, to_i32, u32_of, whole_i64};
 use sagax_nav::Cost;
 use sagax_nav::Limits;
 use sagax_nav::dstar::{DStarLite, DStarStatus};
 use sagax_nav::flow::FlowField;
 use sagax_nav::formation::Formation;
 use sagax_nav::grid::{Cell, DenseGrid, GridRules, Moves};
-use sagax_nav::hex::HexLayout;
-use sagax_nav::nav::{Budget, Navigator, Output, Report, Status, WayOptions, write_way};
+use sagax_nav::nav::{Navigator, Output, Report, WayOptions, write_way};
 use sagax_nav::topology::Topology;
 use sagax_nav::trace::{TraceEvent, TraceSink, Tracer};
 
 use std::cell::RefCell;
-use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 /// Numbers per trace event: kind, x, y, parent x, parent y, cost, estimate,
@@ -64,18 +64,6 @@ fn tracer_into(buffer: &Rc<RefCell<TraceBuffer>>) -> Tracer {
         ]);
     })
 }
-
-const ERROR_ARGUMENT: i32 = -1;
-
-const FOUR_WAYS: u32 = 1;
-const CUT_CORNERS: u32 = 2;
-
-const IDLE: i32 = 0;
-const RUNNING: i32 = 1;
-const FOUND: i32 = 2;
-const PARTIAL: i32 = 3;
-const UNREACHABLE: i32 = 4;
-const DONE: i32 = 5;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Begun {
@@ -113,7 +101,7 @@ fn topology_of(kind: i32, straight: i32, diagonal: i32, flags: u32) -> Option<To
     let straight = positive(straight)?;
     let layout = match kind {
         0 => None,
-        kind => Some(hex_layout_of(u32::try_from(kind).ok()?)?),
+        kind => Some(convert::hex_layout(u32_of(kind)?)?),
     };
     Some(match layout {
         Some(layout) => Topology::Hex {
@@ -131,48 +119,6 @@ fn topology_of(kind: i32, straight: i32, diagonal: i32, flags: u32) -> Option<To
             diagonal: positive(diagonal)?,
         }),
     })
-}
-
-/// Budget 0 means unlimited; negative budgets are refused.
-fn nav_budget_of(budget: i32) -> Option<Budget> {
-    match budget {
-        0 => Some(Budget::Unlimited),
-        b => usize::try_from(b)
-            .ok()
-            .and_then(NonZeroUsize::new)
-            .map(Budget::Cells),
-    }
-}
-
-fn budget_of(budget: i32) -> Option<usize> {
-    match budget {
-        0 => Some(usize::MAX),
-        b => usize::try_from(b).ok(),
-    }
-}
-
-fn output_of(output: i32) -> Option<Output> {
-    match output {
-        0 => Some(Output::Cells),
-        1 => Some(Output::Turns),
-        2 => Some(Output::Smooth),
-        _ => None,
-    }
-}
-
-fn to_i32<T: TryInto<i32>>(value: T) -> i32 {
-    value.try_into().unwrap_or(i32::MAX)
-}
-
-fn status_code(status: Status) -> i32 {
-    match status {
-        Status::Idle => IDLE,
-        Status::Running => RUNNING,
-        Status::Found => FOUND,
-        Status::Partial => PARTIAL,
-        Status::Unreachable => UNREACHABLE,
-        Status::Done => DONE,
-    }
 }
 
 impl WasmGrid {
@@ -203,7 +149,7 @@ impl WasmGrid {
 
     fn report(&mut self, report: Report) {
         self.result = [
-            status_code(report.status),
+            nav_status(report.status),
             to_i32(report.cells),
             to_i32(report.cost),
             to_i32(report.expanded),
@@ -447,8 +393,8 @@ pub unsafe extern "C" fn sx_find_path(
 ) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
     let (Some(budget), Some(output), Ok(count)) = (
-        nav_budget_of(budget),
-        output_of(output),
+        convert::budget(budget),
+        u32_of(output).and_then(convert::output),
         usize::try_from(count),
     ) else {
         return ERROR_ARGUMENT;
@@ -482,7 +428,7 @@ pub unsafe extern "C" fn sx_flee(
 ) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
     let (Some(output), Ok(count), Ok(max_cost)) = (
-        output_of(output),
+        u32_of(output).and_then(convert::output),
         usize::try_from(count),
         Cost::try_from(max_cost),
     ) else {
@@ -514,7 +460,7 @@ pub unsafe extern "C" fn sx_reachable(
     budget: i32,
 ) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
-    let (Some(budget), Ok(max_cost)) = (nav_budget_of(budget), Cost::try_from(max_cost)) else {
+    let (Some(budget), Ok(max_cost)) = (convert::budget(budget), Cost::try_from(max_cost)) else {
         return ERROR_ARGUMENT;
     };
     let report = w
@@ -533,7 +479,7 @@ pub unsafe extern "C" fn sx_reachable(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_continue(g: *mut WasmGrid, budget: i32) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
-    let Some(budget) = nav_budget_of(budget) else {
+    let Some(budget) = convert::budget(budget) else {
         return ERROR_ARGUMENT;
     };
     let report = w.nav.continue_search(&mut w.grid, budget);
@@ -559,7 +505,7 @@ pub unsafe extern "C" fn sx_path_to(
     output: i32,
 ) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
-    let Some(output) = output_of(output) else {
+    let Some(output) = u32_of(output).and_then(convert::output) else {
         return ERROR_ARGUMENT;
     };
     match w.nav.path_to(Cell::new(x, y, level)) {
@@ -582,7 +528,7 @@ pub unsafe extern "C" fn sx_path_to(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_way(g: *mut WasmGrid, output: i32) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
-    let Some(output) = output_of(output) else {
+    let Some(output) = u32_of(output).and_then(convert::output) else {
         return ERROR_ARGUMENT;
     };
     w.write_way(output)
@@ -712,7 +658,10 @@ pub unsafe extern "C" fn sx_dstar_begin(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_dstar_compute(g: *mut WasmGrid, budget: i32, output: i32) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
-    let (Some(budget), Some(output)) = (budget_of(budget), output_of(output)) else {
+    let (Some(budget), Some(output)) = (
+        convert::budget_cells(budget),
+        u32_of(output).and_then(convert::output),
+    ) else {
         return ERROR_ARGUMENT;
     };
     let status = {
@@ -843,7 +792,7 @@ pub unsafe extern "C" fn sx_trace_dropped(g: *mut WasmGrid) -> i32 {
 // ---- decisions -------------------------------------------------------------
 
 use sagax_core::CallbackSink;
-use sagax_decide::{Apply, Candidate, Combine, Consideration, Curve, DecideEvent, Decider, Pick};
+use sagax_decide::{Apply, Candidate, Consideration, Curve, DecideEvent, Decider, Pick};
 
 /// Numbers per decision trace event: kind (1 factor, 2 scored, 3 chosen),
 /// candidate, consideration (-1 if none), input, value, score.
@@ -962,8 +911,9 @@ pub unsafe extern "C" fn sx_decider_add_weighted(
     }
 }
 
-/// Combine 0..4 for every option (`option` -1) or one option (`combine` -1:
-/// follow the decider).
+/// Combine 0..4 for every option (`option` -1, JS `ALL_OPTIONS`) or one
+/// option (`combine` -1: follow the decider). Any other negative `option`
+/// is an argument error.
 ///
 /// # Safety
 /// `d` from [`sx_decider_new`].
@@ -974,18 +924,19 @@ pub unsafe extern "C" fn sx_decider_set_combine(
     combine: i32,
 ) -> i32 {
     let w = decider!(d, ERROR_ARGUMENT);
-    let how = u32::try_from(combine).ok().and_then(Combine::from_u32);
-    match (u32::try_from(option), how) {
-        (Err(_), Some(how)) => {
-            w.decider.set_combine(how);
-            0
-        }
-        (Ok(option), how)
-            if (how.is_some() || combine == -1) && w.decider.set_option_combine(option, how) =>
-        {
-            0
-        }
-        _ => ERROR_ARGUMENT,
+    let target = match option {
+        -1 => CombineTarget::All,
+        option => match u32_of(option) {
+            Some(option) => CombineTarget::Option(option),
+            None => return ERROR_ARGUMENT,
+        },
+    };
+    // -1 is the C `SX_COMBINE_FOLLOW` (all bits set); other negatives wrap
+    // to numbers that are no combine.
+    if convert::set_combine(&mut w.decider, target, combine as u32) {
+        0
+    } else {
+        ERROR_ARGUMENT
     }
 }
 
@@ -1401,8 +1352,8 @@ pub unsafe extern "C" fn sx_machine_set_state(m: *mut WasmMachine, state: u32, n
 // the tables that hand out several records have an out buffer too.
 
 use sagax_decide::memory::{
-    Area, Areas, Evict, Fact, Inbox, Knowledge, LOOK_OFFSETS, Message, Metric, Outbox,
-    PointPattern, Refused, Route, Sine, Timers, points_around, route, sine, sweep_heading,
+    Area, Areas, Evict, Fact, Inbox, Knowledge, LOOK_OFFSETS, Message, Outbox, PointPattern,
+    Refused, Route, Sine, Timers, points_around, route, sine, sweep_heading,
 };
 
 /// Numbers per fact record: subject, kind, x, y, z, seen at, strength, data,
@@ -2436,17 +2387,16 @@ pub extern "C" fn sx_route(
 ) -> i32 {
     let rule = match rule {
         0 if arg >= 0.0 => Route::Nearest(arg as usize),
-        1 => Route::InRange(arg as i64),
+        1 => match whole_i64(arg) {
+            Some(range) => Route::InRange(range),
+            None => return ERROR_ARGUMENT,
+        },
         2 => Route::All,
         3 if arg >= 0.0 => Route::To(arg as u32),
         _ => return ERROR_ARGUMENT,
     };
-    let metric = match metric {
-        0 => Metric::Euclid,
-        1 => Metric::Manhattan,
-        2 => Metric::Chebyshev,
-        3 => Metric::Hex,
-        _ => return ERROR_ARGUMENT,
+    let Some(metric) = u32_of(metric).and_then(convert::metric) else {
+        return ERROR_ARGUMENT;
     };
     SCRATCH.with(|s| {
         let mut s = s.borrow_mut();
@@ -2550,14 +2500,11 @@ pub extern "C" fn sx_sweep_heading(base: i32, elapsed: u32, step_ticks: u32, cou
 // `sagax.h` (`SX_PLACE_*`, `SX_GOAL_*`, `SX_START_*`, ...). Values beyond
 // 32 bits (radii, ranges) come as `f64`, like the route argument.
 
+use sagax_abi::convert::{CombineTarget, SkillCodes};
 use sagax_decide::group::{
-    Abort, Channel, Goal, GoalKeeper, GoalKind, Member, MemberState, Nearby, Order, Place, Plan,
-    PlanError, Shape, Side, SkillTable, Slot, Spot, Squad, SquadConfig, Start,
-    Status as SquadStatus, Tactic, Trigger, gather, tactics,
+    Abort, Channel, Goal, GoalKeeper, Member, MemberState, Nearby, Order, Place, Plan, PlanError,
+    SkillTable, Slot, Spot, Squad, SquadConfig, Tactic, Trigger, gather, tactics,
 };
-
-/// A tactic reads a column beyond the row (`SX_ERROR_PLAN`).
-const ERROR_PLAN: i32 = -3;
 
 /// Numbers per member record: id, x, y, z, roles, skill, state.
 const MEMBER_SIZE: usize = 7;
@@ -2567,7 +2514,7 @@ const SPOT_SIZE: usize = 4;
 const CANDIDATE_SIZE: usize = 6;
 /// Numbers per slot record: roles, min, max, place (kind, x, y, z, value),
 /// gather (the same five), kind, custom, start, start ticks, want tags, dist,
-/// gather dist.
+/// gather dist (20 numbers).
 const SLOT_SIZE: usize = 20;
 /// Numbers per goal record: kind, custom, x, y, z, then x, y, z, target,
 /// start, start ticks, slot, plan, issued at, start delay, has pos,
@@ -2596,28 +2543,13 @@ fn scratch_put(values: &[i32]) {
     });
 }
 
-fn metric_of(code: i32) -> Option<Metric> {
-    Some(match code {
-        0 => Metric::Euclid,
-        1 => Metric::Manhattan,
-        2 => Metric::Chebyshev,
-        3 => Metric::Hex,
-        _ => return None,
-    })
-}
-
 fn member_of(r: &[i32]) -> Option<Member> {
     Some(Member {
         id: r[0] as u32,
         pos: [r[1], r[2], r[3]],
         roles: r[4] as u32,
         skill: u8::try_from(r[5]).ok()?,
-        state: match r[6] {
-            0 => MemberState::Active,
-            1 => MemberState::Suspended,
-            2 => MemberState::Gone,
-            _ => return None,
-        },
+        state: convert::member_state(u32_of(r[6])?)?,
     })
 }
 
@@ -2635,63 +2567,10 @@ fn member_record(m: &Member) -> [i32; MEMBER_SIZE] {
     ]
 }
 
-/// `Some(None)` for no place (kind 0), `None` if invalid.
-fn place_of(r: &[i32]) -> Option<Option<Place>> {
-    Some(Some(match r[0] {
-        0 => return Some(None),
-        1 => Place::Offset([r[1], r[2], r[3]]),
-        2 => Place::Side(match r[4] {
-            0 => Side::Front,
-            1 => Side::Left,
-            2 => Side::Right,
-            3 => Side::Rear,
-            _ => return None,
-        }),
-        3 => Place::Between,
-        4 => Place::Tagged(r[4] as u32),
-        5 => Place::Here,
-        _ => return None,
-    }))
-}
-
-fn kind_of(code: i32, custom: i32) -> Option<GoalKind> {
-    Some(match code {
-        0 => GoalKind::Move,
-        1 => GoalKind::Hold,
-        2 => GoalKind::Attack,
-        3 => GoalKind::Wait,
-        4 => GoalKind::Retreat,
-        5 => GoalKind::Custom(custom as u32),
-        _ => return None,
-    })
-}
-
-fn kind_code(kind: GoalKind) -> (i32, i32) {
-    match kind {
-        GoalKind::Move => (0, 0),
-        GoalKind::Hold => (1, 0),
-        GoalKind::Attack => (2, 0),
-        GoalKind::Wait => (3, 0),
-        GoalKind::Retreat => (4, 0),
-        GoalKind::Custom(c) => (5, c as i32),
-    }
-}
-
-fn start_of(code: i32, ticks: i32) -> Option<Start> {
-    Some(match code {
-        0 => Start::Now,
-        1 => Start::AfterTicks(ticks as u32),
-        2 => Start::OnSignal,
-        _ => return None,
-    })
-}
-
-fn start_code(start: Start) -> (i32, i32) {
-    match start {
-        Start::Now => (0, 0),
-        Start::AfterTicks(n) => (1, n as i32),
-        Start::OnSignal => (2, 0),
-    }
+/// The place of five numbers: kind, x, y, z, value. `Some(None)` for no
+/// place (kind 0), `None` if invalid.
+fn place_from(r: &[i32]) -> Option<Option<Place>> {
+    convert::place(u32_of(r[0])?, r[4] as u32, [r[1], r[2], r[3]])
 }
 
 fn slot_of(r: &[i32]) -> Option<Slot> {
@@ -2699,10 +2578,10 @@ fn slot_of(r: &[i32]) -> Option<Slot> {
         roles: r[0] as u32,
         min: u8::try_from(r[1]).ok()?,
         max: u8::try_from(r[2]).ok()?,
-        place: place_of(&r[3..8])??,
-        gather: place_of(&r[8..13])?,
-        kind: kind_of(r[13], r[14])?,
-        start: start_of(r[15], r[16])?,
+        place: place_from(&r[3..8])??,
+        gather: place_from(&r[8..13])?,
+        kind: convert::goal_kind(u32_of(r[13])?, r[14] as u32)?,
+        start: convert::start(u32_of(r[15])?, r[16] as u32)?,
         want_tags: r[17] as u32,
         dist: r[18],
         gather_dist: r[19],
@@ -2710,13 +2589,13 @@ fn slot_of(r: &[i32]) -> Option<Slot> {
 }
 
 fn goal_record(g: &Goal) -> [i32; GOAL_SIZE] {
-    let (kind, custom) = kind_code(g.kind);
-    let (start, ticks) = start_code(g.start);
+    let (kind, custom) = convert::goal_kind_code(g.kind);
+    let (start, ticks) = convert::start_code(g.start);
     let p = g.pos.unwrap_or_default();
     let t = g.then_pos.unwrap_or_default();
     [
-        kind,
-        custom,
+        kind as i32,
+        custom as i32,
         p[0],
         p[1],
         p[2],
@@ -2724,8 +2603,8 @@ fn goal_record(g: &Goal) -> [i32; GOAL_SIZE] {
         t[1],
         t[2],
         g.target.unwrap_or(0) as i32,
-        start,
-        ticks,
+        start as i32,
+        ticks as i32,
         i32::from(g.slot),
         g.plan as i32,
         g.issued_at as i32,
@@ -2740,13 +2619,13 @@ fn goal_record(g: &Goal) -> [i32; GOAL_SIZE] {
 
 fn goal_of(r: &[i32]) -> Option<Goal> {
     Some(Goal {
-        kind: kind_of(r[0], r[1])?,
+        kind: convert::goal_kind(u32_of(r[0])?, r[1] as u32)?,
         pos: (r[15] != 0).then_some([r[2], r[3], r[4]]),
         unchecked: r[16] != 0,
         then_pos: (r[17] != 0).then_some([r[5], r[6], r[7]]),
         then_unchecked: r[18] != 0,
         target: (r[19] != 0).then_some(r[8] as u32),
-        start: start_of(r[9], r[10])?,
+        start: convert::start(u32_of(r[9])?, r[10] as u32)?,
         slot: u8::try_from(r[11]).ok()?,
         plan: r[12] as u32,
         issued_at: r[13] as u32,
@@ -2760,35 +2639,34 @@ fn put_order(out: &mut Vec<i32>, member: u32, goal: &Goal) {
 }
 
 fn skill_record(t: &SkillTable) -> [i32; SKILL_SIZE] {
+    let c = convert::skill_codes(t);
     let mut r = [0; SKILL_SIZE];
     for i in 0..4 {
-        let (pick, top) = match t.pick[i] {
-            Pick::Best => (0, 0),
-            Pick::Weighted { top } => (1, top),
-            Pick::Uniform { top } => (2, top),
-        };
-        r[i] = pick;
-        r[4 + i] = top as i32;
-        r[8 + i] = t.think_ticks[i] as i32;
-        r[12 + i] = t.timing_spread[i] as i32;
-        r[16 + i] = t.hold_bonus[i] as i32;
-        r[20 + i] = t.give_up_ticks[i] as i32;
-        r[24 + i] = i32::from(t.spot_rank_error[i]);
+        r[i] = c.pick[i] as i32;
+        r[4 + i] = c.pick_top[i] as i32;
+        r[8 + i] = c.think_ticks[i] as i32;
+        r[12 + i] = c.timing_spread[i] as i32;
+        r[16 + i] = c.hold_bonus[i] as i32;
+        r[20 + i] = c.give_up_ticks[i] as i32;
+        r[24 + i] = i32::from(c.spot_rank_error[i]);
     }
     r
 }
 
-fn skill_of(r: &[i32]) -> Option<SkillTable> {
-    let mut t = SkillTable::default();
+/// The table of a record; `None` for an unknown pick or a negative number
+/// (a skill table has no negative entry).
+fn skill_from(r: &[i32]) -> Option<SkillTable> {
+    let mut c = SkillCodes::default();
     for i in 0..4 {
-        t.pick[i] = Pick::from_u32(r[i] as u32, r[4 + i] as u32)?;
-        t.think_ticks[i] = r[8 + i] as u32;
-        t.timing_spread[i] = r[12 + i] as u32;
-        t.hold_bonus[i] = r[16 + i] as u32;
-        t.give_up_ticks[i] = r[20 + i] as u32;
-        t.spot_rank_error[i] = u8::try_from(r[24 + i]).ok()?;
+        c.pick[i] = u32_of(r[i])?;
+        c.pick_top[i] = u32_of(r[4 + i])?;
+        c.think_ticks[i] = u32_of(r[8 + i])?;
+        c.timing_spread[i] = u32_of(r[12 + i])?;
+        c.hold_bonus[i] = u32_of(r[16 + i])?;
+        c.give_up_ticks[i] = u32_of(r[20 + i])?;
+        c.spot_rank_error[i] = u8::try_from(r[24 + i]).ok()?;
     }
-    Some(t)
+    convert::skill_table(&c)
 }
 
 /// Picks up to `max` of the `n` candidates in the scratch buffer (6 numbers
@@ -2807,7 +2685,9 @@ pub extern "C" fn sx_gather(
     n: u32,
     max: u32,
 ) -> i32 {
-    let Some(metric) = metric_of(metric) else {
+    let (Some(metric), Some(radius)) =
+        (u32_of(metric).and_then(convert::metric), whole_i64(radius))
+    else {
         return ERROR_ARGUMENT;
     };
     let Some(r) = (n as usize)
@@ -2831,7 +2711,7 @@ pub extern "C" fn sx_gather(
     gather(
         [x, y, 0],
         faction,
-        radius as i64,
+        radius,
         metric,
         free_only != 0,
         &list,
@@ -2872,10 +2752,9 @@ pub unsafe extern "C" fn sx_areas_move_cost(a: *mut WasmAreas) -> i32 {
 /// even rows, odd columns, even columns). Returns 0, or -1 for another layout.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_hex_to_axial(layout: u32, x: i32, y: i32) -> i32 {
-    let Some(layout) = hex_layout_of(layout) else {
+    let Some([q, r, _]) = convert::hex_to_axial(layout, [x, y, 0]) else {
         return ERROR_ARGUMENT;
     };
-    let (q, r) = layout.to_axial(x, y);
     scratch_put(&[q, r]);
     0
 }
@@ -2884,23 +2763,11 @@ pub extern "C" fn sx_hex_to_axial(layout: u32, x: i32, y: i32) -> i32 {
 /// see [`sx_hex_to_axial`].
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_hex_from_axial(layout: u32, q: i32, r: i32) -> i32 {
-    let Some(layout) = hex_layout_of(layout) else {
+    let Some([x, y, _]) = convert::hex_from_axial(layout, [q, r, 0]) else {
         return ERROR_ARGUMENT;
     };
-    let (x, y) = layout.from_axial(q, r);
     scratch_put(&[x, y]);
     0
-}
-
-/// The hex layout of `sx_rules.grid` 1..4.
-fn hex_layout_of(layout: u32) -> Option<HexLayout> {
-    match layout {
-        1 => Some(HexLayout::OddR),
-        2 => Some(HexLayout::EvenR),
-        3 => Some(HexLayout::OddQ),
-        4 => Some(HexLayout::EvenQ),
-        _ => None,
-    }
 }
 
 /// A tactic being built (`sx_tactic_*`).
@@ -2933,26 +2800,57 @@ pub extern "C" fn sx_tactic_new(weight: u32, min_skill: u32, needs_target: u32) 
     })))
 }
 
-/// A shipped tactic: `which` 0 rush, 1 line, 2 wedge, 3 column, 4 flank from
-/// 2 sides, 5 flank from 3, 6 ambush, 7 focus, 8 isolate, 9 fall back;
-/// `param` is the spacing or distance where there is one. Null for an
-/// unknown one.
-#[unsafe(no_mangle)]
-pub extern "C" fn sx_tactic_shipped(which: u32, param: i32) -> *mut WasmTactic {
-    let t = match which {
-        0 => tactics::rush(),
-        1 => tactics::formation(Shape::Line, param),
-        2 => tactics::formation(Shape::Wedge, param),
-        3 => tactics::formation(Shape::Column, param),
-        4 => tactics::flank(2, param),
-        5 => tactics::flank(3, param),
-        6 => tactics::ambush(),
-        7 => tactics::focus(),
-        8 => tactics::isolate(),
-        9 => tactics::fall_back(),
-        _ => return std::ptr::null_mut(),
-    };
+/// A tactic as a handle for [`sx_squad_add_tactic`].
+fn shipped(t: Tactic) -> *mut WasmTactic {
     Box::into_raw(Box::new(WasmTactic(t)))
+}
+
+/// The shipped rush tactic (`sx_squad_add_rush`).
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_tactic_rush() -> *mut WasmTactic {
+    shipped(tactics::rush())
+}
+
+/// The shipped formation tactic: `shape` 0 line, 1 wedge, 2 column
+/// (`SX_SHAPE_*`), members `spacing` apart. Null for another shape.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_tactic_formation(shape: u32, spacing: i32) -> *mut WasmTactic {
+    convert::shape(shape).map_or(std::ptr::null_mut(), |shape| {
+        shipped(tactics::formation(shape, spacing))
+    })
+}
+
+/// The shipped flank tactic from `sides` 2 or 3, at `dist`. Null for another
+/// number of sides.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_tactic_flank(sides: u32, dist: i32) -> *mut WasmTactic {
+    convert::flank_sides(sides).map_or(std::ptr::null_mut(), |sides| {
+        shipped(tactics::flank(sides, dist))
+    })
+}
+
+/// The shipped ambush tactic.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_tactic_ambush() -> *mut WasmTactic {
+    shipped(tactics::ambush())
+}
+
+/// The shipped focus tactic.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_tactic_focus() -> *mut WasmTactic {
+    shipped(tactics::focus())
+}
+
+/// The shipped isolate tactic.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_tactic_isolate() -> *mut WasmTactic {
+    shipped(tactics::isolate())
+}
+
+/// The shipped fall-back tactic.
+#[unsafe(no_mangle)]
+pub extern "C" fn sx_tactic_fall_back() -> *mut WasmTactic {
+    shipped(tactics::fall_back())
 }
 
 /// Frees a tactic not given to a squad.
@@ -2967,7 +2865,7 @@ pub unsafe extern "C" fn sx_tactic_free(t: *mut WasmTactic) {
     }
 }
 
-/// Adds the slot record (19 numbers) in the scratch buffer; returns its
+/// Adds the slot record (20 numbers) in the scratch buffer; returns its
 /// index, or -1 for an unknown place, side, kind or start, a goal place of
 /// none, or a min or max above 255.
 ///
@@ -3040,7 +2938,7 @@ pub unsafe extern "C" fn sx_tactic_trigger_all_arrived(t: *mut WasmTactic, max_w
 }
 
 /// The signal fires when the target is within `radius` of the group centre.
-/// Returns 0.
+/// Returns 0; -1 if `radius` is not a whole number in range.
 ///
 /// # Safety
 /// `t` from [`sx_tactic_new`].
@@ -3049,7 +2947,11 @@ pub unsafe extern "C" fn sx_tactic_trigger_target_in_radius(
     t: *mut WasmTactic,
     radius: f64,
 ) -> i32 {
-    tactic!(t).trigger = Trigger::TargetInRadius(radius as i64);
+    let t = tactic!(t);
+    let Some(radius) = whole_i64(radius) else {
+        return ERROR_ARGUMENT;
+    };
+    t.trigger = Trigger::TargetInRadius(radius);
     0
 }
 
@@ -3077,7 +2979,7 @@ fn table_and_skill(skill: u32, custom: u32) -> Option<(SkillTable, u8)> {
     let table = if custom == 0 {
         SkillTable::default()
     } else {
-        scratch_copy(SKILL_SIZE).as_deref().and_then(skill_of)?
+        scratch_copy(SKILL_SIZE).as_deref().and_then(skill_from)?
     };
     Some((table, skill))
 }
@@ -3159,7 +3061,7 @@ pub extern "C" fn sx_squad_new(
     dangers: u32,
     metric: i32,
 ) -> *mut WasmSquad {
-    let Some(metric) = metric_of(metric) else {
+    let Some(metric) = u32_of(metric).and_then(convert::metric) else {
         return std::ptr::null_mut();
     };
     let Ok(squad) = Squad::new(SquadConfig {
@@ -3409,7 +3311,7 @@ pub unsafe extern "C" fn sx_squad_skill(s: *mut WasmSquad) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_set_skill_table(s: *mut WasmSquad) -> i32 {
     let w = squad!(s);
-    let Some(table) = scratch_copy(SKILL_SIZE).as_deref().and_then(skill_of) else {
+    let Some(table) = scratch_copy(SKILL_SIZE).as_deref().and_then(skill_from) else {
         return ERROR_ARGUMENT;
     };
     w.squad.set_skill_table(table);
@@ -3430,19 +3332,18 @@ pub unsafe extern "C" fn sx_squad_skill_table(s: *mut WasmSquad) -> i32 {
 }
 
 /// Orders (and reports) reach the member after 1 tick per unit, within
-/// `range`. Returns 1, or 0 if the id is not in the group.
+/// `range`. Returns 1, or 0 if the id is not in the group; -1 if `range` is
+/// not a whole number in range.
 ///
 /// # Safety
 /// `s` from [`sx_squad_new`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_set_shout(s: *mut WasmSquad, id: u32, range: f64) -> i32 {
     let w = squad!(s);
-    i32::from(w.squad.set_channel(
-        id,
-        Channel::Shout {
-            range: range as i64,
-        },
-    ))
+    let Some(range) = whole_i64(range) else {
+        return ERROR_ARGUMENT;
+    };
+    i32::from(w.squad.set_channel(id, Channel::Shout { range }))
 }
 
 /// Orders reach the member after `base + distance * per_unit` ticks.
@@ -3597,13 +3498,13 @@ pub unsafe extern "C" fn sx_squad_set_extra_columns(s: *mut WasmSquad, count: u3
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_set_spot_radius(s: *mut WasmSquad, radius: f64) -> i32 {
     let w = squad!(s);
-    if radius.fract() != 0.0 || radius.is_nan() {
+    let Some(radius) = whole_i64(radius) else {
         return ERROR_ARGUMENT;
-    }
-    if radius < 0.0 {
+    };
+    if radius < 0 {
         w.squad.set_spot_radius(None);
-    } else if radius <= f64::from(u32::MAX) {
-        w.squad.set_spot_radius(Some(radius as u32));
+    } else if let Ok(radius) = u32::try_from(radius) {
+        w.squad.set_spot_radius(Some(radius));
     } else {
         return ERROR_ARGUMENT;
     }
@@ -3666,7 +3567,7 @@ pub unsafe extern "C" fn sx_squad_targets(s: *mut WasmSquad) -> i32 {
     n
 }
 
-/// Adds a tactic from [`sx_tactic_new`] or [`sx_tactic_shipped`]; the squad
+/// Adds a tactic from [`sx_tactic_new`] or a shipped tactic ([`sx_tactic_rush`] ...); the squad
 /// takes it over (do not use or free it again). Returns its index.
 ///
 /// # Safety
@@ -3682,21 +3583,18 @@ pub unsafe extern "C" fn sx_squad_add_tactic(s: *mut WasmSquad, t: *mut WasmTact
     to_i32(w.squad.add_tactic(t.0))
 }
 
-/// [`ERROR_PLAN`] with the tactic and column in the out buffer.
+/// `ERROR_PLAN` (-3) with the tactic and column in the out buffer.
 fn plan_error(w: &mut WasmSquad, e: PlanError) -> i32 {
     plan_error_to(&mut w.out, e)
 }
 
-/// [`ERROR_PLAN`] with the tactic and column in `out`.
+/// `ERROR_PLAN` (-3) with the tactic and column in `out`.
 fn plan_error_to(out: &mut Vec<i32>, e: PlanError) -> i32 {
-    let (tactic, input) = match e {
-        PlanError::InputOutOfRange { tactic, input } => (tactic, input),
-        // No column: -1 in the out buffer.
-        PlanError::TooManySlots { tactic } => (tactic, u32::MAX),
-    };
+    // No column: -1 in the out buffer.
+    let (code, tactic, input) = convert::plan_error(e);
     out.clear();
     out.extend([to_i32(tactic), input as i32]);
-    ERROR_PLAN
+    code
 }
 
 /// Checks the tactics' columns. Returns 0, or `ERROR_PLAN` with the
@@ -3786,14 +3684,17 @@ pub unsafe extern "C" fn sx_squad_check(
     };
     let seed = u64::from(seed_low) | (u64::from(seed_high) << 32);
     w.out.clear();
-    match w.squad.check(now, &extra, &spots, seed) {
-        Ok(SquadStatus::Keep) => 0,
-        Ok(SquadStatus::Replan(id)) => {
-            w.out.push(id as i32);
-            1
+    match w
+        .squad
+        .check(now, &extra, &spots, seed)
+        .map(convert::squad_status)
+    {
+        Ok((code, id)) => {
+            if let Some(id) = id {
+                w.out.push(id as i32);
+            }
+            code
         }
-        Ok(SquadStatus::Signal) => 2,
-        Ok(SquadStatus::NoPlan) => 3,
         Err(e) => plan_error(w, e),
     }
 }
@@ -4077,7 +3978,7 @@ pub unsafe extern "C" fn sx_keeper_inputs(
     discipline: u32,
 ) -> i32 {
     let w = keeper!(k);
-    let Some(metric) = metric_of(metric) else {
+    let Some(metric) = u32_of(metric).and_then(convert::metric) else {
         return ERROR_ARGUMENT;
     };
     let inputs = w

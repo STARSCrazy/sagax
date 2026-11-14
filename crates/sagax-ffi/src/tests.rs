@@ -1,4 +1,5 @@
 use super::*;
+use sagax_abi::codes::{IDLE, PARTIAL};
 use sagax_nav::nav::ANY_LEVEL;
 
 /// A 20 x 20 map, one level; context points to a list of blocked cells.
@@ -876,7 +877,7 @@ mod squad {
     use crate::memory::{
         SxArea, SxFact, SxMessage, sx_areas_at, sx_areas_count, sx_knowledge_count,
     };
-    use crate::{ERROR_ARGUMENT, ERROR_PLAN};
+    use sagax_abi::codes::*;
     use sagax_decide::group::{
         IN_AREA, IN_EXTRA, IN_LOSSES, IN_OFF_PLAN, IN_PLAN_AGE, IN_RANGED, IN_TARGET_AGE,
         IN_TARGET_DIST, IN_TARGET_FRIEND_DIST, MAX_EXTRA_COLUMNS, REPORT_ARRIVED, REPORT_ENEMY,
@@ -994,7 +995,7 @@ mod squad {
         assert_eq!(size_of::<SxSkillTable>(), 100);
         assert_eq!(define("SX_API_VERSION"), 9);
         assert_eq!(define("SX_ERROR_PLAN"), i64::from(ERROR_PLAN));
-        assert_eq!(define("SX_IDLE"), i64::from(crate::IDLE));
+        assert_eq!(define("SX_IDLE"), i64::from(IDLE));
         let core = [
             ("SX_IN_LOSSES", IN_LOSSES as i64),
             ("SX_IN_OFF_PLAN", IN_OFF_PLAN as i64),
@@ -1048,6 +1049,89 @@ mod squad {
         ];
         for (name, value) in core.iter().chain(ffi.iter()) {
             assert_eq!(define(name), *value, "{name}");
+        }
+    }
+
+    #[test]
+    fn abi_codes_match_header() {
+        let numbers = [
+            ("SX_ERROR_ARGUMENT", i64::from(ERROR_ARGUMENT)),
+            ("SX_ERROR_INTERNAL", i64::from(ERROR_INTERNAL)),
+            ("SX_ERROR_PLAN", i64::from(ERROR_PLAN)),
+            ("SX_FOUR_WAYS", i64::from(FOUR_WAYS)),
+            ("SX_CUT_CORNERS", i64::from(CUT_CORNERS)),
+            ("SX_IDLE", i64::from(IDLE)),
+            ("SX_RUNNING", i64::from(RUNNING)),
+            ("SX_FOUND", i64::from(FOUND)),
+            ("SX_PARTIAL", i64::from(PARTIAL)),
+            ("SX_UNREACHABLE", i64::from(UNREACHABLE)),
+            ("SX_DONE", i64::from(DONE)),
+            ("SX_GRID_SQUARE", i64::from(GRID_SQUARE)),
+            ("SX_GRID_HEX_ODD_R", i64::from(GRID_HEX_ODD_R)),
+            ("SX_GRID_HEX_EVEN_R", i64::from(GRID_HEX_EVEN_R)),
+            ("SX_GRID_HEX_ODD_Q", i64::from(GRID_HEX_ODD_Q)),
+            ("SX_GRID_HEX_EVEN_Q", i64::from(GRID_HEX_EVEN_Q)),
+            ("SX_METRIC_EUCLID", i64::from(METRIC_EUCLID)),
+            ("SX_METRIC_MANHATTAN", i64::from(METRIC_MANHATTAN)),
+            ("SX_METRIC_CHEBYSHEV", i64::from(METRIC_CHEBYSHEV)),
+            ("SX_METRIC_HEX", i64::from(METRIC_HEX)),
+            ("SX_PICK_BEST", i64::from(PICK_BEST)),
+            ("SX_PICK_WEIGHTED", i64::from(PICK_WEIGHTED)),
+            ("SX_PICK_UNIFORM", i64::from(PICK_UNIFORM)),
+            ("SX_SIDE_FRONT", i64::from(SIDE_FRONT)),
+            ("SX_SIDE_LEFT", i64::from(SIDE_LEFT)),
+            ("SX_SIDE_RIGHT", i64::from(SIDE_RIGHT)),
+            ("SX_SIDE_REAR", i64::from(SIDE_REAR)),
+            ("SX_MEMBER_ACTIVE", i64::from(MEMBER_ACTIVE)),
+            ("SX_MEMBER_SUSPENDED", i64::from(MEMBER_SUSPENDED)),
+            ("SX_MEMBER_GONE", i64::from(MEMBER_GONE)),
+            ("SX_CREW_PLANNED", i64::from(CREW_PLANNED)),
+            ("SX_CREW_ACTIVATED", i64::from(CREW_ACTIVATED)),
+            ("SX_CREW_SIGNAL", i64::from(CREW_SIGNAL)),
+            ("SX_CREW_ORDER", i64::from(CREW_ORDER)),
+            ("SX_CREW_START", i64::from(CREW_START)),
+            ("SX_CREW_ARRIVED", i64::from(CREW_ARRIVED)),
+            ("SX_CREW_BROKEN", i64::from(CREW_BROKEN)),
+            ("SX_CREW_NO_PLAN", i64::from(CREW_NO_PLAN)),
+        ];
+        for (name, value) in numbers {
+            assert_eq!(define(name), value, "{name}");
+        }
+        assert_eq!(define("SX_ALL_OPTIONS"), i64::from(ALL_OPTIONS));
+        assert_eq!(define("SX_COMBINE_FOLLOW"), i64::from(COMBINE_FOLLOW));
+    }
+
+    #[test]
+    fn one_codec_per_layer() {
+        // The conversions live in `sagax-abi`; neither layer has its own.
+        let sources = [
+            include_str!("lib.rs"),
+            include_str!("bench.rs"),
+            include_str!("crew.rs"),
+            include_str!("decide.rs"),
+            include_str!("grid.rs"),
+            include_str!("group.rs"),
+            include_str!("machine.rs"),
+            include_str!("memory.rs"),
+            include_str!("../../sagax-wasm/src/lib.rs"),
+            include_str!("../../sagax-wasm/src/crew.rs"),
+            include_str!("../../sagax-wasm/src/values.rs"),
+        ];
+        let gone = [
+            "fn metric_of",
+            "fn hex_layout",
+            "fn kind_of",
+            "fn start_of",
+            "fn place_of",
+            "fn skill_of",
+            "fn set_combine",
+            "fn status_code",
+            "fn to_i32",
+        ];
+        for source in sources {
+            for name in gone {
+                assert!(!source.contains(name), "{name}");
+            }
         }
     }
 
@@ -2714,7 +2798,7 @@ mod crew {
     use crate::crew::*;
     use crate::group::*;
     use crate::memory::SxFact;
-    use crate::{ERROR_ARGUMENT, ERROR_PLAN};
+    use sagax_abi::codes::*;
     use sagax_decide::group::{
         Channel, Crew, CrewConfig, CrewEvent, Member, MemberState, Shape, Spot, SquadConfig,
         TAG_COVER, TAG_HIGH, tactics,

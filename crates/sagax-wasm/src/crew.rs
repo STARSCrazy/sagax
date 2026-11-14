@@ -6,9 +6,10 @@ use sagax_decide::group::{Crew, CrewConfig, CrewEvent, GoalKeeper, Squad, SquadC
 
 use super::{
     ERROR_ARGUMENT, FACT_SIZE, GOAL_SIZE, Held, Lend, MEMBER_SIZE, WasmKeeper, WasmSquad,
-    boxed_squad, drop_squad, fact_of, fact_record, goal_record, hex_layout_of, member_of,
-    metric_of, plan_error_to, plan_input, scratch_copy, to_i32,
+    boxed_squad, drop_squad, fact_of, fact_record, goal_record, member_of, plan_error_to,
+    plan_input, scratch_copy,
 };
+use sagax_abi::convert::{self, to_i32, u32_of};
 
 /// Numbers per event record: kind (`SX_CREW_*`), member, plan, start at,
 /// has start at, then a goal record (for an order; else zeros).
@@ -100,12 +101,12 @@ pub extern "C" fn sx_crew_new(
     arrive_radius: u32,
     hex: u32,
 ) -> *mut WasmCrew {
-    let Some(metric) = metric_of(metric) else {
+    let Some(metric) = u32_of(metric).and_then(convert::metric) else {
         return std::ptr::null_mut();
     };
     let hex_layout = match hex {
         0 => None,
-        layout => match hex_layout_of(layout) {
+        layout => match convert::hex_layout(layout) {
             Some(l) => Some(l),
             None => return std::ptr::null_mut(),
         },
@@ -301,26 +302,14 @@ pub unsafe extern "C" fn sx_crew_tick(
     w.out.clear();
     for e in &w.events {
         let mut r = [0i32; EVENT_SIZE];
-        let (kind, member, plan) = match *e {
-            CrewEvent::Planned(plan) => (1, 0, plan),
-            CrewEvent::Activated(plan) => (2, 0, plan),
-            CrewEvent::Signal => (3, 0, 0),
-            CrewEvent::Order {
-                member,
-                goal,
-                start_at,
-            } => {
-                r[3] = start_at.unwrap_or(0) as i32;
-                r[4] = i32::from(start_at.is_some());
-                r[5..].copy_from_slice(&goal_record(&goal));
-                (4, member, goal.plan)
-            }
-            CrewEvent::Start { member } => (5, member, 0),
-            CrewEvent::Arrived { member } => (6, member, 0),
-            CrewEvent::Broken { member } => (7, member, 0),
-            CrewEvent::NoPlan => (8, 0, 0),
-        };
-        r[0] = kind;
+        let c = convert::crew_event(e);
+        if let Some(goal) = &c.goal {
+            r[5..].copy_from_slice(&goal_record(goal));
+        }
+        r[3] = c.start_at.unwrap_or(0) as i32;
+        r[4] = i32::from(c.start_at.is_some());
+        let (kind, member, plan) = (c.kind, c.member, c.plan);
+        r[0] = kind as i32;
         r[1] = member as i32;
         r[2] = plan as i32;
         w.out.extend_from_slice(&r);

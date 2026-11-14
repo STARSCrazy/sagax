@@ -2,8 +2,10 @@
 
 use std::ffi::c_void;
 
+use sagax_abi::codes::ALL_OPTIONS;
+use sagax_abi::convert::{self, CombineTarget};
 use sagax_core::CallbackSink;
-use sagax_decide::{Apply, Candidate, Combine, Consideration, Curve, DecideEvent, Decider, Pick};
+use sagax_decide::{Apply, Candidate, Consideration, Curve, DecideEvent, Decider, Pick};
 
 use super::{ERROR_ARGUMENT, create, destroy, guarded, slice_of, to_i32};
 
@@ -215,30 +217,6 @@ pub unsafe extern "C" fn sx_decider_add_weighted(
     })
 }
 
-/// `SX_ALL_OPTIONS`: `option` of `sx_decider_set_combine` for every option.
-const ALL_OPTIONS: u32 = u32::MAX;
-/// `SX_COMBINE_FOLLOW`: `combine` of `sx_decider_set_combine` for "follow the decider".
-const COMBINE_FOLLOW: u32 = u32::MAX;
-
-/// `option` `SX_ALL_OPTIONS` for all, `combine` `SX_COMBINE_FOLLOW` to follow.
-pub(crate) fn set_combine(decider: &mut Decider, option: u32, combine: u32) -> i32 {
-    let how = Combine::from_u32(combine);
-    match (option, how) {
-        (ALL_OPTIONS, Some(how)) => {
-            decider.set_combine(how);
-            0
-        }
-        (option, how)
-            if option != ALL_OPTIONS
-                && (how.is_some() || combine == COMBINE_FOLLOW)
-                && decider.set_option_combine(option, how) =>
-        {
-            0
-        }
-        _ => ERROR_ARGUMENT,
-    }
-}
-
 /// `sx_decider_set_combine`.
 ///
 /// # Safety
@@ -253,7 +231,16 @@ pub unsafe extern "C" fn sx_decider_set_combine(
     let Some(d) = (unsafe { decider.as_mut() }) else {
         return ERROR_ARGUMENT;
     };
-    set_combine(&mut d.decider, option, combine)
+    let target = if option == ALL_OPTIONS {
+        CombineTarget::All
+    } else {
+        CombineTarget::Option(option)
+    };
+    if convert::set_combine(&mut d.decider, target, combine) {
+        0
+    } else {
+        ERROR_ARGUMENT
+    }
 }
 
 /// `sx_decider_set_rank`.

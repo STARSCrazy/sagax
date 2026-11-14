@@ -13,6 +13,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sagax-abi"
+version = "0.9.0"
+dependencies = [
+ "sagax-core",
+ "sagax-decide",
+ "sagax-nav",
+]
+
+[[package]]
 name = "sagax-core"
 version = "0.9.0"
 
@@ -34,6 +43,7 @@ dependencies = [
 name = "sagax-ffi"
 version = "0.9.0"
 dependencies = [
+ "sagax-abi",
  "sagax-core",
  "sagax-decide",
  "sagax-nav",
@@ -51,6 +61,7 @@ dependencies = [
 name = "sagax-wasm"
 version = "0.9.0"
 dependencies = [
+ "sagax-abi",
  "sagax-core",
  "sagax-decide",
  "sagax-nav",

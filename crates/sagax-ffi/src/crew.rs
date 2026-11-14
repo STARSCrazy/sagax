@@ -9,18 +9,9 @@ use super::group::{
     Held, Lend, SxGoal, SxKeeper, SxMember, SxSpot, SxSquad, SxSquadConfig, lists, plan_error,
     sx_squad_config_default,
 };
-use super::memory::{SxFact, metric_of, pos3, put};
+use super::memory::{SxFact, pos3, put};
 use super::{ERROR_ARGUMENT, create, destroy, guarded, hex_layout, to_i32};
-
-// Event kinds (`SX_CREW_*` in `sagax.h`).
-pub(crate) const CREW_PLANNED: u32 = 1;
-pub(crate) const CREW_ACTIVATED: u32 = 2;
-pub(crate) const CREW_SIGNAL: u32 = 3;
-pub(crate) const CREW_ORDER: u32 = 4;
-pub(crate) const CREW_START: u32 = 5;
-pub(crate) const CREW_ARRIVED: u32 = 6;
-pub(crate) const CREW_BROKEN: u32 = 7;
-pub(crate) const CREW_NO_PLAN: u32 = 8;
+use sagax_abi::convert;
 
 /// `sx_crew_config`.
 #[repr(C)]
@@ -54,32 +45,14 @@ pub struct SxCrewEvent {
 
 impl SxCrewEvent {
     fn of(e: &CrewEvent) -> Self {
-        let plain = |kind, member, plan| Self {
-            kind,
-            member,
-            plan,
-            ..Self::default()
-        };
-        match *e {
-            CrewEvent::Planned(plan) => plain(CREW_PLANNED, 0, plan),
-            CrewEvent::Activated(plan) => plain(CREW_ACTIVATED, 0, plan),
-            CrewEvent::Signal => plain(CREW_SIGNAL, 0, 0),
-            CrewEvent::Order {
-                member,
-                goal,
-                start_at,
-            } => Self {
-                kind: CREW_ORDER,
-                member,
-                plan: goal.plan,
-                start_at: start_at.unwrap_or(0),
-                goal: SxGoal::of(&goal),
-                has_start_at: u8::from(start_at.is_some()),
-            },
-            CrewEvent::Start { member } => plain(CREW_START, member, 0),
-            CrewEvent::Arrived { member } => plain(CREW_ARRIVED, member, 0),
-            CrewEvent::Broken { member } => plain(CREW_BROKEN, member, 0),
-            CrewEvent::NoPlan => plain(CREW_NO_PLAN, 0, 0),
+        let c = convert::crew_event(e);
+        Self {
+            kind: c.kind,
+            member: c.member,
+            plan: c.plan,
+            start_at: c.start_at.unwrap_or(0),
+            goal: c.goal.as_ref().map(SxGoal::of).unwrap_or_default(),
+            has_start_at: u8::from(c.start_at.is_some()),
         }
     }
 }
@@ -219,7 +192,7 @@ pub unsafe extern "C" fn sx_crew_new(config: *const SxCrewConfig) -> *mut SxCrew
                 areas: s.areas as usize,
                 inbox: s.inbox as usize,
                 dangers: s.dangers as usize,
-                metric: metric_of(s.metric)?,
+                metric: convert::metric(s.metric)?,
             },
             arrive_radius: c.arrive_radius,
             hex_layout: layout,

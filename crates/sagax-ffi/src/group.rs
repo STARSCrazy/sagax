@@ -2,46 +2,17 @@
 //! see `sagax.h`.
 
 use sagax_decide::group::{
-    Abort, Channel, Goal, GoalKeeper, GoalKind, Member, MemberState, Nearby, Order, Place, Plan,
-    PlanError, Shape, Side, SkillTable, Slot, Spot, Squad, SquadConfig, Start, Status, Tactic,
-    Trigger, gather, tactics,
+    Abort, Channel, Goal, GoalKeeper, Member, MemberState, Nearby, Order, Place, Plan, PlanError,
+    SkillTable, Slot, Spot, Squad, SquadConfig, Tactic, Trigger, gather, tactics,
 };
-use sagax_decide::{Consideration, Curve, Pick};
+use sagax_decide::{Consideration, Curve};
 
 use super::crew::SxCrew;
 use super::decide::{SxConsideration, SxDecider};
-use super::memory::{SxArea, SxAreas, SxFact, SxKnowledge, SxMessage, metric_of, pos3, put};
-use super::{ERROR_ARGUMENT, ERROR_PLAN, create, destroy, guarded, slice_of, to_i32};
+use super::memory::{SxArea, SxAreas, SxFact, SxKnowledge, SxMessage, pos3, put};
+use super::{ERROR_ARGUMENT, create, destroy, guarded, slice_of, to_i32};
+use sagax_abi::convert;
 use sagax_decide::memory::Metric;
-
-// Numbers of the C interface (`SX_*` in `sagax.h`).
-
-pub(crate) const PLACE_NONE: u32 = 0;
-pub(crate) const PLACE_OFFSET: u32 = 1;
-pub(crate) const PLACE_SIDE: u32 = 2;
-pub(crate) const PLACE_BETWEEN: u32 = 3;
-pub(crate) const PLACE_TAGGED: u32 = 4;
-pub(crate) const PLACE_HERE: u32 = 5;
-
-pub(crate) const GOAL_MOVE: u32 = 0;
-pub(crate) const GOAL_HOLD: u32 = 1;
-pub(crate) const GOAL_ATTACK: u32 = 2;
-pub(crate) const GOAL_WAIT: u32 = 3;
-pub(crate) const GOAL_RETREAT: u32 = 4;
-pub(crate) const GOAL_CUSTOM: u32 = 5;
-
-pub(crate) const START_NOW: u32 = 0;
-pub(crate) const START_AFTER_TICKS: u32 = 1;
-pub(crate) const START_ON_SIGNAL: u32 = 2;
-
-pub(crate) const SHAPE_LINE: u32 = 0;
-pub(crate) const SHAPE_WEDGE: u32 = 1;
-pub(crate) const SHAPE_COLUMN: u32 = 2;
-
-pub(crate) const SQUAD_KEEP: i32 = 0;
-pub(crate) const SQUAD_REPLAN: i32 = 1;
-pub(crate) const SQUAD_SIGNAL: i32 = 2;
-pub(crate) const SQUAD_NO_PLAN: i32 = 3;
 
 // ---- value structs ------------------------------------------------------------
 
@@ -73,18 +44,12 @@ impl SxMember {
     }
 
     pub(crate) fn member(&self) -> Option<Member> {
-        let state = match self.state {
-            0 => MemberState::Active,
-            1 => MemberState::Suspended,
-            2 => MemberState::Gone,
-            _ => return None,
-        };
         Some(Member {
             id: self.id,
             pos: self.pos,
             roles: self.roles,
             skill: self.skill,
-            state,
+            state: convert::member_state(u32::from(self.state))?,
         })
     }
 }
@@ -125,21 +90,7 @@ pub struct SxPlace {
 impl SxPlace {
     /// The place, `Some(None)` for `SX_PLACE_NONE`, `None` if invalid.
     fn place(&self) -> Option<Option<Place>> {
-        Some(Some(match self.kind {
-            PLACE_NONE => return Some(None),
-            PLACE_OFFSET => Place::Offset([self.x, self.y, self.z]),
-            PLACE_SIDE => Place::Side(match self.value {
-                0 => Side::Front,
-                1 => Side::Left,
-                2 => Side::Right,
-                3 => Side::Rear,
-                _ => return None,
-            }),
-            PLACE_BETWEEN => Place::Between,
-            PLACE_TAGGED => Place::Tagged(self.value),
-            PLACE_HERE => Place::Here,
-            _ => return None,
-        }))
+        convert::place(self.kind, self.value, [self.x, self.y, self.z])
     }
 }
 
@@ -182,52 +133,12 @@ impl SxSlot {
             max: self.max,
             gather: self.gather.place()?,
             place: self.place.place()??,
-            kind: kind_of(self.kind, self.custom)?,
-            start: start_of(self.start, self.start_ticks)?,
+            kind: convert::goal_kind(self.kind, self.custom)?,
+            start: convert::start(self.start, self.start_ticks)?,
             want_tags: self.want_tags,
             dist: self.dist,
             gather_dist: self.gather_dist,
         })
-    }
-}
-
-fn kind_of(code: u32, custom: u32) -> Option<GoalKind> {
-    Some(match code {
-        GOAL_MOVE => GoalKind::Move,
-        GOAL_HOLD => GoalKind::Hold,
-        GOAL_ATTACK => GoalKind::Attack,
-        GOAL_WAIT => GoalKind::Wait,
-        GOAL_RETREAT => GoalKind::Retreat,
-        GOAL_CUSTOM => GoalKind::Custom(custom),
-        _ => return None,
-    })
-}
-
-fn kind_code(kind: GoalKind) -> (u32, u32) {
-    match kind {
-        GoalKind::Move => (GOAL_MOVE, 0),
-        GoalKind::Hold => (GOAL_HOLD, 0),
-        GoalKind::Attack => (GOAL_ATTACK, 0),
-        GoalKind::Wait => (GOAL_WAIT, 0),
-        GoalKind::Retreat => (GOAL_RETREAT, 0),
-        GoalKind::Custom(c) => (GOAL_CUSTOM, c),
-    }
-}
-
-fn start_of(code: u32, ticks: u32) -> Option<Start> {
-    Some(match code {
-        START_NOW => Start::Now,
-        START_AFTER_TICKS => Start::AfterTicks(ticks),
-        START_ON_SIGNAL => Start::OnSignal,
-        _ => return None,
-    })
-}
-
-fn start_code(start: Start) -> (u32, u32) {
-    match start {
-        Start::Now => (START_NOW, 0),
-        Start::AfterTicks(n) => (START_AFTER_TICKS, n),
-        Start::OnSignal => (START_ON_SIGNAL, 0),
     }
 }
 
@@ -271,8 +182,8 @@ pub struct SxGoal {
 
 impl SxGoal {
     pub(crate) fn of(g: &Goal) -> Self {
-        let (kind, custom) = kind_code(g.kind);
-        let (start, start_ticks) = start_code(g.start);
+        let (kind, custom) = convert::goal_kind_code(g.kind);
+        let (start, start_ticks) = convert::start_code(g.start);
         Self {
             kind,
             custom,
@@ -295,13 +206,13 @@ impl SxGoal {
 
     fn goal(&self) -> Option<Goal> {
         Some(Goal {
-            kind: kind_of(self.kind, self.custom)?,
+            kind: convert::goal_kind(self.kind, self.custom)?,
             pos: (self.has_pos != 0).then_some(self.pos),
             unchecked: self.unchecked != 0,
             then_pos: (self.has_then_pos != 0).then_some(self.then_pos),
             then_unchecked: self.then_unchecked != 0,
             target: (self.has_target != 0).then_some(self.target),
-            start: start_of(self.start, self.start_ticks)?,
+            start: convert::start(self.start, self.start_ticks)?,
             slot: u8::try_from(self.slot).ok()?,
             plan: self.plan,
             issued_at: self.issued_at,
@@ -371,34 +282,27 @@ pub struct SxSkillTable {
 
 impl SxSkillTable {
     fn of(t: &SkillTable) -> Self {
-        let pick = t.pick.map(|p| match p {
-            Pick::Best => (0, 0),
-            Pick::Weighted { top } => (1, top),
-            Pick::Uniform { top } => (2, top),
-        });
+        let c = convert::skill_codes(t);
         Self {
-            pick: pick.map(|p| p.0),
-            pick_top: pick.map(|p| p.1),
-            think_ticks: t.think_ticks,
-            timing_spread: t.timing_spread,
-            hold_bonus: t.hold_bonus,
-            give_up_ticks: t.give_up_ticks,
-            spot_rank_error: t.spot_rank_error,
+            pick: c.pick,
+            pick_top: c.pick_top,
+            think_ticks: c.think_ticks,
+            timing_spread: c.timing_spread,
+            hold_bonus: c.hold_bonus,
+            give_up_ticks: c.give_up_ticks,
+            spot_rank_error: c.spot_rank_error,
         }
     }
 
     fn table(&self) -> Option<SkillTable> {
-        let mut pick = [Pick::Best; 4];
-        for (i, p) in pick.iter_mut().enumerate() {
-            *p = Pick::from_u32(self.pick[i], self.pick_top[i])?;
-        }
-        Some(SkillTable {
-            pick,
+        convert::skill_table(&convert::SkillCodes {
+            pick: self.pick,
+            pick_top: self.pick_top,
             think_ticks: self.think_ticks,
-            spot_rank_error: self.spot_rank_error,
             timing_spread: self.timing_spread,
             hold_bonus: self.hold_bonus,
             give_up_ticks: self.give_up_ticks,
+            spot_rank_error: self.spot_rank_error,
         })
     }
 }
@@ -426,7 +330,7 @@ pub unsafe extern "C" fn sx_gather(
     if (candidates.is_null() && n > 0) || (out.is_null() && max > 0) {
         return ERROR_ARGUMENT;
     }
-    let Some(metric) = metric_of(metric) else {
+    let Some(metric) = convert::metric(metric) else {
         return ERROR_ARGUMENT;
     };
     // SAFETY: see above.
@@ -739,7 +643,7 @@ pub unsafe extern "C" fn sx_squad_new(config: *const SxSquadConfig) -> *mut SxSq
             areas: c.areas as usize,
             inbox: c.inbox as usize,
             dangers: c.dangers as usize,
-            metric: metric_of(c.metric)?,
+            metric: convert::metric(c.metric)?,
         })
         .ok()?;
         Some(SxSquad {
@@ -1399,11 +1303,8 @@ pub unsafe extern "C" fn sx_squad_add_formation(
     spacing: i32,
 ) -> i32 {
     let s = &mut squad!(squad);
-    let shape = match shape {
-        SHAPE_LINE => Shape::Line,
-        SHAPE_WEDGE => Shape::Wedge,
-        SHAPE_COLUMN => Shape::Column,
-        _ => return ERROR_ARGUMENT,
+    let Some(shape) = convert::shape(shape) else {
+        return ERROR_ARGUMENT;
     };
     to_i32(s.add_tactic(tactics::formation(shape, spacing)))
 }
@@ -1415,9 +1316,9 @@ pub unsafe extern "C" fn sx_squad_add_formation(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_add_flank(squad: *mut SxSquad, sides: u32, dist: i32) -> i32 {
     let s = &mut squad!(squad);
-    match sides {
-        2 | 3 => to_i32(s.add_tactic(tactics::flank(sides as u8, dist))),
-        _ => ERROR_ARGUMENT,
+    match convert::flank_sides(sides) {
+        Some(sides) => to_i32(s.add_tactic(tactics::flank(sides, dist))),
+        None => ERROR_ARGUMENT,
     }
 }
 
@@ -1478,16 +1379,13 @@ pub unsafe extern "C" fn sx_squad_add_tactic(squad: *mut SxSquad, tactic: *mut S
 /// # Safety
 /// `tactic` and `input` are null or writable.
 pub(crate) unsafe fn plan_error(e: PlanError, tactic: *mut u32, input: *mut u32) -> i32 {
-    let (t, i) = match e {
-        PlanError::InputOutOfRange { tactic, input } => (tactic, input),
-        PlanError::TooManySlots { tactic } => (tactic, u32::MAX),
-    };
+    let (code, t, i) = convert::plan_error(e);
     // SAFETY: see above.
     unsafe {
-        put(tactic, u32::try_from(t).unwrap_or(u32::MAX));
+        put(tactic, t);
         put(input, i);
     }
-    ERROR_PLAN
+    code
 }
 
 /// `sx_squad_validate`.
@@ -1585,18 +1483,19 @@ pub unsafe extern "C" fn sx_squad_check(
     let Some((extra, spots)) = (unsafe { lists(extra, extra_count, spots, spot_count) }) else {
         return ERROR_ARGUMENT;
     };
-    guarded(|| match s.check(now, extra, spots, seed) {
-        Ok(Status::Keep) => SQUAD_KEEP,
-        Ok(Status::Replan(id)) => {
-            // SAFETY: see above.
-            unsafe { put(plan, id) };
-            SQUAD_REPLAN
-        }
-        Ok(Status::Signal) => SQUAD_SIGNAL,
-        Ok(Status::NoPlan) => SQUAD_NO_PLAN,
-        // SAFETY: null details.
-        Err(e) => unsafe { plan_error(e, std::ptr::null_mut(), std::ptr::null_mut()) },
-    })
+    guarded(
+        || match s.check(now, extra, spots, seed).map(convert::squad_status) {
+            Ok((code, id)) => {
+                if let Some(id) = id {
+                    // SAFETY: see above.
+                    unsafe { put(plan, id) };
+                }
+                code
+            }
+            // SAFETY: null details.
+            Err(e) => unsafe { plan_error(e, std::ptr::null_mut(), std::ptr::null_mut()) },
+        },
+    )
 }
 
 /// `sx_squad_orders_due`.
@@ -1885,7 +1784,7 @@ pub unsafe extern "C" fn sx_keeper_inputs(
     out: *mut i32,
 ) -> i32 {
     let k = keeper!(keeper);
-    let Some(metric) = metric_of(metric) else {
+    let Some(metric) = convert::metric(metric) else {
         return ERROR_ARGUMENT;
     };
     if out.is_null() {

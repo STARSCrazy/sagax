@@ -6,37 +6,24 @@
 //! [`DStarLite`].
 
 use std::ffi::c_void;
-use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use sagax_abi::codes::{
+    CUT_CORNERS, DONE, ERROR_ARGUMENT, ERROR_INTERNAL, FOUND, FOUR_WAYS, RUNNING, UNREACHABLE,
+};
+use sagax_abi::convert::{self, hex_layout, nav_status, to_i32};
 use sagax_nav::Cost;
 use sagax_nav::Limits;
 use sagax_nav::dstar::{DStarLite, DStarStatus};
 use sagax_nav::flow::FlowField;
 use sagax_nav::formation::Formation;
 use sagax_nav::grid::{Cell, CellMap, GridRules, Moves, Preset};
-use sagax_nav::hex::HexLayout;
-use sagax_nav::nav::{Budget, Navigator, Output, Report, Status, WayOptions, write_way};
+use sagax_nav::nav::{Navigator, Output, Report, WayOptions, write_way};
 use sagax_nav::topology::Topology;
 use sagax_nav::trace::{TraceEvent, TraceSink, Tracer};
 
 /// Version of the C interface (`SX_API_VERSION`).
 pub const API_VERSION: u32 = 9;
-
-const ERROR_ARGUMENT: i32 = -1;
-const ERROR_INTERNAL: i32 = -2;
-/// `SX_ERROR_PLAN`: a tactic reads a column beyond the scoring row.
-const ERROR_PLAN: i32 = -3;
-
-const FOUR_WAYS: u32 = 1;
-const CUT_CORNERS: u32 = 2;
-
-const IDLE: i32 = 0;
-const RUNNING: i32 = 1;
-const FOUND: i32 = 2;
-const PARTIAL: i32 = 3;
-const UNREACHABLE: i32 = 4;
-const DONE: i32 = 5;
 
 /// `sx_step_fn`.
 pub type StepFn = unsafe extern "C" fn(*mut c_void, i32, i32, i32, i32, i32) -> i32;
@@ -114,17 +101,6 @@ impl Point {
     }
 }
 
-/// The hex layout of an `SX_GRID_HEX_*` value; `None` for square or unknown.
-fn hex_layout(grid: u32) -> Option<HexLayout> {
-    match grid {
-        1 => Some(HexLayout::OddR),
-        2 => Some(HexLayout::EvenR),
-        3 => Some(HexLayout::OddQ),
-        4 => Some(HexLayout::EvenQ),
-        _ => None,
-    }
-}
-
 /// `sx_point_to_pos`: the point as `[x, y, level]` in `out` (3 integers).
 /// Returns 0, or `SX_ERROR_ARGUMENT` if `out` is null.
 ///
@@ -165,19 +141,18 @@ unsafe fn hex_convert(
     grid: u32,
     pos: *const i32,
     out: *mut i32,
-    f: fn(HexLayout, [i32; 3]) -> [i32; 3],
+    f: fn(u32, [i32; 3]) -> Option<[i32; 3]>,
 ) -> i32 {
-    let Some(layout) = hex_layout(grid) else {
-        return ERROR_ARGUMENT;
-    };
     if pos.is_null() || out.is_null() {
         return ERROR_ARGUMENT;
     }
-    // SAFETY: not null; the caller gives 3 integers and room for 3.
-    unsafe {
-        let p = pos.cast::<[i32; 3]>().read_unaligned();
-        out.cast::<[i32; 3]>().write_unaligned(f(layout, p));
-    }
+    // SAFETY: not null; the caller gives 3 integers.
+    let p = unsafe { pos.cast::<[i32; 3]>().read_unaligned() };
+    let Some(q) = f(grid, p) else {
+        return ERROR_ARGUMENT;
+    };
+    // SAFETY: not null; the caller gives room for 3 integers.
+    unsafe { out.cast::<[i32; 3]>().write_unaligned(q) };
     0
 }
 
@@ -190,7 +165,7 @@ unsafe fn hex_convert(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_hex_to_axial(grid: u32, pos: *const i32, out: *mut i32) -> i32 {
     // SAFETY: see above.
-    unsafe { hex_convert(grid, pos, out, HexLayout::to_axial_pos) }
+    unsafe { hex_convert(grid, pos, out, convert::hex_to_axial) }
 }
 
 /// `sx_hex_from_axial`: the axial position `[q, r, z]` as offset `[x, y, z]`;
@@ -201,7 +176,7 @@ pub unsafe extern "C" fn sx_hex_to_axial(grid: u32, pos: *const i32, out: *mut i
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_hex_from_axial(grid: u32, pos: *const i32, out: *mut i32) -> i32 {
     // SAFETY: see above.
-    unsafe { hex_convert(grid, pos, out, HexLayout::from_axial_pos) }
+    unsafe { hex_convert(grid, pos, out, convert::hex_from_axial) }
 }
 
 /// `sx_map`.
@@ -444,52 +419,10 @@ pub unsafe extern "C" fn sx_rules_default(grid: u32, preset: u32, out: *mut SxRu
     0
 }
 
-/// Budget 0 means unlimited; negative budgets are refused.
-fn nav_budget_of(budget: i32) -> Option<Budget> {
-    match budget {
-        0 => Some(Budget::Unlimited),
-        b => usize::try_from(b)
-            .ok()
-            .and_then(NonZeroUsize::new)
-            .map(Budget::Cells),
-    }
-}
-
-fn budget_of(budget: i32) -> Option<usize> {
-    match budget {
-        0 => Some(usize::MAX),
-        b => usize::try_from(b).ok(),
-    }
-}
-
-fn output_of(output: u32) -> Option<Output> {
-    match output {
-        0 => Some(Output::Cells),
-        1 => Some(Output::Turns),
-        2 => Some(Output::Smooth),
-        _ => None,
-    }
-}
-
 /// `max` entries at `out` must be writable (or `max` 0).
 fn room<T>(out: *mut T, max: i32) -> Option<usize> {
     let max = usize::try_from(max).ok()?;
     (max == 0 || !out.is_null()).then_some(max)
-}
-
-fn to_i32<T: TryInto<i32>>(value: T) -> i32 {
-    value.try_into().unwrap_or(i32::MAX)
-}
-
-fn status_code(status: Status) -> i32 {
-    match status {
-        Status::Idle => IDLE,
-        Status::Running => RUNNING,
-        Status::Found => FOUND,
-        Status::Partial => PARTIAL,
-        Status::Unreachable => UNREACHABLE,
-        Status::Done => DONE,
-    }
 }
 
 fn write_result(result: *mut SxResult, value: SxResult) {
@@ -501,7 +434,7 @@ fn write_result(result: *mut SxResult, value: SxResult) {
 
 fn result_of(report: Report) -> SxResult {
     SxResult {
-        status: status_code(report.status),
+        status: nav_status(report.status),
         cells: to_i32(report.cells),
         cost: to_i32(report.cost),
         expanded: to_i32(report.expanded),
@@ -659,8 +592,8 @@ pub unsafe extern "C" fn sx_nav_find_path(
         return ERROR_ARGUMENT;
     };
     let (Some(budget), Some(output), Some(max), Some(count)) = (
-        nav_budget_of(budget),
-        output_of(output),
+        convert::budget(budget),
+        convert::output(output),
         room(points, max_points),
         room(goals.cast_mut(), goal_count),
     ) else {
@@ -701,7 +634,7 @@ pub unsafe extern "C" fn sx_nav_flee(
     };
     let (Ok(max_cost), Some(output), Some(max), Some(count)) = (
         Cost::try_from(max_cost),
-        output_of(output),
+        convert::output(output),
         room(points, max_points),
         room(threats.cast_mut(), threat_count),
     ) else {
@@ -740,7 +673,7 @@ pub unsafe extern "C" fn sx_nav_reachable(
     };
     let (Ok(max_cost), Some(budget), Some(max)) = (
         Cost::try_from(max_cost),
-        nav_budget_of(budget),
+        convert::budget(budget),
         room(cells, max_cells),
     ) else {
         return ERROR_ARGUMENT;
@@ -771,7 +704,7 @@ pub unsafe extern "C" fn sx_nav_continue(
     let (Some(s), Some(mut map)) = (unsafe { nav.as_mut() }, CallbackMap::new(map)) else {
         return ERROR_ARGUMENT;
     };
-    let (Some(budget), Some(max)) = (nav_budget_of(budget), room(points, max_points)) else {
+    let (Some(budget), Some(max)) = (convert::budget(budget), room(points, max_points)) else {
         return ERROR_ARGUMENT;
     };
     guarded(|| {
@@ -803,7 +736,7 @@ pub unsafe extern "C" fn sx_nav_path_to(
     let (Some(s), Some(mut map)) = (unsafe { nav.as_mut() }, CallbackMap::new(map)) else {
         return ERROR_ARGUMENT;
     };
-    let (Some(output), Some(max)) = (output_of(output), room(points, max_points)) else {
+    let (Some(output), Some(max)) = (convert::output(output), room(points, max_points)) else {
         return ERROR_ARGUMENT;
     };
     guarded(|| {
@@ -847,7 +780,7 @@ pub unsafe extern "C" fn sx_nav_way(
     let (Some(s), Some(mut map)) = (unsafe { nav.as_mut() }, CallbackMap::new(map)) else {
         return ERROR_ARGUMENT;
     };
-    let (Some(output), Some(max)) = (output_of(output), room(points, max_points)) else {
+    let (Some(output), Some(max)) = (convert::output(output), room(points, max_points)) else {
         return ERROR_ARGUMENT;
     };
     guarded(|| s.write_way(&mut map, output, points, max))
@@ -1131,8 +1064,8 @@ pub unsafe extern "C" fn sx_dstar_compute(
         return ERROR_ARGUMENT;
     };
     let (Some(budget), Some(output), Some(max)) = (
-        budget_of(budget),
-        output_of(output),
+        convert::budget_cells(budget),
+        convert::output(output),
         room(points, max_points),
     ) else {
         return ERROR_ARGUMENT;

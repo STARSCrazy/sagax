@@ -549,6 +549,8 @@ export const MEMORY = {
   countPair: 0xfffffff3, // ... on this target
 };
 const COMBINE = { product: 0, geometricMean: 1, minimum: 2, average: 3, median: 4 };
+/** `option` of Decider.setCombine for every option (the same as leaving it out). */
+export const ALL_OPTIONS = -1;
 const APPLY = { combine: 0, multiply: 1 };
 const fixed = (v, what) => {
   const n = Math.round(v * ONE);
@@ -641,11 +643,12 @@ export class Decider extends Handle {
   /**
    * How factors are put together: 'product' (default), 'geometricMean',
    * 'minimum', 'average' or 'median'. Without option: for every option;
-   * with option: that one only (null: follow the decider again).
+   * with option: that one only (null: follow the decider again). The option
+   * is ALL_OPTIONS or a valid option number, nothing else.
    */
   setCombine(combine, option) {
     const c = combine === null ? -1 : combineOf(combine);
-    const o = option === undefined || option === null ? -1 : u32Of(option, 'option');
+    const o = option === undefined || option === null || option === ALL_OPTIONS ? -1 : intIn(option, 0, I32_MAX, 'option');
     if (this.x.sx_decider_set_combine(this.h, o, c) !== 0) {
       throw new RangeError('Sagax: bad combine or option');
     }
@@ -1704,7 +1707,8 @@ const START = { now: 0, after: 1, signal: 2 };
 const STARTS = Object.keys(START);
 const PLACE = { none: 0, offset: 1, side: 2, between: 3, tagged: 4, here: 5 };
 const SIDE = { front: 0, left: 1, right: 2, rear: 3 };
-const SHAPE = { line: 1, wedge: 2, column: 3 };
+/** The shapes of lib.tactics.formation, numbered as C `SX_SHAPE_*`. */
+export const SHAPE = { line: 0, wedge: 1, column: 2 };
 const PICKS = Object.keys(PICK);
 const SQUAD_STATUS = ['keep', 'replan', 'signal', 'noPlan'];
 const MEMBER_SIZE = 7;
@@ -1776,6 +1780,9 @@ function bitsOf(v, table, what) {
   if (!Array.isArray(v)) return u32Of(v, what);
   return v.reduce((bits, name) => (bits | choice(table, name, what)) >>> 0, 0);
 }
+
+/** A skill table entry: a whole number from 0 to 2147483647 (the module reads the numbers as i32). */
+const entryOf = (v, what) => intIn(v, 0, I32_MAX, what);
 
 /** Four numbers of a skill table row, checked. */
 function levels(list, check, what) {
@@ -1858,11 +1865,11 @@ function skillValues(t) {
   const pick = levels(t.pick, (p, what) => choice(PICK, p, what), 'pick');
   return [
     ...pick,
-    ...levels(t.pickTop, u32Of, 'pickTop'),
-    ...levels(t.thinkTicks, u32Of, 'thinkTicks'),
-    ...levels(t.timingSpread, u32Of, 'timingSpread'),
-    ...levels(t.holdBonus, u32Of, 'holdBonus'),
-    ...levels(t.giveUpTicks, u32Of, 'giveUpTicks'),
+    ...levels(t.pickTop, entryOf, 'pickTop'),
+    ...levels(t.thinkTicks, entryOf, 'thinkTicks'),
+    ...levels(t.timingSpread, entryOf, 'timingSpread'),
+    ...levels(t.holdBonus, entryOf, 'holdBonus'),
+    ...levels(t.giveUpTicks, entryOf, 'giveUpTicks'),
     ...levels(t.spotRankError, u8Of, 'spotRankError'),
   ].map(i32);
 }
@@ -2650,9 +2657,9 @@ function skillEntry(x, which, table, skill) {
   return u32(takeInts(x, ptr, 1)[0]);
 }
 
-/** A shipped tactic as a Tactic. */
-function shipped(x, which, param = 0) {
-  return new Tactic(x, x.sx_tactic_shipped(which, i32Of(param, 'param')));
+/** The shape number of a name ('line' | 'wedge' | 'column') or a SHAPE number. */
+function shapeOf(shape) {
+  return typeof shape === 'number' ? intIn(shape, 0, 2, 'shape') : choice(SHAPE, shape, 'shape');
 }
 
 Object.assign(Sagax.prototype, {
@@ -2797,19 +2804,22 @@ Object.defineProperty(Sagax.prototype, 'hex', {
 Object.defineProperty(Sagax.prototype, 'tactics', {
   /**
    * The shipped tactics as Tactic objects (numbers are defaults to tune):
-   * rush(), formation('line'|'wedge'|'column', spacing), flank(sides 2|3,
+   * rush(), formation('line'|'wedge'|'column' or a SHAPE number, spacing), flank(sides 2|3,
    * dist), ambush(), focus(), isolate(), fallBack().
    */
   get() {
     const x = this.x;
     return {
-      rush: () => shipped(x, 0),
-      formation: (shape, spacing) => shipped(x, choice(SHAPE, shape, 'shape'), spacing),
-      flank: (sides, dist) => shipped(x, u8Of(sides, 'sides') >= 3 ? 5 : 4, dist),
-      ambush: () => shipped(x, 6),
-      focus: () => shipped(x, 7),
-      isolate: () => shipped(x, 8),
-      fallBack: () => shipped(x, 9),
+      rush: () => new Tactic(x, x.sx_tactic_rush()),
+      formation: (shape, spacing = 0) => new Tactic(x, x.sx_tactic_formation(shapeOf(shape), i32Of(spacing, 'spacing'))),
+      flank: (sides, dist = 0) => {
+        if (sides !== 2 && sides !== 3) throw new RangeError(`Sagax: flank sides must be 2 or 3, not ${String(sides)}`);
+        return new Tactic(x, x.sx_tactic_flank(sides, i32Of(dist, 'dist')));
+      },
+      ambush: () => new Tactic(x, x.sx_tactic_ambush()),
+      focus: () => new Tactic(x, x.sx_tactic_focus()),
+      isolate: () => new Tactic(x, x.sx_tactic_isolate()),
+      fallBack: () => new Tactic(x, x.sx_tactic_fall_back()),
     };
   },
 });

@@ -3,7 +3,7 @@
 
 import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
-import { KEEPER, MEMORY, ONE, Report, SQUAD, loadSagax, HEX, FORMATION, Progress, Interval, Alertness, PlanError } from './sagax.mjs';
+import { ALL_OPTIONS, KEEPER, MEMORY, ONE, Report, SHAPE, SQUAD, loadSagax, HEX, FORMATION, Progress, Interval, Alertness, PlanError } from './sagax.mjs';
 
 const wasm = await readFile(new URL('../target/wasm32-unknown-unknown/release/sagax_wasm.wasm', import.meta.url));
 console.log(`wasm size ${(wasm.length / 1024).toFixed(0)} KB`);
@@ -2244,6 +2244,100 @@ test('value classes match C', () => {
   assert.deepEqual(Object.keys(new Progress()).sort(), ['best', 'since', 'started']);
   assert.deepEqual(Object.keys(new Interval()).sort(), ['last', 'started']);
   assert.deepEqual(Object.keys(new Alertness()).sort(), ['last', 'lastStimulus', 'level', 'value']);
+});
+
+test('setCombine: ALL_OPTIONS or a valid option', () => {
+  const d = lib.decider();
+  const one = d.addOption(1, [{ input: 0 }]);
+  d.setCombine('minimum', ALL_OPTIONS);
+  d.setCombine('median', one);
+  d.setCombine(null, one);
+  assert.throws(() => d.setCombine('minimum', -2), RangeError);
+  assert.throws(() => d.setCombine('minimum', one + 5), RangeError);
+  assert.throws(() => d.setCombine('minimum', 1.5), RangeError);
+  d.free();
+});
+
+test('skill table: negative throws', () => {
+  const sq = squadOf('euclid', [[1, 0, 0]]);
+  const table = sq.skillTable();
+  for (const key of ['pickTop', 'thinkTicks', 'timingSpread', 'holdBonus', 'giveUpTicks']) {
+    assert.throws(() => sq.setSkillTable({ ...table, [key]: [-1, 0, 0, 0] }), RangeError, key);
+  }
+  assert.throws(() => sq.setSkillTable({ ...table, spotRankError: [-1, 0, 0, 0] }), RangeError);
+  assert.deepEqual(sq.skillTable(), table, 'nothing changed');
+  // the raw module refuses a negative entry too (it never wraps to u32)
+  const x = lib.x;
+  const record = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const put = (values) => new Int32Array(x.memory.buffer, x.sx_scratch(values.length), values.length).set(values);
+  put(record);
+  assert.equal(x.sx_squad_set_skill_table(sq.h), 0);
+  put(record.map((v, i) => (i === 9 ? -1 : v)));
+  assert.equal(x.sx_squad_set_skill_table(sq.h), -1);
+  sq.free();
+});
+
+test('radius and range must be whole', () => {
+  const t = lib.tactic();
+  const sq = squadOf('euclid', [[1, 0, 0]]);
+  assert.throws(() => t.triggerTargetInRadius(NaN), RangeError);
+  assert.throws(() => t.triggerTargetInRadius(2.5), RangeError);
+  assert.throws(() => sq.setShout(1, 1.5), RangeError);
+  assert.throws(() => sq.setShout(1, NaN), RangeError);
+  assert.throws(() => sq.setSpotRadius(1.5), RangeError);
+  // the raw module does not truncate either
+  const x = lib.x;
+  const tactic = lib.tactic();
+  assert.equal(x.sx_tactic_trigger_target_in_radius(tactic.h, NaN), -1);
+  assert.equal(x.sx_tactic_trigger_target_in_radius(tactic.h, 2.5), -1);
+  assert.equal(x.sx_tactic_trigger_target_in_radius(tactic.h, 9.3e18), -1);
+  assert.equal(x.sx_tactic_trigger_target_in_radius(tactic.h, -3), 0);
+  assert.equal(x.sx_squad_set_shout(sq.h, 1, 1.5), -1);
+  assert.equal(x.sx_squad_set_shout(sq.h, 1, NaN), -1);
+  assert.equal(x.sx_squad_set_shout(sq.h, 1, 4), 1);
+  assert.equal(x.sx_squad_set_spot_radius(sq.h, 1.5), -1);
+  assert.equal(x.sx_squad_set_spot_radius(sq.h, NaN), -1);
+  assert.equal(x.sx_squad_set_spot_radius(sq.h, 4294967296), -1);
+  tactic.free();
+  t.free();
+  sq.free();
+});
+
+test('flank sides are 2 or 3', () => {
+  assert.throws(() => lib.tactics.flank(4, 4), RangeError);
+  assert.throws(() => lib.tactics.flank(1, 4), RangeError);
+  assert.throws(() => lib.tactics.flank(2.5, 4), RangeError);
+  assert.throws(() => lib.tactics.flank('3', 4), RangeError);
+  const sq = squadOf('euclid', [[1, 0, 0]]);
+  assert.equal(sq.addTactic(lib.tactics.flank(2, 4)), 0);
+  assert.equal(sq.addTactic(lib.tactics.flank(3, 4)), 1);
+  sq.free();
+});
+
+test('SHAPE matches C', () => {
+  assert.equal(SHAPE.line, 0);
+  assert.equal(SHAPE.wedge, 1);
+  assert.equal(SHAPE.column, 2);
+  assert.throws(() => lib.tactics.formation(3, 2), RangeError);
+  assert.throws(() => lib.tactics.formation(-1, 2), RangeError);
+  assert.throws(() => lib.tactics.formation('ring', 2), RangeError);
+  // the number and the name make the same tactic: the same plan, slot for slot
+  const planOf = (shape) => {
+    const sq = squadOf('euclid', [[1, 0, 0], [2, 1, 0], [3, 0, 1], [4, 1, 1]], { radio: false });
+    sq.addTactic(lib.tactics.formation(shape, 2));
+    sq.setSkill(255);
+    sq.observe(0, enemy(10, 20, 0));
+    sq.plan(0);
+    const plan = sq.pendingPlan();
+    sq.free();
+    return plan;
+  };
+  for (const name of ['line', 'wedge', 'column']) {
+    const byName = planOf(name);
+    assert.ok(byName.goals.length >= 2, name);
+    assert.deepEqual(planOf(SHAPE[name]), byName, name);
+  }
+  assert.notDeepEqual(planOf(SHAPE.line).goals.map((g) => g.pos), planOf(SHAPE.column).goals.map((g) => g.pos));
 });
 
 console.log(`${passed} tests passed`);

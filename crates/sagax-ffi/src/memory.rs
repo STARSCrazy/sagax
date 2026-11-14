@@ -3,11 +3,12 @@
 
 use sagax_decide::memory::{
     AlertConfig, Alertness, Area, Areas, Evict, Fact, Inbox, Interval, Knowledge, LOOK_OFFSETS,
-    Message, Metric, Outbox, PointPattern, Progress, Refused, Route, Sine, Timers, arrival,
-    points_around, route, sine, sweep_heading,
+    Message, Outbox, PointPattern, Progress, Refused, Route, Sine, Timers, arrival, points_around,
+    route, sine, sweep_heading,
 };
 
 use super::{ERROR_ARGUMENT, create, destroy, slice_of, to_i32};
+use sagax_abi::convert;
 use sagax_nav::grid::Cell;
 
 /// `sx_fact`.
@@ -68,17 +69,6 @@ pub struct SxPointPattern {
 
 fn flag(b: bool) -> i32 {
     i32::from(b)
-}
-
-/// The metric for its number (`SX_METRIC_*`).
-pub(crate) fn metric_of(code: u32) -> Option<Metric> {
-    Some(match code {
-        0 => Metric::Euclid,
-        1 => Metric::Manhattan,
-        2 => Metric::Chebyshev,
-        3 => Metric::Hex,
-        _ => return None,
-    })
 }
 
 fn sine_of(code: u32) -> Option<Sine> {
@@ -659,7 +649,7 @@ pub unsafe extern "C" fn sx_route(
     if (c.is_null() && n > 0) || (out.is_null() && n > 0) {
         return ERROR_ARGUMENT;
     }
-    let Some(metric) = metric_of(metric) else {
+    let Some(metric) = convert::metric(metric) else {
         return ERROR_ARGUMENT;
     };
     let rule = match rule {

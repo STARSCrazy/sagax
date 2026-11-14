@@ -1,0 +1,19 @@
+[package]
+name = "sagax-abi"
+description = "Internal number codes and checked conversions shared by the C and WebAssembly layers of Sagax."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+
+[dependencies]
+sagax-core = { path = "../sagax-core" }
+sagax-nav = { path = "../sagax-nav" }
+sagax-decide = { path = "../sagax-decide" }
+
+[lints]
+workspace = true
