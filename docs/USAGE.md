@@ -1129,6 +1129,15 @@ What comes out per check (at most `MAX_PERCEPTS_PER_CHECK`, 4): `Noticed`,
 - A cue rule with `gain` 0 is neutral (no gain factor), so a rule that is
   only instant ("a drawn weapon is recognised at once in the focus") is
   possible.
+- An instant fires from the sight pass only, and only while sight sees
+  the target: any of band, distance, light, clarity, size or conspicuity
+  at 0 blocks it (darkness with `dark_gain` 0, size 0, conspicuity 0); a
+  gain that merely rounds to 0 does not. The thermal pass never fires
+  one: a `SIGHT` + `THERMAL` eye with `dark_gain` 0 sees a warm target in
+  the dark by heat, but its instant stays blocked (`NIGHT` lifts the
+  light, so it fires). `look` picks instant targets by cue bits alone, so
+  in the dark or for a thermal-only eye such a pick uses an `instant_cap`
+  slot without firing.
 - The scanner (`SCANNER`) reaches only *noticed*: it gives a location,
   never cues, never recognition and never sees through a disguise.
 - Light is read at the target's cell (with its `glow`); `Lit { inner,

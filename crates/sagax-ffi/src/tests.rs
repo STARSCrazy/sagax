@@ -6678,6 +6678,23 @@ mod perception {
             };
             let kinds = SxFactKinds::default();
             assert_eq!(sx_percept_fact(&bad, &kinds, &mut fact), e);
+            // A disguised HEARD: no fact without a disguised kind, else
+            // that kind.
+            let masked = SxPercept {
+                disguised: 1,
+                ..buf[0]
+            };
+            assert_eq!(sx_percept_fact(&masked, &kinds, &mut fact), 0);
+            let with = SxFactKinds {
+                heard_kind: 4,
+                disguised_kind: 7,
+                has_disguised_kind: 1,
+                ..kinds
+            };
+            assert_eq!(sx_percept_fact(&masked, &with, &mut fact), 1);
+            assert_eq!(fact.kind, 7);
+            assert_eq!(sx_percept_fact(&buf[0], &with, &mut fact), 1);
+            assert_eq!(fact.kind, 4);
             let mut map = SxSenseMap::default();
             assert_eq!(sx_sense_map_from_grid(null(), &mut map), e);
             assert_eq!(sx_sense_map_from_map(null(), &mut map), e);

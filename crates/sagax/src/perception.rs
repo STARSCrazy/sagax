@@ -220,8 +220,8 @@ pub struct FactKinds {
     pub seen_kind: u32,
     /// A heard stimulus.
     pub heard_kind: u32,
-    /// A disguised target, in place of the noticed and seen kinds; `None`:
-    /// disguised percepts are skipped (not a threat at all).
+    /// A disguised target, in place of the noticed, seen and heard kinds;
+    /// `None`: disguised percepts are skipped (not a threat at all).
     pub disguised_kind: Option<u32>,
 }
 
@@ -246,7 +246,13 @@ pub struct AlertAmounts {
 /// The fact kind a percept stands for, `None` for none.
 fn fact_kind(p: &Percept, kinds: &FactKinds) -> Option<u32> {
     if p.event == PerceptKind::Heard {
-        return Some(kinds.heard_kind);
+        // A disguised source's noise, as its sight percepts: the
+        // disguised kind, or no fact without one.
+        return if p.disguised {
+            kinds.disguised_kind
+        } else {
+            Some(kinds.heard_kind)
+        };
     }
     let (noticed, seen) = noticed_and_seen(p, kinds)?;
     match p.event {
@@ -270,7 +276,7 @@ fn noticed_and_seen(p: &Percept, kinds: &FactKinds) -> Option<(u32, u32)> {
 /// The fact a percept stands for: `Noticed` and `Seen` at stage noticed
 /// give `noticed_kind`; `Recognized`, `Seen` at stage recognised and
 /// `Cues` give `seen_kind`; `Heard` gives `heard_kind`. A disguised
-/// percept uses `disguised_kind`. `pos` is the whole cell, `seen_at` the
+/// percept (seen or heard) uses `disguised_kind`. `pos` is the whole cell, `seen_at` the
 /// percept's time, `data` its cues; `source` [`SOURCE_HEARD`] with the
 /// margin as `strength` for hearing, else [`SOURCE_OWN`] with the clarity.
 ///
@@ -328,8 +334,9 @@ pub fn alert_amount(p: &Percept, amounts: &AlertAmounts) -> u32 {
 /// | `Lost`, `Forgotten`, `SeenThrough` | nothing: facts age out by the game's `expire*` |
 ///
 /// and `alert.stimulus(alert_amount(p))` for each amount above 0. A
-/// disguised percept uses `disguised_kind` for both the noticed and the
-/// seen kind, or is skipped entirely (no fact, no alert). A percept that
+/// disguised percept uses `disguised_kind` for the noticed, the seen and
+/// the heard kind (a disguised `Heard` still merges), or is skipped
+/// entirely (no fact, no alert). A percept that
 /// is not `placed` changes no fact (its alert amount still counts).
 pub fn learn_percepts(
     known: &mut Knowledge,

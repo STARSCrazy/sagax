@@ -2895,7 +2895,13 @@ typedef struct sx_band {
 } sx_band;
 
 /* What a cue bit of a target (the game's bits: drawn weapon, attacking, a
- * body) does for this observer. */
+ * body) does for this observer. An instant fires from the sight pass only
+ * (never the thermal pass) and only while sight sees the target: none of
+ * band, distance, light, clarity, size and conspicuity is 0 (so not in the
+ * dark with dark_gain 0; SX_SENSE_FLAG_NIGHT lifts the light, then it
+ * fires). A product that only rounds to 0 still fires. sx_perception_look
+ * picks instant targets by cue bits alone: in the dark or for a
+ * thermal-only eye such a pick uses an instant_cap slot without firing. */
 typedef struct sx_cue_rule {
 	uint32_t bits;              /* any of them matches; 0: unused rule */
 	uint16_t gain;              /* conspicuity factor per 256 while shown (0: none) */
@@ -3166,8 +3172,9 @@ int32_t sx_count_crowds(const sx_target *targets, uint32_t count, int32_t radius
 
 /* ---- into knowledge and alertness ---- */
 
-/* The game's fact kinds. A disguised percept uses disguised_kind for both
- * noticed and seen kinds, or is skipped without one. */
+/* The game's fact kinds. A disguised percept (seen or heard) uses
+ * disguised_kind in place of the noticed, seen and heard kinds, or is
+ * skipped without one. */
 typedef struct sx_fact_kinds {
 	uint32_t noticed_kind;
 	uint32_t seen_kind;
@@ -3189,14 +3196,15 @@ typedef struct sx_alert_amounts {
 
 /* The fact a percept stands for: NOTICED and SEEN at stage 1 give
  * noticed_kind, RECOGNIZED, SEEN at stage 2 and CUES seen_kind, HEARD
- * heard_kind; pos is the percept's cell (offset on hex), strength the
+ * heard_kind (disguised: disguised_kind); pos is the percept's cell (offset on hex), strength the
  * clarity (hearing: the margin). Returns 1 (written), 0 (none: LOST,
  * FORGOTTEN, SEEN_THROUGH, not placed, disguised without a kind), or
  * SX_ERROR_ARGUMENT for a null pointer or an unknown sense or event. */
 int32_t sx_percept_fact(const sx_percept *pc, const sx_fact_kinds *k, sx_fact *out);
 /* The common use of count percepts, in order: NOTICED / SEEN at stage 1 learn
  * the noticed kind; RECOGNIZED / SEEN at stage 2 remove the noticed and learn
- * the seen kind; CUES set the seen fact's data; HEARD merges the heard kind;
+ * the seen kind; CUES set the seen fact's data; HEARD merges the heard kind
+ * (a disguised percept: as in sx_fact_kinds);
  * LOST, FORGOTTEN, SEEN_THROUGH remove nothing (facts age out). Each amount
  * above 0 goes to sx_alertness_stimulus. known's trace sees each learn,
  * remove and merge.

@@ -64,7 +64,9 @@ game built with the new header refuses an older library.
     the pair at most to *noticed* (up to 3 percepts per call).
     `Stimulus.disguise` (as `Target.disguise`, 0 none): a disguised
     source's noise gives `disguised` percepts unless the pair has seen
-    through it; hearing never grows the doubt.
+    through it; hearing never grows the doubt. `percept_fact` and
+    `learn_percepts` map a disguised `Heard` to `disguised_kind` (no fact
+    without one), as they do for sight.
   - `PerceptionTrace`, also in `sagax::debug`.
 - **`sagax::perception` helpers** that join it with nav and memory:
   `GridSight::square` / `hex` (a sense map from a `DenseGrid`),

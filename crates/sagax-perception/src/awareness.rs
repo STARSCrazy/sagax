@@ -207,7 +207,13 @@ pub fn observe(
 ///    clarity, size, conspicuity: so not in the dark with `dark_gain` 0,
 ///    nor at size or conspicuity 0), raise the counter to `notice_at` or
 ///    `recognize_at`. A chain whose product only rounds to 0 (a heavily
-///    discounted but visible target) still fires.
+///    discounted but visible target) still fires. Only the sight pass
+///    fires instants, never the thermal pass: a sight-and-thermal eye with
+///    `dark_gain` 0 sees a warm target in the dark by heat, but its instant
+///    stays blocked ([`NIGHT`](crate::NIGHT) lifts the light, so it
+///    fires). [`look`](crate::look) picks instant targets by cue bits
+///    alone, so in the dark or for a thermal-only eye such a pick uses an
+///    `instant_cap` slot without firing.
 /// 7. **Decay** when sight and thermal saw nothing, once `hold` ticks
 ///    passed since the last sighting: `decay_per_tick * credit`; with a
 ///    scanner contact never below `notice_at`, so the scanner holds a

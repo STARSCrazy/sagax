@@ -714,13 +714,17 @@ fn disguised_noise_learns_no_threat() {
         assert!(known.get(9, kind).is_none(), "kind {kind}");
     }
     assert_eq!(alert.value(), 0);
-    // With one: the noticed fact goes there, the noise stays a noise.
+    // One percept at a time: no fact either.
+    assert!(out.iter().all(|p| percept_fact(p, &kinds()).is_none()));
+    // With one: the noticed fact and the noise both go there.
     let with = FactKinds {
         disguised_kind: Some(DISGUISED),
         ..kinds()
     };
+    let heard = percept_fact(&out[0], &with).unwrap();
+    assert_eq!((heard.kind, heard.source), (DISGUISED, SOURCE_HEARD));
     learn_percepts(&mut known, &mut alert, &cfg, 1, &out, &with, &amounts);
     assert!(known.get(9, NOTICED).is_none());
+    assert!(known.get(9, HEARD).is_none());
     assert_eq!(known.get(9, DISGUISED).unwrap().pos, [2, 0, 0]);
-    assert_eq!(known.get(9, HEARD).unwrap().pos, [2, 0, 0]);
 }
