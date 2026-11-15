@@ -576,77 +576,108 @@ fn hex_grids_work_everywhere() {
     }
 }
 
-unsafe extern "C" fn record(ctx: *mut c_void, event: *const SxEvent) {
-    let events = unsafe { &mut *ctx.cast::<Vec<SxEvent>>() };
+unsafe extern "C" fn record(ctx: *mut c_void, event: *const SxSearchTrace) {
+    let events = unsafe { &mut *ctx.cast::<Vec<SxSearchTrace>>() };
     events.push(unsafe { *event });
+}
+
+unsafe extern "C" fn record_nav(ctx: *mut c_void, event: *const SxNavTrace) {
+    let events = unsafe { &mut *ctx.cast::<Vec<SxNavTrace>>() };
+    events.push(unsafe { *event });
+}
+
+/// `sx_nav_find_path` from (2, 2) to (18, 2) as `output`.
+fn find(nav: *mut SxNav, map: &SxMap, output: u32) -> (Vec<Point>, SxResult) {
+    let mut points = [Point::default(); 64];
+    let mut result = SxResult::default();
+    let n = unsafe {
+        sx_nav_find_path(
+            nav,
+            map,
+            p(2, 2),
+            &p(18, 2),
+            1,
+            0,
+            output,
+            points.as_mut_ptr(),
+            64,
+            &mut result,
+        )
+    };
+    (points[..n as usize].to_vec(), result)
 }
 
 #[test]
 fn tracing_reports_steps_and_turns_off() {
+    use sagax_abi::codes::{NAV_TRACE_SEARCH, NAV_TRACE_SHORTCUT, SEARCH_TRACE_EXPANDED};
     let mut w = wall_line();
     let map = map_of(&mut w);
     let nav = unsafe { sx_nav_new(&rules(0)) };
-    let mut events: Vec<SxEvent> = Vec::new();
-    let ctx = (&mut events as *mut Vec<SxEvent>).cast();
-    assert_eq!(unsafe { sx_nav_set_trace(nav, Some(record), ctx) }, 0);
-    let mut points = [Point::default(); 64];
-    let mut result = SxResult::default();
-    unsafe {
-        sx_nav_find_path(
-            nav,
-            &map,
-            p(2, 2),
-            &p(18, 2),
-            1,
-            0,
-            1,
-            points.as_mut_ptr(),
-            64,
-            &mut result,
-        )
-    };
-    let expanded = events.iter().filter(|e| e.kind == 2).count();
+    let mut events: Vec<SxNavTrace> = Vec::new();
+    let ctx = (&mut events as *mut Vec<SxNavTrace>).cast();
+    assert_eq!(unsafe { sx_nav_set_trace(nav, Some(record_nav), ctx) }, 0);
+    assert_eq!(
+        unsafe { sx_nav_set_trace(std::ptr::null_mut(), Some(record_nav), ctx) },
+        ERROR_ARGUMENT
+    );
+    let (way, result) = find(nav, &map, 2);
+    let search: Vec<SxSearchTrace> = events
+        .iter()
+        .filter(|e| e.kind == NAV_TRACE_SEARCH)
+        .map(|e| e.search)
+        .collect();
+    let expanded = search
+        .iter()
+        .filter(|e| e.kind == SEARCH_TRACE_EXPANDED)
+        .count();
     assert_eq!(expanded as i32, result.expanded);
-    assert_eq!((events[0].kind, events[0].cell), (1, p(2, 2)));
-    let last = *events.last().unwrap();
+    assert_eq!((search[0].kind, search[0].cell), (1, p(2, 2)));
+    let last = *search.last().unwrap();
     assert_eq!((last.kind, last.found), (5, 1));
+    // the smoothed way: its line tests follow the search
+    let shortcuts = events
+        .iter()
+        .skip_while(|e| e.kind == NAV_TRACE_SEARCH)
+        .inspect(|e| assert_eq!(e.kind, NAV_TRACE_SHORTCUT))
+        .count();
+    assert!(shortcuts > 0);
 
     unsafe { sx_nav_set_trace(nav, None, std::ptr::null_mut()) };
     let before = events.len();
-    unsafe {
-        sx_nav_find_path(
-            nav,
-            &map,
-            p(2, 2),
-            &p(18, 2),
-            1,
-            0,
-            1,
-            points.as_mut_ptr(),
-            64,
-            &mut result,
-        )
-    };
+    assert_eq!(find(nav, &map, 2), (way, result));
     assert_eq!(events.len(), before);
     unsafe { sx_nav_free(nav) };
 
     let d = unsafe { sx_dstar_new(&rules(0)) };
-    let mut events: Vec<SxEvent> = Vec::new();
-    unsafe { sx_dstar_set_trace(d, Some(record), (&mut events as *mut Vec<SxEvent>).cast()) };
+    let mut points = [Point::default(); 64];
+    let mut result = SxResult::default();
+    let mut events: Vec<SxSearchTrace> = Vec::new();
+    unsafe {
+        sx_dstar_set_trace(
+            d,
+            Some(record),
+            (&mut events as *mut Vec<SxSearchTrace>).cast(),
+        )
+    };
     unsafe { sx_dstar_begin(d, p(2, 2), p(18, 2)) };
     unsafe { sx_dstar_compute(d, &map, 0, 0, points.as_mut_ptr(), 64, &mut result) };
     assert_eq!(result.status, FOUND);
     assert!(events.iter().filter(|e| e.kind == 2).count() > 10);
     assert_eq!(events.last().map(|e| (e.kind, e.found)), Some((5, 1)));
+    let before = events.len();
+    unsafe { sx_dstar_set_trace(d, None, std::ptr::null_mut()) };
+    unsafe { sx_dstar_begin(d, p(2, 2), p(18, 2)) };
+    unsafe { sx_dstar_compute(d, &map, 0, 0, points.as_mut_ptr(), 64, &mut result) };
+    assert_eq!(events.len(), before);
     unsafe { sx_dstar_free(d) };
 
     let flow = unsafe { sx_flow_new(&rules(0)) };
-    let mut events: Vec<SxEvent> = Vec::new();
+    let mut events: Vec<SxSearchTrace> = Vec::new();
     unsafe {
         sx_flow_set_trace(
             flow,
             Some(record),
-            (&mut events as *mut Vec<SxEvent>).cast(),
+            (&mut events as *mut Vec<SxSearchTrace>).cast(),
         )
     };
     unsafe { sx_flow_build(flow, &map, [p(18, 2)].as_ptr(), 1, 100_000, &mut result) };
@@ -654,7 +685,101 @@ fn tracing_reports_steps_and_turns_off() {
         events.iter().filter(|e| e.kind == 2).count() as i32,
         result.cells
     );
+    let before = events.len();
+    unsafe { sx_flow_set_trace(flow, None, std::ptr::null_mut()) };
+    unsafe { sx_flow_build(flow, &map, [p(18, 2)].as_ptr(), 1, 100_000, &mut result) };
+    assert_eq!(events.len(), before);
+    assert_eq!(
+        unsafe { sx_flow_set_trace(std::ptr::null_mut(), None, std::ptr::null_mut()) },
+        ERROR_ARGUMENT
+    );
+    assert_eq!(
+        unsafe { sx_dstar_set_trace(std::ptr::null_mut(), None, std::ptr::null_mut()) },
+        ERROR_ARGUMENT
+    );
     unsafe { sx_flow_free(flow) };
+}
+
+/// Every C nav call with a trace gives the records the Rust `_traced` call
+/// gives, converted.
+#[test]
+fn nav_trace_matches_rust() {
+    use sagax_abi::codes::{
+        NAV_TRACE_FLEE_BEST, NAV_TRACE_PLACED, NAV_TRACE_SEARCH, NAV_TRACE_SHORTCUT,
+    };
+    use sagax_nav::nav::Output;
+    let mut w = wall_line();
+    let map = map_of(&mut w);
+    let nav = unsafe { sx_nav_new(&rules(0)) };
+    let mut events: Vec<SxNavTrace> = Vec::new();
+    let ctx = (&mut events as *mut Vec<SxNavTrace>).cast();
+    assert_eq!(unsafe { sx_nav_set_trace(nav, Some(record_nav), ctx) }, 0);
+    let mut points = [Point::default(); 64];
+    let mut result = SxResult::default();
+    let threats = [p(4, 2)];
+    let mut table = [Point::default(); 4 * 64];
+    unsafe {
+        sx_nav_find_path(
+            nav,
+            &map,
+            p(2, 2),
+            &p(18, 2),
+            1,
+            0,
+            2,
+            points.as_mut_ptr(),
+            64,
+            &mut result,
+        );
+        sx_nav_formation(nav, &map, std::ptr::null(), 3, table.as_mut_ptr(), 64);
+        sx_nav_flee(
+            nav,
+            &map,
+            p(2, 2),
+            threats.as_ptr(),
+            1,
+            60,
+            0,
+            points.as_mut_ptr(),
+            64,
+            &mut result,
+        );
+    }
+    unsafe { sx_nav_free(nav) };
+
+    let mut rust: Vec<SxNavTrace> = Vec::new();
+    let (topology, capacity, tolerance) = rules_of(&rules(0)).unwrap();
+    let mut navigator = Navigator::new(topology, capacity);
+    navigator.set_smooth_max_extra(tolerance);
+    let mut map = CallbackMap::new(&map).unwrap();
+    let mut sink = CallbackSink(|e| rust.push(SxNavTrace::of(e)));
+    navigator.find_path_traced(
+        &mut map,
+        Cell::new(2, 2, 0),
+        &[Cell::new(18, 2, 0)],
+        sagax_nav::Budget::UNLIMITED,
+        &mut sink,
+    );
+    navigator.output_traced(&mut map, Output::Smooth, &mut sink);
+    navigator.formation_traced(&mut map, &Formation::block_of_four(), &mut sink);
+    navigator.flee_traced(
+        &mut map,
+        Cell::new(2, 2, 0),
+        &[Cell::new(4, 2, 0)],
+        60,
+        &mut sink,
+    );
+    navigator.output_traced(&mut map, Output::Cells, &mut sink);
+    assert_eq!(events, rust);
+    for kind in [
+        NAV_TRACE_SEARCH,
+        NAV_TRACE_SHORTCUT,
+        NAV_TRACE_PLACED,
+        NAV_TRACE_FLEE_BEST,
+    ] {
+        assert!(events.iter().any(|e| e.kind == kind), "kind {kind}");
+    }
+    assert_eq!(events.last().map(|e| e.kind), Some(NAV_TRACE_FLEE_BEST));
 }
 
 #[test]
@@ -1170,6 +1295,16 @@ mod squad {
             ("SX_MISSION_EVENT_SIGNAL", MISSION_EVENT_SIGNAL),
             ("SX_MISSION_EVENT_CALL", MISSION_EVENT_CALL),
             ("SX_MISSION_EVENT_WANTS_SQUAD", MISSION_EVENT_WANTS_SQUAD),
+            ("SX_SEARCH_TRACE_STARTED", SEARCH_TRACE_STARTED),
+            ("SX_SEARCH_TRACE_EXPANDED", SEARCH_TRACE_EXPANDED),
+            ("SX_SEARCH_TRACE_IMPROVED", SEARCH_TRACE_IMPROVED),
+            ("SX_SEARCH_TRACE_PAUSED", SEARCH_TRACE_PAUSED),
+            ("SX_SEARCH_TRACE_FINISHED", SEARCH_TRACE_FINISHED),
+            ("SX_NAV_TRACE_SEARCH", NAV_TRACE_SEARCH),
+            ("SX_NAV_TRACE_SHORTCUT", NAV_TRACE_SHORTCUT),
+            ("SX_NAV_TRACE_PLACED", NAV_TRACE_PLACED),
+            ("SX_NAV_TRACE_UNPLACED", NAV_TRACE_UNPLACED),
+            ("SX_NAV_TRACE_FLEE_BEST", NAV_TRACE_FLEE_BEST),
             ("SX_MISSION_TRACE_COLUMN", MISSION_TRACE_COLUMN),
             ("SX_MISSION_TRACE_FACTOR", MISSION_TRACE_FACTOR),
             ("SX_MISSION_TRACE_SCORED", MISSION_TRACE_SCORED),
@@ -2860,7 +2995,7 @@ mod conventions {
             SxMissionTraceEvent, SxMotive, SxStep, SxWhere,
         };
         use crate::rules::{SxChannelCtx, SxCostCtx, SxPlaceCtx, SxSpotCtx, SxViewPlan};
-        use crate::{Point, SxEvent, SxResult, SxRules};
+        use crate::{Point, SxNavTrace, SxResult, SxRules, SxSearchTrace};
         use std::mem::{offset_of, size_of};
 
         macro_rules! layout {
@@ -2876,7 +3011,32 @@ mod conventions {
             layout!("sx_point", Point, level),
             layout!("sx_rules", SxRules, cost_straight, smooth_max_extra),
             layout!("sx_result", SxResult, node_limit_hit),
-            layout!("sx_event", SxEvent, cell, parent, cost, found),
+            layout!(
+                "sx_search_trace",
+                SxSearchTrace,
+                search,
+                cell,
+                parent,
+                cost,
+                estimate,
+                expanded,
+                found,
+                first
+            ),
+            layout!(
+                "sx_nav_trace",
+                SxNavTrace,
+                search,
+                from,
+                to,
+                cell,
+                member,
+                step,
+                distance,
+                cost,
+                clear,
+                slot
+            ),
             layout!("sx_consideration", SxConsideration, max),
             layout!("sx_candidate", SxCandidate, target),
             layout!("sx_choice", SxChoice, score),

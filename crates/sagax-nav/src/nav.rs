@@ -17,16 +17,60 @@
 //! let corners = nav.output(&mut map, Output::Smooth);
 //! assert_eq!(corners, [Cell::new(0, 0, 0), Cell::new(15, 3, 0)]);
 //! ```
+//!
+//! Every call that decides something has a `_traced` form that reports what
+//! it did as [`NavTrace`] records to a [`Sink`]; the plain call is the
+//! traced one with [`NoopSink`] and costs nothing extra.
+//!
+//! ```
+//! use sagax_debug::{Collector, Overflow};
+//! use sagax_nav::grid::{Cell, DenseGrid, GridRules, Preset};
+//! use sagax_nav::nav::{Budget, NavTrace, Navigator};
+//! use sagax_nav::search::SearchTrace;
+//! use sagax_nav::topology::Topology;
+//!
+//! let mut map = DenseGrid::new(10, 10);
+//! let mut nav = Navigator::new(Topology::Square(GridRules::preset(Preset::Octile)), 1000);
+//! let mut log = Collector::new(1000, Overflow::DropOldest);
+//! let goal = [Cell::new(5, 0, 0)];
+//! nav.find_path_traced(&mut map, Cell::new(0, 0, 0), &goal, Budget::UNLIMITED, &mut log);
+//! let first = log.records().next().unwrap().event;
+//! assert!(matches!(first, NavTrace::Search(SearchTrace::Started { .. })));
+//! ```
 
 use std::num::NonZeroUsize;
 
-use sagax_core::NoopSink;
+use sagax_core::{MapSink, NoopSink, Sink};
 
-use crate::formation::Formation;
+use crate::formation::{Formation, FormationTrace};
 use crate::grid::{Cell, CellMap};
-use crate::search::{Cost, Goal, Limits, NoGoal, Search, SearchStatus};
+use crate::search::{Cost, Goal, Limits, NoGoal, Search, SearchStatus, SearchTrace};
+use crate::smooth::SmoothTrace;
 use crate::topology::Topology;
-use crate::trace::{TraceSink, Tracer};
+
+/// What a [`Navigator`] reports to the sink of a `_traced` call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NavTrace {
+    /// A step of a search: of a path, an area, or one of the two searches of
+    /// a flee (the threats' search first, then the walker's; each counts its
+    /// `search` numbers on its own).
+    Search(SearchTrace<Cell>),
+    /// A line test of the smoothing ([`Output::Smooth`]).
+    Smooth(SmoothTrace<Cell>),
+    /// A member placement of [`Navigator::formation_traced`].
+    Formation(FormationTrace),
+    /// The cell [`Navigator::flee_traced`] chose (the start when nothing is
+    /// farther): `distance` is the threats' walk to it ([`Cost::MAX`] when no
+    /// threat reaches it), `cost` the walker's.
+    FleeBest {
+        /// The chosen cell.
+        cell: Cell,
+        /// How far the nearest threat walks to it.
+        distance: Cost,
+        /// What the walker pays to get there.
+        cost: Cost,
+    },
+}
 
 /// Goal level meaning "any level" (no real level is negative: a step
 /// answers -1 for "blocked").
@@ -175,7 +219,6 @@ pub struct Navigator {
     list: Vec<Cell>,
     scratch: Vec<Cell>,
     members: Vec<Vec<Cell>>,
-    tracer: Option<Tracer>,
 }
 
 impl Navigator {
@@ -196,7 +239,6 @@ impl Navigator {
             list: Vec::with_capacity(capacity),
             scratch: Vec::with_capacity(capacity),
             members: Vec::new(),
-            tracer: None,
         }
     }
 
@@ -210,12 +252,6 @@ impl Navigator {
     /// in the middle of their start cell, see `start_step` of the maps).
     pub fn set_keep_first(&mut self, keep: bool) {
         self.keep_first = keep;
-    }
-
-    /// Hands every step of the following searches to `tracer` (`None`:
-    /// off, the default; then tracing costs nothing). See [`crate::trace`].
-    pub fn set_tracer(&mut self, tracer: Option<Tracer>) {
-        self.tracer = tracer;
     }
 
     /// Smoothing may cross cells whose extra move cost is at most `max_extra`
@@ -251,6 +287,19 @@ impl Navigator {
         goals: &[Cell],
         budget: impl Into<Budget>,
     ) -> Report {
+        self.find_path_traced(map, start, goals, budget, &mut NoopSink)
+    }
+
+    /// [`find_path`](Self::find_path) that reports every search step to
+    /// `sink` ([`NavTrace::Search`]).
+    pub fn find_path_traced<M: CellMap, S: Sink<NavTrace> + ?Sized>(
+        &mut self,
+        map: &mut M,
+        start: Cell,
+        goals: &[Cell],
+        budget: impl Into<Budget>,
+        sink: &mut S,
+    ) -> Report {
         self.goals.clear();
         self.goals.extend_from_slice(goals);
         let limits = Limits {
@@ -264,7 +313,7 @@ impl Navigator {
         self.search.begin(start, &goal, limits);
         self.start = start;
         self.last = Last::Path;
-        self.run_path(map, budget.into())
+        self.run_path(map, budget.into(), sink)
     }
 
     /// Goes on with the last search for another `budget` cells (after
@@ -275,10 +324,21 @@ impl Navigator {
         map: &mut M,
         budget: impl Into<Budget>,
     ) -> Report {
+        self.continue_search_traced(map, budget, &mut NoopSink)
+    }
+
+    /// [`continue_search`](Self::continue_search) that reports every search
+    /// step to `sink`.
+    pub fn continue_search_traced<M: CellMap, S: Sink<NavTrace> + ?Sized>(
+        &mut self,
+        map: &mut M,
+        budget: impl Into<Budget>,
+        sink: &mut S,
+    ) -> Report {
         let budget = budget.into();
         match self.last {
-            Last::Path => self.run_path(map, budget),
-            Last::Area => self.run_area(map, budget),
+            Last::Path => self.run_path(map, budget, sink),
+            Last::Area => self.run_area(map, budget, sink),
             Last::Nothing => Report::default(),
         }
     }
@@ -293,6 +353,19 @@ impl Navigator {
         max_cost: Cost,
         budget: impl Into<Budget>,
     ) -> Report {
+        self.reachable_traced(map, start, max_cost, budget, &mut NoopSink)
+    }
+
+    /// [`reachable`](Self::reachable) that reports every search step to
+    /// `sink`.
+    pub fn reachable_traced<M: CellMap, S: Sink<NavTrace> + ?Sized>(
+        &mut self,
+        map: &mut M,
+        start: Cell,
+        max_cost: Cost,
+        budget: impl Into<Budget>,
+        sink: &mut S,
+    ) -> Report {
         let limits = Limits {
             max_nodes: self.capacity,
             max_cost,
@@ -301,7 +374,7 @@ impl Navigator {
         self.start = start;
         self.last = Last::Area;
         self.path.clear();
-        self.run_area(map, budget.into())
+        self.run_area(map, budget.into(), sink)
     }
 
     /// A way away from `threats`: to the cell, reachable from `start` at a
@@ -323,6 +396,20 @@ impl Navigator {
         threats: &[Cell],
         max_cost: Cost,
     ) -> Report {
+        self.flee_traced(map, start, threats, max_cost, &mut NoopSink)
+    }
+
+    /// [`flee`](Self::flee) that reports the steps of both searches (the
+    /// threats' first, then the walker's) and the chosen cell
+    /// ([`NavTrace::FleeBest`]) to `sink`.
+    pub fn flee_traced<M: CellMap, S: Sink<NavTrace> + ?Sized>(
+        &mut self,
+        map: &mut M,
+        start: Cell,
+        threats: &[Cell],
+        max_cost: Cost,
+        sink: &mut S,
+    ) -> Report {
         // how far each cell is from the nearest threat, by the threats' walk
         let capacity = self.capacity;
         let danger = self
@@ -337,10 +424,10 @@ impl Navigator {
             &mut self.topology.graph(&mut *map, None),
             &NoGoal,
             usize::MAX,
-            &mut NoopSink,
+            &mut MapSink::new(&mut *sink, NavTrace::Search),
         );
 
-        let area = self.reachable(map, start, max_cost, Budget::UNLIMITED);
+        let area = self.reachable_traced(map, start, max_cost, Budget::UNLIMITED, &mut *sink);
         let Some(danger) = self.flee.as_ref() else {
             return Report::default();
         };
@@ -353,6 +440,13 @@ impl Navigator {
             }
         }
         let node_limit_hit = area.node_limit_hit || danger.node_limit_hit();
+        if sink.enabled() {
+            sink.emit(NavTrace::FleeBest {
+                cell: best.0,
+                distance: best.1,
+                cost: best.2,
+            });
+        }
         self.last = Last::Nothing;
         let status = if best.0 == start {
             self.path.clear();
@@ -392,6 +486,18 @@ impl Navigator {
 
     /// The current way as `output`.
     pub fn output<M: CellMap>(&mut self, map: &mut M, output: Output) -> &[Cell] {
+        self.output_traced(map, output, &mut NoopSink)
+    }
+
+    /// [`output`](Self::output) that reports each line test of
+    /// [`Output::Smooth`] to `sink` ([`NavTrace::Smooth`]); the other
+    /// outputs decide nothing and report nothing.
+    pub fn output_traced<M: CellMap, S: Sink<NavTrace> + ?Sized>(
+        &mut self,
+        map: &mut M,
+        output: Output,
+        sink: &mut S,
+    ) -> &[Cell] {
         let way = WayOptions {
             keep_first: self.keep_first,
             smooth_max_extra: self.smooth_max_extra,
@@ -399,7 +505,7 @@ impl Navigator {
         if output == Output::Cells {
             return &self.path;
         }
-        write_way(
+        write_way_traced(
             self.topology,
             map,
             &self.path,
@@ -407,6 +513,7 @@ impl Navigator {
             way,
             &mut self.scratch,
             &mut self.list,
+            &mut MapSink::new(sink, NavTrace::Smooth),
         );
         &self.list
     }
@@ -415,8 +522,24 @@ impl Navigator {
     /// leader's): `result[k][i]` is member `k`'s cell while the leader stands
     /// on `path()[i]`. See [`Topology::place_members`].
     pub fn formation<M: CellMap>(&mut self, map: &mut M, formation: &Formation) -> &[Vec<Cell>] {
-        self.topology
-            .place_members(map, &self.path, formation, &mut self.members);
+        self.formation_traced(map, formation, &mut NoopSink)
+    }
+
+    /// [`formation`](Self::formation) that reports every placement to
+    /// `sink` ([`NavTrace::Formation`]).
+    pub fn formation_traced<M: CellMap, S: Sink<NavTrace> + ?Sized>(
+        &mut self,
+        map: &mut M,
+        formation: &Formation,
+        sink: &mut S,
+    ) -> &[Vec<Cell>] {
+        self.topology.place_members_traced(
+            map,
+            &self.path,
+            formation,
+            &mut self.members,
+            &mut MapSink::new(sink, NavTrace::Formation),
+        );
         &self.members
     }
 
@@ -425,20 +548,23 @@ impl Navigator {
         &self.members
     }
 
-    fn run_path<M: CellMap>(&mut self, map: &mut M, budget: Budget) -> Report {
+    fn run_path<M: CellMap, S: Sink<NavTrace> + ?Sized>(
+        &mut self,
+        map: &mut M,
+        budget: Budget,
+        sink: &mut S,
+    ) -> Report {
         let goal = Goals {
             cells: &self.goals,
             topology: self.topology,
         };
         let mut graph = self.topology.graph(&mut *map, Some(self.start));
-        let status = match self.tracer.as_deref_mut() {
-            None => self
-                .search
-                .advance(&mut graph, &goal, budget.cells(), &mut NoopSink),
-            Some(t) => self
-                .search
-                .advance(&mut graph, &goal, budget.cells(), &mut TraceSink(t)),
-        };
+        let status = self.search.advance(
+            &mut graph,
+            &goal,
+            budget.cells(),
+            &mut MapSink::new(sink, NavTrace::Search),
+        );
         self.search.best_path(&mut self.path);
         let status = match status {
             SearchStatus::Found => Status::Found,
@@ -455,16 +581,19 @@ impl Navigator {
         }
     }
 
-    fn run_area<M: CellMap>(&mut self, map: &mut M, budget: Budget) -> Report {
+    fn run_area<M: CellMap, S: Sink<NavTrace> + ?Sized>(
+        &mut self,
+        map: &mut M,
+        budget: Budget,
+        sink: &mut S,
+    ) -> Report {
         let mut graph = self.topology.graph(&mut *map, Some(self.start));
-        let status = match self.tracer.as_deref_mut() {
-            None => self
-                .search
-                .advance(&mut graph, &NoGoal, budget.cells(), &mut NoopSink),
-            Some(t) => self
-                .search
-                .advance(&mut graph, &NoGoal, budget.cells(), &mut TraceSink(t)),
-        };
+        let status = self.search.advance(
+            &mut graph,
+            &NoGoal,
+            budget.cells(),
+            &mut MapSink::new(sink, NavTrace::Search),
+        );
         Report {
             status: if status == SearchStatus::Running {
                 Status::Running
@@ -501,6 +630,31 @@ pub fn write_way<M: CellMap>(
     scratch: &mut Vec<Cell>,
     out: &mut Vec<Cell>,
 ) {
+    write_way_traced(
+        topology,
+        map,
+        path,
+        output,
+        options,
+        scratch,
+        out,
+        &mut NoopSink,
+    );
+}
+
+/// [`write_way`] that reports each line test of [`Output::Smooth`] to
+/// `sink`.
+#[allow(clippy::too_many_arguments)]
+pub fn write_way_traced<M: CellMap, S: Sink<SmoothTrace<Cell>> + ?Sized>(
+    topology: Topology,
+    map: &mut M,
+    path: &[Cell],
+    output: Output,
+    options: WayOptions,
+    scratch: &mut Vec<Cell>,
+    out: &mut Vec<Cell>,
+    sink: &mut S,
+) {
     out.clear();
     match output {
         Output::Cells => out.extend_from_slice(path),
@@ -511,7 +665,7 @@ pub fn write_way<M: CellMap>(
         }
         Output::Smooth => {
             let skip = usize::from(options.keep_first && path.len() > 2);
-            topology.smooth(map, &path[skip..], options.smooth_max_extra, scratch);
+            topology.smooth_traced(map, &path[skip..], options.smooth_max_extra, scratch, sink);
             out.extend(path.first().filter(|_| skip == 1));
             out.extend_from_slice(scratch);
         }
@@ -716,8 +870,7 @@ mod tests {
 
     #[test]
     fn tracing_reports_every_step_and_changes_nothing() {
-        use crate::trace::{TraceEvent, TraceKind};
-        use std::sync::{Arc, Mutex};
+        use sagax_debug::{Collector, Overflow};
 
         let mut map = DenseGrid::new(30, 30);
         wall(&mut map, 15, 0, 25);
@@ -725,30 +878,130 @@ mod tests {
         let mut plain = square();
         let expected = plain.find_path(&mut map, start, &[goal], Budget::UNLIMITED);
 
-        let events = Arc::new(Mutex::new(Vec::<TraceEvent>::new()));
-        let sink = Arc::clone(&events);
+        let mut log = Collector::new(100_000, Overflow::DropNewest);
         let mut nav = square();
-        nav.set_tracer(Some(Box::new(move |e: &TraceEvent| {
-            sink.lock().unwrap().push(*e)
-        })));
-        let mut report = nav.find_path(&mut map, start, &[goal], NonZeroUsize::new(50).unwrap());
+        let fifty = NonZeroUsize::new(50).unwrap();
+        let mut report = nav.find_path_traced(&mut map, start, &[goal], fifty, &mut log);
         while report.status == Status::Running {
-            report = nav.continue_search(&mut map, NonZeroUsize::new(50).unwrap());
+            report = nav.continue_search_traced(&mut map, fifty, &mut log);
         }
         assert_eq!(report, expected);
         assert_eq!(nav.path(), plain.path());
 
-        let events = events.lock().unwrap();
-        let count = |k| events.iter().filter(|e| e.kind == k).count();
-        assert_eq!(count(TraceKind::Started), 1);
-        assert_eq!(count(TraceKind::Expanded), report.expanded);
-        assert!(count(TraceKind::Paused) > 5);
-        let last = events.last().unwrap();
+        let events: Vec<_> = log
+            .records()
+            .map(|r| match r.event {
+                NavTrace::Search(e) => e,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        let count = |f: fn(&SearchTrace<Cell>) -> bool| events.iter().filter(|e| f(e)).count();
+        assert_eq!(count(|e| matches!(e, SearchTrace::Started { .. })), 1);
         assert_eq!(
-            (last.kind, last.found, last.expanded),
-            (TraceKind::Finished, true, report.expanded)
+            count(|e| matches!(e, SearchTrace::Expanded { .. })),
+            report.expanded
         );
-        assert_eq!(events[0].cell, start);
+        assert!(count(|e| matches!(e, SearchTrace::Paused { .. })) > 5);
+        assert_eq!(
+            events.last(),
+            Some(&SearchTrace::Finished {
+                search: 1,
+                status: SearchStatus::Found,
+                expanded: report.expanded,
+            })
+        );
+        assert!(matches!(events[0], SearchTrace::Started { start: s, .. } if s == start));
+
+        // the way and its smoothing: the same lists, each line test reported
+        log.clear();
+        for output in [Output::Cells, Output::Turns, Output::Smooth] {
+            let want = plain.output(&mut map, output).to_vec();
+            assert_eq!(nav.output_traced(&mut map, output, &mut log), want);
+        }
+        assert!(log.records().len() > 0);
+        assert!(
+            log.records()
+                .all(|r| matches!(r.event, NavTrace::Smooth(SmoothTrace::Shortcut { .. })))
+        );
+    }
+
+    /// A sink that is off but counts what it is given anyway.
+    struct Off(usize);
+
+    impl Sink<NavTrace> for Off {
+        fn enabled(&self) -> bool {
+            false
+        }
+
+        fn emit(&mut self, _: NavTrace) {
+            self.0 += 1;
+        }
+    }
+
+    #[test]
+    fn every_traced_call_matches_the_plain_one_and_off_is_off() {
+        use sagax_debug::{Collector, Overflow};
+
+        let mut map = DenseGrid::new(20, 20);
+        wall(&mut map, 10, 0, 15);
+        let hex = Topology::Hex {
+            layout: HexLayout::OddQ,
+            step_cost: 10,
+        };
+        for topology in [Topology::Square(GridRules::preset(Preset::Octile)), hex] {
+            let mut plain = Navigator::new(topology, 10_000);
+            let mut traced = Navigator::new(topology, 10_000);
+            let mut off = Navigator::new(topology, 10_000);
+            let mut log = Collector::new(100_000, Overflow::DropNewest);
+            let mut silent = Off(0);
+            let (start, goal) = (Cell::new(2, 2, 0), [Cell::new(18, 2, 0)]);
+            let threats = [Cell::new(4, 2, 0)];
+            let formation = Formation::block_of_four();
+
+            let a = plain.find_path(&mut map, start, &goal, Budget::UNLIMITED);
+            let b = traced.find_path_traced(&mut map, start, &goal, Budget::UNLIMITED, &mut log);
+            let c = off.find_path_traced(&mut map, start, &goal, Budget::UNLIMITED, &mut silent);
+            assert_eq!((a, b), (c, c), "{topology:?}");
+            let a = plain.output(&mut map, Output::Smooth).to_vec();
+            assert_eq!(traced.output_traced(&mut map, Output::Smooth, &mut log), a);
+            assert_eq!(off.output_traced(&mut map, Output::Smooth, &mut silent), a);
+            let a = plain.formation(&mut map, &formation).to_vec();
+            assert_eq!(traced.formation_traced(&mut map, &formation, &mut log), a);
+            assert_eq!(off.formation_traced(&mut map, &formation, &mut silent), a);
+
+            let a = plain.reachable(&mut map, start, 40, Budget::UNLIMITED);
+            let b = traced.reachable_traced(&mut map, start, 40, Budget::UNLIMITED, &mut log);
+            let c = off.reachable_traced(&mut map, start, 40, Budget::UNLIMITED, &mut silent);
+            assert_eq!((a, b), (c, c), "{topology:?}");
+            assert!(plain.area().eq(traced.area()));
+            let a = plain.continue_search(&mut map, Budget::UNLIMITED);
+            let b = traced.continue_search_traced(&mut map, Budget::UNLIMITED, &mut log);
+            assert_eq!(a, b);
+
+            let a = plain.flee(&mut map, start, &threats, 60);
+            log.clear();
+            let b = traced.flee_traced(&mut map, start, &threats, 60, &mut log);
+            let c = off.flee_traced(&mut map, start, &threats, 60, &mut silent);
+            assert_eq!((a, b), (c, c), "{topology:?}");
+            assert_eq!(plain.path(), traced.path());
+            assert_eq!(silent.0, 0, "{topology:?}: a disabled sink gets nothing");
+
+            // flee: the threats' search, the walker's, then the chosen cell
+            let starts: Vec<Cell> = log
+                .records()
+                .filter_map(|r| match r.event {
+                    NavTrace::Search(SearchTrace::Started { start, .. }) => Some(start),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(starts, [threats[0], start], "{topology:?}");
+            let end = *traced.path().last().unwrap();
+            let last = log.records().last().unwrap().event;
+            let NavTrace::FleeBest { cell, cost, .. } = last else {
+                panic!("{last:?}");
+            };
+            assert_eq!((cell, cost), (end, b.cost), "{topology:?}");
+        }
     }
 
     #[test]

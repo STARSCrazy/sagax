@@ -22,7 +22,7 @@ pub use sagax_decide::memory::{Areas, Evict, Fact, Knowledge, Message, Metric, P
 pub use sagax_decide::mission::BuiltInRules as MissionBuiltInRules;
 pub use sagax_decide::mission::{
     Action, BreakReason, Detour, DetourEnd, Event, Fail, FailCtx, Leash, Leeway, Mission,
-    MissionConfig, MissionRules, MissionTraceEvent, Motive, OnLost, Plan, PlanCtx, Step, Where,
+    MissionConfig, MissionRules, Motive, OnLost, Plan, PlanCtx, Step, Where,
 };
 pub use sagax_decide::{Candidate, Choice, Consideration, Curve, DecideError, Decider, ONE, Pick};
 pub use sagax_nav::Budget;

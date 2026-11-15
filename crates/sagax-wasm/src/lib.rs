@@ -18,18 +18,16 @@
 
 use sagax_abi::codes::{CUT_CORNERS, ERROR_ARGUMENT, FOUND, FOUR_WAYS, RUNNING, UNREACHABLE};
 use sagax_abi::convert::{self, nav_status, to_i32, u32_of, whole_i64};
+use sagax_core::{CallbackSink, NoopSink, Sink};
 use sagax_nav::Cost;
 use sagax_nav::Limits;
 use sagax_nav::dstar::{DStarLite, DStarStatus};
 use sagax_nav::flow::FlowField;
 use sagax_nav::formation::Formation;
 use sagax_nav::grid::{Cell, DenseGrid, GridRules, Moves};
-use sagax_nav::nav::{Navigator, Output, Report, WayOptions, write_way};
+use sagax_nav::nav::{NavTrace, Navigator, Output, Report, WayOptions, write_way};
+use sagax_nav::search::SearchTrace;
 use sagax_nav::topology::Topology;
-use sagax_nav::trace::{TraceEvent, TraceSink, Tracer};
-
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Numbers per trace event: kind, x, y, parent x, parent y, cost, estimate,
 /// expanded, found.
@@ -37,32 +35,62 @@ const TRACE_STRIDE: usize = 9;
 /// At most this many events wait to be taken; later ones are dropped.
 const TRACE_LIMIT: usize = 200_000;
 
+/// The search steps waiting for `sx_trace_take`, [`TRACE_STRIDE`] numbers
+/// each. It is the sink of the traced searches; of a navigator's records it
+/// keeps only the search steps.
 #[derive(Default)]
 struct TraceBuffer {
     events: Vec<i32>,
     dropped: usize,
 }
 
-fn tracer_into(buffer: &Rc<RefCell<TraceBuffer>>) -> Tracer {
-    let buffer = Rc::clone(buffer);
-    Box::new(move |e: &TraceEvent| {
-        let mut b = buffer.borrow_mut();
-        if b.events.len() >= TRACE_LIMIT * TRACE_STRIDE {
-            b.dropped += 1;
+impl TraceBuffer {
+    fn push(&mut self, event: SearchTrace<Cell>) {
+        if self.events.len() >= TRACE_LIMIT * TRACE_STRIDE {
+            self.dropped += 1;
             return;
         }
-        b.events.extend_from_slice(&[
-            e.kind as i32,
-            e.cell.x,
-            e.cell.y,
-            e.parent.x,
-            e.parent.y,
-            to_i32(e.cost),
-            to_i32(e.estimate),
-            to_i32(e.expanded),
-            i32::from(e.found),
+        let c = convert::search_trace(event);
+        self.events.extend_from_slice(&[
+            to_i32(c.kind),
+            c.cell.x,
+            c.cell.y,
+            c.parent.x,
+            c.parent.y,
+            c.cost,
+            c.estimate,
+            c.expanded,
+            i32::from(c.found),
         ]);
-    })
+    }
+}
+
+impl Sink<SearchTrace<Cell>> for TraceBuffer {
+    fn emit(&mut self, event: SearchTrace<Cell>) {
+        self.push(event);
+    }
+}
+
+impl Sink<NavTrace> for TraceBuffer {
+    fn emit(&mut self, event: NavTrace) {
+        if let NavTrace::Search(event) = event {
+            self.push(event);
+        }
+    }
+}
+
+/// Runs `$call` with `$sink` the grid's trace buffer when tracing is on,
+/// else `NoopSink` (the plain operation).
+macro_rules! traced {
+    ($w:ident, |$sink:ident| $call:expr) => {
+        if $w.tracing {
+            let $sink = &mut $w.trace;
+            $call
+        } else {
+            let $sink = &mut NoopSink;
+            $call
+        }
+    };
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -90,8 +118,8 @@ pub struct WasmGrid {
     path: Vec<Cell>,
     list: Vec<Cell>,
     scratch: Vec<Cell>,
-    trace: Rc<RefCell<TraceBuffer>>,
-    tracer: Option<Tracer>,
+    trace: TraceBuffer,
+    tracing: bool,
 }
 
 /// Grid kinds as in `sx_rules.grid`: 0 square, 1..4 hex odd rows, even rows,
@@ -142,8 +170,8 @@ impl WasmGrid {
             path: Vec::new(),
             list: Vec::new(),
             scratch: Vec::new(),
-            trace: Rc::default(),
-            tracer: None,
+            trace: TraceBuffer::default(),
+            tracing: false,
         }
     }
 
@@ -402,9 +430,14 @@ pub unsafe extern "C" fn sx_find_path(
     if !w.input_cells(count) {
         return ERROR_ARGUMENT;
     }
-    let report = w
-        .nav
-        .find_path(&mut w.grid, Cell::new(sx, sy, sl), &w.cells, budget);
+    let start = Cell::new(sx, sy, sl);
+    let report = traced!(w, |sink| w.nav.find_path_traced(
+        &mut w.grid,
+        start,
+        &w.cells,
+        budget,
+        sink
+    ));
     w.report(report);
     w.begun = Begun::Path(output);
     w.write_way(output)
@@ -437,9 +470,14 @@ pub unsafe extern "C" fn sx_flee(
     if !w.input_cells(count) {
         return ERROR_ARGUMENT;
     }
-    let report = w
-        .nav
-        .flee(&mut w.grid, Cell::new(sx, sy, sl), &w.cells, max_cost);
+    let start = Cell::new(sx, sy, sl);
+    let report = traced!(w, |sink| w.nav.flee_traced(
+        &mut w.grid,
+        start,
+        &w.cells,
+        max_cost,
+        sink
+    ));
     w.report(report);
     w.begun = Begun::Path(output);
     w.write_way(output)
@@ -463,9 +501,14 @@ pub unsafe extern "C" fn sx_reachable(
     let (Some(budget), Ok(max_cost)) = (convert::budget(budget), Cost::try_from(max_cost)) else {
         return ERROR_ARGUMENT;
     };
-    let report = w
-        .nav
-        .reachable(&mut w.grid, Cell::new(sx, sy, sl), max_cost, budget);
+    let start = Cell::new(sx, sy, sl);
+    let report = traced!(w, |sink| w.nav.reachable_traced(
+        &mut w.grid,
+        start,
+        max_cost,
+        budget,
+        sink
+    ));
     w.report(report);
     w.begun = Begun::Area;
     w.write_area()
@@ -482,7 +525,11 @@ pub unsafe extern "C" fn sx_continue(g: *mut WasmGrid, budget: i32) -> i32 {
     let Some(budget) = convert::budget(budget) else {
         return ERROR_ARGUMENT;
     };
-    let report = w.nav.continue_search(&mut w.grid, budget);
+    let report = traced!(w, |sink| w.nav.continue_search_traced(
+        &mut w.grid,
+        budget,
+        sink
+    ));
     w.report(report);
     match w.begun {
         Begun::Nothing => 0,
@@ -589,12 +636,9 @@ pub unsafe extern "C" fn sx_flow_build(g: *mut WasmGrid, count: i32, max_cost: i
     };
     let mut graph = w.topology.graph(&mut w.grid, None);
     let goals = w.cells.iter().copied();
-    match w.tracer.as_deref_mut() {
-        None => w.flow.build(&mut graph, goals, limits),
-        Some(t) => w
-            .flow
-            .build_traced(&mut graph, goals, limits, &mut TraceSink(t)),
-    }
+    traced!(w, |sink| w
+        .flow
+        .build_traced(&mut graph, goals, limits, sink));
     to_i32(w.flow.len())
 }
 
@@ -666,12 +710,7 @@ pub unsafe extern "C" fn sx_dstar_compute(g: *mut WasmGrid, budget: i32, output:
     };
     let status = {
         let mut graph = w.topology.graph(&mut w.grid, None);
-        let status = match w.tracer.as_deref_mut() {
-            None => w.dstar.compute(&mut graph, budget),
-            Some(t) => w
-                .dstar
-                .compute_traced(&mut graph, budget, &mut TraceSink(t)),
-        };
+        let status = traced!(w, |sink| w.dstar.compute_traced(&mut graph, budget, sink));
         if !(status == DStarStatus::Found && w.dstar.path(&mut graph, &mut w.path)) {
             w.path.clear();
         }
@@ -752,14 +791,7 @@ pub unsafe extern "C" fn sx_dstar_cells_changed(g: *mut WasmGrid, count: i32) ->
 /// `g` from [`sx_grid_new`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_trace(g: *mut WasmGrid, on: i32) -> i32 {
-    let w = grid!(g, ERROR_ARGUMENT);
-    if on != 0 {
-        w.nav.set_tracer(Some(tracer_into(&w.trace)));
-        w.tracer = Some(tracer_into(&w.trace));
-    } else {
-        w.nav.set_tracer(None);
-        w.tracer = None;
-    }
+    grid!(g, ERROR_ARGUMENT).tracing = on != 0;
     0
 }
 
@@ -772,9 +804,8 @@ pub unsafe extern "C" fn sx_trace(g: *mut WasmGrid, on: i32) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_trace_take(g: *mut WasmGrid) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
-    let mut b = w.trace.borrow_mut();
-    std::mem::swap(&mut w.out, &mut b.events);
-    b.events.clear();
+    std::mem::swap(&mut w.out, &mut w.trace.events);
+    w.trace.events.clear();
     to_i32(w.out.len() / TRACE_STRIDE)
 }
 
@@ -786,12 +817,11 @@ pub unsafe extern "C" fn sx_trace_take(g: *mut WasmGrid) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_trace_dropped(g: *mut WasmGrid) -> i32 {
     let w = grid!(g, ERROR_ARGUMENT);
-    to_i32(std::mem::take(&mut w.trace.borrow_mut().dropped))
+    to_i32(std::mem::take(&mut w.trace.dropped))
 }
 
 // ---- decisions -------------------------------------------------------------
 
-use sagax_core::CallbackSink;
 use sagax_decide::{Apply, Candidate, Consideration, Curve, DecideEvent, Decider, Pick};
 
 /// Numbers per decision trace event: kind (1 factor, 2 scored, 3 chosen),
@@ -2345,6 +2375,8 @@ pub unsafe extern "C" fn sx_timers_clear(t: *mut WasmTimers) -> i32 {
 pub unsafe extern "C" fn sx_timers_count(t: *mut WasmTimers) -> i32 {
     to_i32(timers!(t).len())
 }
+
+use std::cell::RefCell;
 
 thread_local! {
     static SCRATCH: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };

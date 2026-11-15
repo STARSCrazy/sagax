@@ -11,16 +11,17 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use sagax_abi::codes::{
     CUT_CORNERS, DONE, ERROR_ARGUMENT, ERROR_INTERNAL, FOUND, FOUR_WAYS, RUNNING, UNREACHABLE,
 };
-use sagax_abi::convert::{self, hex_layout, nav_status, to_i32};
+use sagax_abi::convert::{self, NavTraceCode, SearchTraceCode, hex_layout, nav_status, to_i32};
+use sagax_core::CallbackSink;
 use sagax_nav::Cost;
 use sagax_nav::Limits;
 use sagax_nav::dstar::{DStarLite, DStarStatus};
 use sagax_nav::flow::FlowField;
 use sagax_nav::formation::Formation;
 use sagax_nav::grid::{Cell, CellMap, GridRules, Moves, Preset};
-use sagax_nav::nav::{Navigator, Output, Report, WayOptions, write_way};
+use sagax_nav::nav::{NavTrace, Navigator, Output, Report, WayOptions, write_way};
+use sagax_nav::search::SearchTrace;
 use sagax_nav::topology::Topology;
-use sagax_nav::trace::{TraceEvent, TraceSink, Tracer};
 
 /// Version of the C interface (`SX_API_VERSION`).
 pub const API_VERSION: u32 = 12;
@@ -32,18 +33,74 @@ pub type MoveCostFn = unsafe extern "C" fn(*mut c_void, i32, i32, i32, i32, i32,
 /// `sx_steps_fn`.
 pub type StepsFn = unsafe extern "C" fn(*mut c_void, i32, i32, i32, i32, i32, *const i32, *mut i32);
 
-/// `sx_trace_fn`.
-pub type TraceFn = unsafe extern "C" fn(*mut c_void, *const SxEvent);
+// ---- trace plumbing ---------------------------------------------------------
 
-/// `sx_event`.
+/// A trace callback a handle stores (`sx_*_set_trace`), with its context;
+/// `None` is off.
+pub(crate) type TraceSlot<R> = Option<(unsafe extern "C" fn(*mut c_void, *const R), *mut c_void)>;
+
+/// Stores `trace` and `context` in `slot` (`trace` null: off). Returns 0, or
+/// `SX_ERROR_ARGUMENT` for a null handle (`slot` `None`).
+pub(crate) fn set_trace<R>(
+    slot: Option<&mut TraceSlot<R>>,
+    trace: Option<unsafe extern "C" fn(*mut c_void, *const R)>,
+    context: *mut c_void,
+) -> i32 {
+    let Some(slot) = slot else {
+        return ERROR_ARGUMENT;
+    };
+    *slot = trace.map(|f| (f, context));
+    0
+}
+
+/// The sink of a stored callback: converts each record with `convert` and
+/// hands it to the game, which may only read it during the call.
+pub(crate) fn trace_sink<E, R>(
+    trace: unsafe extern "C" fn(*mut c_void, *const R),
+    context: *mut c_void,
+    convert: impl Fn(E) -> R,
+) -> CallbackSink<impl FnMut(E)> {
+    CallbackSink(move |event| {
+        let record = convert(event);
+        // SAFETY: the game passed a valid callback and context for as long
+        // as tracing is on (sagax.h); the record lives through the call.
+        unsafe { trace(context, &record) };
+    })
+}
+
+/// Runs `$call` with `$sink` bound to the sink of the trace slot `$slot`:
+/// `NoopSink` when off (the plain operation), else a sink that converts with
+/// `$convert` and calls the game. One check of the slot per call.
+macro_rules! traced {
+    ($slot:expr, $convert:expr, |$sink:ident| $call:expr) => {
+        match $slot {
+            None => {
+                let $sink = &mut sagax_core::NoopSink;
+                $call
+            }
+            Some((trace, context)) => {
+                let $sink = &mut $crate::trace_sink(trace, context, $convert);
+                $call
+            }
+        }
+    };
+}
+pub(crate) use traced;
+
+/// `sx_search_trace_fn`.
+pub type SearchTraceFn = unsafe extern "C" fn(*mut c_void, *const SxSearchTrace);
+
+/// `sx_search_trace`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SxEvent {
-    /// `SX_TRACE_*`.
-    pub kind: i32,
-    /// The cell.
+pub struct SxSearchTrace {
+    /// `SX_SEARCH_TRACE_*`.
+    pub kind: u32,
+    /// Number of the search within its handle.
+    pub search: u32,
+    /// The start (`STARTED`) or the cell.
     pub cell: Point,
-    /// Where the cell was reached from.
+    /// Where the cell was reached from (`IMPROVED`).
     pub parent: Point,
     /// Cost.
     pub cost: i32,
@@ -52,26 +109,81 @@ pub struct SxEvent {
     /// Cells expanded so far.
     pub expanded: i32,
     /// 1 if a goal was reached.
-    pub found: i32,
+    pub found: u8,
+    /// 1 if the cell was new (`IMPROVED`).
+    pub first: u8,
 }
 
-/// A tracer that calls the game's trace callback, or `None` for null.
-fn tracer_of(trace: Option<TraceFn>, context: *mut c_void) -> Option<Tracer> {
-    let f = trace?;
-    Some(Box::new(move |e: &TraceEvent| {
-        let event = SxEvent {
-            kind: e.kind as i32,
-            cell: Point::of(e.cell),
-            parent: Point::of(e.parent),
-            cost: to_i32(e.cost),
-            estimate: to_i32(e.estimate),
-            expanded: to_i32(e.expanded),
-            found: i32::from(e.found),
-        };
-        // SAFETY: the game passed a valid callback and context for as long
-        // as tracing is on (sagax.h).
-        unsafe { f(context, &event) };
-    }))
+impl SxSearchTrace {
+    fn of_code(c: SearchTraceCode) -> Self {
+        Self {
+            kind: c.kind,
+            search: c.search,
+            cell: Point::of(c.cell),
+            parent: Point::of(c.parent),
+            cost: c.cost,
+            estimate: c.estimate,
+            expanded: c.expanded,
+            found: u8::from(c.found),
+            first: u8::from(c.first),
+        }
+    }
+
+    /// The record of a search trace.
+    pub fn of(event: SearchTrace<Cell>) -> Self {
+        Self::of_code(convert::search_trace(event))
+    }
+}
+
+/// `sx_nav_trace_fn`.
+pub type NavTraceFn = unsafe extern "C" fn(*mut c_void, *const SxNavTrace);
+
+/// `sx_nav_trace`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SxNavTrace {
+    /// `SX_NAV_TRACE_*`.
+    pub kind: u32,
+    /// The search record (`SEARCH`).
+    pub search: SxSearchTrace,
+    /// Start of the tested line (`SHORTCUT`).
+    pub from: Point,
+    /// End of the tested line (`SHORTCUT`).
+    pub to: Point,
+    /// The member's target (`PLACED`) or the chosen cell (`FLEE_BEST`).
+    pub cell: Point,
+    /// The member (`PLACED`, `UNPLACED`).
+    pub member: i32,
+    /// The leader's step (`PLACED`, `UNPLACED`).
+    pub step: i32,
+    /// The threats' walk to the cell (`FLEE_BEST`).
+    pub distance: i32,
+    /// The walker's cost to the cell (`FLEE_BEST`).
+    pub cost: i32,
+    /// 1 if the line was free (`SHORTCUT`).
+    pub clear: u8,
+    /// 1 if the target is the member's slot (`PLACED`).
+    pub slot: u8,
+}
+
+impl SxNavTrace {
+    /// The record of a navigator trace.
+    pub fn of(event: NavTrace) -> Self {
+        let c: NavTraceCode = convert::nav_trace(event);
+        Self {
+            kind: c.kind,
+            search: SxSearchTrace::of_code(c.search),
+            from: Point::of(c.from),
+            to: Point::of(c.to),
+            cell: Point::of(c.cell),
+            member: c.member,
+            step: c.step,
+            distance: c.distance,
+            cost: c.cost,
+            clear: u8::from(c.clear),
+            slot: u8::from(c.slot),
+        }
+    }
 }
 
 /// `sx_point`.
@@ -505,6 +617,7 @@ pub struct SxNav {
     nav: Navigator,
     begun: Begun,
     cells: Vec<Cell>,
+    trace: TraceSlot<SxNavTrace>,
 }
 
 impl SxNav {
@@ -516,7 +629,10 @@ impl SxNav {
         max: usize,
     ) -> i32 {
         self.nav.set_keep_first(map.map.start_step.is_some());
-        write_cells(self.nav.output(map, output), out, max)
+        let way = traced!(self.trace, SxNavTrace::of, |sink| self
+            .nav
+            .output_traced(map, output, sink));
+        write_cells(way, out, max)
     }
 
     fn take_cells(&mut self, points: &[Point]) {
@@ -554,6 +670,7 @@ pub unsafe extern "C" fn sx_nav_new(rules: *const SxRules) -> *mut SxNav {
             nav,
             begun: Begun::Nothing,
             cells: Vec::new(),
+            trace: None,
         })
     })
 }
@@ -602,7 +719,13 @@ pub unsafe extern "C" fn sx_nav_find_path(
     guarded(|| {
         // SAFETY: the caller promised `goal_count` points at `goals`.
         s.take_cells(unsafe { slice_of(goals, count) });
-        let report = s.nav.find_path(&mut map, start.cell(), &s.cells, budget);
+        let report = traced!(s.trace, SxNavTrace::of, |sink| s.nav.find_path_traced(
+            &mut map,
+            start.cell(),
+            &s.cells,
+            budget,
+            sink
+        ));
         s.begun = Begun::Path(output);
         write_result(result, result_of(report));
         s.write_way(&mut map, output, points, max)
@@ -643,7 +766,13 @@ pub unsafe extern "C" fn sx_nav_flee(
     guarded(|| {
         // SAFETY: the caller promised `threat_count` points at `threats`.
         s.take_cells(unsafe { slice_of(threats, count) });
-        let report = s.nav.flee(&mut map, start.cell(), &s.cells, max_cost);
+        let report = traced!(s.trace, SxNavTrace::of, |sink| s.nav.flee_traced(
+            &mut map,
+            start.cell(),
+            &s.cells,
+            max_cost,
+            sink
+        ));
         s.begun = Begun::Path(output);
         write_result(result, result_of(report));
         s.write_way(&mut map, output, points, max)
@@ -679,7 +808,13 @@ pub unsafe extern "C" fn sx_nav_reachable(
         return ERROR_ARGUMENT;
     };
     guarded(|| {
-        let report = s.nav.reachable(&mut map, start.cell(), max_cost, budget);
+        let report = traced!(s.trace, SxNavTrace::of, |sink| s.nav.reachable_traced(
+            &mut map,
+            start.cell(),
+            max_cost,
+            budget,
+            sink
+        ));
         s.begun = Begun::Area;
         write_result(result, result_of(report));
         s.write_area(cells, costs, max)
@@ -708,7 +843,9 @@ pub unsafe extern "C" fn sx_nav_continue(
         return ERROR_ARGUMENT;
     };
     guarded(|| {
-        let report = s.nav.continue_search(&mut map, budget);
+        let report = traced!(s.trace, SxNavTrace::of, |sink| s
+            .nav
+            .continue_search_traced(&mut map, budget, sink));
         write_result(result, result_of(report));
         match s.begun {
             Begun::Nothing => 0,
@@ -825,7 +962,9 @@ pub unsafe extern "C" fn sx_nav_formation(
                     .collect(),
             }
         };
-        s.nav.formation(&mut map, &formation);
+        traced!(s.trace, SxNavTrace::of, |sink| s
+            .nav
+            .formation_traced(&mut map, &formation, sink));
         let path = s.nav.path();
         let rows = s.nav.members();
         let n = path.len().min(max);
@@ -849,7 +988,7 @@ pub unsafe extern "C" fn sx_nav_formation(
 /// `sx_flow`.
 pub struct SxFlow {
     field: FlowField<Cell>,
-    tracer: Option<Tracer>,
+    trace: TraceSlot<SxSearchTrace>,
     topology: Topology,
     capacity: usize,
     goals: Vec<Cell>,
@@ -865,7 +1004,7 @@ pub unsafe extern "C" fn sx_flow_new(rules: *const SxRules) -> *mut SxFlow {
         let (topology, capacity, _) = rules_of(rules)?;
         Some(SxFlow {
             field: FlowField::with_capacity(capacity),
-            tracer: None,
+            trace: None,
             topology,
             capacity,
             goals: Vec::new(),
@@ -916,12 +1055,9 @@ pub unsafe extern "C" fn sx_flow_build(
         };
         let mut graph = f.topology.graph(&mut map, None);
         let goals = f.goals.iter().copied();
-        match f.tracer.as_deref_mut() {
-            None => f.field.build(&mut graph, goals, limits),
-            Some(t) => f
-                .field
-                .build_traced(&mut graph, goals, limits, &mut TraceSink(t)),
-        }
+        traced!(f.trace, SxSearchTrace::of, |sink| f
+            .field
+            .build_traced(&mut graph, goals, limits, sink));
         write_result(
             result,
             SxResult {
@@ -984,7 +1120,7 @@ pub unsafe extern "C" fn sx_flow_next(
 /// `sx_dstar`.
 pub struct SxDStar {
     planner: DStarLite<Cell, Topology>,
-    tracer: Option<Tracer>,
+    trace: TraceSlot<SxSearchTrace>,
     topology: Topology,
     smooth_max_extra: Cost,
     path: Vec<Cell>,
@@ -1004,7 +1140,7 @@ pub unsafe extern "C" fn sx_dstar_new(rules: *const SxRules) -> *mut SxDStar {
         planner.set_max_nodes(capacity);
         Some(SxDStar {
             planner,
-            tracer: None,
+            trace: None,
             topology,
             smooth_max_extra: tolerance,
             path: Vec::with_capacity(capacity),
@@ -1073,12 +1209,9 @@ pub unsafe extern "C" fn sx_dstar_compute(
     guarded(|| {
         let status = {
             let mut graph = d.topology.graph(&mut map, None);
-            let status = match d.tracer.as_deref_mut() {
-                None => d.planner.compute(&mut graph, budget),
-                Some(t) => d
-                    .planner
-                    .compute_traced(&mut graph, budget, &mut TraceSink(t)),
-            };
+            let status = traced!(d.trace, SxSearchTrace::of, |sink| d
+                .planner
+                .compute_traced(&mut graph, budget, sink));
             if !(status == DStarStatus::Found && d.planner.path(&mut graph, &mut d.path)) {
                 d.path.clear();
             }
@@ -1178,15 +1311,15 @@ pub unsafe extern "C" fn sx_dstar_cells_changed(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_nav_set_trace(
     nav: *mut SxNav,
-    trace: Option<TraceFn>,
+    trace: Option<NavTraceFn>,
     context: *mut c_void,
 ) -> i32 {
     // SAFETY: see above.
-    let Some(s) = (unsafe { nav.as_mut() }) else {
-        return ERROR_ARGUMENT;
-    };
-    s.nav.set_tracer(tracer_of(trace, context));
-    0
+    set_trace(
+        unsafe { nav.as_mut() }.map(|s| &mut s.trace),
+        trace,
+        context,
+    )
 }
 
 /// `sx_flow_set_trace`.
@@ -1196,15 +1329,15 @@ pub unsafe extern "C" fn sx_nav_set_trace(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_flow_set_trace(
     flow: *mut SxFlow,
-    trace: Option<TraceFn>,
+    trace: Option<SearchTraceFn>,
     context: *mut c_void,
 ) -> i32 {
     // SAFETY: see above.
-    let Some(f) = (unsafe { flow.as_mut() }) else {
-        return ERROR_ARGUMENT;
-    };
-    f.tracer = tracer_of(trace, context);
-    0
+    set_trace(
+        unsafe { flow.as_mut() }.map(|f| &mut f.trace),
+        trace,
+        context,
+    )
 }
 
 /// `sx_dstar_set_trace`.
@@ -1214,15 +1347,15 @@ pub unsafe extern "C" fn sx_flow_set_trace(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_dstar_set_trace(
     dstar: *mut SxDStar,
-    trace: Option<TraceFn>,
+    trace: Option<SearchTraceFn>,
     context: *mut c_void,
 ) -> i32 {
     // SAFETY: see above.
-    let Some(d) = (unsafe { dstar.as_mut() }) else {
-        return ERROR_ARGUMENT;
-    };
-    d.tracer = tracer_of(trace, context);
-    0
+    set_trace(
+        unsafe { dstar.as_mut() }.map(|d| &mut d.trace),
+        trace,
+        context,
+    )
 }
 
 #[cfg(test)]

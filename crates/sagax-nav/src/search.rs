@@ -94,7 +94,7 @@ pub enum SearchStatus {
 /// for each expanded node `Expanded` followed by its `Improved` neighbours,
 /// `Paused` when an advance ends early, and `Finished` once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SearchEvent<N> {
+pub enum SearchTrace<N> {
     /// The search begins at `start`.
     Started {
         /// Number of the search within its [`Search`] (counts up from 1).
@@ -301,7 +301,7 @@ impl<N: Copy + Eq + Hash> Search<N> {
     where
         G: Graph<Node = N>,
         Go: Goal<N>,
-        S: Sink<SearchEvent<N>>,
+        S: Sink<SearchTrace<N>> + ?Sized,
     {
         if self.status != SearchStatus::Running {
             return self.status;
@@ -310,7 +310,7 @@ impl<N: Copy + Eq + Hash> Search<N> {
         if !self.started {
             self.started = true;
             if let (true, Some(&start)) = (sink.enabled(), self.records.first()) {
-                sink.emit(SearchEvent::Started {
+                sink.emit(SearchTrace::Started {
                     search,
                     start: start.node,
                     estimate: start.estimate,
@@ -339,7 +339,7 @@ impl<N: Copy + Eq + Hash> Search<N> {
             self.expanded += 1;
             left -= 1;
             if sink.enabled() {
-                sink.emit(SearchEvent::Expanded {
+                sink.emit(SearchTrace::Expanded {
                     search,
                     node,
                     cost,
@@ -397,7 +397,7 @@ impl<N: Copy + Eq + Hash> Search<N> {
                 record.parent = current;
                 let next_estimate = record.estimate;
                 if sink.enabled() {
-                    sink.emit(SearchEvent::Improved {
+                    sink.emit(SearchTrace::Improved {
                         search,
                         node: next,
                         parent: node,
@@ -415,11 +415,11 @@ impl<N: Copy + Eq + Hash> Search<N> {
         }
         if sink.enabled() {
             match self.status {
-                SearchStatus::Running => sink.emit(SearchEvent::Paused {
+                SearchStatus::Running => sink.emit(SearchTrace::Paused {
                     search,
                     expanded: self.expanded,
                 }),
-                status => sink.emit(SearchEvent::Finished {
+                status => sink.emit(SearchTrace::Finished {
                     search,
                     status,
                     expanded: self.expanded,

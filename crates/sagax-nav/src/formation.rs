@@ -18,7 +18,10 @@
 //!
 //! Square grids: [`place_members`], slots turn in 8 directions ([`rotate`]).
 //! Hex grids: [`place_members_hex`], slots turn in 6 directions
-//! ([`rotate_hex`]).
+//! ([`rotate_hex`]). The `_traced` forms report each placement as a
+//! [`FormationTrace`].
+
+use sagax_core::{NoopSink, Sink};
 
 use crate::grid::{Cell, CellMap, DenseGrid};
 use crate::hex::{HexLayout, axial_step};
@@ -72,6 +75,34 @@ impl Formation {
     }
 }
 
+/// What [`place_members_traced`] and [`place_members_hex_traced`] report,
+/// one record per member and leader step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormationTrace {
+    /// Member `member` stands on `cell` while the leader stands on step
+    /// `step` of its path. `slot` is `false` when the slot cell could not be
+    /// used and the member fell back to the leader's trail (or a free cell
+    /// next to the leader).
+    Placed {
+        /// Index of the member (its slot).
+        member: usize,
+        /// Index into the leader's path.
+        step: usize,
+        /// The member's target.
+        cell: Cell,
+        /// `true` if the target is the member's slot.
+        slot: bool,
+    },
+    /// No free cell was found: member `member` waits on the leader's cell
+    /// at step `step`.
+    Unplaced {
+        /// Index of the member.
+        member: usize,
+        /// Index into the leader's path.
+        step: usize,
+    },
+}
+
 /// Turns a slot offset to walking direction `(dx, dy)` (one of the 8 grid
 /// directions). Diagonal directions turn by 45 degrees on the grid.
 pub fn rotate((forward, right): (i32, i32), (dx, dy): (i32, i32)) -> (i32, i32) {
@@ -93,11 +124,23 @@ pub fn place_members<M: CellMap>(
     formation: &Formation,
     out: &mut Vec<Vec<Cell>>,
 ) {
+    place_members_traced(map, leader_path, formation, out, &mut NoopSink);
+}
+
+/// [`place_members`] that reports every placement to `sink`.
+pub fn place_members_traced<M: CellMap, S: Sink<FormationTrace> + ?Sized>(
+    map: &mut M,
+    leader_path: &[Cell],
+    formation: &Formation,
+    out: &mut Vec<Vec<Cell>>,
+    sink: &mut S,
+) {
     place(
         map,
         leader_path,
         formation,
         out,
+        sink,
         (1, 0),
         |a, b| {
             let step = ((b.x - a.x).signum(), (b.y - a.y).signum());
@@ -138,11 +181,24 @@ pub fn place_members_hex<M: CellMap>(
     formation: &Formation,
     out: &mut Vec<Vec<Cell>>,
 ) {
+    place_members_hex_traced(map, layout, leader_path, formation, out, &mut NoopSink);
+}
+
+/// [`place_members_hex`] that reports every placement to `sink`.
+pub fn place_members_hex_traced<M: CellMap, S: Sink<FormationTrace> + ?Sized>(
+    map: &mut M,
+    layout: HexLayout,
+    leader_path: &[Cell],
+    formation: &Formation,
+    out: &mut Vec<Vec<Cell>>,
+    sink: &mut S,
+) {
     place(
         map,
         leader_path,
         formation,
         out,
+        sink,
         0usize,
         |a, b| layout.direction(a.x, a.y, b.x, b.y),
         |leader, dir, slot| {
@@ -167,11 +223,12 @@ pub fn place_members_hex<M: CellMap>(
 /// direction between two path cells, `slot_cell` the cell of a slot, `sight`
 /// whether a member can stand there, `around` the neighbours of a cell.
 #[allow(clippy::too_many_arguments)]
-fn place<M, D: Copy>(
+fn place<M, D: Copy, S: Sink<FormationTrace> + ?Sized>(
     map: &mut M,
     leader_path: &[Cell],
     formation: &Formation,
     out: &mut Vec<Vec<Cell>>,
+    sink: &mut S,
     first_dir: D,
     dir_of: impl Fn(Cell, Cell) -> Option<D>,
     slot_cell: impl Fn(Cell, D, (i32, i32)) -> Cell,
@@ -200,11 +257,11 @@ fn place<M, D: Copy>(
         taken.push(leader);
         for (k, &slot) in formation.slots.iter().enumerate() {
             let cell = slot_cell(leader, dir, slot);
-            let target = if !taken.contains(&cell) && sight(map, leader, cell) {
-                cell
+            let (target, in_slot) = if !taken.contains(&cell) && sight(map, leader, cell) {
+                (Some(cell), true)
             } else {
                 // in line: the nearest free cell on the trail behind the leader
-                leader_path[..i]
+                let fallback = leader_path[..i]
                     .iter()
                     .rev()
                     .copied()
@@ -216,9 +273,22 @@ fn place<M, D: Copy>(
                         around(leader)
                             .into_iter()
                             .find(|c| !taken.contains(c) && sight(map, leader, *c))
-                    })
-                    .unwrap_or(leader) // nowhere to stand: wait on the leader's cell
+                    });
+                (fallback, false)
             };
+            if sink.enabled() {
+                sink.emit(match target {
+                    Some(cell) => FormationTrace::Placed {
+                        member: k,
+                        step: i,
+                        cell,
+                        slot: in_slot,
+                    },
+                    None => FormationTrace::Unplaced { member: k, step: i },
+                });
+            }
+            // nowhere to stand: wait on the leader's cell
+            let target = target.unwrap_or(leader);
             taken.push(target);
             out[k].push(target);
         }
@@ -251,6 +321,65 @@ mod tests {
         assert_eq!(out[0].last(), Some(&Cell::new(last.x, 5, 0)));
         assert_eq!(out[1].last(), Some(&Cell::new(last.x - 1, 4, 0)));
         assert_eq!(out[2].last(), Some(&Cell::new(last.x - 1, 5, 0)));
+    }
+
+    #[test]
+    fn traced_placing_reports_each_member_and_changes_nothing() {
+        use sagax_debug::{Collector, Overflow};
+        // wall at x = 15 with a one-cell door at y = 4
+        let mut map = DenseGrid::new(30, 10);
+        for y in 0..10 {
+            if y != 4 {
+                map.set(15, y, DenseGrid::BLOCKED);
+            }
+        }
+        let path: Vec<Cell> = (5..26).map(|x| Cell::new(x, 4, 0)).collect();
+        let formation = Formation::block_of_four();
+        let (mut plain, mut traced) = (Vec::new(), Vec::new());
+        place_members(&mut map, &path, &formation, &mut plain);
+        let mut log = Collector::new(1000, Overflow::DropNewest);
+        place_members_traced(&mut map, &path, &formation, &mut traced, &mut log);
+        assert_eq!(plain, traced);
+        assert_eq!(log.records().len(), path.len() * 3);
+        let mut fell_back = 0;
+        for (n, r) in log.records().enumerate() {
+            let FormationTrace::Placed {
+                member,
+                step,
+                cell,
+                slot,
+            } = r.event
+            else {
+                panic!("{:?}", r.event);
+            };
+            assert_eq!((step, member), (n / 3, n % 3));
+            assert_eq!(cell, traced[member][step]);
+            fell_back += usize::from(!slot);
+        }
+        // in the door the block becomes a line
+        assert!(fell_back > 0);
+
+        // hex: the same result with and without a sink
+        let layout = HexLayout::OddR;
+        let (mut plain, mut traced) = (Vec::new(), Vec::new());
+        place_members_hex(&mut map, layout, &path, &formation, &mut plain);
+        let mut log = Collector::new(1000, Overflow::DropNewest);
+        place_members_hex_traced(&mut map, layout, &path, &formation, &mut traced, &mut log);
+        assert_eq!(plain, traced);
+        assert_eq!(log.records().len(), path.len() * 3);
+    }
+
+    #[test]
+    fn nowhere_to_stand_is_unplaced() {
+        // a single open cell: the leader stands on it, the member has no room
+        let mut map = DenseGrid::new(1, 1);
+        let path = [Cell::new(0, 0, 0)];
+        let mut out = Vec::new();
+        let mut log = sagax_debug::Collector::new(10, sagax_debug::Overflow::DropNewest);
+        place_members_traced(&mut map, &path, &Formation::column(1), &mut out, &mut log);
+        assert_eq!(out, [vec![Cell::new(0, 0, 0)]]);
+        let events: Vec<_> = log.records().map(|r| r.event).collect();
+        assert_eq!(events, [FormationTrace::Unplaced { member: 0, step: 0 }]);
     }
 
     #[test]

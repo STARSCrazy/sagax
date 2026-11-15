@@ -430,3 +430,135 @@ fn mission_trace_events() {
         (MISSION_TRACE_PICKED, None, -1, 0)
     );
 }
+
+#[test]
+fn search_trace_codes() {
+    let c = |x, y| Cell::new(x, y, 0);
+    let started = search_trace(SearchTrace::Started {
+        search: 2,
+        start: c(1, 2),
+        estimate: 30,
+    });
+    assert_eq!(
+        started,
+        SearchTraceCode {
+            kind: SEARCH_TRACE_STARTED,
+            search: 2,
+            cell: c(1, 2),
+            estimate: 30,
+            ..SearchTraceCode::default()
+        }
+    );
+    let improved = search_trace(SearchTrace::Improved {
+        search: 2,
+        node: c(2, 2),
+        parent: c(1, 2),
+        cost: Cost::MAX,
+        first: true,
+    });
+    assert_eq!(
+        (
+            improved.kind,
+            improved.parent,
+            improved.cost,
+            improved.first
+        ),
+        (SEARCH_TRACE_IMPROVED, c(1, 2), i32::MAX, true)
+    );
+    let expanded = search_trace(SearchTrace::Expanded {
+        search: 1,
+        node: c(3, 3),
+        cost: 7,
+        estimate: 9,
+    });
+    assert_eq!(
+        (
+            expanded.kind,
+            expanded.cell,
+            expanded.cost,
+            expanded.estimate
+        ),
+        (SEARCH_TRACE_EXPANDED, c(3, 3), 7, 9)
+    );
+    let paused = search_trace(SearchTrace::Paused {
+        search: 1,
+        expanded: 12,
+    });
+    assert_eq!((paused.kind, paused.expanded), (SEARCH_TRACE_PAUSED, 12));
+    for (status, found) in [
+        (SearchStatus::Found, true),
+        (SearchStatus::Exhausted, false),
+    ] {
+        let finished = search_trace(SearchTrace::Finished {
+            search: 1,
+            status,
+            expanded: 40,
+        });
+        assert_eq!(
+            (finished.kind, finished.expanded, finished.found),
+            (SEARCH_TRACE_FINISHED, 40, found)
+        );
+    }
+}
+
+#[test]
+fn nav_trace_codes() {
+    let c = |x, y| Cell::new(x, y, 0);
+    let inner = SearchTrace::Paused {
+        search: 3,
+        expanded: 5,
+    };
+    let search = nav_trace(NavTrace::Search(inner));
+    assert_eq!(
+        (search.kind, search.search),
+        (NAV_TRACE_SEARCH, search_trace(inner))
+    );
+    let shortcut = nav_trace(NavTrace::Smooth(SmoothTrace::Shortcut {
+        from: c(0, 0),
+        to: c(4, 1),
+        clear: true,
+    }));
+    assert_eq!(
+        shortcut,
+        NavTraceCode {
+            kind: NAV_TRACE_SHORTCUT,
+            from: c(0, 0),
+            to: c(4, 1),
+            clear: true,
+            ..NavTraceCode::default()
+        }
+    );
+    let placed = nav_trace(NavTrace::Formation(FormationTrace::Placed {
+        member: 2,
+        step: 6,
+        cell: c(5, 5),
+        slot: false,
+    }));
+    assert_eq!(
+        (
+            placed.kind,
+            placed.member,
+            placed.step,
+            placed.cell,
+            placed.slot
+        ),
+        (NAV_TRACE_PLACED, 2, 6, c(5, 5), false)
+    );
+    let unplaced = nav_trace(NavTrace::Formation(FormationTrace::Unplaced {
+        member: 1,
+        step: 0,
+    }));
+    assert_eq!(
+        (unplaced.kind, unplaced.member, unplaced.step),
+        (NAV_TRACE_UNPLACED, 1, 0)
+    );
+    let best = nav_trace(NavTrace::FleeBest {
+        cell: c(9, 1),
+        distance: Cost::MAX,
+        cost: 80,
+    });
+    assert_eq!(
+        (best.kind, best.cell, best.distance, best.cost),
+        (NAV_TRACE_FLEE_BEST, c(9, 1), i32::MAX, 80)
+    );
+}

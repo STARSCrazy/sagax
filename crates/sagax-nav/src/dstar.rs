@@ -61,7 +61,7 @@ use crate::grid::{Cell, GridRules};
 use crate::hex::HexLayout;
 use sagax_core::{NoopSink, Sink};
 
-use crate::search::{Cost, Graph, SearchEvent, SearchStatus};
+use crate::search::{Cost, Graph, SearchStatus, SearchTrace};
 use crate::table::NodeTable;
 
 /// The cost of "no path" in `g`, `rhs` and the keys.
@@ -247,7 +247,7 @@ impl<N: Copy + Eq + Hash, H: Heuristic<N>> DStarLite<N, H> {
 
     /// As [`compute`](Self::compute), reporting every expansion to `sink`
     /// (cost: to the goal as known now).
-    pub fn compute_traced<G: Graph<Node = N>, S: Sink<SearchEvent<N>>>(
+    pub fn compute_traced<G: Graph<Node = N>, S: Sink<SearchTrace<N>> + ?Sized>(
         &mut self,
         graph: &mut G,
         max_expansions: usize,
@@ -259,7 +259,7 @@ impl<N: Copy + Eq + Hash, H: Heuristic<N>> DStarLite<N, H> {
         let search = u32::try_from(self.computes).unwrap_or(u32::MAX);
         self.computes += 1;
         if sink.enabled() {
-            sink.emit(SearchEvent::Started {
+            sink.emit(SearchTrace::Started {
                 search,
                 start,
                 estimate: 0,
@@ -315,7 +315,7 @@ impl<N: Copy + Eq + Hash, H: Heuristic<N>> DStarLite<N, H> {
             self.expanded += 1;
             if sink.enabled() {
                 let cost = record.g.min(record.rhs);
-                sink.emit(SearchEvent::Expanded {
+                sink.emit(SearchTrace::Expanded {
                     search,
                     node: record.node,
                     cost: Cost::try_from(cost).unwrap_or(Cost::MAX),
@@ -346,11 +346,11 @@ impl<N: Copy + Eq + Hash, H: Heuristic<N>> DStarLite<N, H> {
         };
         if sink.enabled() {
             sink.emit(match self.status {
-                DStarStatus::Running => SearchEvent::Paused {
+                DStarStatus::Running => SearchTrace::Paused {
                     search,
                     expanded: self.expanded,
                 },
-                status => SearchEvent::Finished {
+                status => SearchTrace::Finished {
                     search,
                     status: if status == DStarStatus::Found {
                         SearchStatus::Found

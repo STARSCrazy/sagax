@@ -16,7 +16,7 @@ use std::hash::Hash;
 
 use sagax_core::{NoopSink, Sink};
 
-use crate::search::{Cost, Graph, Limits, NoGoal, Search, SearchEvent};
+use crate::search::{Cost, Graph, Limits, NoGoal, Search, SearchTrace};
 
 /// Distances to the nearest goal for every reachable node.
 pub struct FlowField<N> {
@@ -53,7 +53,7 @@ impl<N: Copy + Eq + Hash> FlowField<N> {
 
     /// As [`build`](Self::build), reporting every step to `sink` (costs are
     /// costs to the nearest goal).
-    pub fn build_traced<G: Graph<Node = N>, S: Sink<SearchEvent<N>>>(
+    pub fn build_traced<G: Graph<Node = N>, S: Sink<SearchTrace<N>> + ?Sized>(
         &mut self,
         graph: &mut G,
         goals: impl IntoIterator<Item = N>,

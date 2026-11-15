@@ -706,9 +706,9 @@ pub unsafe extern "C" fn sx_path_cost(
     crate::guarded(|| {
         s.begun = Begun::Nothing;
         // The same as `sagax::rules::path_cost`.
-        let report = s
+        let report = crate::traced!(s.trace, crate::SxNavTrace::of, |sink| s
             .nav
-            .find_path(&mut map, Cell::from(from), &[Cell::from(to)], budget);
+            .find_path_traced(&mut map, Cell::from(from), &[Cell::from(to)], budget, sink));
         if report.status != Status::Found {
             return 0;
         }

@@ -15,7 +15,12 @@ use sagax_decide::mission::{
     MotiveKind, OnLost, StepKind, Where,
 };
 use sagax_decide::{Combine, Decider, Pick};
-use sagax_nav::nav::{Budget, Output, Status};
+use sagax_nav::Cost;
+use sagax_nav::formation::FormationTrace;
+use sagax_nav::grid::Cell;
+use sagax_nav::nav::{Budget, NavTrace, Output, Status};
+use sagax_nav::search::{SearchStatus, SearchTrace};
+use sagax_nav::smooth::SmoothTrace;
 
 use crate::codes::{
     ACTION_ATTACK, ACTION_CUSTOM, ACTION_FLEE, ACTION_FOLLOW, ACTION_GO_TO, ACTION_HOLD,
@@ -44,6 +49,11 @@ use crate::codes::{
     SHAPE_COLUMN, SHAPE_LINE, SHAPE_WEDGE, SIDE_FRONT, SIDE_LEFT, SIDE_REAR, SIDE_RIGHT,
     SQUAD_KEEP, SQUAD_NO_PLAN, SQUAD_REPLAN, SQUAD_SIGNAL, START_AFTER_TICKS, START_NOW,
     START_ON_SIGNAL, UNREACHABLE,
+};
+use crate::codes::{
+    NAV_TRACE_FLEE_BEST, NAV_TRACE_PLACED, NAV_TRACE_SEARCH, NAV_TRACE_SHORTCUT,
+    NAV_TRACE_UNPLACED, SEARCH_TRACE_EXPANDED, SEARCH_TRACE_FINISHED, SEARCH_TRACE_IMPROVED,
+    SEARCH_TRACE_PAUSED, SEARCH_TRACE_STARTED,
 };
 
 // ---- numbers ------------------------------------------------------------------
@@ -153,6 +163,165 @@ pub const fn nav_status(status: Status) -> i32 {
         Status::Partial => PARTIAL,
         Status::Unreachable => UNREACHABLE,
         Status::Done => DONE,
+    }
+}
+
+// ---- traces of the navigation -------------------------------------------------
+
+/// The numbers of a search trace record (`sx_search_trace`). Fields that do
+/// not apply to `kind` are 0 (cells `(0, 0, 0)`); costs saturate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SearchTraceCode {
+    /// `SX_SEARCH_TRACE_*`.
+    pub kind: u32,
+    /// Number of the search within its search object.
+    pub search: u32,
+    /// `STARTED`: the start; `EXPANDED`, `IMPROVED`: the cell.
+    pub cell: Cell,
+    /// `IMPROVED`: where the cell is reached from.
+    pub parent: Cell,
+    /// `EXPANDED`, `IMPROVED`: the cost.
+    pub cost: i32,
+    /// `STARTED`, `EXPANDED`: the estimate still to go.
+    pub estimate: i32,
+    /// `PAUSED`, `FINISHED`: cells expanded so far.
+    pub expanded: i32,
+    /// `FINISHED`: a goal was reached.
+    pub found: bool,
+    /// `IMPROVED`: the cell was new.
+    pub first: bool,
+}
+
+/// The numbers of a search trace record.
+pub fn search_trace(event: SearchTrace<Cell>) -> SearchTraceCode {
+    let of = |kind, search| SearchTraceCode {
+        kind,
+        search,
+        ..SearchTraceCode::default()
+    };
+    match event {
+        SearchTrace::Started {
+            search,
+            start,
+            estimate,
+        } => SearchTraceCode {
+            cell: start,
+            estimate: to_i32(estimate),
+            ..of(SEARCH_TRACE_STARTED, search)
+        },
+        SearchTrace::Expanded {
+            search,
+            node,
+            cost,
+            estimate,
+        } => SearchTraceCode {
+            cell: node,
+            cost: to_i32(cost),
+            estimate: to_i32(estimate),
+            ..of(SEARCH_TRACE_EXPANDED, search)
+        },
+        SearchTrace::Improved {
+            search,
+            node,
+            parent,
+            cost,
+            first,
+        } => SearchTraceCode {
+            cell: node,
+            parent,
+            cost: to_i32(cost),
+            first,
+            ..of(SEARCH_TRACE_IMPROVED, search)
+        },
+        SearchTrace::Paused { search, expanded } => SearchTraceCode {
+            expanded: to_i32(expanded),
+            ..of(SEARCH_TRACE_PAUSED, search)
+        },
+        SearchTrace::Finished {
+            search,
+            status,
+            expanded,
+        } => SearchTraceCode {
+            expanded: to_i32(expanded),
+            found: status == SearchStatus::Found,
+            ..of(SEARCH_TRACE_FINISHED, search)
+        },
+    }
+}
+
+/// The numbers of a navigator trace record (`sx_nav_trace`). Fields that do
+/// not apply to `kind` are 0; costs saturate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NavTraceCode {
+    /// `SX_NAV_TRACE_*`.
+    pub kind: u32,
+    /// `SEARCH`: the search record.
+    pub search: SearchTraceCode,
+    /// `SHORTCUT`: where the tested line starts.
+    pub from: Cell,
+    /// `SHORTCUT`: where it ends.
+    pub to: Cell,
+    /// `PLACED`: the member's target; `FLEE_BEST`: the chosen cell.
+    pub cell: Cell,
+    /// `PLACED`, `UNPLACED`: the member.
+    pub member: i32,
+    /// `PLACED`, `UNPLACED`: the step of the leader's way.
+    pub step: i32,
+    /// `FLEE_BEST`: the threats' walk to the cell (`i32::MAX`: none
+    /// reaches it).
+    pub distance: i32,
+    /// `FLEE_BEST`: the walker's cost to the cell.
+    pub cost: i32,
+    /// `SHORTCUT`: the line was free.
+    pub clear: bool,
+    /// `PLACED`: the target is the member's slot.
+    pub slot: bool,
+}
+
+/// The numbers of a navigator trace record.
+pub fn nav_trace(event: NavTrace) -> NavTraceCode {
+    let of = |kind| NavTraceCode {
+        kind,
+        ..NavTraceCode::default()
+    };
+    match event {
+        NavTrace::Search(e) => NavTraceCode {
+            search: search_trace(e),
+            ..of(NAV_TRACE_SEARCH)
+        },
+        NavTrace::Smooth(SmoothTrace::Shortcut { from, to, clear }) => NavTraceCode {
+            from,
+            to,
+            clear,
+            ..of(NAV_TRACE_SHORTCUT)
+        },
+        NavTrace::Formation(FormationTrace::Placed {
+            member,
+            step,
+            cell,
+            slot,
+        }) => NavTraceCode {
+            cell,
+            member: to_i32(member),
+            step: to_i32(step),
+            slot,
+            ..of(NAV_TRACE_PLACED)
+        },
+        NavTrace::Formation(FormationTrace::Unplaced { member, step }) => NavTraceCode {
+            member: to_i32(member),
+            step: to_i32(step),
+            ..of(NAV_TRACE_UNPLACED)
+        },
+        NavTrace::FleeBest {
+            cell,
+            distance,
+            cost,
+        } => NavTraceCode {
+            cell,
+            distance: to_i32::<Cost>(distance),
+            cost: to_i32(cost),
+            ..of(NAV_TRACE_FLEE_BEST)
+        },
     }
 }
 

@@ -3,7 +3,7 @@
 use sagax_core::{NoopSink, Sink};
 use sagax_debug::{Collector, Overflow};
 use sagax_nav::grid::{Cell, CellGoal, CellMap, DenseGrid, GridGraph, GridRules, Moves, Preset};
-use sagax_nav::{Cost, Goal, Graph, Limits, NoGoal, Search, SearchEvent, SearchStatus, find_path};
+use sagax_nav::{Cost, Goal, Graph, Limits, NoGoal, Search, SearchStatus, SearchTrace, find_path};
 
 /// Small deterministic random numbers for test maps.
 struct Rng(u64);
@@ -590,21 +590,21 @@ fn diagnostics_report_in_order_and_change_nothing() {
     let events: Vec<_> = collector.records().map(|r| r.event).collect();
     assert!(matches!(
         events.first(),
-        Some(SearchEvent::Started { search: 1, .. })
+        Some(SearchTrace::Started { search: 1, .. })
     ));
     assert!(matches!(
         events.last(),
-        Some(SearchEvent::Finished { search: 1, .. })
+        Some(SearchTrace::Finished { search: 1, .. })
     ));
     let expanded = events
         .iter()
-        .filter(|e| matches!(e, SearchEvent::Expanded { .. }))
+        .filter(|e| matches!(e, SearchTrace::Expanded { .. }))
         .count();
     assert_eq!(expanded, watched.expanded());
     assert_eq!(
         events
             .iter()
-            .filter(|e| matches!(e, SearchEvent::Finished { .. }))
+            .filter(|e| matches!(e, SearchTrace::Finished { .. }))
             .count(),
         1
     );
@@ -629,11 +629,11 @@ fn bounded_collector_drops_but_search_goes_on() {
     assert!(collector.dropped() > 0);
     assert!(matches!(
         collector.records().last().unwrap().event,
-        SearchEvent::Finished { .. }
+        SearchTrace::Finished { .. }
     ));
 }
 
 #[test]
 fn noop_sink_is_disabled() {
-    assert!(!<NoopSink as Sink<SearchEvent<Cell>>>::enabled(&NoopSink));
+    assert!(!<NoopSink as Sink<SearchTrace<Cell>>>::enabled(&NoopSink));
 }

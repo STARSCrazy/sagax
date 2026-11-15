@@ -29,6 +29,28 @@ pub const UNREACHABLE: i32 = 4;
 /// `SX_DONE`: an area or flow field is complete.
 pub const DONE: i32 = 5;
 
+/// `SX_SEARCH_TRACE_STARTED`: a search begins.
+pub const SEARCH_TRACE_STARTED: u32 = 1;
+/// `SX_SEARCH_TRACE_EXPANDED`: a cell was expanded.
+pub const SEARCH_TRACE_EXPANDED: u32 = 2;
+/// `SX_SEARCH_TRACE_IMPROVED`: a cell was reached more cheaply.
+pub const SEARCH_TRACE_IMPROVED: u32 = 3;
+/// `SX_SEARCH_TRACE_PAUSED`: the budget is used up.
+pub const SEARCH_TRACE_PAUSED: u32 = 4;
+/// `SX_SEARCH_TRACE_FINISHED`: the search ended.
+pub const SEARCH_TRACE_FINISHED: u32 = 5;
+
+/// `SX_NAV_TRACE_SEARCH`: a step of a search (`search` is valid).
+pub const NAV_TRACE_SEARCH: u32 = 1;
+/// `SX_NAV_TRACE_SHORTCUT`: the smoothing tested a straight line.
+pub const NAV_TRACE_SHORTCUT: u32 = 2;
+/// `SX_NAV_TRACE_PLACED`: a formation member got its target.
+pub const NAV_TRACE_PLACED: u32 = 3;
+/// `SX_NAV_TRACE_UNPLACED`: a formation member found no free cell.
+pub const NAV_TRACE_UNPLACED: u32 = 4;
+/// `SX_NAV_TRACE_FLEE_BEST`: the cell a flee chose.
+pub const NAV_TRACE_FLEE_BEST: u32 = 5;
+
 /// `SX_GRID_SQUARE`.
 pub const GRID_SQUARE: u32 = 0;
 /// `SX_GRID_HEX_ODD_R`.

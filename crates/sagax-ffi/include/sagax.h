@@ -319,32 +319,79 @@ int32_t sx_dstar_move_start(sx_dstar *dstar, sx_point cell);
 int32_t sx_dstar_cells_changed(sx_dstar *dstar, const sx_map *map, const sx_point *cells,
 	int32_t count);
 
-/* ---- tracing (since version 2) ------------------------------------------ */
+/* ---- tracing (since version 2; this form since version 12) -------------- */
 
-/* Every step of a search, for debugging and logging. Off by default; off it
- * costs nothing. The callback runs inside the search: keep it short. */
-#define SX_TRACE_STARTED   1   /* a search begins at cell */
-#define SX_TRACE_EXPANDED  2   /* cell expanded: cost is final (D* Lite: for now) */
-#define SX_TRACE_IMPROVED  3   /* cell reached more cheaply from parent */
-#define SX_TRACE_PAUSED    4   /* budget used up */
-#define SX_TRACE_FINISHED  5   /* search ended; found 1 if a goal was reached */
+/* Why did a call do that? Every handle that decides something can carry
+ * one trace callback (sx_<handle>_set_trace). It is off by default; off it
+ * costs one check per call. On, the callback gets every record of the
+ * following calls on that handle:
+ *
+ *  - It runs inside the call, synchronously, in record order. The record is
+ *    valid only during the callback: copy what you keep.
+ *  - The callback must not call into the same handle.
+ *  - Records are flat structs: a kind first, then named fields; fields that
+ *    do not apply to the kind are 0. Sub-records are embedded by value.
+ *  - A trace never changes a result: every call answers the same with
+ *    tracing on or off.
+ *
+ * set_trace with trace NULL turns tracing off. Returns 0, SX_ERROR_ARGUMENT
+ * for a null handle. */
 
-typedef struct sx_event {
-	int32_t kind;               /* SX_TRACE_* */
-	sx_point cell;
-	sx_point parent;            /* SX_TRACE_IMPROVED */
-	int32_t cost;               /* nav: from the start; flow, D* Lite: to the goal */
-	int32_t estimate;           /* estimated cost still to go */
-	int32_t expanded;           /* SX_TRACE_PAUSED, SX_TRACE_FINISHED */
-	int32_t found;              /* SX_TRACE_FINISHED */
-} sx_event;
+/* One step of a search: paths, areas, flow fields, D* Lite. */
+#define SX_SEARCH_TRACE_STARTED   1   /* a search begins at cell */
+#define SX_SEARCH_TRACE_EXPANDED  2   /* cell expanded: cost is final (D* Lite: for now) */
+#define SX_SEARCH_TRACE_IMPROVED  3   /* cell reached more cheaply from parent */
+#define SX_SEARCH_TRACE_PAUSED    4   /* budget used up */
+#define SX_SEARCH_TRACE_FINISHED  5   /* search ended; found 1 if a goal was reached */
 
-typedef void (*sx_trace_fn)(void *context, const sx_event *event);
+typedef struct sx_search_trace {
+	uint32_t kind;              /* SX_SEARCH_TRACE_* */
+	uint32_t search;            /* number of the search within its handle, from 1 */
+	sx_point cell;              /* STARTED: the start; EXPANDED, IMPROVED: the cell */
+	sx_point parent;            /* IMPROVED */
+	int32_t cost;               /* EXPANDED, IMPROVED. nav: from the start; flow,
+	                             * D* Lite: to the goal */
+	int32_t estimate;           /* STARTED, EXPANDED: estimated cost still to go */
+	int32_t expanded;           /* PAUSED, FINISHED: cells expanded so far */
+	uint8_t found;              /* FINISHED */
+	uint8_t first;              /* IMPROVED: 1 if the cell was new */
+} sx_search_trace;
 
-/* trace 0 turns tracing off. Return 0. */
-int32_t sx_nav_set_trace(sx_nav *nav, sx_trace_fn trace, void *context);
-int32_t sx_flow_set_trace(sx_flow *flow, sx_trace_fn trace, void *context);
-int32_t sx_dstar_set_trace(sx_dstar *dstar, sx_trace_fn trace, void *context);
+typedef void (*sx_search_trace_fn)(void *context, const sx_search_trace *trace);
+
+/* What a navigator did: its searches (a flee runs two: the threats' first,
+ * then the walker's, each with its own search numbers), the line tests of
+ * SX_OUT_SMOOTH, the member placements of sx_nav_formation and the cell a
+ * flee chose. Covers sx_nav_find_path, sx_nav_continue, sx_nav_reachable,
+ * sx_nav_flee, sx_nav_path_to, sx_nav_way, sx_nav_formation and
+ * sx_path_cost. */
+#define SX_NAV_TRACE_SEARCH     1  /* search: one search step */
+#define SX_NAV_TRACE_SHORTCUT   2  /* the straight line from -> to was tested; clear 1 if free */
+#define SX_NAV_TRACE_PLACED     3  /* member stands on cell while the leader is on its
+                                    * way's point step; slot 0: fell back to the trail */
+#define SX_NAV_TRACE_UNPLACED   4  /* member found no free cell at step (waits on the leader) */
+#define SX_NAV_TRACE_FLEE_BEST  5  /* the cell a flee chose: distance is the threats' walk
+                                    * (INT32_MAX: none reaches it), cost the walker's */
+
+typedef struct sx_nav_trace {
+	uint32_t kind;              /* SX_NAV_TRACE_* */
+	sx_search_trace search;     /* SEARCH */
+	sx_point from;              /* SHORTCUT */
+	sx_point to;                /* SHORTCUT */
+	sx_point cell;              /* PLACED, FLEE_BEST */
+	int32_t member;             /* PLACED, UNPLACED */
+	int32_t step;               /* PLACED, UNPLACED */
+	int32_t distance;           /* FLEE_BEST */
+	int32_t cost;               /* FLEE_BEST */
+	uint8_t clear;              /* SHORTCUT */
+	uint8_t slot;               /* PLACED */
+} sx_nav_trace;
+
+typedef void (*sx_nav_trace_fn)(void *context, const sx_nav_trace *trace);
+
+int32_t sx_nav_set_trace(sx_nav *nav, sx_nav_trace_fn trace, void *context);
+int32_t sx_flow_set_trace(sx_flow *flow, sx_search_trace_fn trace, void *context);
+int32_t sx_dstar_set_trace(sx_dstar *dstar, sx_search_trace_fn trace, void *context);
 
 /* ---- decisions (since version 4) ---------------------------------------- */
 
@@ -2466,11 +2513,26 @@ _Static_assert(offsetof(sx_rules, cost_straight) == 8, "sx_rules.cost_straight l
 _Static_assert(offsetof(sx_rules, smooth_max_extra) == 20, "sx_rules.smooth_max_extra layout");
 _Static_assert(sizeof(sx_result) == 20, "sx_result layout");
 _Static_assert(offsetof(sx_result, node_limit_hit) == 16, "sx_result.node_limit_hit layout");
-_Static_assert(sizeof(sx_event) == 44, "sx_event layout");
-_Static_assert(offsetof(sx_event, cell) == 4, "sx_event.cell layout");
-_Static_assert(offsetof(sx_event, parent) == 16, "sx_event.parent layout");
-_Static_assert(offsetof(sx_event, cost) == 28, "sx_event.cost layout");
-_Static_assert(offsetof(sx_event, found) == 40, "sx_event.found layout");
+_Static_assert(sizeof(sx_search_trace) == 48, "sx_search_trace layout");
+_Static_assert(offsetof(sx_search_trace, search) == 4, "sx_search_trace.search layout");
+_Static_assert(offsetof(sx_search_trace, cell) == 8, "sx_search_trace.cell layout");
+_Static_assert(offsetof(sx_search_trace, parent) == 20, "sx_search_trace.parent layout");
+_Static_assert(offsetof(sx_search_trace, cost) == 32, "sx_search_trace.cost layout");
+_Static_assert(offsetof(sx_search_trace, estimate) == 36, "sx_search_trace.estimate layout");
+_Static_assert(offsetof(sx_search_trace, expanded) == 40, "sx_search_trace.expanded layout");
+_Static_assert(offsetof(sx_search_trace, found) == 44, "sx_search_trace.found layout");
+_Static_assert(offsetof(sx_search_trace, first) == 45, "sx_search_trace.first layout");
+_Static_assert(sizeof(sx_nav_trace) == 108, "sx_nav_trace layout");
+_Static_assert(offsetof(sx_nav_trace, search) == 4, "sx_nav_trace.search layout");
+_Static_assert(offsetof(sx_nav_trace, from) == 52, "sx_nav_trace.from layout");
+_Static_assert(offsetof(sx_nav_trace, to) == 64, "sx_nav_trace.to layout");
+_Static_assert(offsetof(sx_nav_trace, cell) == 76, "sx_nav_trace.cell layout");
+_Static_assert(offsetof(sx_nav_trace, member) == 88, "sx_nav_trace.member layout");
+_Static_assert(offsetof(sx_nav_trace, step) == 92, "sx_nav_trace.step layout");
+_Static_assert(offsetof(sx_nav_trace, distance) == 96, "sx_nav_trace.distance layout");
+_Static_assert(offsetof(sx_nav_trace, cost) == 100, "sx_nav_trace.cost layout");
+_Static_assert(offsetof(sx_nav_trace, clear) == 104, "sx_nav_trace.clear layout");
+_Static_assert(offsetof(sx_nav_trace, slot) == 105, "sx_nav_trace.slot layout");
 _Static_assert(sizeof(sx_consideration) == 16, "sx_consideration layout");
 _Static_assert(offsetof(sx_consideration, max) == 12, "sx_consideration.max layout");
 _Static_assert(sizeof(sx_candidate) == 8, "sx_candidate layout");

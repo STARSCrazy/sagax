@@ -5,12 +5,14 @@
 //! and the right square or hex version runs: search, turning points,
 //! smoothing, formation, D* Lite estimates.
 
+use sagax_core::{NoopSink, Sink};
+
 use crate::dstar::{DStarLite, Heuristic, HexHeuristic};
-use crate::formation::{Formation, place_members, place_members_hex};
+use crate::formation::{Formation, FormationTrace, place_members_hex_traced, place_members_traced};
 use crate::grid::{Cell, CellMap, GridGraph, GridRules, Preset, turning_points};
 use crate::hex::{HexGraph, HexLayout, hex_turning_points};
 use crate::search::{Cost, Graph};
-use crate::smooth::{hex_line_clear_within, line_clear_within, smooth_path};
+use crate::smooth::{SmoothTrace, hex_line_clear_within, line_clear_within, smooth_path_traced};
 
 /// The kind of grid and its move costs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,8 +56,8 @@ impl Topology {
         }
     }
 
-    /// Smooths `path` into `out` (see [`smooth_path`]); lines cross cells
-    /// with an extra cost of at most `max_extra`.
+    /// Smooths `path` into `out` (see [`smooth_path`](crate::smooth::smooth_path));
+    /// lines cross cells with an extra cost of at most `max_extra`.
     pub fn smooth<M: CellMap>(
         &self,
         map: &mut M,
@@ -63,7 +65,24 @@ impl Topology {
         max_extra: Cost,
         out: &mut Vec<Cell>,
     ) {
-        smooth_path(path, out, |a, b| self.line_clear(map, a, b, max_extra));
+        self.smooth_traced(map, path, max_extra, out, &mut NoopSink);
+    }
+
+    /// [`smooth`](Self::smooth) that reports every line test to `sink`.
+    pub fn smooth_traced<M: CellMap, S: Sink<SmoothTrace<Cell>> + ?Sized>(
+        &self,
+        map: &mut M,
+        path: &[Cell],
+        max_extra: Cost,
+        out: &mut Vec<Cell>,
+        sink: &mut S,
+    ) {
+        smooth_path_traced(
+            path,
+            out,
+            |a, b| self.line_clear(map, a, b, max_extra),
+            sink,
+        );
     }
 
     /// Tells `planner` that `cells` changed: every node it knows on or next
@@ -104,8 +123,9 @@ impl Topology {
         scratch.len()
     }
 
-    /// Places a formation along the leader's path (see [`place_members`] and
-    /// [`place_members_hex`]).
+    /// Places a formation along the leader's path (see
+    /// [`place_members`](crate::formation::place_members) and
+    /// [`place_members_hex`](crate::formation::place_members_hex)).
     pub fn place_members<M: CellMap>(
         &self,
         map: &mut M,
@@ -113,9 +133,24 @@ impl Topology {
         formation: &Formation,
         out: &mut Vec<Vec<Cell>>,
     ) {
+        self.place_members_traced(map, leader_path, formation, out, &mut NoopSink);
+    }
+
+    /// [`place_members`](Self::place_members) that reports every placement
+    /// to `sink`.
+    pub fn place_members_traced<M: CellMap, S: Sink<FormationTrace> + ?Sized>(
+        &self,
+        map: &mut M,
+        leader_path: &[Cell],
+        formation: &Formation,
+        out: &mut Vec<Vec<Cell>>,
+        sink: &mut S,
+    ) {
         match *self {
-            Self::Square(_) => place_members(map, leader_path, formation, out),
-            Self::Hex { layout, .. } => place_members_hex(map, layout, leader_path, formation, out),
+            Self::Square(_) => place_members_traced(map, leader_path, formation, out, sink),
+            Self::Hex { layout, .. } => {
+                place_members_hex_traced(map, layout, leader_path, formation, out, sink)
+            }
         }
     }
 

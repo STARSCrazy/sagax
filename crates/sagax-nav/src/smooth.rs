@@ -11,7 +11,10 @@
 //! slightly shorter any-angle paths at a higher search cost; not needed yet.)
 //!
 //! Square grids: [`line_clear`]. Hex grids: [`hex_line_clear`]. Both plug
-//! into [`smooth_path`].
+//! into [`smooth_path`]. [`smooth_path_traced`] reports every line it tested
+//! as a [`SmoothTrace`].
+
+use sagax_core::{NoopSink, Sink};
 
 use crate::grid::{Cell, CellMap};
 use crate::hex::HexLayout;
@@ -26,7 +29,44 @@ use crate::search::Cost;
 /// instead of one per cell). Every line it keeps was tested, so the result is
 /// always walkable; where sight comes and goes along the path it may keep a
 /// corner more than strictly needed.
-pub fn smooth_path<N: Copy>(path: &[N], out: &mut Vec<N>, mut clear: impl FnMut(N, N) -> bool) {
+pub fn smooth_path<N: Copy>(path: &[N], out: &mut Vec<N>, clear: impl FnMut(N, N) -> bool) {
+    smooth_path_traced(path, out, clear, &mut NoopSink);
+}
+
+/// What [`smooth_path_traced`] reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmoothTrace<N> {
+    /// The straight line from `from` to `to` was tested; `clear` is the
+    /// answer of the line test.
+    Shortcut {
+        /// Where the line starts (a kept point).
+        from: N,
+        /// The later point it was tested to.
+        to: N,
+        /// `true` if the line was free.
+        clear: bool,
+    },
+}
+
+/// [`smooth_path`] that reports each line test to `sink`, in the order they
+/// are made. The result is the same as without a sink.
+pub fn smooth_path_traced<N: Copy, S: Sink<SmoothTrace<N>> + ?Sized>(
+    path: &[N],
+    out: &mut Vec<N>,
+    mut clear: impl FnMut(N, N) -> bool,
+    sink: &mut S,
+) {
+    let mut clear = |from: N, to: N| {
+        let free = clear(from, to);
+        if sink.enabled() {
+            sink.emit(SmoothTrace::Shortcut {
+                from,
+                to,
+                clear: free,
+            });
+        }
+        free
+    };
     out.clear();
     let Some(&first) = path.first() else {
         return;
@@ -209,6 +249,69 @@ mod tests {
         let mut out = Vec::new();
         smooth_path(&r.path, &mut out, |a, b| line_clear(&mut g.map, a, b));
         assert_eq!(out, [Cell::new(0, 0, 0), Cell::new(17, 5, 0)]);
+    }
+
+    #[test]
+    fn traced_smoothing_reports_each_line_and_changes_nothing() {
+        use sagax_debug::{Collector, Overflow};
+        let mut map = DenseGrid::new(20, 20);
+        for y in 0..15 {
+            map.set(10, y, DenseGrid::BLOCKED);
+        }
+        let rules = GridRules::preset(Preset::Octile);
+        let mut g = GridGraph::new(map, rules, None);
+        let r = find_path(
+            &mut g,
+            Cell::new(2, 2, 0),
+            &CellGoal::new(18, 2, None, rules),
+            Limits::default(),
+            usize::MAX,
+        );
+        let (mut plain, mut traced) = (Vec::new(), Vec::new());
+        smooth_path(&r.path, &mut plain, |a, b| line_clear(&mut g.map, a, b));
+        let mut log = Collector::new(1000, Overflow::DropNewest);
+        let mut tests = 0;
+        smooth_path_traced(
+            &r.path,
+            &mut traced,
+            |a, b| {
+                tests += 1;
+                line_clear(&mut g.map, a, b)
+            },
+            &mut log,
+        );
+        assert_eq!(plain, traced);
+        assert_eq!(log.records().len(), tests);
+        for rec in log.records() {
+            let SmoothTrace::Shortcut { from, to, clear } = rec.event;
+            assert_eq!(clear, line_clear(&mut g.map, from, to));
+        }
+        // the wall forces at least one blocked line
+        assert!(
+            log.records()
+                .any(|r| !matches!(r.event, SmoothTrace::Shortcut { clear: true, .. }))
+        );
+
+        // a straight two-cell path needs no test at all
+        let mut log = Collector::new(10, Overflow::DropNewest);
+        let two = [Cell::new(0, 0, 0), Cell::new(1, 0, 0)];
+        smooth_path_traced(&two, &mut traced, |_, _| true, &mut log);
+        assert_eq!(traced, two);
+        assert_eq!(log.records().len(), 0);
+    }
+
+    #[test]
+    fn exact_shortcut_trace() {
+        use sagax_debug::{Collector, Overflow};
+        // four points, the line from 0 to 2 is free, 0 to 3 is not
+        let path = [0, 1, 2, 3];
+        let mut out = Vec::new();
+        let mut log = Collector::new(10, Overflow::DropNewest);
+        smooth_path_traced(&path, &mut out, |a: i32, b: i32| b - a < 3, &mut log);
+        assert_eq!(out, [0, 2, 3]);
+        let events: Vec<_> = log.records().map(|r| r.event).collect();
+        let s = |from, to, clear| SmoothTrace::Shortcut { from, to, clear };
+        assert_eq!(events, [s(0, 2, true), s(0, 3, false)]);
     }
 
     #[test]
