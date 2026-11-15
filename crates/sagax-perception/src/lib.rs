@@ -36,12 +36,22 @@
 //!   percept with a deterministically fuzzed whole cell, and with an
 //!   [`Awareness`] raises the pair at most to *noticed*.
 //!
-//! [`PerceptionTrace`] holds the records of the `_traced` forms.
+//! And indirect coordination:
+//!
+//! * [`Contagion`] remembers, per character, the deeds ([`DeedRule`]: cue
+//!   bits with a window) it saw its allies do, fed only from its own
+//!   percepts; [`Contagion::inputs`] and [`Contagion::write_columns`] give
+//!   them as Decider inputs ([`DeedInputs`]). A guard who sees two
+//!   comrades charge charges too; panic spreads only along sight.
+//!
+//! [`PerceptionTrace`] holds the records of the `_traced` forms,
+//! [`ContagionTrace`] those of the contagion memory.
 //!
 //! No floats, no allocation, no global state.
 
 mod awareness;
 mod cone;
+mod contagion;
 mod gain;
 mod hear;
 mod line;
@@ -54,6 +64,9 @@ mod world;
 
 pub use awareness::{Awareness, in_sight, observe, observe_traced};
 pub use cone::{in_band, view_vector};
+pub use contagion::{
+    Contagion, ContagionConfig, ContagionTrace, DEED_COLUMNS, DeedInputs, DeedRule, MAX_DEEDS,
+};
 pub use hear::{Stimulus, hear, hear_traced};
 pub use line::{Line, sight_line};
 pub use look::{Attention, Budget, Pick, count_crowds, look, look_traced};

@@ -1,6 +1,7 @@
 //! Tests of the perception block.
 
 mod awareness;
+mod contagion;
 mod disguise;
 mod hear;
 mod line;
