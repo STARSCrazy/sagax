@@ -10,6 +10,8 @@
 //! * [`percept_fact`], [`alert_amount`] and [`learn_percepts`] turn
 //!   [`Percept`]s into [`Knowledge`] facts (whole cells, never fine points)
 //!   and [`Alertness`] stimuli.
+//! * [`Contagion`] (indirect coordination) turns the deeds a character saw
+//!   its allies do into Decider columns ([`Contagion::write_columns`]).
 //!
 //! Perception cells are axial on hex, nav maps are keyed by offset cells:
 //! the `hex` constructors take the map's [`HexLayout`] and convert every

@@ -728,3 +728,66 @@ fn disguised_noise_learns_no_threat() {
     assert!(known.get(9, HEARD).is_none());
     assert_eq!(known.get(9, DISGUISED).unwrap().pos, [2, 0, 0]);
 }
+
+#[test]
+fn contagion_columns_feed_a_decider() {
+    use sagax::prelude::{Candidate, Choice, Consideration, Curve, Decider, ONE, Pick};
+    // "Join the charge": the share of seen allies attacking, rising; or
+    // hold. No new Decider code, the inputs are plain columns.
+    const ATTACKING: u32 = 1;
+    let world = World::square(S);
+    let at = |x, y| cell_centre(&world, Cell::new(x, y, 0));
+    let mut d = Decider::new();
+    let hold = d.add_option(ONE / 2);
+    let join = d.add_option(ONE);
+    assert!(d.add_consideration(hold, Consideration::new(0, Curve::Step, 0, 0)));
+    assert!(d.add_consideration(join, Consideration::new(2, Curve::Linear, 0, 256)));
+    let candidates = [Candidate::new(hold, 0), Candidate::new(join, 0)];
+    let config = ContagionConfig::new(Grid::Square).with_deed(DeedRule {
+        bits: ATTACKING,
+        window: 4,
+    });
+    let mut memory = Contagion::new(config, 4);
+    let p = SenseProfile::guard(S);
+    let e = ear(&p, at(0, 0));
+    let comrade = |cues| Target {
+        id: 20,
+        point: at(3, 0),
+        size: 256,
+        conspicuity: 256,
+        cues,
+        ..Target::default()
+    };
+    let mut aware = Awareness::default();
+    let mut chosen = Vec::new();
+    for now in 1..=30 {
+        let mut out = Vec::new();
+        let cues = if now >= 20 { ATTACKING } else { 0 };
+        observe(
+            &world,
+            &mut OpenAir,
+            now,
+            &e,
+            &comrade(cues),
+            &mut aware,
+            &mut out,
+        );
+        memory.learn(&out, now, |_, _| true);
+        let mut row = [0; DEED_COLUMNS];
+        memory.write_columns(0, e.point, now, &mut row);
+        let rows = [row, row];
+        let Some(Choice { candidate, .. }) = d.choose(&candidates, &rows, Pick::Best, 0).unwrap()
+        else {
+            panic!("a choice")
+        };
+        chosen.push(candidate);
+    }
+    assert!(
+        chosen[..19].iter().all(|&c| c == 0),
+        "hold while nobody attacks"
+    );
+    assert!(
+        chosen[19..].iter().all(|&c| c == 1),
+        "join once the comrade attacks"
+    );
+}

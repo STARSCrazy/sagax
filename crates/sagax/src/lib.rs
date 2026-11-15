@@ -45,5 +45,5 @@ pub mod debug {
     pub use sagax_nav::{
         formation::FormationTrace, nav::NavTrace, search::SearchTrace, smooth::SmoothTrace,
     };
-    pub use sagax_perception::PerceptionTrace;
+    pub use sagax_perception::{ContagionTrace, PerceptionTrace};
 }
