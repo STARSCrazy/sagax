@@ -12,6 +12,10 @@
 //! d.add_consideration(o, c);
 //! ```
 
+pub use crate::perception::{
+    Awareness, Eye, Percept, SenseProfile, Stats, Stimulus, Target, hear, learn_percepts, look,
+    observe, sight_line,
+};
 pub use sagax_core::{Cell, HexLayout, Pos};
 pub use sagax_decide::group::Status as SquadStatus;
 pub use sagax_decide::group::{

@@ -96,7 +96,7 @@ impl World {
 }
 
 /// An `i64` clamped into `i32`.
-fn fit(v: i64) -> i32 {
+pub(crate) fn fit(v: i64) -> i32 {
     v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }
 

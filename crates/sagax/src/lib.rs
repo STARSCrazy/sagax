@@ -2,7 +2,8 @@
 //!
 //! `use sagax::prelude::*;` brings the types most games need. The parts are
 //! also reachable as [`nav`] and [`decide`]; [`perception`] holds sight
-//! with its nav adapters; [`debug`] holds everything trace related.
+//! and hearing with their nav and memory helpers; [`debug`] holds
+//! everything trace related.
 
 pub use sagax_core::{Cell, HexLayout, Pos};
 pub use sagax_decide as decide;
@@ -44,4 +45,5 @@ pub mod debug {
     pub use sagax_nav::{
         formation::FormationTrace, nav::NavTrace, search::SearchTrace, smooth::SmoothTrace,
     };
+    pub use sagax_perception::PerceptionTrace;
 }

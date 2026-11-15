@@ -2,6 +2,7 @@
 
 mod awareness;
 mod disguise;
+mod hear;
 mod line;
 mod look;
 mod world;

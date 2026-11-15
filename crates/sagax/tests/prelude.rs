@@ -156,3 +156,68 @@ fn mission_rules_with_the_prelude() {
     let plain = m.tick_with(1, [0, 0, 0], &knowledge, 0, &mut MissionBuiltInRules);
     assert_eq!(plain.action, Action::GoTo([1, 0, 0]));
 }
+
+#[test]
+fn perception_with_the_prelude() {
+    let world = sagax::perception::World::square(256);
+    let profile = SenseProfile::human(256);
+    let eye = Eye {
+        id: 1,
+        point: [128, 128, 0],
+        facing: 0,
+        profile: &profile,
+        stats: Stats::NORMAL,
+        disguise: Default::default(),
+    };
+    let target = Target {
+        id: 2,
+        point: [128 + 3 * 256, 128, 0],
+        size: 256,
+        conspicuity: 256,
+        ..Target::default()
+    };
+    let mut map = sagax::perception::OpenAir;
+    assert!(sight_line(&world, &mut map, eye.point, target.point).clear);
+    let mut aware = Awareness::default();
+    let mut out: Vec<Percept> = Vec::new();
+    observe(&world, &mut map, 1, &eye, &target, &mut aware, &mut out);
+    let mut attention = sagax::perception::Attention::default();
+    let budget = sagax::perception::Budget {
+        checks: 1,
+        keep: 1,
+        instant_cap: 1,
+    };
+    look(
+        &world,
+        &mut map,
+        2,
+        &eye,
+        &[target],
+        std::slice::from_mut(&mut aware),
+        &mut attention,
+        budget,
+        &mut out,
+    );
+    let s = Stimulus {
+        id: 1,
+        source: 2,
+        kind: 0,
+        point: target.point,
+        loudness: 8 * 256,
+        channel: 0,
+        at: 2,
+    };
+    assert!(hear(&world, &mut map, 2, &eye, &s, None, None, &mut out, 0));
+    let mut known = Knowledge::new(4, Evict::Oldest).unwrap();
+    let mut alert = sagax::decide::memory::Alertness::default();
+    let cfg = sagax::decide::memory::AlertConfig::default();
+    let kinds = sagax::perception::FactKinds {
+        noticed_kind: 1,
+        seen_kind: 2,
+        heard_kind: 3,
+        disguised_kind: None,
+    };
+    let amounts = sagax::perception::AlertAmounts::default();
+    learn_percepts(&mut known, &mut alert, &cfg, 2, &out, &kinds, &amounts);
+    assert!(known.get(2, 3).is_some());
+}

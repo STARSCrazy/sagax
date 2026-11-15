@@ -142,6 +142,33 @@ impl Awareness {
         }
         (from, self.stage)
     }
+
+    /// A heard stimulus with `margin` left of the listener's `range`
+    /// (`0 <= margin <= range`, `range > 0`): the counter gains
+    /// `hear_gain * (margin * 256 / range) >> 8`, but only up to
+    /// `notice_at`; a counter already at or above it is not changed.
+    /// `last` and `last_seen` stay (hearing is not seeing, credit is a
+    /// sight matter). Then the stage rule with this call's stats. Returns
+    /// the counted stage before and after.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn raise_heard(
+        &mut self,
+        now: u32,
+        p: &SenseProfile,
+        stats: Stats,
+        margin: i64,
+        range: i64,
+        target: u32,
+        sink: &mut impl Sink<PerceptionTrace>,
+    ) -> (u8, u8) {
+        let notice = p.notice_at.min(p.max);
+        if self.counter < notice && range > 0 {
+            let share = (margin.clamp(0, range) * 256 / range) as u64;
+            let gain = (u64::from(p.hear_gain) * share) >> 8;
+            self.counter = (u64::from(self.counter) + gain).min(u64::from(notice)) as u16;
+        }
+        self.settle(now, p, stats, target, sink)
+    }
 }
 
 /// One check of one observer–target pair; pushes at most

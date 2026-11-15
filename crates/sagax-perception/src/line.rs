@@ -146,7 +146,6 @@ pub(crate) fn sight_line_with(
 /// border; at a square corner the cheaper of the two ways round). `None`
 /// when an edge lets nothing through or the levels differ. Saturates at
 /// `i32::MAX`.
-#[cfg_attr(not(test), allow(dead_code))] // hearing (`Spread::Straight`) uses it
 pub(crate) fn sound_cost(
     world: &World,
     map: &mut impl SenseMap,

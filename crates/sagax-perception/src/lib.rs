@@ -27,13 +27,23 @@
 //!   delay, decay, disguise); [`look`] checks a bounded number of targets
 //!   per call ([`Budget`], [`Attention`]). Both push [`Percept`]s.
 //! * [`in_sight`]: cone, range and line, for rule slots.
-//! * [`PerceptionTrace`]: the records of the `_traced` forms.
+//!
+//! And hearing:
+//!
+//! * [`hear`] checks one [`Stimulus`] for one listener: by straight
+//!   distance, along one walk with the map's damping, or by a cost the
+//!   game passes (a flood around corners). It always pushes a `Heard`
+//!   percept with a deterministically fuzzed whole cell, and with an
+//!   [`Awareness`] raises the pair at most to *noticed*.
+//!
+//! [`PerceptionTrace`] holds the records of the `_traced` forms.
 //!
 //! No floats, no allocation, no global state.
 
 mod awareness;
 mod cone;
 mod gain;
+mod hear;
 mod line;
 mod look;
 mod map;
@@ -44,6 +54,7 @@ mod world;
 
 pub use awareness::{Awareness, in_sight, observe, observe_traced};
 pub use cone::{in_band, view_vector};
+pub use hear::{Stimulus, hear, hear_traced};
 pub use line::{Line, sight_line};
 pub use look::{Attention, Budget, Pick, count_crowds, look, look_traced};
 pub use map::{Lit, Medium, OpenAir, SenseMap};
