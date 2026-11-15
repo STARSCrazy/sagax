@@ -64,7 +64,8 @@ impl Awareness {
         self.flags & IN_VIEW != 0
     }
 
-    /// The time of the last check with the target in view (0 if never).
+    /// The time of the last check that saw the target by sight or thermal
+    /// (0 if never; a scanner contact does not count).
     pub fn last_seen(&self) -> u32 {
         self.last_seen
     }
@@ -173,13 +174,17 @@ pub fn observe(
 ///    `scanner_gain * credit`, but only up to `notice_at`.
 /// 6. **Instant** cues in a band that allows them, with enough clarity,
 ///    raise the counter to `notice_at` or `recognize_at`.
-/// 7. **Decay** when nothing was sensed, once `hold` ticks passed since
-///    the last sighting: `decay_per_tick * credit`.
+/// 7. **Decay** when sight and thermal saw nothing, once `hold` ticks
+///    passed since the last sighting: `decay_per_tick * credit`; with a
+///    scanner contact never below `notice_at`, so the scanner holds a
+///    target at *noticed*.
 /// 8. **Stages**: a fall counts at once, a rise after the current
 ///    `reaction_ticks` since it was reached.
-/// 9. **Percepts**, in this order: `Noticed`, `Recognized`, `Lost`,
-///    `Forgotten`, `SeenThrough`, `Cues`, and `Seen` last on every check
-///    at stage noticed or higher with the target in view.
+/// 9. **Percepts**, in this order: `Noticed`, `Recognized`, `Lost` (only
+///    once noticed), `Forgotten`, `SeenThrough`, `Cues`, and `Seen` last on
+///    every check at stage noticed or higher with the target in view.
+///    Cue bits and see-through need sight or thermal; a scanner contact
+///    gives only the place.
 ///
 /// A disguised target (`disguise > 0`, not seen through) is reported with
 /// `disguised: true`, and the cue bits of the observer's
@@ -232,9 +237,12 @@ pub fn observe_traced(
     let mut next = by_vision.max(by_scan);
     let instant = [0, notice, u64::from(p.recognize_at).min(max)][usize::from(found.instant)];
     next = next.max(instant);
-    let in_view = found.vision > 0 || found.scan > 0 || found.instant > 0;
-    let (sense, clarity) = if by_scan > by_vision || (found.vision == 0 && found.instant == 0) {
-        (Sense::Scanner, 0)
+    // Seen: by sight or thermal (or an instant cue). In view: seen, or a
+    // scanner contact (a place, never what it is).
+    let seen = found.vision > 0 || found.instant > 0;
+    let in_view = seen || found.scan > 0;
+    let (sense, clarity) = if by_scan > by_vision || !seen {
+        (Sense::Scanner, 256)
     } else {
         (found.sense, found.clarity)
     };
@@ -243,22 +251,26 @@ pub fn observe_traced(
     } else {
         (Sense::Sight, 0)
     };
-    if in_view {
+    if seen {
         aware.last_seen = now;
     } else if now.wrapping_sub(aware.last_seen) >= u32::from(p.hold) {
-        next = next.saturating_sub(u64::from(p.decay_per_tick).saturating_mul(credit));
+        // A scanner contact keeps it noticed, never more.
+        let floor = if found.scan > 0 { next.min(notice) } else { 0 };
+        next = next
+            .saturating_sub(u64::from(p.decay_per_tick).saturating_mul(credit))
+            .max(floor);
     }
     aware.counter = next as u16;
 
     // Step 8: the stages.
     let (from, to) = aware.settle(now, p, eye.stats, id, sink);
 
-    // See-through: only with it on, while recognised and in view.
+    // See-through: only with it on, while recognised and seen.
     let mut through = false;
     if let Some(st) = eye.disguise.see_through
         && disguised
         && from == 2
-        && in_view
+        && seen
     {
         let (d, range, near) = (found.distance, found.range, i64::from(st.near));
         let close = if d <= near {
@@ -287,7 +299,7 @@ pub fn observe_traced(
     let was_in_view = aware.in_view();
     aware.flags = (aware.flags & !IN_VIEW) | if in_view { IN_VIEW } else { 0 };
     let shown = target.cues & !mask(disguised);
-    let recognised = to == 2 && in_view;
+    let recognised = to == 2 && seen;
     let (point, cell) = if in_view {
         (target.point, cell_of(world, target.point).pos())
     } else {
@@ -302,6 +314,7 @@ pub fn observe_traced(
             stage: to,
             point,
             cell,
+            placed: in_view,
             cues: if recognised { shown } else { 0 },
             disguised,
             clarity,
@@ -316,7 +329,7 @@ pub fn observe_traced(
     if from < 2 && to == 2 {
         push(PerceptKind::Recognized);
     }
-    if was_in_view && !in_view {
+    if from >= 1 && was_in_view && !in_view {
         push(PerceptKind::Lost);
     }
     if from > 0 && to == 0 {

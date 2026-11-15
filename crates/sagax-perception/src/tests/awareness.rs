@@ -342,6 +342,82 @@ fn scanner_through_wall_only_noticed() {
     assert_eq!(a.counter(), 0);
 }
 
+#[test]
+fn scanner_holds_noticed_never_recognised() {
+    let p = SenseProfile::human(S).with_scanner(5 * S);
+    let mut e = eye(&p);
+    e.disguise = DisguiseRule {
+        hides: 1,
+        see_through: Some(SeeThrough {
+            rate: 64,
+            near: 2 * S,
+            at: 60000,
+        }),
+    };
+    let t = Target {
+        cues: 2,
+        disguise: 128,
+        ..person(at(3, 0))
+    };
+    let mut open = Walls(Vec::new());
+    let mut a = Awareness::default();
+    for now in 1..=12 {
+        check_on(&mut open, now, &e, &t, &mut a);
+    }
+    assert_eq!(a.stage(), 2);
+    let doubt = a.doubt;
+    let mut wall = Walls(vec![Cell::new(1, 0, 0)]);
+    for now in 13..=112 {
+        let out = check_on(&mut wall, now, &e, &t, &mut a);
+        for pc in &out {
+            assert!(!matches!(pc.event, PerceptKind::Cues { .. }), "{now}");
+            assert_eq!(pc.cues, 0, "{now}");
+            assert_eq!((pc.sense, pc.clarity), (Sense::Scanner, 256));
+            assert!(pc.placed);
+        }
+        assert!(!has(&out, PerceptKind::Lost));
+        assert!(has(&out, PerceptKind::Seen), "a place, as counted");
+        assert_eq!(a.doubt, doubt, "{now}");
+        assert!(a.in_view());
+    }
+    assert_eq!((a.stage(), a.counter()), (1, p.notice_at));
+}
+
+#[test]
+fn no_lost_before_noticed() {
+    let p = SenseProfile::human(S);
+    let mut a = Awareness::default();
+    for now in 1..=2 {
+        check(now, &eye(&p), &person(at(3, 0)), &mut a);
+    }
+    assert!(a.in_view() && a.stage() == 0);
+    for now in 3..=20 {
+        let out = check(now, &eye(&p), &person(at(-3, 0)), &mut a);
+        assert!(out.is_empty(), "{now}: {out:?}");
+    }
+}
+
+#[test]
+fn delayed_rise_out_of_view_is_not_placed() {
+    let p = SenseProfile::human(S);
+    let mut a = Awareness::default();
+    let mut noticed = Vec::new();
+    for now in 1..=12 {
+        let mut e = eye(&p);
+        e.stats.reaction_ticks = 5;
+        let t = person(if now <= 4 { at(3, 0) } else { at(-3, 0) });
+        for pc in check(now, &e, &t, &mut a) {
+            if pc.event == PerceptKind::Seen {
+                assert!(pc.placed);
+            }
+            if pc.event == PerceptKind::Noticed {
+                noticed.push((now, pc.placed, pc.point, pc.cell));
+            }
+        }
+    }
+    assert_eq!(noticed, [(9, false, [0; 3], [0; 3])]);
+}
+
 fn instant_profile() -> SenseProfile {
     SenseProfile::human(S).with_cue(CueRule {
         bits: 1,
@@ -553,6 +629,10 @@ fn seen_every_check() {
         for pc in &out {
             assert_eq!(pc.stage, a.stage());
             assert_eq!((pc.observer, pc.subject, pc.at), (1, 7, now));
+            assert_eq!(pc.placed, a.in_view(), "{now}");
+            if !pc.placed {
+                assert_eq!((pc.point, pc.cell, pc.clarity), ([0; 3], [0; 3], 0));
+            }
         }
     }
 }

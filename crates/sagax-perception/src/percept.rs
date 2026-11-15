@@ -75,10 +75,10 @@ pub enum PerceptKind {
 
 /// One perceived event, for `Knowledge` and `Alertness`.
 ///
-/// Sight percepts carry `point` and `cell` only when the target is in view
-/// in that check; otherwise (`Lost`, `Forgotten`, or a delayed rise that
-/// became due while the target is out of view) both are zero and
-/// `clarity` is 0: the observer does not know where it is now.
+/// `point` and `cell` are the target's real place only when `placed` is
+/// true; otherwise (`Lost`, `Forgotten`, or a delayed rise that became due
+/// while the target is out of view) both are zero and `clarity` is 0: the
+/// observer does not know where it is now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct Percept {
@@ -96,11 +96,16 @@ pub struct Percept {
     pub point: Pos,
     /// The whole cell `[x, y, level]` of `point` (axial on hex).
     pub cell: Pos,
+    /// `point` and `cell` are the target's real position from this check:
+    /// in view by sight, thermal or scanner (or a heard position). `false`:
+    /// both are `[0, 0, 0]`.
+    pub placed: bool,
     /// The cue bits seen (only at stage recognised; masked ones never).
     pub cues: u32,
     /// The target is disguised for this observer.
     pub disguised: bool,
-    /// How clearly, 0..=256 (0 when not in view, and for the scanner).
+    /// How clearly, 0..=256 (0 when not in view; 256 for the scanner,
+    /// which ignores fog).
     pub clarity: u16,
     /// Hearing only: how clearly heard (0 otherwise).
     pub margin: i32,
