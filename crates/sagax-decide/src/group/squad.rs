@@ -5,13 +5,14 @@ use super::rules::{
     rank_spots,
 };
 use super::skill::{MAX_SKILL_ROWS, SkillTable};
-use super::spots::{Spot, SpotPick, heading, wish_point};
+use super::spots::{Spot, SpotPick, SpotTrace, heading, wish_point};
 use super::tactic::{Abort, GoalKind, Place, Slot, Start, Tactic};
 use crate::memory::{
-    Area, Areas, Evict, Fact, Inbox, Knowledge, Message, Metric, Pos, ZeroCapacity, distance,
+    Area, Areas, AreasTrace, Evict, Fact, Inbox, Knowledge, KnowledgeTrace, Message, Metric, Pos,
+    ZeroCapacity, distance,
 };
 use crate::{Candidate, DecideTrace, Decider, INPUT_SINCE_OPTION, choose, mix};
-use sagax_core::{NoopSink, Sink};
+use sagax_core::{MapSink, Sink};
 
 /// Built-in row column: own losses, every member marked gone (also the
 /// leader) that is still listed, however long ago; the count does not reset
@@ -243,34 +244,160 @@ pub(super) fn plain_dist(metric: Metric, a: Pos, b: Pos) -> i32 {
     clamp_i32(d)
 }
 
-/// One event of the last scoring (see [`Squad::set_score_log`]): what a
-/// consideration or a candidate's score was, and for which tactic and target.
+/// The trace record of a [`Squad`]: what its `*_traced` calls decided, in
+/// the order they decided it ([`Squad::plan_traced`],
+/// [`Squad::check_traced`], [`Squad::observe_traced`],
+/// [`Squad::signal_traced`], [`Squad::reinstate_traced`],
+/// [`Squad::orders_due_traced`]). The rule slots are not traced themselves:
+/// what a slot answered shows in the decision it fed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ScoreEntry {
-    /// Index of the tactic.
-    pub tactic: usize,
-    /// The candidate's target (its subject id); `None` for a tactic without
-    /// one.
-    pub target: Option<u32>,
-    /// A [`DecideTrace::Factor`] or [`DecideTrace::Scored`]; its candidate
-    /// index is the index in the candidate list of the scoring.
-    pub event: DecideTrace,
+pub enum SquadTrace {
+    /// A known target as the targets slot judged it (before each scoring,
+    /// in knowledge order); `kept` false: no candidate for new plans.
+    Target {
+        /// The target, as the leader knows it.
+        fact: Fact,
+        /// The slot's answer.
+        kept: bool,
+    },
+    /// A decider record of one candidate: its factors, then its score. The
+    /// candidate index is the index in the candidate list of that scoring
+    /// (tactic order, then target order).
+    Decide {
+        /// Index of the tactic.
+        tactic: usize,
+        /// The candidate's target; `None` for a tactic without one.
+        target: Option<u32>,
+        /// The decider's record.
+        event: DecideTrace,
+    },
+    /// One abort rule checked, in list order (the check stops at the first
+    /// that fires): on a candidate's row before it is scored (it scores 0
+    /// when one fires), and on the active plan's row in a check.
+    Abort {
+        /// Index of the tactic.
+        tactic: usize,
+        /// The row's target; `None` for a tactic without one or a lost
+        /// target.
+        target: Option<u32>,
+        /// Index of the rule in the tactic's list.
+        abort: usize,
+        /// True when it fired.
+        fired: bool,
+    },
+    /// The candidate a scoring picked for a new plan (by the skill's pick;
+    /// in a replan for a better plan only among the candidates above the
+    /// bar).
+    Picked {
+        /// Index of the tactic.
+        tactic: usize,
+        /// Its target, if any.
+        target: Option<u32>,
+        /// Its score.
+        score: u32,
+    },
+    /// A scoring for a new plan found no candidate to pick: no new plan.
+    NoPick,
+    /// The new plan is pending until `until`.
+    Thinking {
+        /// Its number.
+        plan: PlanId,
+        /// When it becomes active.
+        until: u32,
+    },
+    /// A member was assigned to a slot of the new plan, in assignment
+    /// order.
+    Assigned {
+        /// Index of the slot.
+        slot: usize,
+        /// The member's id.
+        member: u32,
+        /// Its member cost for the slot (the member cost slot's answer).
+        cost: i128,
+    },
+    /// A spot pick for a member of the new plan: per member its first spot
+    /// (the gather spot when it gathers), then its place spot.
+    Spot {
+        /// The member's id.
+        member: u32,
+        /// The ranking and the pick.
+        event: SpotTrace,
+    },
+    /// The active plan's trigger was checked (while the plan holds and its
+    /// signal was not given).
+    Trigger {
+        /// True when it fired.
+        fired: bool,
+    },
+    /// A member report was read from the inbox, before it is handled.
+    Report {
+        /// The report.
+        msg: Message,
+    },
+    /// The channel delay of an order to a member: on activation and on the
+    /// signal per goal in goal order, on reinstating for that member.
+    Delay {
+        /// The member's id.
+        member: u32,
+        /// Ticks until it arrives; `None`: it does not reach the member.
+        delay: Option<u32>,
+    },
+    /// The leader's knowledge changed (an own sighting, an enemy report).
+    Knowledge(KnowledgeTrace),
+    /// The leader's danger areas changed (danger reports, report actions,
+    /// expiry).
+    Areas(AreasTrace),
 }
 
-/// Collects the events of one candidate into the score log.
-struct LogSink<'a> {
-    out: &'a mut Vec<ScoreEntry>,
-    tactic: usize,
-    target: Option<u32>,
-}
-
-impl Sink<DecideTrace> for LogSink<'_> {
-    fn emit(&mut self, event: DecideTrace) {
-        self.out.push(ScoreEntry {
-            tactic: self.tactic,
-            target: self.target,
-            event,
-        });
+impl SquadTrace {
+    /// The same record with every position passed through `f` (a hex crew
+    /// turns axial positions into offset ones).
+    pub(super) fn map_pos(self, f: impl Fn(Pos) -> Pos) -> Self {
+        let fact = |x: Fact| Fact { pos: f(x.pos), ..x };
+        let area = |a: Area| Area {
+            pos: f(a.pos),
+            source: f(a.source),
+            ..a
+        };
+        match self {
+            Self::Target { fact: x, kept } => Self::Target {
+                fact: fact(x),
+                kept,
+            },
+            Self::Spot {
+                member,
+                event: SpotTrace::Picked(SpotPick::Unchecked(p)),
+            } => Self::Spot {
+                member,
+                event: SpotTrace::Picked(SpotPick::Unchecked(f(p))),
+            },
+            Self::Report { msg } => Self::Report {
+                msg: Message {
+                    pos: f(msg.pos),
+                    ..msg
+                },
+            },
+            Self::Knowledge(k) => Self::Knowledge(match k {
+                KnowledgeTrace::Added(x) => KnowledgeTrace::Added(fact(x)),
+                KnowledgeTrace::Updated(x) => KnowledgeTrace::Updated(fact(x)),
+                KnowledgeTrace::Stale(x) => KnowledgeTrace::Stale(fact(x)),
+                KnowledgeTrace::Evicted(x) => KnowledgeTrace::Evicted(fact(x)),
+                KnowledgeTrace::Expired(x) => KnowledgeTrace::Expired(fact(x)),
+            }),
+            Self::Areas(a) => Self::Areas(match a {
+                AreasTrace::Added { index, area: x } => AreasTrace::Added {
+                    index,
+                    area: area(x),
+                },
+                AreasTrace::Renewed { index, area: x } => AreasTrace::Renewed {
+                    index,
+                    area: area(x),
+                },
+                AreasTrace::Evicted(x) => AreasTrace::Evicted(area(x)),
+                AreasTrace::Expired(x) => AreasTrace::Expired(area(x)),
+            }),
+            other => other,
+        }
     }
 }
 
@@ -291,7 +418,6 @@ pub(super) struct Scratch {
     pub(super) then_taken: Vec<bool>,
     pub(super) near: Vec<(i128, usize)>,
     pub(super) reports: Vec<Message>,
-    pub(super) log: Vec<ScoreEntry>,
     /// Per target: kept by the targets slot.
     pub(super) kept: Vec<bool>,
     /// Member costs, slot-major (`slot * group.len() + member index`).
@@ -416,7 +542,6 @@ pub struct Squad {
     pub(super) decider: Decider,
     pub(super) skill: u8,
     pub(super) table: SkillTable,
-    pub(super) log_scores: bool,
     pub(super) leader: Option<u32>,
     pub(super) target_kind: u32,
     pub(super) extra_columns: usize,
@@ -457,7 +582,6 @@ impl Squad {
             decider: Decider::new(),
             skill: 0,
             table: config.skill_table,
-            log_scores: false,
             leader: None,
             target_kind: 0,
             extra_columns: 0,
@@ -554,21 +678,6 @@ impl Squad {
     /// [`Squad::decider`]).
     pub fn decider_mut(&mut self) -> &mut Decider {
         &mut self.decider
-    }
-
-    /// Switches the score log on or off (off by default; off clears it).
-    pub fn set_score_log(&mut self, on: bool) {
-        self.log_scores = on;
-        if !on {
-            self.scratch.log.clear();
-        }
-    }
-
-    /// The `Factor` and `Scored` events of the last scoring in
-    /// [`Squad::plan`] or [`Squad::check`], in candidate order (cleared at the
-    /// start of a scoring). Empty while the log is off.
-    pub fn score_log(&self) -> &[ScoreEntry] {
-        &self.scratch.log
     }
 
     /// The skill table.
@@ -887,11 +996,21 @@ impl Squad {
 
     /// Fills `s.kept` from `s.targets` through the targets slot, in
     /// knowledge order.
-    pub(super) fn keep_targets(&self, s: &mut Scratch, rules: &mut dyn SquadRules) {
+    pub(super) fn keep_targets<S: Sink<SquadTrace>>(
+        &self,
+        s: &mut Scratch,
+        rules: &mut dyn SquadRules,
+        sink: &mut S,
+    ) {
         let view = SquadView::new(self);
         s.kept.clear();
-        s.kept
-            .extend(s.targets.iter().map(|f| rules.keep_target(&view, f)));
+        s.kept.extend(s.targets.iter().map(|f| {
+            let kept = rules.keep_target(&view, f);
+            if sink.enabled() {
+                sink.emit(SquadTrace::Target { fact: *f, kept });
+            }
+            kept
+        }));
     }
 
     /// Fills the rule columns of `s.rows` through the columns slot; `ctx`
@@ -917,7 +1036,8 @@ impl Squad {
     /// Fills `s.candidates` and `s.scores` from `s.targets` and `s.kept`
     /// (see [`Squad::plan`]); `keep` (tactic, target index) is a candidate
     /// even when the targets slot dropped its target.
-    pub(super) fn score_candidates(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn score_candidates<S: Sink<SquadTrace>>(
         &self,
         s: &mut Scratch,
         now: u32,
@@ -925,6 +1045,7 @@ impl Squad {
         extra: &[i32],
         keep: Option<(usize, usize)>,
         rules: &mut dyn SquadRules,
+        sink: &mut S,
     ) -> Result<(), PlanError> {
         s.candidates.clear();
         for (t, tactic) in self.tactics.iter().enumerate() {
@@ -943,7 +1064,6 @@ impl Squad {
             }
         }
         s.scores.clear();
-        s.log.clear();
         for k in 0..s.candidates.len() {
             let (t, target) = s.candidates[k];
             let fact = target.map(|i| s.targets[i]);
@@ -970,29 +1090,25 @@ impl Squad {
                 now,
                 active,
             };
-            let score = if self.aborts_fire(rules, &ctx) {
+            let score = if self.aborts_fire(rules, &ctx, sink) {
                 0
             } else {
                 // `validate` ruled out the only error a row can cause.
                 let candidate = Candidate::new(t as u32, id.unwrap_or(0));
-                if self.log_scores {
-                    let mut sink = LogSink {
-                        out: &mut s.log,
-                        tactic: t,
-                        target: id,
-                    };
-                    self.decider.score_traced(k, candidate, &s.rows, &mut sink)
-                } else {
-                    self.decider
-                        .score_traced(k, candidate, &s.rows, &mut NoopSink)
-                }
-                .map_err(|e| PlanError::InputOutOfRange {
+                let mut decide = MapSink::new(&mut *sink, |event| SquadTrace::Decide {
                     tactic: t,
-                    input: match e {
-                        crate::DecideError::InputOutOfRange { input, .. } => input,
-                        _ => u32::MAX,
-                    },
-                })?
+                    target: id,
+                    event,
+                });
+                self.decider
+                    .score_traced(k, candidate, &s.rows, &mut decide)
+                    .map_err(|e| PlanError::InputOutOfRange {
+                        tactic: t,
+                        input: match e {
+                            crate::DecideError::InputOutOfRange { input, .. } => input,
+                            _ => u32::MAX,
+                        },
+                    })?
             };
             s.scores.push(score);
         }
@@ -1140,7 +1256,8 @@ impl Squad {
     /// candidate scoring at most `bar` is out, so a replan for a better plan
     /// picks only among the clearly better ones (never the active pair,
     /// which scores at most the bar).
-    pub(super) fn plan_now(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn plan_now<S: Sink<SquadTrace>>(
         &mut self,
         now: u32,
         extra: &[i32],
@@ -1148,15 +1265,16 @@ impl Squad {
         seed: u64,
         bar: Option<u64>,
         rules: &mut dyn SquadRules,
+        sink: &mut S,
     ) -> Result<Option<PlanId>, PlanError> {
         let mut s = std::mem::take(&mut self.scratch);
-        let made = self.plan_inner(&mut s, now, extra, spots, seed, bar, rules);
+        let made = self.plan_inner(&mut s, now, extra, spots, seed, bar, rules, sink);
         self.scratch = s;
         made
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn plan_inner(
+    fn plan_inner<S: Sink<SquadTrace>>(
         &mut self,
         s: &mut Scratch,
         now: u32,
@@ -1165,6 +1283,7 @@ impl Squad {
         seed: u64,
         bar: Option<u64>,
         rules: &mut dyn SquadRules,
+        sink: &mut S,
     ) -> Result<Option<PlanId>, PlanError> {
         let (Some(leader), Some(centre)) = (self.acting_leader().map(|m| m.pos), self.centre())
         else {
@@ -1174,8 +1293,8 @@ impl Squad {
 
         s.targets.clear();
         s.targets.extend(self.targets().copied());
-        self.keep_targets(s, rules);
-        self.score_candidates(s, now, centre, extra, None, rules)?;
+        self.keep_targets(s, rules, sink);
+        self.score_candidates(s, now, centre, extra, None, rules, sink)?;
         if let Some(bar) = bar {
             for score in &mut s.scores {
                 if u64::from(*score) <= bar {
@@ -1186,9 +1305,19 @@ impl Squad {
         let pick_seed = mix(seed ^ SALT_PICK ^ u64::from(now));
         let Some(choice) = choose(&s.scores, self.table.pick[level], pick_seed, &mut s.order)
         else {
+            if sink.enabled() {
+                sink.emit(SquadTrace::NoPick);
+            }
             return Ok(None);
         };
         let (t, target) = s.candidates[choice.candidate];
+        if sink.enabled() {
+            sink.emit(SquadTrace::Picked {
+                tactic: t,
+                target: target.map(|i| s.targets[i].subject),
+                score: s.scores[choice.candidate],
+            });
+        }
 
         // Where the slots face.
         let target_fact = target.map(|i| s.targets[i]);
@@ -1290,6 +1419,17 @@ impl Squad {
                 break;
             }
         }
+        if sink.enabled() {
+            for &(mi, si) in &s.picks {
+                if let (Some(m), Some(cost)) = (self.group.get(mi), self.cost(s, si, mi)) {
+                    sink.emit(SquadTrace::Assigned {
+                        slot: si,
+                        member: m.id,
+                        cost,
+                    });
+                }
+            }
+        }
 
         // Spots and goals.
         let id = self.next_id;
@@ -1327,7 +1467,12 @@ impl Squad {
                     target: target_fact,
                     built_in: 0,
                 };
-                match rank_spots(rules, keys, &ctx, spots, taken, skip, metric, radius) {
+                let mut traced = MapSink::new(&mut *sink, |event| SquadTrace::Spot {
+                    member: member.id,
+                    event,
+                });
+                let at = (skip, metric, radius);
+                match rank_spots(rules, keys, &ctx, spots, taken, at, &mut traced) {
                     SpotPick::Spot(i) => {
                         taken[i] = true;
                         (spots[i].pos, false)
@@ -1365,14 +1510,18 @@ impl Squad {
             };
             goals.push((member.id, goal));
         }
+        let until = now.wrapping_add(self.table.think_ticks[level]);
         self.pending = Some(Plan {
             id,
             tactic: t,
             target: target_fact.map(|f| f.subject),
             goals,
             made_at: now,
-            active_at: now.wrapping_add(self.table.think_ticks[level]),
+            active_at: until,
         });
+        if sink.enabled() {
+            sink.emit(SquadTrace::Thinking { plan: id, until });
+        }
         Ok(Some(id))
     }
 
@@ -1457,11 +1606,29 @@ impl Squad {
     /// True when one of the abort rules of tactic `ctx.tactic` fires on
     /// `ctx.row`, in list order (stops at the first that fires); an
     /// [`Abort::Custom`] asks [`SquadRules::abort`].
-    pub(super) fn aborts_fire(&self, rules: &mut dyn SquadRules, ctx: &RowCtx<'_>) -> bool {
+    pub(super) fn aborts_fire<S: Sink<SquadTrace>>(
+        &self,
+        rules: &mut dyn SquadRules,
+        ctx: &RowCtx<'_>,
+        sink: &mut S,
+    ) -> bool {
         let view = SquadView::new(self);
-        fires_with(&self.tactics[ctx.tactic], ctx.row, |id| {
-            rules.abort(id, &view, ctx)
-        })
+        let target = ctx.target.map(|f| f.subject);
+        fires_with(
+            &self.tactics[ctx.tactic],
+            ctx.row,
+            |id| rules.abort(id, &view, ctx),
+            |abort, fired| {
+                if sink.enabled() {
+                    sink.emit(SquadTrace::Abort {
+                        tactic: ctx.tactic,
+                        target,
+                        abort,
+                        fired,
+                    });
+                }
+            },
+        )
     }
 }
 
@@ -1469,14 +1636,26 @@ impl Squad {
 /// (an [`Abort::Custom`] never fires).
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn fires(tactic: &Tactic, row: &[i32]) -> bool {
-    fires_with(tactic, row, |_| false)
+    fires_with(tactic, row, |_| false, |_, _| {})
 }
 
-/// True when one of `tactic`'s abort rules fires on `row`, in list order;
-/// `custom` decides an [`Abort::Custom`].
-fn fires_with(tactic: &Tactic, row: &[i32], mut custom: impl FnMut(u32) -> bool) -> bool {
-    tactic.aborts.iter().any(|ab| match *ab {
-        Abort::When { input, cmp, value } => row.get(input).is_some_and(|&v| cmp.holds(v, value)),
-        Abort::Custom(id) => custom(id),
+/// True when one of `tactic`'s abort rules fires on `row`, in list order
+/// (stops at the first that fires); `custom` decides an [`Abort::Custom`],
+/// `seen` hears each rule's index and answer.
+fn fires_with(
+    tactic: &Tactic,
+    row: &[i32],
+    mut custom: impl FnMut(u32) -> bool,
+    mut seen: impl FnMut(usize, bool),
+) -> bool {
+    tactic.aborts.iter().enumerate().any(|(i, ab)| {
+        let fired = match *ab {
+            Abort::When { input, cmp, value } => {
+                row.get(input).is_some_and(|&v| cmp.holds(v, value))
+            }
+            Abort::Custom(id) => custom(id),
+        };
+        seen(i, fired);
+        fired
     })
 }

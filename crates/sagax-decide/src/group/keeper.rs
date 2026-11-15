@@ -4,6 +4,7 @@
 use super::squad::{Goal, plain_dist};
 use crate::memory::{Metric, Pos};
 use crate::{Candidate, Consideration, Curve, Decider};
+use sagax_core::{NoopSink, Sink};
 
 /// Column of [`GoalKeeper::inputs`]: 1 with a goal, else 0.
 pub const IN_HAS_GOAL: usize = 0;
@@ -59,6 +60,21 @@ impl From<[i32; 5]> for KeeperInputs {
             discipline: row[IN_DISCIPLINE],
         }
     }
+}
+
+/// The trace record of [`GoalKeeper::broken_traced`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KeeperTrace {
+    /// The goal was checked for giving up.
+    Checked {
+        /// Ticks since the goal was postponed (wrapping); 0 when it is not.
+        waited: u32,
+        /// The give-up ticks it was checked against.
+        limit: u32,
+        /// The answer: true once `waited` reached `limit` (never while
+        /// suspended).
+        broken: bool,
+    },
 }
 
 /// A member's current [`Goal`] with its postpone state.
@@ -162,10 +178,26 @@ impl GoalKeeper {
     /// True once the goal has been postponed for at least `give_up_ticks`
     /// (wrap-safe); never while suspended.
     pub fn broken(&self, now: u32, give_up_ticks: u32) -> bool {
-        match self.postponed_at {
-            Some(at) if !self.suspended => now.wrapping_sub(at) >= give_up_ticks,
-            _ => false,
+        self.broken_traced(now, give_up_ticks, &mut NoopSink)
+    }
+
+    /// [`GoalKeeper::broken`] with a trace: one [`KeeperTrace::Checked`].
+    pub fn broken_traced<S: Sink<KeeperTrace>>(
+        &self,
+        now: u32,
+        give_up_ticks: u32,
+        sink: &mut S,
+    ) -> bool {
+        let waited = self.postponed_at.map_or(0, |at| now.wrapping_sub(at));
+        let broken = self.postponed_at.is_some() && !self.suspended && waited >= give_up_ticks;
+        if sink.enabled() {
+            sink.emit(KeeperTrace::Checked {
+                waited,
+                limit: give_up_ticks,
+                broken,
+            });
         }
+        broken
     }
 
     /// The member's decider inputs:
@@ -304,6 +336,33 @@ mod tests {
         assert_eq!(t.hold_bonus_for(0), ONE / 8);
         assert_eq!(t.hold_bonus_for(200), ONE / 2);
         assert_eq!(t.hold_bonus_for(255), ONE / 2);
+    }
+
+    #[test]
+    fn broken_traced_reports_each_check() {
+        use sagax_debug::{Collector, Overflow};
+        let mut k = GoalKeeper::new();
+        k.set(0, goal(None, 0));
+        let mut seen = Collector::new(8, Overflow::DropNewest);
+        assert!(!k.broken_traced(5, 10, &mut seen));
+        k.goal_postponed(5);
+        assert_eq!(k.broken_traced(15, 10, &mut seen), k.broken(15, 10));
+        k.suspend();
+        assert!(!k.broken_traced(20, 10, &mut seen));
+        let checked = |waited, limit, broken| KeeperTrace::Checked {
+            waited,
+            limit,
+            broken,
+        };
+        assert_eq!(
+            seen.records().map(|r| r.event).collect::<Vec<_>>(),
+            [
+                checked(0, 10, false),
+                checked(10, 10, true),
+                checked(15, 10, false)
+            ]
+        );
+        assert!(!k.broken_traced(20, 10, &mut NoopSink));
     }
 
     #[test]

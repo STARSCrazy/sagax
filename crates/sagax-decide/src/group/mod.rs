@@ -50,8 +50,8 @@ mod rules_tests;
 #[cfg(test)]
 mod tests;
 
-pub use crew::{Crew, CrewConfig, CrewError, CrewEvent};
-pub use keeper::{GOAL_OPTION_RANGE, GoalKeeper, KeeperInputs};
+pub use crew::{Crew, CrewConfig, CrewError, CrewEvent, CrewTrace};
+pub use keeper::{GOAL_OPTION_RANGE, GoalKeeper, KeeperInputs, KeeperTrace};
 pub use kit::{
     IN_AREA, IN_RANGED, ROLE_AREA, ROLE_RANGED, Shape, TAG_CHOKE, TAG_COVER, TAG_HIDDEN, TAG_HIGH,
     tactics,
@@ -65,12 +65,12 @@ pub use rules::{
     ReportActions, RowCtx, SpotCtx, SquadRules, SquadView, spot_score_builtin,
 };
 pub use skill::{MAX_SKILL_ROWS, SkillTable};
-pub use spots::{Spot, SpotPick, heading, pick_spot, wish_point};
+pub use spots::{Spot, SpotPick, SpotTrace, heading, pick_spot, pick_spot_traced, wish_point};
 #[allow(deprecated)]
 pub use squad::IN_EXTRA;
 pub use squad::{
     Goal, IN_LOSSES, IN_OFF_PLAN, IN_PLAN_AGE, IN_ROLE_0, IN_ROLE_1, IN_TARGET_AGE, IN_TARGET_DIST,
     IN_TARGET_FRIEND_DIST, MAX_EXTRA_COLUMNS, MAX_ROLE_COUNTS, Plan, PlanError, PlanId, RoleCounts,
-    ScoreEntry, Squad, SquadConfig,
+    Squad, SquadConfig, SquadTrace,
 };
 pub use tactic::{Abort, Compare, GoalKind, Place, Side, Slot, Start, Tactic, Trigger};

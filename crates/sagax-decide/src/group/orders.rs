@@ -5,11 +5,14 @@ use super::rules::{
 };
 use super::spots::Spot;
 use super::squad::{
-    Active, DangerReport, Goal, PlanError, PlanId, Scratch, Squad, dist, plain_dist,
+    Active, DangerReport, Goal, PlanError, PlanId, Scratch, Squad, SquadTrace, dist, plain_dist,
 };
 use super::tactic::{Slot, Start, Trigger};
 use crate::ONE;
-use crate::memory::{Area, Fact, Message, Metric, Pos, SOURCE_OWN, SOURCE_TOLD, arrival};
+use crate::memory::{
+    Area, AreasTrace, Fact, Message, Metric, Pos, SOURCE_OWN, SOURCE_TOLD, arrival,
+};
+use sagax_core::{MapSink, NoopSink, Sink};
 
 /// Report kind ([`crate::memory::Message::kind`] for [`super::Squad::report`]):
 /// the sender's goal broke. `sender` is the member's id, `data` the plan id
@@ -222,12 +225,24 @@ impl Squad {
     /// ([`Knowledge::merge`](crate::memory::Knowledge::merge)) with source [`SOURCE_OWN`]. Returns the fact
     /// dropped to make room, if any.
     pub fn observe(&mut self, now: u32, fact: Fact) -> Option<Fact> {
-        self.knowledge.merge(
+        self.observe_traced(now, fact, &mut NoopSink)
+    }
+
+    /// [`Squad::observe`] with a trace: what the merge did, as
+    /// [`SquadTrace::Knowledge`].
+    pub fn observe_traced<S: Sink<SquadTrace>>(
+        &mut self,
+        now: u32,
+        fact: Fact,
+        sink: &mut S,
+    ) -> Option<Fact> {
+        self.knowledge.merge_traced(
             now,
             Fact {
                 source: SOURCE_OWN,
                 ..fact
             },
+            &mut MapSink::new(sink, SquadTrace::Knowledge),
         )
     }
 
@@ -254,7 +269,18 @@ impl Squad {
     /// signal, or after [`Squad::reinstate`]) replaces it, and never arrives
     /// earlier than the replaced one would have.
     pub fn orders_due(&mut self, now: u32, out: &mut Vec<Order>) {
-        self.advance(now, None);
+        self.orders_due_traced(now, out, &mut NoopSink);
+    }
+
+    /// [`Squad::orders_due`] with a trace: the orders of a plan that becomes
+    /// active ([`SquadTrace::Delay`]).
+    pub fn orders_due_traced<S: Sink<SquadTrace>>(
+        &mut self,
+        now: u32,
+        out: &mut Vec<Order>,
+        sink: &mut S,
+    ) {
+        self.advance(now, None, sink);
         let group = &self.group;
         self.orders.retain(|(order, at)| {
             let due = now.wrapping_sub(*at) < 1 << 31;
@@ -294,13 +320,29 @@ impl Squad {
     /// [`Squad::signal`] with the game's rules (the second orders go over
     /// a [`Channel::Custom`] too).
     pub fn signal_with(&mut self, now: u32, rules: &mut dyn SquadRules) -> bool {
-        self.advance(now, Some(&mut *rules));
-        self.give_signal(now, rules)
+        self.signal_traced(now, rules, &mut NoopSink)
+    }
+
+    /// [`Squad::signal_with`] with a trace: the orders of a plan that
+    /// becomes active first, then the second orders ([`SquadTrace::Delay`]).
+    pub fn signal_traced<S: Sink<SquadTrace>>(
+        &mut self,
+        now: u32,
+        rules: &mut dyn SquadRules,
+        sink: &mut S,
+    ) -> bool {
+        self.advance(now, Some(&mut *rules), sink);
+        self.give_signal(now, rules, sink)
     }
 
     /// Gives the signal of the active plan at `now` (see [`Squad::signal`]),
     /// without activating a pending plan first.
-    pub(super) fn give_signal(&mut self, now: u32, rules: &mut dyn SquadRules) -> bool {
+    pub(super) fn give_signal<S: Sink<SquadTrace>>(
+        &mut self,
+        now: u32,
+        rules: &mut dyn SquadRules,
+        sink: &mut S,
+    ) -> bool {
         let Some(a) = self.active.as_mut() else {
             return false;
         };
@@ -308,7 +350,7 @@ impl Squad {
             return false;
         }
         a.signal_at = Some(now);
-        self.send(now, true, rules);
+        self.send(now, true, rules, sink);
         true
     }
 
@@ -318,7 +360,7 @@ impl Squad {
     /// a member that has to tell the leader sends a [`REPORT_ARRIVED`]
     /// instead.
     pub fn arrived(&mut self, id: u32, now: u32) -> bool {
-        self.advance(now, None);
+        self.advance(now, None, &mut NoopSink);
         let Some(a) = self.active.as_mut() else {
             return false;
         };
@@ -340,26 +382,40 @@ impl Squad {
     /// gets nothing; nor does a member on a [`Channel::Custom`] (use
     /// [`Squad::reinstate_with`]). False when the id is unknown.
     pub fn reinstate(&mut self, id: u32, now: u32) -> bool {
-        self.reinstate_inner(id, now, None)
+        self.reinstate_inner(id, now, None, &mut NoopSink)
     }
 
     /// [`Squad::reinstate`] with the game's rules (the order goes over a
     /// [`Channel::Custom`] too).
     pub fn reinstate_with(&mut self, id: u32, now: u32, rules: &mut dyn SquadRules) -> bool {
-        self.reinstate_inner(id, now, Some(rules))
+        self.reinstate_traced(id, now, rules, &mut NoopSink)
     }
 
-    fn reinstate_inner(
+    /// [`Squad::reinstate_with`] with a trace: the orders of a plan that
+    /// becomes active first, then the member's order
+    /// ([`SquadTrace::Delay`]).
+    pub fn reinstate_traced<S: Sink<SquadTrace>>(
+        &mut self,
+        id: u32,
+        now: u32,
+        rules: &mut dyn SquadRules,
+        sink: &mut S,
+    ) -> bool {
+        self.reinstate_inner(id, now, Some(rules), sink)
+    }
+
+    fn reinstate_inner<S: Sink<SquadTrace>>(
         &mut self,
         id: u32,
         now: u32,
         mut rules: Option<&mut dyn SquadRules>,
+        sink: &mut S,
     ) -> bool {
         let lent: Option<&mut dyn SquadRules> = match &mut rules {
             Some(r) => Some(&mut **r),
             None => None,
         };
-        self.advance(now, lent);
+        self.advance(now, lent, sink);
         let was = self
             .group
             .index(id)
@@ -388,6 +444,12 @@ impl Squad {
             Some(r) => self.arrival_of(id, now, false, r),
             None => self.arrival_of(id, now, false, &mut BuiltInRules),
         };
+        if sink.enabled() {
+            sink.emit(SquadTrace::Delay {
+                member: id,
+                delay: at.map(|t| t.wrapping_sub(now)),
+            });
+        }
         if let Some(t) = at {
             queue(&mut self.orders, Order { member: id, goal }, t, now);
         }
@@ -502,24 +564,28 @@ impl Squad {
         self.check_with(now, extra, spots, seed, &mut BuiltInRules)
     }
 
-    /// [`Squad::check`] with `rules` (see [`Squad::check_with`]).
-    pub(super) fn check_inner(
+    /// [`Squad::check_with`] with a trace: as [`Squad::plan_traced`], plus
+    /// the abort rules of the active plan, the scoring that looks for a
+    /// better plan and the trigger ([`SquadTrace::Trigger`]).
+    pub fn check_traced<S: Sink<SquadTrace>>(
         &mut self,
         now: u32,
         extra: &[i32],
         spots: &[Spot],
         seed: u64,
         rules: &mut dyn SquadRules,
+        sink: &mut S,
     ) -> Result<Status, PlanError> {
         self.validate()?;
-        self.advance(now, Some(&mut *rules));
-        let signal = self.read_reports(now, rules);
-        self.areas.expire(now);
+        self.advance(now, Some(&mut *rules), sink);
+        let signal = self.read_reports(now, rules, sink);
+        self.areas
+            .expire_traced(now, &mut MapSink::new(&mut *sink, SquadTrace::Areas));
         let centre = self.centre();
         // Thinking, or nobody left to judge with: keep the active plan (a
         // report action may still give its signal).
         if self.pending.is_some() || (self.active.is_some() && centre.is_none()) {
-            let given = signal && self.give_signal(now, rules);
+            let given = signal && self.give_signal(now, rules, sink);
             return Ok(if given { Status::Signal } else { Status::Keep });
         }
         let Some(centre) = centre else {
@@ -529,13 +595,13 @@ impl Squad {
             None => Verdict::Abort,
             Some(_) => {
                 let mut s = std::mem::take(&mut self.scratch);
-                let v = self.judge(&mut s, now, centre, extra, signal, rules);
+                let v = self.judge(&mut s, now, centre, extra, signal, rules, sink);
                 self.scratch = s;
                 v?
             }
         };
         match verdict {
-            Verdict::Abort => match self.plan_now(now, extra, spots, seed, None, rules)? {
+            Verdict::Abort => match self.plan_now(now, extra, spots, seed, None, rules, sink)? {
                 Some(id) => Ok(Status::Replan(id)),
                 None => {
                     self.active = None;
@@ -544,12 +610,12 @@ impl Squad {
                 }
             },
             Verdict::Better(bar) => Ok(self
-                .plan_now(now, extra, spots, seed, Some(bar), rules)?
+                .plan_now(now, extra, spots, seed, Some(bar), rules, sink)?
                 .map_or(Status::Keep, Status::Replan)),
             Verdict::Hold => {
                 // A report action's signal, else the trigger's.
-                let fire = signal || self.trigger_fires(now, centre, rules);
-                Ok(if fire && self.give_signal(now, rules) {
+                let fire = signal || self.trigger_fires(now, centre, rules, sink);
+                Ok(if fire && self.give_signal(now, rules, sink) {
                     Status::Signal
                 } else {
                     Status::Keep
@@ -561,7 +627,12 @@ impl Squad {
     /// Makes the pending plan active once its think time has passed, and
     /// sends its orders through `rules`. Without rules a squad that needs
     /// them ([`Squad::needs_rules`]) keeps the plan pending.
-    pub(super) fn advance(&mut self, now: u32, rules: Option<&mut dyn SquadRules>) {
+    pub(super) fn advance<S: Sink<SquadTrace>>(
+        &mut self,
+        now: u32,
+        rules: Option<&mut dyn SquadRules>,
+        sink: &mut S,
+    ) {
         let due = self
             .pending
             .as_ref()
@@ -584,15 +655,21 @@ impl Squad {
             broken: Vec::new(),
         });
         match rules {
-            Some(r) => self.send(since, false, r),
-            None => self.send(since, false, &mut BuiltInRules),
+            Some(r) => self.send(since, false, r, sink),
+            None => self.send(since, false, &mut BuiltInRules, sink),
         }
     }
 
     /// Queues one order per active member of the active plan, timed from the
     /// leader's position at `at`: the goals as planned, or (`signal`) the
     /// second orders (see [`Squad::signal`]).
-    fn send(&mut self, at: u32, signal: bool, rules: &mut dyn SquadRules) {
+    fn send<S: Sink<SquadTrace>>(
+        &mut self,
+        at: u32,
+        signal: bool,
+        rules: &mut dyn SquadRules,
+        sink: &mut S,
+    ) {
         let mut orders = std::mem::take(&mut self.orders);
         let mut added = 0;
         if let Some(a) = &self.active {
@@ -606,7 +683,14 @@ impl Squad {
                 } else {
                     goal
                 };
-                if let Some(t) = self.arrival_of(member, at, false, rules) {
+                let arrive = self.arrival_of(member, at, false, rules);
+                if sink.enabled() {
+                    sink.emit(SquadTrace::Delay {
+                        member,
+                        delay: arrive.map(|t| t.wrapping_sub(at)),
+                    });
+                }
+                if let Some(t) = arrive {
                     queue(&mut orders, Order { member, goal }, t, at);
                     added += 1;
                 }
@@ -639,7 +723,12 @@ impl Squad {
     /// every other kind through [`SquadRules::report`], in arrival order;
     /// then the danger reports; then all report actions, in order. True
     /// when an action asked for the signal (the caller gives it).
-    pub(super) fn read_reports(&mut self, now: u32, rules: &mut dyn SquadRules) -> bool {
+    pub(super) fn read_reports<S: Sink<SquadTrace>>(
+        &mut self,
+        now: u32,
+        rules: &mut dyn SquadRules,
+        sink: &mut S,
+    ) -> bool {
         let mut due = std::mem::take(&mut self.scratch.reports);
         due.clear();
         self.inbox.take_due(now, &mut due);
@@ -648,6 +737,9 @@ impl Squad {
         // Room for every action of this read: the reports do not grow it.
         actions.reserve(due.len().saturating_mul(MAX_REPORT_ACTIONS));
         for msg in &due {
+            if sink.enabled() {
+                sink.emit(SquadTrace::Report { msg: *msg });
+            }
             match msg.kind {
                 REPORT_GOAL_BROKEN => {
                     if let Some(a) = self.active.as_mut()
@@ -663,7 +755,11 @@ impl Squad {
                         kind: self.target_kind,
                         ..msg.to_fact(SOURCE_TOLD)
                     };
-                    self.knowledge.merge(now, fact);
+                    self.knowledge.merge_traced(
+                        now,
+                        fact,
+                        &mut MapSink::new(&mut *sink, SquadTrace::Knowledge),
+                    );
                 }
                 REPORT_ARRIVED => {
                     if let Some(a) = self.active.as_mut()
@@ -681,12 +777,13 @@ impl Squad {
             }
         }
         self.scratch.reports = due;
-        self.read_dangers(now);
+        let mut areas = MapSink::new(sink, SquadTrace::Areas);
+        self.read_dangers(now, &mut areas);
         let mut signal = false;
         for action in &actions {
             match *action {
                 ReportAction::AddArea(area) => {
-                    self.areas.add(now, area);
+                    self.areas.add_traced(now, area, &mut areas);
                 }
                 ReportAction::Signal => signal = true,
                 ReportAction::Forget { subject } => {
@@ -700,7 +797,7 @@ impl Squad {
 
     /// Adds the danger areas of the danger reports that have arrived by
     /// `now`, in the order they were reported.
-    fn read_dangers(&mut self, now: u32) {
+    fn read_dangers<S: Sink<AreasTrace>>(&mut self, now: u32, sink: &mut S) {
         let mut i = 0;
         while i < self.dangers.len() {
             if now.wrapping_sub(self.dangers[i].arrive_at) >= 1 << 31 {
@@ -715,14 +812,15 @@ impl Squad {
                 data: d.sender,
                 ..self.danger
             };
-            self.areas.add(now, area);
+            self.areas.add_traced(now, area, sink);
         }
     }
 
     /// Whether the active plan must go (an abort fires), may go (a better
     /// candidate) or stays. With `signal` (a report action asked for it),
     /// as after the signal, only the aborts are checked.
-    fn judge(
+    #[allow(clippy::too_many_arguments)]
+    fn judge<S: Sink<SquadTrace>>(
         &self,
         s: &mut Scratch,
         now: u32,
@@ -730,6 +828,7 @@ impl Squad {
         extra: &[i32],
         signal: bool,
         rules: &mut dyn SquadRules,
+        sink: &mut S,
     ) -> Result<Verdict, PlanError> {
         let Some(a) = &self.active else {
             return Ok(Verdict::Hold);
@@ -767,7 +866,7 @@ impl Squad {
             now,
             active: true,
         };
-        if self.aborts_fire(rules, &ctx) {
+        if self.aborts_fire(rules, &ctx, sink) {
             return Ok(Verdict::Abort);
         }
         // A started attack is carried through: after the signal only the
@@ -777,9 +876,9 @@ impl Squad {
         }
         // The active pair stays a candidate even when the targets slot
         // drops its target: that slot only filters new plans.
-        self.keep_targets(s, rules);
+        self.keep_targets(s, rules, sink);
         let keep = found.map(|i| (t, i));
-        self.score_candidates(s, now, centre, extra, keep, rules)?;
+        self.score_candidates(s, now, centre, extra, keep, rules, sink)?;
         let (mut mine, mut other) = (0u32, 0u32);
         for (&(ct, ci), &score) in s.candidates.iter().zip(&s.scores) {
             if ct == t && ci.map(|i| s.targets[i].subject) == target {
@@ -798,14 +897,20 @@ impl Squad {
     }
 
     /// Whether the active plan's trigger fires now (not after the signal).
-    fn trigger_fires(&self, now: u32, centre: Pos, rules: &mut dyn SquadRules) -> bool {
+    fn trigger_fires<S: Sink<SquadTrace>>(
+        &self,
+        now: u32,
+        centre: Pos,
+        rules: &mut dyn SquadRules,
+        sink: &mut S,
+    ) -> bool {
         let Some(a) = &self.active else {
             return false;
         };
         if a.signal_at.is_some() {
             return false;
         }
-        match self.tactics[a.plan.tactic].trigger {
+        let fired = match self.tactics[a.plan.tactic].trigger {
             Trigger::AllArrived { max_wait } => {
                 let mut active = a
                     .plan
@@ -830,7 +935,11 @@ impl Squad {
             }
             Trigger::Custom(id) => rules.trigger(id, &SquadView::new(self), now),
             Trigger::None | Trigger::Manual => false,
+        };
+        if sink.enabled() {
+            sink.emit(SquadTrace::Trigger { fired });
         }
+        fired
     }
 }
 

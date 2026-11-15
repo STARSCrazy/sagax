@@ -117,6 +117,45 @@ pub const MESSAGE_TRACE_DROPPED: u32 = 4;
 /// `SX_MESSAGE_TRACE_DELIVERED`: the message was handed out.
 pub const MESSAGE_TRACE_DELIVERED: u32 = 5;
 
+/// `SX_SQUAD_TRACE_TARGET`: the targets slot judged a known target.
+pub const SQUAD_TRACE_TARGET: u32 = 1;
+/// `SX_SQUAD_TRACE_DECIDE`: a decider record of a candidate.
+pub const SQUAD_TRACE_DECIDE: u32 = 2;
+/// `SX_SQUAD_TRACE_ABORT`: one abort rule was checked.
+pub const SQUAD_TRACE_ABORT: u32 = 3;
+/// `SX_SQUAD_TRACE_PICKED`: the candidate picked for a new plan.
+pub const SQUAD_TRACE_PICKED: u32 = 4;
+/// `SX_SQUAD_TRACE_NO_PICK`: a scoring picked nothing.
+pub const SQUAD_TRACE_NO_PICK: u32 = 5;
+/// `SX_SQUAD_TRACE_THINKING`: the new plan is pending.
+pub const SQUAD_TRACE_THINKING: u32 = 6;
+/// `SX_SQUAD_TRACE_ASSIGNED`: a member took a slot.
+pub const SQUAD_TRACE_ASSIGNED: u32 = 7;
+/// `SX_SQUAD_TRACE_SPOT_RANKED`: a spot of a member's ranking.
+pub const SQUAD_TRACE_SPOT_RANKED: u32 = 8;
+/// `SX_SQUAD_TRACE_SPOT_PICKED`: a member's spot pick.
+pub const SQUAD_TRACE_SPOT_PICKED: u32 = 9;
+/// `SX_SQUAD_TRACE_TRIGGER`: the trigger was checked.
+pub const SQUAD_TRACE_TRIGGER: u32 = 10;
+/// `SX_SQUAD_TRACE_REPORT`: a report was read.
+pub const SQUAD_TRACE_REPORT: u32 = 11;
+/// `SX_SQUAD_TRACE_DELAY`: the channel delay of an order.
+pub const SQUAD_TRACE_DELAY: u32 = 12;
+/// `SX_SQUAD_TRACE_KNOWLEDGE`: the leader's knowledge changed.
+pub const SQUAD_TRACE_KNOWLEDGE: u32 = 13;
+/// `SX_SQUAD_TRACE_AREAS`: the leader's danger areas changed.
+pub const SQUAD_TRACE_AREAS: u32 = 14;
+
+/// `SX_KEEPER_TRACE_CHECKED`: a keeper was checked for giving up.
+pub const KEEPER_TRACE_CHECKED: u32 = 1;
+
+/// `SX_CREW_TRACE_SQUAD`: a squad record of the crew call.
+pub const CREW_TRACE_SQUAD: u32 = 1;
+/// `SX_CREW_TRACE_KEEPER`: a keeper check.
+pub const CREW_TRACE_KEEPER: u32 = 2;
+/// `SX_CREW_TRACE_SENT`: a member report sent to the leader.
+pub const CREW_TRACE_SENT: u32 = 3;
+
 /// `SX_GRID_SQUARE`.
 pub const GRID_SQUARE: u32 = 0;
 /// `SX_GRID_HEX_ODD_R`.

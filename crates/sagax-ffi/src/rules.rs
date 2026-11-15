@@ -943,6 +943,25 @@ mod tests {
         unsafe { sx_squad_check_with(sq, now, null(), 0, null(), 0, 0, rules, null_mut()) }
     }
 
+    unsafe extern "C" fn keep_trace(ctx: *mut c_void, t: *const SxSquadTrace) {
+        unsafe { (*ctx.cast::<Vec<SxSquadTrace>>()).push(*t) }
+    }
+
+    /// Turns the squad's trace on, into `log` (which must stay put while
+    /// it is on).
+    unsafe fn trace_on(sq: *mut SxSquad, log: &mut Vec<SxSquadTrace>) {
+        let ctx = std::ptr::from_mut(log).cast();
+        assert_eq!(unsafe { sx_squad_set_trace(sq, Some(keep_trace), ctx) }, 0);
+    }
+
+    /// The decider records of a squad trace.
+    fn decides(log: &[SxSquadTrace]) -> Vec<SxSquadTrace> {
+        log.iter()
+            .filter(|e| e.kind == SQUAD_TRACE_DECIDE)
+            .copied()
+            .collect()
+    }
+
     /// The orders due at `now`, as `(member, now)`.
     unsafe fn due(sq: *mut SxSquad, now: u32) -> Vec<(u32, u32)> {
         unsafe {
@@ -1389,7 +1408,9 @@ mod tests {
         }
     }
 
-    unsafe fn abort_run(metric: u32) -> (Vec<i32>, AbortFrom, *mut SxSquad) {
+    /// The statuses of ticks 1 to 30, the abort calls, the squad and the
+    /// trace of the check of tick 30.
+    unsafe fn abort_run(metric: u32) -> (Vec<i32>, AbortFrom, *mut SxSquad, Vec<SxSquadTrace>) {
         unsafe {
             let sq = squad(metric, &[(1, 0, 0), (2, 2, 0), (3, 4, 0)]);
             // The ambush with only a custom abort.
@@ -1411,7 +1432,6 @@ mod tests {
             assert_eq!(sx_tactic_trigger_target_in_radius(t, 6), 0);
             add(sq, t);
             add(sq, tactic(place(PLACE_SIDE, SIDE_FRONT), 255));
-            assert_eq!(sx_squad_set_score_log(sq, 1), 0);
             see(sq, 10, 60, 0, 0);
             see(sq, 11, 50, 0, 0);
             let mut st = AbortFrom {
@@ -1426,14 +1446,18 @@ mod tests {
             assert_eq!(plan_with(sq, 0, &rules), 1);
             let (p, _) = pending(sq);
             assert_eq!((p.tactic, p.target), (0, 10));
-            let statuses = (1..=30).map(|now| check_with(sq, now, &rules)).collect();
-            (statuses, st, sq)
+            let mut statuses: Vec<i32> = (1..30).map(|now| check_with(sq, now, &rules)).collect();
+            let mut log = Vec::new();
+            trace_on(sq, &mut log);
+            statuses.push(check_with(sq, 30, &rules));
+            assert_eq!(sx_squad_set_trace(sq, None, null_mut()), 0);
+            (statuses, st, sq, log)
         }
     }
 
     unsafe fn scene_abort() {
         unsafe {
-            let (statuses, st, sq) = abort_run(CHEBYSHEV);
+            let (statuses, st, sq, log) = abort_run(CHEBYSHEV);
             assert!(statuses[..29].iter().all(|&s| s == SQUAD_KEEP));
             assert_eq!(statuses[29], SQUAD_REPLAN, "tick 30");
             let (p, _) = pending(sq);
@@ -1452,11 +1476,14 @@ mod tests {
             assert!(st.seen.contains(&(1, 0, Some(11), false, 0)));
             // The ambush candidates scored 0 while the abort fired: only
             // rush was scored.
-            let mut log = [SxScoreEvent::default(); 32];
-            let mut total = 0;
-            let n = sx_squad_score_log(sq, log.as_mut_ptr(), 32, &mut total);
-            assert!(n > 0);
-            assert!(log[..n as usize].iter().all(|e| e.tactic == 1));
+            let scored = decides(&log);
+            assert!(!scored.is_empty());
+            assert!(scored.iter().all(|e| e.tactic == 1));
+            // The fired abort of the ambush candidates is in the trace.
+            assert!(log.iter().any(|e| e.kind == SQUAD_TRACE_ABORT
+                && e.tactic == 0
+                && e.abort == 0
+                && e.fired == 1));
             sx_squad_free(sq);
         }
     }
@@ -1772,8 +1799,8 @@ mod tests {
             let (square, ..) = trigger_run(CHEBYSHEV);
             let (hex, ..) = trigger_run(METRIC_HEX);
             assert_eq!(square, hex);
-            let (square, s, _) = abort_run(CHEBYSHEV);
-            let (hex, h, _) = abort_run(METRIC_HEX);
+            let (square, s, ..) = abort_run(CHEBYSHEV);
+            let (hex, h, ..) = abort_run(METRIC_HEX);
             assert_eq!(square, hex);
             assert_eq!(s.seen, h.seen);
         }
@@ -1795,17 +1822,13 @@ mod tests {
         }
     }
 
-    /// The factors the score log shows: `(target, input)`.
-    unsafe fn factors(sq: *mut SxSquad) -> Vec<(u32, i32)> {
-        unsafe {
-            let mut log = [SxScoreEvent::default(); 32];
-            let n = sx_squad_score_log(sq, log.as_mut_ptr(), 32, null_mut());
-            log[..n as usize]
-                .iter()
-                .filter(|e| e.event.kind == 1)
-                .map(|e| (e.target, e.event.input))
-                .collect()
-        }
+    /// The factors the squad trace shows: `(target, input)`.
+    fn factors(log: &[SxSquadTrace]) -> Vec<(u32, i32)> {
+        decides(log)
+            .iter()
+            .filter(|e| e.decide.kind == DECIDE_TRACE_FACTOR)
+            .map(|e| (e.target, e.decide.input))
+            .collect()
     }
 
     #[test]
@@ -1829,9 +1852,10 @@ mod tests {
             assert_eq!(sx_tactic_add_consideration(t, &friend), 0);
             add(sq, t);
             assert_eq!(sx_squad_set_extra_columns(sq, 1), 0);
-            assert_eq!(sx_squad_set_score_log(sq, 1), 0);
             see(sq, 10, 20, 0, 0);
             see(sq, 11, 23, 0, 0);
+            let mut log = Vec::new();
+            trace_on(sq, &mut log);
             let mut st = KeepOnly(vec![11], Vec::new());
             let rules = SxSquadRules {
                 keep_target: Some(keep_cb),
@@ -1847,7 +1871,7 @@ mod tests {
             let (p, _) = pending(sq);
             assert_eq!((p.tactic, p.has_target, p.target), (0, 1, 11));
             // Only 11 was scored; it read its own block (2) and its dropped friend.
-            assert_eq!(factors(sq), [(11, 9), (11, 3)]);
+            assert_eq!(factors(&log), [(11, 9), (11, 3)]);
             sx_squad_free(sq);
         }
     }
@@ -1903,8 +1927,9 @@ mod tests {
             };
             assert_eq!(sx_tactic_add_consideration(t, &second), 0);
             add(sq, t);
-            assert_eq!(sx_squad_set_score_log(sq, 1), 0);
             see(sq, 10, 20, 0, 0);
+            let mut log = Vec::new();
+            trace_on(sq, &mut log);
             let mut st = Columns {
                 values: [7, 9],
                 seen: Vec::new(),
@@ -1929,12 +1954,10 @@ mod tests {
                 "the game's extra column of target 10"
             );
             // The second rule column (9 of 0..9) is the factor 1.0.
-            let mut log = [SxScoreEvent::default(); 32];
-            let n = sx_squad_score_log(sq, log.as_mut_ptr(), 32, null_mut());
-            let f: Vec<(i32, u32)> = log[..n as usize]
+            let f: Vec<(i32, u32)> = decides(&log)
                 .iter()
-                .filter(|e| e.event.kind == 1)
-                .map(|e| (e.event.input, e.event.value))
+                .filter(|e| e.decide.kind == DECIDE_TRACE_FACTOR)
+                .map(|e| (e.decide.input, e.decide.value))
                 .collect();
             assert_eq!(f, [(9, ONE)]);
             sx_squad_free(sq);

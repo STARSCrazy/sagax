@@ -4,6 +4,26 @@
 use super::*;
 use crate::memory::{Area, Fact, Message, Metric, Pos, ZeroCapacity};
 use crate::{Consideration, Curve, DecideTrace, ONE, mix};
+use sagax_debug::{Collector, Overflow};
+
+/// A collector for squad traces.
+fn log() -> Collector<SquadTrace> {
+    Collector::new(4096, Overflow::DropNewest)
+}
+
+/// The decider records of a trace: (tactic, target, record).
+fn decides(c: &Collector<SquadTrace>) -> Vec<(usize, Option<u32>, DecideTrace)> {
+    c.records()
+        .filter_map(|r| match r.event {
+            SquadTrace::Decide {
+                tactic,
+                target,
+                event,
+            } => Some((tactic, target, event)),
+            _ => None,
+        })
+        .collect()
+}
 
 /// Fact kind of the enemies in these tests.
 const ENEMY: u32 = 1;
@@ -263,7 +283,13 @@ fn spot_score_order_matches_pick_spot() {
         let skip = next(4) as u8;
         let metric = metrics[next(4) as usize];
         let radius = next(31) as i64;
-        let expected = pick_spot(wish, want, &spots, &taken, skip, metric, radius);
+        let mut plain = Collector::new(64, Overflow::DropNewest);
+        let expected =
+            pick_spot_traced(wish, want, &spots, &taken, skip, metric, radius, &mut plain);
+        assert_eq!(
+            expected,
+            pick_spot(wish, want, &spots, &taken, skip, metric, radius)
+        );
         let ctx = SpotCtx {
             tactic: 0,
             slot: 0,
@@ -282,17 +308,21 @@ fn spot_score_order_matches_pick_spot() {
             target: None,
             built_in: 0,
         };
+        let mut ranked = Collector::new(64, Overflow::DropNewest);
         let got = rules::rank_spots(
             &mut BuiltInRules,
             &mut keys,
             &ctx,
             &spots,
             &taken,
-            skip,
-            metric,
-            radius,
+            (skip, metric, radius),
+            &mut ranked,
         );
         assert_eq!(got, expected, "seed {seed}");
+        // The same ranking, spot by spot, ending in the pick.
+        let trace = |c: &Collector<SpotTrace>| c.records().map(|r| r.event).collect::<Vec<_>>();
+        assert_eq!(trace(&ranked), trace(&plain), "seed {seed}");
+        assert_eq!(trace(&plain).last(), Some(&SpotTrace::Picked(expected)));
         found += usize::from(matches!(got, SpotPick::Spot(_)));
     }
     // Both outcomes are common.
@@ -320,20 +350,19 @@ fn targets_slot_drops_candidates() {
     let t = sq.add_tactic(rush);
     assert!(sq.set_extra_columns(1));
     sq.set_skill(255);
-    sq.set_score_log(true);
     see(&mut sq, 10, 20, 0, 0);
     see(&mut sq, 11, 23, 0, 0);
-    sq.plan_with(0, &[0, 5, 9], &[], 0, &mut KeepOnly(&[11]))
+    let mut trace = log();
+    sq.plan_traced(0, &[0, 5, 9], &[], 0, &mut KeepOnly(&[11]), &mut trace)
         .unwrap()
         .unwrap();
     let p = sq.pending_plan().unwrap();
     assert_eq!((p.tactic, p.target), (t, Some(11)));
     // Only 11 was scored; it read its own block (2) and its dropped friend.
-    let inputs: Vec<(Option<u32>, i32)> = sq
-        .score_log()
-        .iter()
-        .filter_map(|e| match e.event {
-            DecideTrace::Factor { input, .. } => Some((e.target, input)),
+    let inputs: Vec<(Option<u32>, i32)> = decides(&trace)
+        .into_iter()
+        .filter_map(|(_, target, e)| match e {
+            DecideTrace::Factor { input, .. } => Some((target, input)),
             _ => None,
         })
         .collect();
@@ -389,20 +418,19 @@ fn columns_slot_fills_after_extra() {
     rush.considerations = vec![Consideration::new(start as u32 + 1, Curve::Linear, 0, 9)];
     sq.add_tactic(rush);
     sq.set_skill(255);
-    sq.set_score_log(true);
     see(&mut sq, 10, 20, 0, 0);
     let mut rules = Columns {
         values: [7, 9],
         seen: Vec::new(),
     };
-    sq.plan_with(0, &[0, 3], &[], 0, &mut rules)
+    let mut trace = log();
+    sq.plan_traced(0, &[0, 3], &[], 0, &mut rules, &mut trace)
         .unwrap()
         .unwrap();
     assert_eq!(rules.seen, [(start, 2)]);
-    let factors: Vec<(i32, u32)> = sq
-        .score_log()
-        .iter()
-        .filter_map(|e| match e.event {
+    let factors: Vec<(i32, u32)> = decides(&trace)
+        .into_iter()
+        .filter_map(|(_, _, e)| match e {
             DecideTrace::Factor { input, value, .. } => Some((input, value)),
             _ => None,
         })
@@ -837,14 +865,13 @@ impl SquadRules for AbortFrom {
 
 /// The abort scene: ambush (with only `Abort::Custom(1)`) against rush,
 /// two targets; statuses from tick 1 to 30.
-fn abort_events(metric: Metric) -> (Vec<Status>, AbortFrom, Squad) {
+fn abort_events(metric: Metric) -> (Vec<Status>, AbortFrom, Squad, Collector<SquadTrace>) {
     let mut sq = line_squad(metric, &[0, 2, 4]);
     sq.add_tactic(Tactic {
         aborts: vec![Abort::Custom(1)],
         ..tactics::ambush()
     });
     sq.add_tactic(tactics::rush());
-    sq.set_score_log(true);
     see(&mut sq, 10, 60, 0, 0);
     see(&mut sq, 11, 50, 0, 0);
     let mut rules = AbortFrom {
@@ -854,15 +881,20 @@ fn abort_events(metric: Metric) -> (Vec<Status>, AbortFrom, Squad) {
     sq.plan_with(0, &[], &[], 0, &mut rules).unwrap().unwrap();
     let p = sq.pending_plan().unwrap();
     assert_eq!((p.tactic, p.target), (0, Some(10)));
+    let mut trace = log();
     let statuses = (1..=30)
-        .map(|now| sq.check_with(now, &[], &[], 0, &mut rules).unwrap())
+        .map(|now| {
+            trace.clear();
+            sq.check_traced(now, &[], &[], 0, &mut rules, &mut trace)
+                .unwrap()
+        })
         .collect();
-    (statuses, rules, sq)
+    (statuses, rules, sq, trace)
 }
 
 #[test]
 fn abort_custom_replans() {
-    let (statuses, rules, sq) = abort_events(Metric::Chebyshev);
+    let (statuses, rules, sq, trace) = abort_events(Metric::Chebyshev);
     assert!(sq.needs_rules());
     assert!(statuses[..29].iter().all(|&s| s == Status::Keep));
     let Status::Replan(id) = statuses[29] else {
@@ -884,9 +916,18 @@ fn abort_custom_replans() {
     // Before tick 30 the other candidate was asked as a candidate.
     assert!(rules.seen.contains(&(1, 0, Some(11), false, 0)));
     // The ambush candidates scored 0 while the abort fired: only rush was
-    // scored.
-    assert!(!sq.score_log().is_empty());
-    assert!(sq.score_log().iter().all(|e| e.tactic == 1));
+    // scored, and the trace says why.
+    let scored = decides(&trace);
+    assert!(!scored.is_empty());
+    assert!(scored.iter().all(|e| e.0 == 1));
+    let ambush = |fired| SquadTrace::Abort {
+        tactic: 0,
+        target: Some(10),
+        abort: 0,
+        fired,
+    };
+    assert!(trace.records().any(|r| r.event == ambush(true)));
+    assert!(trace.records().all(|r| r.event != ambush(false)));
 }
 
 /// Custom channel delays: `per * distance`, or never; records every call.
@@ -1240,8 +1281,8 @@ fn custom_parts_square_and_hex() {
     let (square, ..) = trigger_events(Metric::Chebyshev);
     let (hex, ..) = trigger_events(Metric::Hex);
     assert_eq!(square, hex);
-    let (square, rs, _) = abort_events(Metric::Chebyshev);
-    let (hex, rh, _) = abort_events(Metric::Hex);
+    let (square, rs, ..) = abort_events(Metric::Chebyshev);
+    let (hex, rh, ..) = abort_events(Metric::Hex);
     assert_eq!(square, hex);
     assert_eq!(rs.seen, rh.seen);
     let delay = || Delay {

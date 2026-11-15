@@ -2,16 +2,18 @@
 //! tick, see `sagax.h`.
 
 use sagax_decide::group::{
-    Crew, CrewConfig, CrewEvent, GoalKeeper, KeeperInputs, Squad, SquadConfig,
+    BuiltInRules, Crew, CrewConfig, CrewEvent, CrewTrace, GoalKeeper, KeeperInputs, Squad,
+    SquadConfig, SquadRules,
 };
+use std::ffi::c_void;
 
 use super::group::{
-    Held, Lend, SxGoal, SxKeeper, SxMember, SxSpot, SxSquad, SxSquadConfig, lists, plan_error,
-    sx_squad_config_default,
+    Held, Lend, SxGoal, SxKeeper, SxKeeperTrace, SxMember, SxSpot, SxSquad, SxSquadConfig,
+    SxSquadTrace, lists, plan_error, sx_squad_config_default,
 };
 use super::memory::{SxFact, SxMessage, pos3, put};
 use super::rules::{CRules, SxSquadRules};
-use super::{ERROR_ARGUMENT, create, destroy, guarded, hex_layout, to_i32};
+use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, guarded, hex_layout, set_trace, to_i32};
 use sagax_abi::convert;
 
 /// `sx_crew_config`.
@@ -99,6 +101,69 @@ pub struct SxCrew {
     /// The handles `sx_crew_keeper` lent, one per member id asked for (each
     /// its own allocation, freed with the crew).
     keepers: Vec<(u32, *mut SxKeeper)>,
+    /// Where `sx_crew_set_trace` sends the records of the crew's calls.
+    trace: TraceSlot<SxCrewTrace>,
+}
+
+/// `sx_crew_trace`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SxCrewTrace {
+    /// `SX_CREW_TRACE_*`.
+    pub kind: u32,
+    /// `KEEPER`: the member; `SENT`: the sender.
+    pub member: u32,
+    /// `SENT`: the ticks until it reaches the leader, if `has_delay`.
+    pub delay: u32,
+    /// `SENT`: 1 if `delay` is set (0: it never arrives, nothing was sent).
+    pub has_delay: u8,
+    /// `SENT`: 1 when the inbox took it.
+    pub queued: u8,
+    /// `SENT`: the report.
+    pub msg: SxMessage,
+    /// `KEEPER`: the keeper's record.
+    pub keeper: SxKeeperTrace,
+    /// `SQUAD`: the squad's record.
+    pub squad: SxSquadTrace,
+}
+
+impl SxCrewTrace {
+    /// The record of a crew trace.
+    pub fn of(event: CrewTrace) -> Self {
+        let c = convert::crew_trace(event);
+        Self {
+            kind: c.kind,
+            member: c.member,
+            delay: c.delay.unwrap_or_default(),
+            has_delay: u8::from(c.delay.is_some()),
+            queued: u8::from(c.queued),
+            msg: c.msg,
+            keeper: SxKeeperTrace::of_code(c.keeper),
+            squad: SxSquadTrace::of_code(c.squad),
+        }
+    }
+}
+
+/// `sx_crew_trace_fn`.
+pub type CrewTraceFn = unsafe extern "C" fn(*mut c_void, *const SxCrewTrace);
+
+/// `sx_crew_set_trace`.
+///
+/// # Safety
+/// `crew` is null or valid; `trace` and `context` stay valid while tracing
+/// is on.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_crew_set_trace(
+    crew: *mut SxCrew,
+    trace: Option<CrewTraceFn>,
+    context: *mut c_void,
+) -> i32 {
+    // SAFETY: see above.
+    set_trace(
+        unsafe { crew.as_mut() }.map(|c| &mut c.trace),
+        trace,
+        context,
+    )
 }
 
 impl SxCrew {
@@ -208,6 +273,7 @@ pub unsafe extern "C" fn sx_crew_new(config: *const SxCrewConfig) -> *mut SxCrew
             epoch: 0,
             squad: std::ptr::null_mut(),
             keepers: Vec::new(),
+            trace: None,
         })
     });
     if root.is_null() {
@@ -224,6 +290,7 @@ pub unsafe extern "C" fn sx_crew_new(config: *const SxCrewConfig) -> *mut SxCrew
         decider: std::ptr::null_mut(),
         knowledge: std::ptr::null_mut(),
         areas: std::ptr::null_mut(),
+        trace: None,
     }));
     // SAFETY: `root` was just made by `create` (Box::into_raw) and nothing
     // else refers to it yet.
@@ -305,9 +372,23 @@ pub unsafe extern "C" fn sx_crew_reinstate_with(
     let c = crew!(crew);
     // SAFETY: null or valid (see above).
     let mut rules = unsafe { CRules::of(rules) };
-    guarded(|| match rules.as_mut() {
-        Some(r) => i32::from(c.crew.reinstate_with(id, now, r)),
-        None => i32::from(c.crew.reinstate(id, now)),
+    let trace = c.trace;
+    let crew = &mut c.crew;
+    guarded(|| {
+        let known = match rules.as_mut() {
+            Some(r) => traced!(trace, SxCrewTrace::of, |sink| crew
+                .reinstate_traced(id, now, r, sink)),
+            // Without rules such a squad does not activate a due plan: the
+            // plain call, untraced.
+            None if crew.squad().needs_rules() => crew.reinstate(id, now),
+            None => traced!(trace, SxCrewTrace::of, |sink| crew.reinstate_traced(
+                id,
+                now,
+                &mut BuiltInRules,
+                sink
+            )),
+        };
+        i32::from(known)
     })
 }
 
@@ -339,7 +420,11 @@ pub unsafe extern "C" fn sx_crew_observe(
     evicted: *mut SxFact,
 ) -> i32 {
     let c = crew!(crew);
-    match c.crew.observe(now, *input!(fact)) {
+    let fact = *input!(fact);
+    match traced!(c.trace, SxCrewTrace::of, |sink| c
+        .crew
+        .observe_traced(now, fact, sink))
+    {
         Some(gone) => {
             // SAFETY: null or writable (see above).
             unsafe { put(evicted, gone) };
@@ -447,9 +532,21 @@ pub unsafe extern "C" fn sx_crew_tick_with(
     // SAFETY: null or valid (see above).
     let mut rules = unsafe { CRules::of(rules) };
     guarded(|| {
+        let (crew, out) = (&mut c.crew, &mut c.events);
         let result = match rules.as_mut() {
-            Some(r) => c.crew.tick_with(now, extra, spots, seed, r, &mut c.events),
-            None => c.crew.tick(now, extra, spots, seed, &mut c.events),
+            Some(r) => traced!(c.trace, SxCrewTrace::of, |sink| crew
+                .tick_traced(now, extra, spots, seed, r, out, sink)),
+            // Refused: a squad that needs rules.
+            None if crew.squad().needs_rules() => crew.tick(now, extra, spots, seed, out),
+            None => traced!(c.trace, SxCrewTrace::of, |sink| crew.tick_traced(
+                now,
+                extra,
+                spots,
+                seed,
+                &mut BuiltInRules,
+                out,
+                sink
+            )),
         };
         // SAFETY: null or writable (see above).
         unsafe { put(total, u32::try_from(c.events.len()).unwrap_or(u32::MAX)) };
@@ -494,10 +591,13 @@ pub unsafe extern "C" fn sx_crew_report_with(
     // SAFETY: null or valid (see above).
     let mut rules = unsafe { CRules::of(rules) };
     guarded(|| {
-        let stored = match rules.as_mut() {
-            Some(r) => c.crew.report_with(now, msg, r),
-            None => c.crew.report(now, msg),
+        let crew = &mut c.crew;
+        let r: &mut dyn SquadRules = match rules.as_mut() {
+            Some(r) => r,
+            None => &mut BuiltInRules,
         };
+        let stored = traced!(c.trace, SxCrewTrace::of, |sink| crew
+            .report_traced(now, msg, r, sink));
         i32::from(stored)
     })
 }
@@ -602,7 +702,7 @@ pub unsafe extern "C" fn sx_crew_keeper(crew: *mut SxCrew, id: u32) -> *mut SxKe
         unsafe { (*k).0 = Held::Lent(lend) };
         return k;
     }
-    let k = Box::into_raw(Box::new(SxKeeper(Held::Lent(lend))));
+    let k = Box::into_raw(Box::new(SxKeeper(Held::Lent(lend), None)));
     c.keepers.push((id, k));
     k
 }

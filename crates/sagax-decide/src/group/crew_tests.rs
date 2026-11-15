@@ -1489,3 +1489,195 @@ fn crew_reinstate_with_custom_channel() {
     assert_eq!(got, Some((18, goal)));
     assert!(!crew.reinstate_with(99, 14, &mut rules));
 }
+
+/// The decider records among squad records.
+fn squad_decides(records: impl Iterator<Item = SquadTrace>) -> Vec<SquadTrace> {
+    records
+        .filter(|e| matches!(e, SquadTrace::Decide { .. }))
+        .collect()
+}
+
+#[test]
+fn crew_tick_traced_equals_tick_and_nests_the_squad() {
+    use sagax_debug::{Collector, Overflow};
+    let t0 = 100;
+    let mut plain = flank_crew(8, t0);
+    let mut traced = flank_crew(8, t0);
+    let spots = flank_spots();
+    let mut walks = [Walk::default(); 4];
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    let mut trace = Collector::new(1 << 16, Overflow::DropNewest);
+    let (mut keepers, mut sent, mut decides) = (0, 0, 0);
+    for k in 0..=60 {
+        let t = t0 + k;
+        for (i, (id, ..)) in MEMBERS.iter().enumerate() {
+            let g = plain.squad().group();
+            let at = g.get(g.index(*id).unwrap()).unwrap().pos;
+            if let Some(p) = walks[i].next(t, at) {
+                assert!(plain.set_pos(*id, p));
+                assert!(traced.set_pos(*id, p));
+            }
+        }
+        // The squad's check on a clone traces the same scoring.
+        let mut twin = traced.squad().clone();
+        let mut alone = Collector::new(1 << 16, Overflow::DropNewest);
+        let _ = twin.check_traced(t, &[], &spots, SEED, &mut BuiltInRules, &mut alone);
+        trace.clear();
+        plain.tick(t, &[], &spots, SEED, &mut a).unwrap();
+        traced
+            .tick_traced(t, &[], &spots, SEED, &mut BuiltInRules, &mut b, &mut trace)
+            .unwrap();
+        assert_eq!(a, b, "tick {t}");
+        assert_eq!(trace.dropped(), 0);
+        note_orders(&mut walks, t, &a);
+        let inner = trace.records().filter_map(|r| match r.event {
+            CrewTrace::Squad(e) => Some(e),
+            _ => None,
+        });
+        let nested = squad_decides(inner);
+        assert_eq!(
+            nested,
+            squad_decides(alone.records().map(|r| r.event)),
+            "tick {t}"
+        );
+        decides += nested.len();
+        for r in trace.records() {
+            match r.event {
+                CrewTrace::Keeper { .. } => keepers += 1,
+                CrewTrace::Sent { msg, queued, .. } => {
+                    assert!(queued);
+                    assert!(msg.kind == REPORT_ARRIVED || msg.kind == REPORT_GOAL_BROKEN);
+                    sent += 1;
+                }
+                CrewTrace::Squad(_) => {}
+            }
+        }
+    }
+    assert!(
+        decides > 0 && sent > 0 && keepers > 0,
+        "{decides} {sent} {keepers}"
+    );
+    assert_eq!(plain.squad().active_plan(), traced.squad().active_plan());
+    // Off is off.
+    let mut off: Collector<CrewTrace> = Collector::new(0, Overflow::DropNewest);
+    traced
+        .tick_traced(
+            t0 + 61,
+            &[],
+            &spots,
+            SEED,
+            &mut BuiltInRules,
+            &mut b,
+            &mut off,
+        )
+        .unwrap();
+    assert_eq!(off.offered(), 0);
+}
+
+#[test]
+fn crew_traces_keeper_checks_and_reports() {
+    use sagax_debug::{Collector, Overflow};
+    let mut crew = crew_with_orders(0);
+    let id = 2;
+    let mut events = Vec::new();
+    let mut trace = Collector::new(4096, Overflow::DropNewest);
+    let mut checks = Vec::new();
+    for t in 11..400 {
+        assert!(crew.member_chose(id, t, false));
+        trace.clear();
+        crew.tick_traced(
+            t,
+            &[],
+            &flank_spots(),
+            SEED,
+            &mut BuiltInRules,
+            &mut events,
+            &mut trace,
+        )
+        .unwrap();
+        for r in trace.records() {
+            if let CrewTrace::Keeper { member, event } = r.event
+                && member == id
+            {
+                checks.push(event);
+            }
+        }
+        if events.contains(&CrewEvent::Broken { member: id }) {
+            let sent = trace.records().any(|r| {
+                matches!(r.event, CrewTrace::Sent { msg, queued: true, .. }
+                    if msg.kind == REPORT_GOAL_BROKEN && msg.sender == id)
+            });
+            assert!(sent, "the broken report is traced");
+            break;
+        }
+    }
+    let Some(KeeperTrace::Checked {
+        broken,
+        limit,
+        waited,
+    }) = checks.last().copied()
+    else {
+        panic!("no keeper check");
+    };
+    assert!(broken && waited >= limit);
+    assert!(
+        checks[..checks.len() - 1]
+            .iter()
+            .all(|c| matches!(c, KeeperTrace::Checked { broken: false, .. }))
+    );
+    // A report that never arrives is traced without a delay.
+    assert!(crew.squad_mut().set_channel(3, Channel::None));
+    trace.clear();
+    let msg = Message {
+        kind: REPORT_GAME_FIRST,
+        sender: 3,
+        ..Message::default()
+    };
+    assert!(crew.report_traced(500, msg, &mut BuiltInRules, &mut trace));
+    assert_eq!(
+        trace.records().map(|r| r.event).collect::<Vec<_>>(),
+        [CrewTrace::Sent {
+            msg,
+            delay: None,
+            queued: false
+        }]
+    );
+}
+
+#[test]
+fn crew_hex_trace_is_in_offset_coords() {
+    use sagax_debug::{Collector, Overflow};
+    let layout = HexLayout::OddR;
+    let mut crew = Crew::new(CrewConfig {
+        squad: SquadConfig {
+            metric: Metric::Hex,
+            ..scene_config(8)
+        },
+        hex_layout: Some(layout),
+        ..CrewConfig::default()
+    })
+    .unwrap();
+    assert!(crew.add_member(scene_member(1, 0, 1)).is_some());
+    let fact = Fact {
+        subject: 10,
+        kind: ENEMY,
+        pos: [3, 5, 0],
+        ..Fact::default()
+    };
+    let mut trace = Collector::new(16, Overflow::DropNewest);
+    assert_eq!(crew.observe_traced(0, fact, &mut trace), None);
+    let added = Fact {
+        source: crate::memory::SOURCE_OWN,
+        ..fact
+    };
+    assert_eq!(
+        trace.records().map(|r| r.event).collect::<Vec<_>>(),
+        [CrewTrace::Squad(SquadTrace::Knowledge(
+            crate::memory::KnowledgeTrace::Added(added)
+        ))]
+    );
+    assert_ne!(
+        crew.squad().knowledge().iter().next().unwrap().pos,
+        fact.pos
+    );
+}

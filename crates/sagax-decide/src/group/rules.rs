@@ -79,11 +79,11 @@
 
 use super::members::Member;
 use super::orders::{Channel, Status};
-use super::spots::{Spot, SpotPick};
-use super::squad::{Goal, PlanError, PlanId, Squad};
+use super::spots::{Spot, SpotPick, SpotTrace};
+use super::squad::{Goal, PlanError, PlanId, Squad, SquadTrace};
 use super::tactic::{Abort, Place, Tactic, Trigger};
 use crate::memory::{Area, Fact, Message, Metric, Pos, distance};
-use sagax_core::HexLayout;
+use sagax_core::{HexLayout, MapSink, NoopSink, Sink};
 
 /// Game logic a squad calls at fixed points; see the [module](self) for the
 /// call order and the defaults.
@@ -501,18 +501,19 @@ pub fn spot_score_builtin(wish: Pos, want_tags: u32, spot: &Spot, metric: Metric
 /// free spots (not `taken[i]`) within `radius` of `ctx.wish` in index
 /// order are scored (`ctx` gives everything but `index`, `spot` and
 /// `built_in`), unusable ones dropped, the rest sorted by `(score, index)`
-/// into `keys`; the result is rank `skip`, clamped to the last.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn rank_spots(
+/// into `keys`; the result is rank `skip`, clamped to the last. `at` is
+/// `(skip, metric, radius)`. The trace gets the ranking (fit and distance
+/// as [`pick_spot`](super::pick_spot) sees them) and the pick.
+pub(super) fn rank_spots<S: Sink<SpotTrace>>(
     rules: &mut dyn SquadRules,
     keys: &mut Vec<(i128, usize)>,
     ctx: &SpotCtx,
     spots: &[Spot],
     taken: &[bool],
-    skip: u8,
-    metric: Metric,
-    radius: i64,
+    at: (u8, Metric, i64),
+    sink: &mut S,
 ) -> SpotPick {
+    let (skip, metric, radius) = at;
     let limit = if metric == Metric::Euclid {
         i128::from(radius) * i128::from(radius)
     } else {
@@ -540,10 +541,24 @@ pub(super) fn rank_spots(
         }
     }
     keys.sort_unstable();
-    match keys.len() {
+    let pick = match keys.len() {
         0 => SpotPick::Unchecked(ctx.wish),
         n => SpotPick::Spot(keys[usize::from(skip).min(n - 1)].1),
+    };
+    if sink.enabled() {
+        for &(_, index) in keys.iter() {
+            let spot = &spots[index];
+            let dx = i64::from(spot.pos[0]) - i64::from(ctx.wish[0]);
+            let dy = i64::from(spot.pos[1]) - i64::from(ctx.wish[1]);
+            sink.emit(SpotTrace::Ranked {
+                spot: index,
+                fits: spot.tags & ctx.want_tags == ctx.want_tags,
+                distance: distance(metric, dx, dy),
+            });
+        }
+        sink.emit(SpotTrace::Picked(pick));
     }
+    pick
 }
 
 impl Squad {
@@ -580,13 +595,31 @@ impl Squad {
         seed: u64,
         rules: &mut dyn SquadRules,
     ) -> Result<Option<PlanId>, PlanError> {
+        self.plan_traced(now, extra, spots, seed, rules, &mut NoopSink)
+    }
+
+    /// [`Squad::plan_with`] with a trace: the orders of a plan that becomes
+    /// active ([`SquadTrace::Delay`]), the reports read and what they
+    /// changed, the targets, the scoring of every candidate
+    /// ([`SquadTrace::Abort`], [`SquadTrace::Decide`]), the pick, and for a
+    /// new plan its assignment, spots and think time.
+    pub fn plan_traced<S: Sink<SquadTrace>>(
+        &mut self,
+        now: u32,
+        extra: &[i32],
+        spots: &[Spot],
+        seed: u64,
+        rules: &mut dyn SquadRules,
+        sink: &mut S,
+    ) -> Result<Option<PlanId>, PlanError> {
         self.validate()?;
-        self.advance(now, Some(&mut *rules));
-        if self.read_reports(now, rules) {
-            self.give_signal(now, rules);
+        self.advance(now, Some(&mut *rules), sink);
+        if self.read_reports(now, rules, sink) {
+            self.give_signal(now, rules, sink);
         }
-        self.areas.expire(now);
-        self.plan_now(now, extra, spots, seed, None, rules)
+        self.areas
+            .expire_traced(now, &mut MapSink::new(&mut *sink, SquadTrace::Areas));
+        self.plan_now(now, extra, spots, seed, None, rules, sink)
     }
 
     /// [`Squad::check`] with the game's rules; see the [rules](super::rules)
@@ -599,6 +632,6 @@ impl Squad {
         seed: u64,
         rules: &mut dyn SquadRules,
     ) -> Result<Status, PlanError> {
-        self.check_inner(now, extra, spots, seed, rules)
+        self.check_traced(now, extra, spots, seed, rules, &mut NoopSink)
     }
 }

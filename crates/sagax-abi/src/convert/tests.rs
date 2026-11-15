@@ -814,3 +814,215 @@ fn memory_trace_codes() {
         assert_eq!(message_trace(event), expected);
     }
 }
+
+#[test]
+fn group_trace_codes() {
+    use sagax_decide::group::{CrewTrace, KeeperTrace, SpotPick, SpotTrace, SquadTrace};
+    let f = Fact {
+        subject: 3,
+        kind: 1,
+        ..Fact::default()
+    };
+    let factor = DecideTrace::Factor {
+        candidate: 2,
+        consideration: 1,
+        input: 5,
+        value: 7,
+    };
+    let base = |kind| SquadTraceCode {
+        kind,
+        ..SquadTraceCode::default()
+    };
+    let cases = [
+        (
+            SquadTrace::Target {
+                fact: f,
+                kept: true,
+            },
+            SquadTraceCode {
+                fact: f,
+                kept: true,
+                ..base(SQUAD_TRACE_TARGET)
+            },
+        ),
+        (
+            SquadTrace::Decide {
+                tactic: 1,
+                target: Some(3),
+                event: factor,
+            },
+            SquadTraceCode {
+                tactic: 1,
+                target: Some(3),
+                decide: decide_trace(factor),
+                ..base(SQUAD_TRACE_DECIDE)
+            },
+        ),
+        (
+            SquadTrace::Abort {
+                tactic: 2,
+                target: None,
+                abort: 1,
+                fired: true,
+            },
+            SquadTraceCode {
+                tactic: 2,
+                abort: 1,
+                fired: true,
+                ..base(SQUAD_TRACE_ABORT)
+            },
+        ),
+        (
+            SquadTrace::Picked {
+                tactic: 0,
+                target: Some(9),
+                score: 40,
+            },
+            SquadTraceCode {
+                target: Some(9),
+                score: 40,
+                ..base(SQUAD_TRACE_PICKED)
+            },
+        ),
+        (SquadTrace::NoPick, base(SQUAD_TRACE_NO_PICK)),
+        (
+            SquadTrace::Thinking { plan: 4, until: 12 },
+            SquadTraceCode {
+                plan: 4,
+                until: 12,
+                ..base(SQUAD_TRACE_THINKING)
+            },
+        ),
+        (
+            SquadTrace::Assigned {
+                slot: 1,
+                member: 6,
+                cost: i128::MAX,
+            },
+            SquadTraceCode {
+                slot: 1,
+                member: 6,
+                cost: i64::MAX,
+                ..base(SQUAD_TRACE_ASSIGNED)
+            },
+        ),
+        (
+            SquadTrace::Spot {
+                member: 6,
+                event: SpotTrace::Ranked {
+                    spot: 2,
+                    fits: true,
+                    distance: 9,
+                },
+            },
+            SquadTraceCode {
+                member: 6,
+                spot: Some(2),
+                fits: true,
+                distance: 9,
+                ..base(SQUAD_TRACE_SPOT_RANKED)
+            },
+        ),
+        (
+            SquadTrace::Spot {
+                member: 6,
+                event: SpotTrace::Picked(SpotPick::Unchecked([1, 2, 3])),
+            },
+            SquadTraceCode {
+                member: 6,
+                pos: [1, 2, 3],
+                ..base(SQUAD_TRACE_SPOT_PICKED)
+            },
+        ),
+        (
+            SquadTrace::Trigger { fired: true },
+            SquadTraceCode {
+                fired: true,
+                ..base(SQUAD_TRACE_TRIGGER)
+            },
+        ),
+        (
+            SquadTrace::Delay {
+                member: 2,
+                delay: Some(5),
+            },
+            SquadTraceCode {
+                member: 2,
+                delay: Some(5),
+                ..base(SQUAD_TRACE_DELAY)
+            },
+        ),
+        (
+            SquadTrace::Knowledge(KnowledgeTrace::Added(f)),
+            SquadTraceCode {
+                knowledge: knowledge_trace(KnowledgeTrace::Added(f)),
+                ..base(SQUAD_TRACE_KNOWLEDGE)
+            },
+        ),
+    ];
+    for (event, code) in cases {
+        assert_eq!(squad_trace(event), code, "{event:?}");
+    }
+    let msg = Message {
+        kind: 4,
+        sender: 7,
+        ..Message::default()
+    };
+    assert_eq!(squad_trace(SquadTrace::Report { msg }).msg, msg);
+    assert_eq!(
+        squad_trace(SquadTrace::Spot {
+            member: 1,
+            event: SpotTrace::Picked(SpotPick::Spot(4)),
+        })
+        .spot,
+        Some(4)
+    );
+    assert_eq!(
+        squad_trace(SquadTrace::Areas(AreasTrace::Expired(Area::default()))).kind,
+        SQUAD_TRACE_AREAS
+    );
+
+    let checked = KeeperTrace::Checked {
+        waited: 3,
+        limit: 5,
+        broken: false,
+    };
+    assert_eq!(
+        keeper_trace(checked),
+        KeeperTraceCode {
+            kind: KEEPER_TRACE_CHECKED,
+            waited: 3,
+            limit: 5,
+            broken: false,
+        }
+    );
+    assert_eq!(
+        crew_trace(CrewTrace::Keeper {
+            member: 2,
+            event: checked
+        }),
+        CrewTraceCode {
+            kind: CREW_TRACE_KEEPER,
+            member: 2,
+            keeper: keeper_trace(checked),
+            ..CrewTraceCode::default()
+        }
+    );
+    assert_eq!(
+        crew_trace(CrewTrace::Squad(SquadTrace::NoPick)).squad,
+        base(SQUAD_TRACE_NO_PICK)
+    );
+    assert_eq!(
+        crew_trace(CrewTrace::Sent {
+            msg,
+            delay: None,
+            queued: false
+        }),
+        CrewTraceCode {
+            kind: CREW_TRACE_SENT,
+            member: 7,
+            msg,
+            ..CrewTraceCode::default()
+        }
+    );
+}

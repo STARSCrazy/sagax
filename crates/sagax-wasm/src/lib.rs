@@ -2539,9 +2539,9 @@ pub extern "C" fn sx_sweep_heading(base: i32, elapsed: u32, step_ticks: u32, cou
 
 use sagax_abi::convert::{CombineTarget, SkillCodes};
 use sagax_decide::group::{
-    Abort, Channel, Goal, GoalKeeper, MAX_ROLE_COUNTS, Member, MemberState, Nearby, Order, Place,
-    Plan, PlanError, RoleCounts, SkillTable, Slot, Spot, Squad, SquadConfig, Tactic, Trigger,
-    gather, tactics,
+    Abort, BuiltInRules, Channel, Goal, GoalKeeper, MAX_ROLE_COUNTS, Member, MemberState, Nearby,
+    Order, Place, Plan, PlanError, RoleCounts, SkillTable, Slot, Spot, Squad, SquadConfig,
+    SquadTrace, Tactic, Trigger, gather, tactics,
 };
 
 /// Numbers per member record: id, x, y, z, roles, skill, state.
@@ -3120,6 +3120,83 @@ pub struct WasmSquad {
     areas: *mut WasmAreas,
     /// The handle on the squad's decider, freed with it.
     decider: *mut WasmDecider,
+    /// The score log is on: plan and check run traced.
+    score_on: bool,
+    /// The score log: `SCORE_STRIDE` numbers per decider record of the last
+    /// scoring.
+    scores: Vec<i32>,
+}
+
+/// Keeps the decider records of the last scoring of a traced plan or check
+/// as the score log. A scoring starts with its first decider record after
+/// the start of the call, after the targets slot's records, after the pick
+/// of the scoring before or when the candidates start over; one that scored
+/// nothing (every candidate aborted) leaves an empty log.
+struct ScoreLog<'a> {
+    log: &'a mut Vec<i32>,
+    /// The next decider record starts a new scoring.
+    fresh: bool,
+    /// The candidate of the last scored record of this scoring.
+    scored: Option<usize>,
+}
+
+impl Sink<SquadTrace> for ScoreLog<'_> {
+    fn emit(&mut self, event: SquadTrace) {
+        let (tactic, target, event) = match event {
+            SquadTrace::Decide {
+                tactic,
+                target,
+                event,
+            } => (tactic, target, event),
+            SquadTrace::Target { .. } => {
+                self.fresh = true;
+                return;
+            }
+            SquadTrace::Picked { .. } | SquadTrace::NoPick => {
+                if self.fresh {
+                    self.log.clear();
+                }
+                self.fresh = true;
+                return;
+            }
+            _ => return,
+        };
+        let (kind, candidate, consideration, input, value, score) = match event {
+            DecideTrace::Factor {
+                candidate,
+                consideration,
+                input,
+                value,
+            } => (1, candidate, to_i32(consideration), input, value, 0),
+            DecideTrace::Scored {
+                candidate,
+                product,
+                score,
+                ..
+            } => (2, candidate, -1, 0, product, score),
+            // The squad scores candidates one by one: no ranks, no winner.
+            DecideTrace::Ranked { .. } | DecideTrace::Chosen { .. } => return,
+        };
+        if self.fresh || self.scored.is_some_and(|c| candidate <= c) {
+            self.log.clear();
+            self.fresh = false;
+            self.scored = None;
+        }
+        if kind == 2 {
+            self.scored = Some(candidate);
+        }
+        self.log.extend([
+            to_i32(tactic),
+            target.unwrap_or(0) as i32,
+            i32::from(target.is_some()),
+            kind,
+            to_i32(candidate),
+            consideration,
+            input,
+            value as i32,
+            score as i32,
+        ]);
+    }
 }
 
 macro_rules! squad {
@@ -3176,6 +3253,8 @@ fn boxed_squad(squad: Held<Squad>) -> *mut WasmSquad {
         knowledge: std::ptr::null_mut(),
         areas: std::ptr::null_mut(),
         decider: std::ptr::null_mut(),
+        score_on: false,
+        scores: Vec::new(),
     }));
     // SAFETY: `s` was just made; the squad stays at this address until
     // drop_squad, which frees the two handles first.
@@ -3288,18 +3367,24 @@ pub unsafe extern "C" fn sx_squad_decider(s: *mut WasmSquad) -> *mut WasmDecider
     unsafe { s.as_ref() }.map_or(std::ptr::null_mut(), |w| w.decider)
 }
 
-/// Switches the score log on (1) or off (0, clears it). Returns 0.
+/// Switches the score log on (1) or off (0, clears it). Returns 0. It
+/// covers the calls through this handle: a crew's ticks are not in the log
+/// of its lent squad.
 ///
 /// # Safety
 /// `s` from [`sx_squad_new`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_set_score_log(s: *mut WasmSquad, on: i32) -> i32 {
-    squad!(s).squad.set_score_log(on != 0);
+    let w = squad!(s);
+    w.score_on = on != 0;
+    if !w.score_on {
+        w.scores.clear();
+    }
     0
 }
 
-/// Moves the events of the last scoring in plan or check to the out buffer
-/// (9 numbers each, see `SCORE_STRIDE`) and returns how many.
+/// Copies the events of the last scoring in plan or check to the out
+/// buffer (9 numbers each, see `SCORE_STRIDE`) and returns how many.
 ///
 /// # Safety
 /// `s` from [`sx_squad_new`].
@@ -3307,36 +3392,7 @@ pub unsafe extern "C" fn sx_squad_set_score_log(s: *mut WasmSquad, on: i32) -> i
 pub unsafe extern "C" fn sx_squad_score_log(s: *mut WasmSquad) -> i32 {
     let w = squad!(s);
     w.out.clear();
-    for e in w.squad.score_log() {
-        let (kind, candidate, consideration, input, value, score) = match e.event {
-            DecideTrace::Factor {
-                candidate,
-                consideration,
-                input,
-                value,
-            } => (1, candidate, to_i32(consideration), input, value, 0),
-            DecideTrace::Scored {
-                candidate,
-                product,
-                score,
-                ..
-            } => (2, candidate, -1, 0, product, score),
-            // The squad scores candidates one by one: no ranks.
-            DecideTrace::Ranked { .. } => continue,
-            DecideTrace::Chosen { candidate, score } => (3, candidate, -1, 0, 0, score),
-        };
-        w.out.extend([
-            to_i32(e.tactic),
-            e.target.unwrap_or(0) as i32,
-            i32::from(e.target.is_some()),
-            kind,
-            to_i32(candidate),
-            consideration,
-            input,
-            value as i32,
-            score as i32,
-        ]);
-    }
+    w.out.extend_from_slice(&w.scores);
     to_i32(w.out.len() / SCORE_STRIDE)
 }
 
@@ -3839,7 +3895,18 @@ pub unsafe extern "C" fn sx_squad_plan(
     };
     let seed = u64::from(seed_low) | (u64::from(seed_high) << 32);
     w.out.clear();
-    match w.squad.plan(now, &extra, &spots, seed) {
+    let made = if w.score_on && !w.squad.needs_rules() {
+        let mut log = ScoreLog {
+            log: &mut w.scores,
+            fresh: true,
+            scored: None,
+        };
+        w.squad
+            .plan_traced(now, &extra, &spots, seed, &mut BuiltInRules, &mut log)
+    } else {
+        w.squad.plan(now, &extra, &spots, seed)
+    };
+    match made {
         Ok(Some(id)) => {
             w.out.push(id as i32);
             1
@@ -3870,11 +3937,18 @@ pub unsafe extern "C" fn sx_squad_check(
     };
     let seed = u64::from(seed_low) | (u64::from(seed_high) << 32);
     w.out.clear();
-    match w
-        .squad
-        .check(now, &extra, &spots, seed)
-        .map(convert::squad_status)
-    {
+    let status = if w.score_on && !w.squad.needs_rules() {
+        let mut log = ScoreLog {
+            log: &mut w.scores,
+            fresh: true,
+            scored: None,
+        };
+        w.squad
+            .check_traced(now, &extra, &spots, seed, &mut BuiltInRules, &mut log)
+    } else {
+        w.squad.check(now, &extra, &spots, seed)
+    };
+    match status.map(convert::squad_status) {
         Ok((code, id)) => {
             if let Some(id) = id {
                 w.out.push(id as i32);

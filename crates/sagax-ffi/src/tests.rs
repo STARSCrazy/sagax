@@ -1126,7 +1126,6 @@ mod squad {
         assert_eq!(size_of::<SxOrder>(), 72);
         assert_eq!(size_of::<SxPlan>(), 28);
         assert_eq!(size_of::<SxSkillTable>(), 204);
-        assert_eq!(size_of::<SxScoreEvent>(), 48);
         assert_eq!(define("SX_API_VERSION"), 12);
         assert_eq!(define("SX_ERROR_PLAN"), i64::from(ERROR_PLAN));
         assert_eq!(define("SX_IDLE"), i64::from(IDLE));
@@ -1338,6 +1337,24 @@ mod squad {
             ("SX_MESSAGE_TRACE_REFUSED", MESSAGE_TRACE_REFUSED),
             ("SX_MESSAGE_TRACE_QUEUED", MESSAGE_TRACE_QUEUED),
             ("SX_MESSAGE_TRACE_DROPPED", MESSAGE_TRACE_DROPPED),
+            ("SX_SQUAD_TRACE_TARGET", SQUAD_TRACE_TARGET),
+            ("SX_SQUAD_TRACE_DECIDE", SQUAD_TRACE_DECIDE),
+            ("SX_SQUAD_TRACE_ABORT", SQUAD_TRACE_ABORT),
+            ("SX_SQUAD_TRACE_PICKED", SQUAD_TRACE_PICKED),
+            ("SX_SQUAD_TRACE_NO_PICK", SQUAD_TRACE_NO_PICK),
+            ("SX_SQUAD_TRACE_THINKING", SQUAD_TRACE_THINKING),
+            ("SX_SQUAD_TRACE_ASSIGNED", SQUAD_TRACE_ASSIGNED),
+            ("SX_SQUAD_TRACE_SPOT_RANKED", SQUAD_TRACE_SPOT_RANKED),
+            ("SX_SQUAD_TRACE_SPOT_PICKED", SQUAD_TRACE_SPOT_PICKED),
+            ("SX_SQUAD_TRACE_TRIGGER", SQUAD_TRACE_TRIGGER),
+            ("SX_SQUAD_TRACE_REPORT", SQUAD_TRACE_REPORT),
+            ("SX_SQUAD_TRACE_DELAY", SQUAD_TRACE_DELAY),
+            ("SX_SQUAD_TRACE_KNOWLEDGE", SQUAD_TRACE_KNOWLEDGE),
+            ("SX_SQUAD_TRACE_AREAS", SQUAD_TRACE_AREAS),
+            ("SX_KEEPER_TRACE_CHECKED", KEEPER_TRACE_CHECKED),
+            ("SX_CREW_TRACE_SQUAD", CREW_TRACE_SQUAD),
+            ("SX_CREW_TRACE_KEEPER", CREW_TRACE_KEEPER),
+            ("SX_CREW_TRACE_SENT", CREW_TRACE_SENT),
             ("SX_MESSAGE_TRACE_DELIVERED", MESSAGE_TRACE_DELIVERED),
             ("SX_BREAK_FAIL", BREAK_FAIL),
             ("SX_BREAK_IMPOSSIBLE", BREAK_IMPOSSIBLE),
@@ -1484,7 +1501,6 @@ mod squad {
             offset_of!(SxSkillTable, spot_rank_error),
         ];
         assert_eq!(table, [0, 4, 36, 68, 100, 132, 164, 196]);
-        assert_eq!(offset_of!(SxScoreEvent, event), 12);
     }
 
     #[test]
@@ -2461,49 +2477,87 @@ mod squad {
     }
 
     #[test]
-    fn score_log_cap_and_total() {
+    fn squad_trace_set_call_off() {
         unsafe {
             let sq = squad_of(CHEBYSHEV, &[(1, 0, 0), (2, 1, 0), (3, 0, 1), (4, 1, 1)]);
             assert_eq!(sx_squad_add_rush(sq), 0);
             assert_eq!(sx_squad_add_focus(sq), 1);
             assert_eq!(sx_squad_set_skill(sq, 255), 0);
+            let mut log: Vec<SxSquadTrace> = Vec::new();
+            let ctx = (&raw mut log).cast();
+            assert_eq!(sx_squad_set_trace(sq, Some(keep), ctx), 0);
             assert_eq!(sx_squad_observe(sq, 0, &enemy(E1, 20, 0), null_mut()), 0);
             assert_eq!(sx_squad_observe(sq, 0, &enemy(E2, 30, 0), null_mut()), 0);
+            let learned = log.iter().filter(|e| e.kind == SQUAD_TRACE_KNOWLEDGE);
+            assert_eq!(learned.count(), 2);
+            log.clear();
             let mut id = 0;
             assert_eq!(sx_squad_plan(sq, 1, null(), 0, null(), 0, 0, &mut id), 1);
-            let mut total = 99;
-            assert_eq!(sx_squad_score_log(sq, null_mut(), 0, &mut total), 0);
-            assert_eq!(total, 0, "off by default");
-            assert_eq!(sx_squad_set_score_log(sq, 1), 0);
-            assert_eq!(sx_squad_plan(sq, 2, null(), 0, null(), 0, 0, &mut id), 1);
-            assert_eq!(sx_squad_score_log(sq, null_mut(), 0, &mut total), 0);
-            // Four candidates, scored events at least; focus has a factor each.
-            assert!(total >= 6, "{total}");
-            let mut all = vec![SxScoreEvent::default(); total as usize];
-            assert_eq!(
-                sx_squad_score_log(sq, all.as_mut_ptr(), total, null_mut()),
-                total as i32
-            );
-            let scored: Vec<(u32, u32, u8)> = all
+            // Every pair of tactic and target is scored.
+            let scored: Vec<(u32, u32, u8)> = log
                 .iter()
-                .filter(|e| e.event.kind == 2)
+                .filter(|e| e.kind == SQUAD_TRACE_DECIDE && e.decide.kind == DECIDE_TRACE_SCORED)
                 .map(|e| (e.tactic, e.target, e.has_target))
                 .collect();
             assert_eq!(scored, [(0, E1, 1), (0, E2, 1), (1, E1, 1), (1, E2, 1)]);
-            // A smaller cap writes that many and still counts all.
-            let mut two = [SxScoreEvent::default(); 2];
-            let mut seen = 0;
-            assert_eq!(sx_squad_score_log(sq, two.as_mut_ptr(), 2, &mut seen), 2);
-            assert_eq!((seen, two[0], two[1]), (total, all[0], all[1]));
+            let picked: Vec<_> = log
+                .iter()
+                .filter(|e| e.kind == SQUAD_TRACE_PICKED)
+                .collect();
+            assert_eq!(picked.len(), 1);
             assert_eq!(
-                sx_squad_score_log(sq, null_mut(), 1, &mut seen),
+                log.iter()
+                    .filter(|e| e.kind == SQUAD_TRACE_ASSIGNED)
+                    .count(),
+                4
+            );
+            // Unused fields are 0.
+            assert_eq!(
+                (picked[0].member, picked[0].cost, picked[0].fact.subject),
+                (0, 0, 0)
+            );
+            assert_eq!(sx_squad_set_trace(sq, None, null_mut()), 0);
+            log.clear();
+            assert_eq!(sx_squad_plan(sq, 2, null(), 0, null(), 0, 0, &mut id), 1);
+            assert!(log.is_empty(), "off is off");
+            assert_eq!(
+                sx_squad_set_trace(null_mut(), None, null_mut()),
                 ERROR_ARGUMENT
             );
-            assert_eq!(sx_squad_set_score_log(sq, 0), 0);
-            assert_eq!(sx_squad_score_log(sq, null_mut(), 0, &mut seen), 0);
-            assert_eq!(seen, 0);
-            assert_eq!(sx_squad_set_score_log(null_mut(), 1), ERROR_ARGUMENT);
             sx_squad_free(sq);
+        }
+    }
+
+    #[test]
+    fn keeper_trace_set_call_off() {
+        unsafe {
+            let k = sx_keeper_new();
+            let goal = SxGoal {
+                kind: GOAL_MOVE,
+                has_pos: 1,
+                ..SxGoal::default()
+            };
+            assert_eq!(sx_keeper_set(k, 0, &goal), 0);
+            let mut log: Vec<SxKeeperTrace> = Vec::new();
+            assert_eq!(sx_keeper_set_trace(k, Some(keep), (&raw mut log).cast()), 0);
+            assert_eq!(sx_keeper_broken(k, 3, 10), 0);
+            assert_eq!(sx_keeper_goal_postponed(k, 4), 0);
+            assert_eq!(sx_keeper_broken(k, 20, 10), 1);
+            let checked = |waited, broken| SxKeeperTrace {
+                kind: KEEPER_TRACE_CHECKED,
+                waited,
+                limit: 10,
+                broken,
+            };
+            assert_eq!(log, [checked(0, 0), checked(16, 1)]);
+            assert_eq!(sx_keeper_set_trace(k, None, null_mut()), 0);
+            assert_eq!(sx_keeper_broken(k, 21, 10), 1);
+            assert_eq!(log.len(), 2, "off is off");
+            assert_eq!(
+                sx_keeper_set_trace(null_mut(), None, null_mut()),
+                ERROR_ARGUMENT
+            );
+            sx_keeper_free(k);
         }
     }
 
@@ -3078,11 +3132,11 @@ mod conventions {
     type Layout = (&'static str, usize, Vec<(&'static str, usize)>);
 
     fn rust_layouts() -> Vec<Layout> {
-        use crate::crew::{SxCrewConfig, SxCrewEvent, SxMemberInputs};
+        use crate::crew::{SxCrewConfig, SxCrewEvent, SxCrewTrace, SxMemberInputs};
         use crate::decide::{SxCandidate, SxChoice, SxConsideration, SxDecideTrace};
         use crate::group::{
-            SxGatherCandidate, SxGoal, SxMember, SxOrder, SxPlace, SxPlan, SxScoreEvent,
-            SxSkillTable, SxSlot, SxSpot, SxSquadConfig,
+            SxGatherCandidate, SxGoal, SxKeeperTrace, SxMember, SxOrder, SxPlace, SxPlan,
+            SxSkillTable, SxSlot, SxSpot, SxSquadConfig, SxSquadTrace,
         };
         use crate::machine::{SxChange, SxMachineTrace};
         use crate::memory::{
@@ -3196,7 +3250,35 @@ mod conventions {
                 gather_dist
             ),
             layout!("sx_skill_table", SxSkillTable, hold_bonus, spot_rank_error),
-            layout!("sx_score_event", SxScoreEvent, event),
+            layout!(
+                "sx_squad_trace",
+                SxSquadTrace,
+                tactic,
+                target,
+                member,
+                slot,
+                abort,
+                plan,
+                until,
+                score,
+                delay,
+                spot,
+                pos,
+                has_target,
+                has_delay,
+                has_spot,
+                fired,
+                kept,
+                fits,
+                cost,
+                distance,
+                fact,
+                msg,
+                decide,
+                knowledge,
+                areas
+            ),
+            layout!("sx_keeper_trace", SxKeeperTrace, waited, limit, broken),
             layout!(
                 "sx_goal",
                 SxGoal,
@@ -3229,6 +3311,17 @@ mod conventions {
                 hex_grid
             ),
             layout!("sx_crew_event", SxCrewEvent, start_at, goal, has_start_at),
+            layout!(
+                "sx_crew_trace",
+                SxCrewTrace,
+                member,
+                delay,
+                has_delay,
+                queued,
+                msg,
+                keeper,
+                squad
+            ),
             layout!(
                 "sx_place_ctx",
                 SxPlaceCtx,
@@ -3909,6 +4002,123 @@ mod crew {
         assert_eq!(count("SX_CREW_ORDER"), 8);
         assert_eq!(count("SX_CREW_ARRIVED"), 4);
         assert_eq!(count("SX_CREW_SIGNAL"), 1);
+    }
+
+    unsafe extern "C" fn keep<R: Copy>(ctx: *mut std::ffi::c_void, t: *const R) {
+        let records = unsafe { &mut *ctx.cast::<Vec<R>>() };
+        records.push(unsafe { *t });
+    }
+
+    #[test]
+    fn crew_trace_same_as_rust_and_lent_handles_trace_their_own_calls() {
+        use sagax_decide::group::BuiltInRules;
+        // Rust: the traced ticks, as C records.
+        let mut crew = rust_crew();
+        let spots = spots();
+        let mut walks = [Walk::default(); 4];
+        let mut events = Vec::new();
+        let mut rust_keys = Vec::new();
+        let mut rust = Vec::new();
+        for t in 0..=80 {
+            for (i, (id, ..)) in MEMBERS.iter().enumerate() {
+                let g = crew.squad().group();
+                let at = g.get(g.index(*id).unwrap()).unwrap().pos;
+                if let Some(p) = walks[i].next(t, at) {
+                    assert!(crew.set_pos(*id, p));
+                }
+            }
+            let mut sink = sagax_core::CallbackSink(|e| rust.push(SxCrewTrace::of(e)));
+            crew.tick_traced(
+                t,
+                &[],
+                &spots,
+                SEED,
+                &mut BuiltInRules,
+                &mut events,
+                &mut sink,
+            )
+            .unwrap();
+            let keys: Vec<Key> = events.iter().map(rust_key).collect();
+            note(&mut walks, t, &keys);
+            rust_keys.push(keys);
+        }
+        assert_eq!(rust_keys, run_rust(80), "tracing changes nothing");
+
+        let c = c_crew();
+        let mut traces: Vec<SxCrewTrace> = Vec::new();
+        let mut squad: Vec<SxSquadTrace> = Vec::new();
+        let mut keeper: Vec<SxKeeperTrace> = Vec::new();
+        unsafe {
+            assert_eq!(
+                sx_crew_set_trace(c, Some(keep), (&raw mut traces).cast()),
+                0
+            );
+            let sq = sx_crew_squad(c);
+            let k = sx_crew_keeper(c, MEMBERS[1].0);
+            assert_eq!(
+                sx_squad_set_trace(sq, Some(keep), (&raw mut squad).cast()),
+                0
+            );
+            assert_eq!(
+                sx_keeper_set_trace(k, Some(keep), (&raw mut keeper).cast()),
+                0
+            );
+            let mut walks = [Walk::default(); 4];
+            let mut c_keys = Vec::new();
+            for t in 0..=80 {
+                walk_c(c, &walks, t);
+                let (_, _, keys) = tick_c(c, t, 16);
+                note(&mut walks, t, &keys);
+                c_keys.push(keys);
+            }
+            assert_eq!(c_keys, rust_keys);
+            assert_eq!(traces, rust);
+            // The crew's work goes to the crew trace only.
+            assert!(squad.is_empty() && keeper.is_empty());
+            let count = |kind| traces.iter().filter(|e| e.kind == kind).count();
+            assert!(count(CREW_TRACE_SQUAD) > 0);
+            assert!(count(CREW_TRACE_KEEPER) > 0);
+            assert!(
+                traces
+                    .iter()
+                    .any(|e| e.kind == CREW_TRACE_SQUAD && e.squad.kind == SQUAD_TRACE_DECIDE)
+            );
+            // The lent handles trace the calls made through them.
+            let n = traces.len();
+            let seen = sighting(12, 30, 0);
+            assert_eq!(sx_squad_observe(sq, 81, &seen, null_mut()), 0);
+            assert_eq!(squad.len(), 1);
+            assert_eq!(squad[0].kind, SQUAD_TRACE_KNOWLEDGE);
+            // Crew calls make lent keepers stale; asked again, the same
+            // handle comes back with its trace still set.
+            assert_eq!(sx_crew_keeper(c, MEMBERS[1].0), k);
+            assert!(sx_keeper_broken(k, 81, 10) >= 0);
+            assert_eq!(keeper.len(), 1);
+            assert_eq!(keeper[0].kind, KEEPER_TRACE_CHECKED);
+            assert_eq!(traces.len(), n);
+            // A report through the crew: one SENT record.
+            let msg = Message::enemy(MEMBERS[2].0, sighting(13, 31, 0));
+            assert_eq!(sx_crew_report(c, 82, &msg), 1);
+            let sent = &traces[n..];
+            assert_eq!(sent.len(), 1);
+            assert_eq!(
+                (
+                    sent[0].kind,
+                    sent[0].member,
+                    sent[0].has_delay,
+                    sent[0].queued
+                ),
+                (CREW_TRACE_SENT, MEMBERS[2].0, 1, 1)
+            );
+            assert_eq!(sx_crew_set_trace(c, None, null_mut()), 0);
+            assert_eq!(sx_crew_report(c, 83, &msg), 1);
+            assert_eq!(traces.len(), n + 1, "off is off");
+            assert_eq!(
+                sx_crew_set_trace(null_mut(), None, null_mut()),
+                ERROR_ARGUMENT
+            );
+            sx_crew_free(c);
+        }
     }
 
     /// Everything a game can read of the crew after a tick.

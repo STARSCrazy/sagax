@@ -3033,7 +3033,7 @@ fn lost_target_switch_off_keeps_plan() {
     assert!(sq.active_plan().is_some());
 }
 
-// --- Skill rows, the squad's decider and the score log ---
+// --- Skill rows, the squad's decider and the plan trace ---
 
 #[test]
 fn set_skill_table_rejects_rows() {
@@ -3103,7 +3103,8 @@ fn decider_reachable() {
 }
 
 #[test]
-fn score_log_lists_candidates() {
+fn plan_trace_lists_candidates() {
+    use sagax_debug::{Collector, Overflow};
     let mut sq = squad_of(Metric::Euclid, &four());
     sq.add_tactic(tactics::rush());
     sq.add_tactic(tactics::focus());
@@ -3111,46 +3112,197 @@ fn score_log_lists_candidates() {
     see(&mut sq, 10, 20, 0, 0);
     see(&mut sq, 11, 30, 0, 0);
     sq.plan(0, &[], &[], 0).unwrap().unwrap();
-    assert!(sq.score_log().is_empty(), "off by default");
-    sq.set_score_log(true);
-    sq.plan(1, &[], &[], 0).unwrap().unwrap();
-    let scored: Vec<(usize, Option<u32>, u32)> = sq
-        .score_log()
-        .iter()
-        .filter_map(|e| match e.event {
-            DecideTrace::Scored { score, .. } => Some((e.tactic, e.target, score)),
+    let mut twin = sq.clone();
+    let mut trace = Collector::new(4096, Overflow::DropNewest);
+    let made = sq
+        .plan_traced(1, &[], &[], 0, &mut BuiltInRules, &mut trace)
+        .unwrap();
+    // Same result and state as the plain call.
+    assert_eq!(made, twin.plan(1, &[], &[], 0).unwrap());
+    assert_eq!(sq.pending_plan(), twin.pending_plan());
+    let decides: Vec<(usize, Option<u32>, DecideTrace)> = trace
+        .records()
+        .filter_map(|r| match r.event {
+            SquadTrace::Decide {
+                tactic,
+                target,
+                event,
+            } => Some((tactic, target, event)),
             _ => None,
         })
         .collect();
-    let keys: Vec<(usize, Option<u32>)> = scored.iter().map(|s| (s.0, s.1)).collect();
+    let scored: Vec<(usize, Option<u32>, usize, u32)> = decides
+        .iter()
+        .filter_map(|&(t, target, e)| match e {
+            DecideTrace::Scored {
+                candidate, score, ..
+            } => Some((t, target, candidate, score)),
+            _ => None,
+        })
+        .collect();
+    let keys: Vec<(usize, Option<u32>, usize)> = scored.iter().map(|s| (s.0, s.1, s.2)).collect();
     assert_eq!(
         keys,
-        [(0, Some(10)), (0, Some(11)), (1, Some(10)), (1, Some(11))]
+        [
+            (0, Some(10), 0),
+            (0, Some(11), 1),
+            (1, Some(10), 2),
+            (1, Some(11), 3)
+        ]
     );
     // The scores are the ones the plan used: rush is 1/4 flat, focus is
     // weighted by the target distance.
-    assert_eq!(scored[0].2, ONE / 4);
-    assert_eq!(scored[1].2, ONE / 4);
-    assert!(scored[2].2 > scored[3].2);
-    let candidates: Vec<usize> = sq
-        .score_log()
-        .iter()
-        .filter_map(|e| match e.event {
-            DecideTrace::Scored { candidate, .. } => Some(candidate),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(candidates, [0, 1, 2, 3]);
+    assert_eq!(scored[0].3, ONE / 4);
+    assert_eq!(scored[1].3, ONE / 4);
+    assert!(scored[2].3 > scored[3].3);
     assert!(
-        sq.score_log()
+        decides
             .iter()
-            .any(|e| matches!(e.event, DecideTrace::Factor { .. }))
+            .any(|e| matches!(e.2, DecideTrace::Factor { .. }))
     );
-    // The next check scores again: the log holds that scoring only.
-    let before = sq.score_log().len();
-    let _ = sq.check(10, &[], &[], 0).unwrap();
-    assert_eq!(sq.score_log().len(), before);
-    sq.set_score_log(false);
-    let _ = sq.check(11, &[], &[], 0).unwrap();
-    assert!(sq.score_log().is_empty());
+    // Targets first, the pick and the think time after the scoring.
+    let kinds: Vec<&SquadTrace> = trace.records().map(|r| &r.event).collect();
+    assert!(matches!(
+        kinds[0],
+        SquadTrace::Target {
+            fact: Fact { subject: 10, .. },
+            kept: true
+        }
+    ));
+    let p = sq.pending_plan().unwrap();
+    assert!(kinds.contains(&&SquadTrace::Picked {
+        tactic: p.tactic,
+        target: p.target,
+        score: scored[2].3,
+    }));
+    assert_eq!(
+        kinds.last(),
+        Some(&&SquadTrace::Thinking {
+            plan: p.id,
+            until: p.active_at
+        })
+    );
+    let assigned = kinds
+        .iter()
+        .filter(|e| matches!(e, SquadTrace::Assigned { .. }))
+        .count();
+    assert_eq!(assigned, p.goals.len());
+    // Off is off.
+    let mut off: Collector<SquadTrace> = Collector::new(0, Overflow::DropNewest);
+    let _ = sq.check_traced(10, &[], &[], 0, &mut BuiltInRules, &mut off);
+    assert_eq!(off.records().len(), 0);
+}
+
+/// Runs a squad through reports, danger, a plan, its signal and a
+/// reinstate, plainly or traced; returns every result and the final state.
+fn squad_story(
+    metric: Metric,
+    sink: &mut impl sagax_core::Sink<SquadTrace>,
+) -> (Vec<String>, Squad) {
+    let mut sq = squad_of(metric, &four());
+    sq.add_tactic(tactics::rush());
+    sq.add_tactic(tactics::flank(2, 3));
+    sq.add_tactic(tactics::ambush());
+    sq.set_skill(200);
+    for id in 2..=4 {
+        assert!(sq.set_channel(
+            id,
+            Channel::Radio {
+                base: 1,
+                per_unit: 1
+            }
+        ));
+    }
+    let spots: Vec<Spot> = (0..12)
+        .map(|i| spot(10 + i % 4 * 3, i / 4 * 3 - 3, i as u32 % 3))
+        .collect();
+    let mut out = Vec::new();
+    let mut orders = Vec::new();
+    let enemy = |subject, x, now| Fact {
+        subject,
+        kind: ENEMY,
+        pos: [x, 0, 0],
+        seen_at: now,
+        ..Fact::default()
+    };
+    out.push(format!(
+        "{:?}",
+        sq.observe_traced(0, enemy(10, 20, 0), sink)
+    ));
+    assert!(sq.report(Message::enemy(3, enemy(11, 24, 1)), 2));
+    assert!(sq.report_danger(2, [5, 5, 0], Some([9, 9, 0]), 3));
+    for now in 0..40 {
+        if now == 12 {
+            assert!(sq.group_mut().suspend(4));
+        }
+        if now == 20 {
+            out.push(format!(
+                "{:?}",
+                sq.reinstate_traced(4, now, &mut BuiltInRules, sink)
+            ));
+        }
+        if now == 25 {
+            out.push(format!(
+                "{:?}",
+                sq.signal_traced(now, &mut BuiltInRules, sink)
+            ));
+        }
+        let status = sq.check_traced(now, &[], &spots, 3, &mut BuiltInRules, sink);
+        out.push(format!("{status:?}"));
+        orders.clear();
+        sq.orders_due_traced(now, &mut orders, sink);
+        out.push(format!("{orders:?}"));
+    }
+    let made = sq.plan_traced(41, &[], &spots, 9, &mut BuiltInRules, sink);
+    out.push(format!(
+        "{made:?} {:?} {:?}",
+        sq.pending_plan(),
+        sq.active_plan()
+    ));
+    (out, sq)
+}
+
+#[test]
+fn squad_traced_calls_change_nothing() {
+    use sagax_core::NoopSink;
+    use sagax_debug::{Collector, Overflow};
+    for metric in [Metric::Chebyshev, Metric::Euclid, Metric::Hex] {
+        let (plain, a) = squad_story(metric, &mut NoopSink);
+        let mut trace = Collector::new(1 << 16, Overflow::DropNewest);
+        let (traced, b) = squad_story(metric, &mut trace);
+        assert_eq!(plain, traced, "{metric:?}");
+        assert_eq!(
+            format!("{:?}", a.knowledge()),
+            format!("{:?}", b.knowledge())
+        );
+        assert_eq!(a.leader(), b.leader());
+        let mut off: Collector<SquadTrace> = Collector::new(0, Overflow::DropNewest);
+        let (quiet, _) = squad_story(metric, &mut off);
+        assert_eq!(plain, quiet);
+        assert_eq!(off.offered(), 0, "off is off");
+        let has = |f: &dyn Fn(&SquadTrace) -> bool| trace.records().any(|r| f(&r.event));
+        assert!(has(
+            &|e| matches!(e, SquadTrace::Knowledge(crate::memory::KnowledgeTrace::Added(f)) if f.subject == 10)
+        ));
+        assert!(has(
+            &|e| matches!(e, SquadTrace::Report { msg } if msg.subject == 11)
+        ));
+        assert!(has(&|e| matches!(
+            e,
+            SquadTrace::Areas(crate::memory::AreasTrace::Added { .. })
+        )));
+        assert!(has(
+            &|e| matches!(e, SquadTrace::Delay { delay: Some(d), .. } if *d > 0)
+        ));
+        assert!(has(&|e| matches!(e, SquadTrace::Delay { member: 4, .. })));
+        assert!(has(&|e| matches!(
+            e,
+            SquadTrace::Spot {
+                event: SpotTrace::Ranked { .. },
+                ..
+            }
+        )));
+        assert!(has(&|e| matches!(e, SquadTrace::Trigger { .. })));
+        assert!(has(&|e| matches!(e, SquadTrace::Thinking { .. })));
+    }
 }

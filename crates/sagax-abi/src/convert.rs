@@ -6,8 +6,9 @@ use std::num::NonZeroUsize;
 
 use sagax_core::{HexLayout, Pos};
 use sagax_decide::group::{
-    Compare, CrewEvent, Goal, GoalKind, MemberState, Place, PlanError, PlanId, RoleCounts, Shape,
-    Side, SkillTable, Start, Status as SquadStatus,
+    Compare, CrewEvent, CrewTrace, Goal, GoalKind, KeeperTrace, MemberState, Place, PlanError,
+    PlanId, RoleCounts, Shape, Side, SkillTable, SpotPick, SpotTrace, SquadTrace, Start,
+    Status as SquadStatus,
 };
 use sagax_decide::memory::{
     Area, AreasTrace, Fact, KnowledgeTrace, Message, MessageTrace, Metric, Refused, TimersTrace,
@@ -58,6 +59,13 @@ use crate::codes::{
     SHAPE_COLUMN, SHAPE_LINE, SHAPE_WEDGE, SIDE_FRONT, SIDE_LEFT, SIDE_REAR, SIDE_RIGHT,
     SQUAD_KEEP, SQUAD_NO_PLAN, SQUAD_REPLAN, SQUAD_SIGNAL, START_AFTER_TICKS, START_NOW,
     START_ON_SIGNAL, UNREACHABLE,
+};
+use crate::codes::{
+    CREW_TRACE_KEEPER, CREW_TRACE_SENT, CREW_TRACE_SQUAD, KEEPER_TRACE_CHECKED, SQUAD_TRACE_ABORT,
+    SQUAD_TRACE_AREAS, SQUAD_TRACE_ASSIGNED, SQUAD_TRACE_DECIDE, SQUAD_TRACE_DELAY,
+    SQUAD_TRACE_KNOWLEDGE, SQUAD_TRACE_NO_PICK, SQUAD_TRACE_PICKED, SQUAD_TRACE_REPORT,
+    SQUAD_TRACE_SPOT_PICKED, SQUAD_TRACE_SPOT_RANKED, SQUAD_TRACE_TARGET, SQUAD_TRACE_THINKING,
+    SQUAD_TRACE_TRIGGER,
 };
 use crate::codes::{
     DECIDE_TRACE_CHOSEN, DECIDE_TRACE_FACTOR, DECIDE_TRACE_RANKED, DECIDE_TRACE_SCORED,
@@ -610,6 +618,253 @@ pub fn message_trace(event: MessageTrace) -> MessageTraceCode {
         },
         MessageTrace::Dropped { msg } => code(MESSAGE_TRACE_DROPPED, msg),
         MessageTrace::Delivered { msg } => code(MESSAGE_TRACE_DELIVERED, msg),
+    }
+}
+
+// ---- traces of the group ------------------------------------------------------
+
+/// `v` as `i64`, saturated.
+fn sat64(v: i128) -> i64 {
+    v.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
+/// `v` as `u32`, `u32::MAX` if it does not fit.
+fn index_u32(v: usize) -> u32 {
+    u32::try_from(v).unwrap_or(u32::MAX)
+}
+
+/// The numbers of a squad trace record (`sx_squad_trace`). Fields that do
+/// not apply to `kind` are 0 (`None`, `false`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SquadTraceCode {
+    /// `SX_SQUAD_TRACE_*`.
+    pub kind: u32,
+    /// `DECIDE`, `ABORT`, `PICKED`: the tactic.
+    pub tactic: u32,
+    /// `DECIDE`, `ABORT`, `PICKED`: the target, if any.
+    pub target: Option<u32>,
+    /// `ASSIGNED`, `SPOT_*`, `DELAY`: the member.
+    pub member: u32,
+    /// `ASSIGNED`: the slot.
+    pub slot: u32,
+    /// `ABORT`: the rule's index.
+    pub abort: u32,
+    /// `THINKING`: the plan.
+    pub plan: u32,
+    /// `THINKING`: when it becomes active.
+    pub until: u32,
+    /// `PICKED`: the score.
+    pub score: u32,
+    /// `DELAY`: the ticks until it arrives; `None` when it does not.
+    pub delay: Option<u32>,
+    /// `SPOT_RANKED`: the spot; `SPOT_PICKED`: the spot, `None` for the
+    /// unchecked wish point in `pos`.
+    pub spot: Option<u32>,
+    /// `SPOT_PICKED` without a spot: the wish point.
+    pub pos: Pos,
+    /// `ABORT`, `TRIGGER`: it fired.
+    pub fired: bool,
+    /// `TARGET`: the targets slot kept it.
+    pub kept: bool,
+    /// `SPOT_RANKED`: the spot has every wanted tag.
+    pub fits: bool,
+    /// `ASSIGNED`: the member cost (saturated).
+    pub cost: i64,
+    /// `SPOT_RANKED`: the distance from the wish point (saturated).
+    pub distance: i64,
+    /// `TARGET`: the target.
+    pub fact: Fact,
+    /// `REPORT`: the report.
+    pub msg: Message,
+    /// `DECIDE`: the decider's record.
+    pub decide: DecideTraceCode,
+    /// `KNOWLEDGE`: the knowledge record.
+    pub knowledge: KnowledgeTraceCode,
+    /// `AREAS`: the areas record.
+    pub areas: AreasTraceCode,
+}
+
+/// The numbers of a squad trace record.
+pub fn squad_trace(event: SquadTrace) -> SquadTraceCode {
+    let of = |kind| SquadTraceCode {
+        kind,
+        ..SquadTraceCode::default()
+    };
+    match event {
+        SquadTrace::Target { fact, kept } => SquadTraceCode {
+            fact,
+            kept,
+            ..of(SQUAD_TRACE_TARGET)
+        },
+        SquadTrace::Decide {
+            tactic,
+            target,
+            event,
+        } => SquadTraceCode {
+            tactic: index_u32(tactic),
+            target,
+            decide: decide_trace(event),
+            ..of(SQUAD_TRACE_DECIDE)
+        },
+        SquadTrace::Abort {
+            tactic,
+            target,
+            abort,
+            fired,
+        } => SquadTraceCode {
+            tactic: index_u32(tactic),
+            target,
+            abort: index_u32(abort),
+            fired,
+            ..of(SQUAD_TRACE_ABORT)
+        },
+        SquadTrace::Picked {
+            tactic,
+            target,
+            score,
+        } => SquadTraceCode {
+            tactic: index_u32(tactic),
+            target,
+            score,
+            ..of(SQUAD_TRACE_PICKED)
+        },
+        SquadTrace::NoPick => of(SQUAD_TRACE_NO_PICK),
+        SquadTrace::Thinking { plan, until } => SquadTraceCode {
+            plan,
+            until,
+            ..of(SQUAD_TRACE_THINKING)
+        },
+        SquadTrace::Assigned { slot, member, cost } => SquadTraceCode {
+            slot: index_u32(slot),
+            member,
+            cost: sat64(cost),
+            ..of(SQUAD_TRACE_ASSIGNED)
+        },
+        SquadTrace::Spot {
+            member,
+            event:
+                SpotTrace::Ranked {
+                    spot,
+                    fits,
+                    distance,
+                },
+        } => SquadTraceCode {
+            member,
+            spot: Some(index_u32(spot)),
+            fits,
+            distance: sat64(distance),
+            ..of(SQUAD_TRACE_SPOT_RANKED)
+        },
+        SquadTrace::Spot {
+            member,
+            event: SpotTrace::Picked(pick),
+        } => {
+            let (spot, pos) = match pick {
+                SpotPick::Spot(i) => (Some(index_u32(i)), [0; 3]),
+                SpotPick::Unchecked(p) => (None, p),
+            };
+            SquadTraceCode {
+                member,
+                spot,
+                pos,
+                ..of(SQUAD_TRACE_SPOT_PICKED)
+            }
+        }
+        SquadTrace::Trigger { fired } => SquadTraceCode {
+            fired,
+            ..of(SQUAD_TRACE_TRIGGER)
+        },
+        SquadTrace::Report { msg } => SquadTraceCode {
+            msg,
+            ..of(SQUAD_TRACE_REPORT)
+        },
+        SquadTrace::Delay { member, delay } => SquadTraceCode {
+            member,
+            delay,
+            ..of(SQUAD_TRACE_DELAY)
+        },
+        SquadTrace::Knowledge(k) => SquadTraceCode {
+            knowledge: knowledge_trace(k),
+            ..of(SQUAD_TRACE_KNOWLEDGE)
+        },
+        SquadTrace::Areas(a) => SquadTraceCode {
+            areas: areas_trace(a),
+            ..of(SQUAD_TRACE_AREAS)
+        },
+    }
+}
+
+/// The numbers of a keeper trace record (`sx_keeper_trace`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeeperTraceCode {
+    /// `SX_KEEPER_TRACE_*`.
+    pub kind: u32,
+    /// Ticks since the goal was postponed; 0 when it is not.
+    pub waited: u32,
+    /// The give-up ticks.
+    pub limit: u32,
+    /// The answer.
+    pub broken: bool,
+}
+
+/// The numbers of a keeper trace record.
+pub fn keeper_trace(event: KeeperTrace) -> KeeperTraceCode {
+    match event {
+        KeeperTrace::Checked {
+            waited,
+            limit,
+            broken,
+        } => KeeperTraceCode {
+            kind: KEEPER_TRACE_CHECKED,
+            waited,
+            limit,
+            broken,
+        },
+    }
+}
+
+/// The numbers of a crew trace record (`sx_crew_trace`). Fields that do not
+/// apply to `kind` are 0 (`None`, `false`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CrewTraceCode {
+    /// `SX_CREW_TRACE_*`.
+    pub kind: u32,
+    /// `KEEPER`: the member; `SENT`: the sender.
+    pub member: u32,
+    /// `SENT`: the ticks until it reaches the leader; `None` when never.
+    pub delay: Option<u32>,
+    /// `SENT`: the inbox took it.
+    pub queued: bool,
+    /// `SENT`: the report.
+    pub msg: Message,
+    /// `KEEPER`: the keeper's record.
+    pub keeper: KeeperTraceCode,
+    /// `SQUAD`: the squad's record.
+    pub squad: SquadTraceCode,
+}
+
+/// The numbers of a crew trace record.
+pub fn crew_trace(event: CrewTrace) -> CrewTraceCode {
+    match event {
+        CrewTrace::Squad(e) => CrewTraceCode {
+            kind: CREW_TRACE_SQUAD,
+            squad: squad_trace(e),
+            ..CrewTraceCode::default()
+        },
+        CrewTrace::Keeper { member, event } => CrewTraceCode {
+            kind: CREW_TRACE_KEEPER,
+            member,
+            keeper: keeper_trace(event),
+            ..CrewTraceCode::default()
+        },
+        CrewTrace::Sent { msg, delay, queued } => CrewTraceCode {
+            kind: CREW_TRACE_SENT,
+            member: msg.sender,
+            delay,
+            queued,
+            msg,
+            ..CrewTraceCode::default()
+        },
     }
 }
 

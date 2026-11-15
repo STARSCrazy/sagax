@@ -1,7 +1,7 @@
 //! The [`Crew`]: a [`Squad`] with one [`GoalKeeper`] per member, run as one
 //! loop per tick that reports what happened as [`CrewEvent`]s.
 
-use super::keeper::{GoalKeeper, KeeperInputs};
+use super::keeper::{GoalKeeper, KeeperInputs, KeeperTrace};
 use super::members::{Member, MemberState};
 use super::orders::{Order, Status};
 use super::rules::{
@@ -9,9 +9,49 @@ use super::rules::{
     SquadRules, SquadView,
 };
 use super::spots::Spot;
-use super::squad::{Goal, PlanError, PlanId, Squad, SquadConfig};
+use super::squad::{Goal, PlanError, PlanId, Squad, SquadConfig, SquadTrace};
 use crate::memory::{Area, Fact, Message, Metric, Pos, distance};
-use sagax_core::HexLayout;
+use sagax_core::{HexLayout, MapSink, NoopSink, Sink};
+
+/// The trace record of a [`Crew`]: what its `*_traced` calls decided
+/// ([`Crew::tick_traced`], [`Crew::observe_traced`],
+/// [`Crew::report_traced`], [`Crew::reinstate_traced`]). The
+/// [`CrewEvent`]s of a tick are not repeated here. With a hex layout the
+/// positions are offset coordinates, as the crew's other output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CrewTrace {
+    /// All squad work of the call, unchanged.
+    Squad(SquadTrace),
+    /// A keeper was checked for giving its goal up (tick step 7).
+    Keeper {
+        /// The member's id.
+        member: u32,
+        /// The keeper's record.
+        event: KeeperTrace,
+    },
+    /// The crew sent a member report to the leader over the member's
+    /// channel (tick steps 6 and 7, [`Crew::report_traced`]).
+    Sent {
+        /// The report.
+        msg: Message,
+        /// Ticks until it reaches the leader; `None`: it never arrives and
+        /// nothing was sent.
+        delay: Option<u32>,
+        /// True when the inbox took it.
+        queued: bool,
+    },
+}
+
+/// Wraps squad records for a crew: positions to offset coordinates with a
+/// hex layout.
+fn wrap(hex: Option<HexLayout>) -> impl Fn(SquadTrace) -> CrewTrace {
+    move |e| {
+        CrewTrace::Squad(match hex {
+            Some(l) => e.map_pos(|p| l.from_axial_pos(p)),
+            None => e,
+        })
+    }
+}
 
 /// Capacities and options of a [`Crew`] (see [`Crew::new`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -258,11 +298,25 @@ impl Crew {
     /// the goal goes over a [`Channel::Custom`](super::Channel::Custom) too;
     /// the slots see offset coordinates with a hex layout).
     pub fn reinstate_with(&mut self, id: u32, now: u32, rules: &mut dyn SquadRules) -> bool {
+        self.reinstate_traced(id, now, rules, &mut NoopSink)
+    }
+
+    /// [`Crew::reinstate_with`] with a trace ([`Squad::reinstate_traced`],
+    /// wrapped in [`CrewTrace::Squad`]).
+    pub fn reinstate_traced<S: Sink<CrewTrace>>(
+        &mut self,
+        id: u32,
+        now: u32,
+        rules: &mut dyn SquadRules,
+        sink: &mut S,
+    ) -> bool {
+        let mut squad = MapSink::new(sink, wrap(self.hex));
         let known = match self.hex {
-            Some(layout) => self
-                .squad
-                .reinstate_with(id, now, &mut HexRules::new(rules, layout)),
-            None => self.squad.reinstate_with(id, now, rules),
+            Some(layout) => {
+                self.squad
+                    .reinstate_traced(id, now, &mut HexRules::new(rules, layout), &mut squad)
+            }
+            None => self.squad.reinstate_traced(id, now, rules, &mut squad),
         };
         self.reinstated(id, now, known)
     }
@@ -292,11 +346,24 @@ impl Crew {
     /// The leader's own sighting ([`Squad::observe`]; offset coordinates
     /// with a hex layout). Returns the fact dropped to make room, if any.
     pub fn observe(&mut self, now: u32, fact: Fact) -> Option<Fact> {
+        self.observe_traced(now, fact, &mut NoopSink)
+    }
+
+    /// [`Crew::observe`] with a trace ([`Squad::observe_traced`], wrapped
+    /// in [`CrewTrace::Squad`]).
+    pub fn observe_traced<S: Sink<CrewTrace>>(
+        &mut self,
+        now: u32,
+        fact: Fact,
+        sink: &mut S,
+    ) -> Option<Fact> {
         let fact = Fact {
             pos: self.pos_in(fact.pos),
             ..fact
         };
-        let dropped = self.squad.observe(now, fact)?;
+        let dropped =
+            self.squad
+                .observe_traced(now, fact, &mut MapSink::new(sink, wrap(self.hex)))?;
         Some(Fact {
             pos: self.pos_out(dropped.pos),
             ..dropped
@@ -337,11 +404,23 @@ impl Crew {
     /// [`SquadRules::channel_delay`] ([`Squad::report_arrives_at_with`]).
     #[must_use]
     pub fn report_with(&mut self, now: u32, msg: Message, rules: &mut dyn SquadRules) -> bool {
+        self.report_traced(now, msg, rules, &mut NoopSink)
+    }
+
+    /// [`Crew::report_with`] with a trace: one [`CrewTrace::Sent`].
+    #[must_use]
+    pub fn report_traced<S: Sink<CrewTrace>>(
+        &mut self,
+        now: u32,
+        msg: Message,
+        rules: &mut dyn SquadRules,
+        sink: &mut S,
+    ) -> bool {
         let msg = Message {
             pos: self.pos_in(msg.pos),
             ..msg
         };
-        self.send(msg, msg.sender, now, rules)
+        self.send(msg, msg.sender, now, rules, sink)
     }
 
     /// Runs the group at `now`; `events` is cleared first and gets what
@@ -394,7 +473,7 @@ impl Crew {
         seed: u64,
         events: &mut Vec<CrewEvent>,
     ) -> Result<(), PlanError> {
-        self.run(now, extra, spots, seed, None, events)
+        self.run(now, extra, spots, seed, None, events, &mut NoopSink)
     }
 
     /// [`Crew::tick`] with the game's rules, in the same steps: step 2 is
@@ -417,12 +496,31 @@ impl Crew {
         rules: &mut dyn SquadRules,
         events: &mut Vec<CrewEvent>,
     ) -> Result<(), PlanError> {
-        self.run(now, extra, spots, seed, Some(rules), events)
+        self.run(now, extra, spots, seed, Some(rules), events, &mut NoopSink)
     }
 
-    /// [`Crew::tick_with`]; `None` is [`Crew::tick`] (built-in rules, a
+    /// [`Crew::tick_with`] with a trace: the squad's check and orders
+    /// ([`CrewTrace::Squad`]), the keeper checks of step 7
+    /// ([`CrewTrace::Keeper`]) and the reports of steps 6 and 7
+    /// ([`CrewTrace::Sent`]), in the order of the steps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tick_traced<S: Sink<CrewTrace>>(
+        &mut self,
+        now: u32,
+        extra: &[i32],
+        spots: &[Spot],
+        seed: u64,
+        rules: &mut dyn SquadRules,
+        events: &mut Vec<CrewEvent>,
+        sink: &mut S,
+    ) -> Result<(), PlanError> {
+        self.run(now, extra, spots, seed, Some(rules), events, sink)
+    }
+
+    /// [`Crew::tick_traced`]; `None` is [`Crew::tick`] (built-in rules, a
     /// squad that needs rules refused).
-    fn run(
+    #[allow(clippy::too_many_arguments)]
+    fn run<S: Sink<CrewTrace>>(
         &mut self,
         now: u32,
         extra: &[i32],
@@ -430,6 +528,7 @@ impl Crew {
         seed: u64,
         rules: Option<&mut dyn SquadRules>,
         events: &mut Vec<CrewEvent>,
+        sink: &mut S,
     ) -> Result<(), PlanError> {
         events.clear();
         self.sync_seats();
@@ -452,12 +551,23 @@ impl Crew {
                     ..*s
                 }));
                 let mut hex = HexRules::new(&mut *rules, layout);
-                self.squad
-                    .check_with(now, extra, &self.spots, seed, &mut hex)?
+                self.squad.check_traced(
+                    now,
+                    extra,
+                    &self.spots,
+                    seed,
+                    &mut hex,
+                    &mut MapSink::new(&mut *sink, wrap(self.hex)),
+                )?
             }
-            None => self
-                .squad
-                .check_with(now, extra, spots, seed, &mut *rules)?,
+            None => self.squad.check_traced(
+                now,
+                extra,
+                spots,
+                seed,
+                &mut *rules,
+                &mut MapSink::new(&mut *sink, wrap(None)),
+            )?,
         };
         match status {
             Status::Replan(id) => events.push(CrewEvent::Planned(id)),
@@ -483,7 +593,11 @@ impl Crew {
         }
         let live = self.squad.active_plan().map(|p| p.id);
 
-        self.squad.orders_due(now, &mut self.orders);
+        self.squad.orders_due_traced(
+            now,
+            &mut self.orders,
+            &mut MapSink::new(&mut *sink, wrap(self.hex)),
+        );
         for i in 0..self.orders.len() {
             let order = self.orders[i];
             let start_at = order.goal.start_tick(now);
@@ -526,7 +640,13 @@ impl Crew {
             if !seat.arrived
                 && goal.awaits_arrival()
                 && goal.pos.is_some_and(|p| self.within_radius(member.pos, p))
-                && self.send(Message::arrived(seat.id, goal.plan), seat.id, now, rules)
+                && self.send(
+                    Message::arrived(seat.id, goal.plan),
+                    seat.id,
+                    now,
+                    rules,
+                    sink,
+                )
             {
                 self.seats[i].arrived = true;
                 events.push(CrewEvent::Arrived { member: seat.id });
@@ -542,13 +662,20 @@ impl Crew {
                 continue;
             };
             let give_up = self.squad.skill_table().give_up_ticks_for(member.skill);
-            if !seat.broken
-                && seat.keeper.broken(now, give_up)
+            if seat.broken {
+                continue;
+            }
+            let mut keeper = MapSink::new(&mut *sink, |event| CrewTrace::Keeper {
+                member: seat.id,
+                event,
+            });
+            if seat.keeper.broken_traced(now, give_up, &mut keeper)
                 && self.send(
                     Message::goal_broken(seat.id, goal.plan),
                     seat.id,
                     now,
                     rules,
+                    sink,
                 )
             {
                 self.seats[i].broken = true;
@@ -651,7 +778,14 @@ impl Crew {
 
     /// Sends a member report at the time it reaches the leader; true when
     /// it is on its way, or when it can never arrive (nothing to send).
-    fn send(&mut self, msg: Message, id: u32, now: u32, rules: &mut dyn SquadRules) -> bool {
+    fn send<S: Sink<CrewTrace>>(
+        &mut self,
+        msg: Message,
+        id: u32,
+        now: u32,
+        rules: &mut dyn SquadRules,
+        sink: &mut S,
+    ) -> bool {
         let at = match self.hex {
             Some(layout) => {
                 self.squad
@@ -659,10 +793,18 @@ impl Crew {
             }
             None => self.squad.report_arrives_at_with(id, now, rules),
         };
-        match at {
-            Some(at) => self.squad.report(msg, at),
-            None => true,
+        let queued = at.is_some_and(|at| self.squad.report(msg, at));
+        if sink.enabled() {
+            sink.emit(CrewTrace::Sent {
+                msg: Message {
+                    pos: self.pos_out(msg.pos),
+                    ..msg
+                },
+                delay: at.map(|t| t.wrapping_sub(now)),
+                queued,
+            });
         }
+        at.is_none() || queued
     }
 
     fn within_radius(&self, at: Pos, spot: Pos) -> bool {

@@ -1,18 +1,22 @@
 //! `sx_squad_*`, `sx_tactic_*`, `sx_keeper_*`, `sx_gather`: group tactics,
 //! see `sagax.h`.
 
+use sagax_abi::convert::{KeeperTraceCode, SquadTraceCode};
 use sagax_decide::group::{
-    Abort, Channel, Goal, GoalKeeper, Member, MemberState, Nearby, Order, Place, Plan, PlanError,
-    SkillTable, Slot, Spot, Squad, SquadConfig, Tactic, Trigger, gather, tactics,
+    Abort, BuiltInRules, Channel, Goal, GoalKeeper, KeeperTrace, Member, MemberState, Nearby,
+    Order, Place, Plan, PlanError, SkillTable, Slot, Spot, Squad, SquadConfig, SquadTrace, Tactic,
+    Trigger, gather, tactics,
 };
 use sagax_decide::{Consideration, Curve, Decider};
 use std::ffi::c_void;
 
 use super::crew::SxCrew;
 use super::decide::{SxConsideration, SxDecideTrace, SxDecider};
-use super::memory::{SxArea, SxAreas, SxFact, SxKnowledge, SxMessage, pos3, put};
+use super::memory::{
+    SxArea, SxAreas, SxAreasTrace, SxFact, SxKnowledge, SxKnowledgeTrace, SxMessage, pos3, put,
+};
 use super::rules::{CRules, SxSquadRules};
-use super::{ERROR_ARGUMENT, create, destroy, guarded, slice_of, to_i32};
+use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, guarded, set_trace, slice_of, to_i32};
 use sagax_abi::convert;
 use sagax_decide::memory::{Areas, Knowledge, Metric};
 
@@ -709,6 +713,9 @@ pub struct SxSquad {
     /// The areas handle lent by `sx_squad_areas` (null until asked), freed
     /// with the squad.
     pub(crate) areas: *mut SxAreas,
+    /// Where `sx_squad_set_trace` sends the records of the calls through
+    /// this handle.
+    pub(crate) trace: TraceSlot<SxSquadTrace>,
 }
 
 impl Drop for SxSquad {
@@ -818,6 +825,7 @@ pub unsafe extern "C" fn sx_squad_new(config: *const SxSquadConfig) -> *mut SxSq
             decider: std::ptr::null_mut(),
             knowledge: std::ptr::null_mut(),
             areas: std::ptr::null_mut(),
+            trace: None,
         })
     })
 }
@@ -896,7 +904,8 @@ pub unsafe extern "C" fn sx_squad_suspend(squad: *mut SxSquad, id: u32) -> i32 {
 /// `squad` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_reinstate(squad: *mut SxSquad, id: u32, now: u32) -> i32 {
-    i32::from(squad!(squad).reinstate(id, now))
+    // SAFETY: see above; no rules.
+    unsafe { sx_squad_reinstate_with(squad, id, now, std::ptr::null()) }
 }
 
 /// `sx_squad_reinstate_with`: the goal goes over a custom channel too.
@@ -910,12 +919,26 @@ pub unsafe extern "C" fn sx_squad_reinstate_with(
     now: u32,
     rules: *const SxSquadRules,
 ) -> i32 {
-    let s = &mut squad!(squad);
+    let h = get!(squad);
+    let trace = h.trace;
+    let s = &mut *h.squad;
     // SAFETY: null or valid (see above).
     let mut rules = unsafe { CRules::of(rules) };
-    guarded(|| match rules.as_mut() {
-        Some(r) => i32::from(s.reinstate_with(id, now, r)),
-        None => i32::from(s.reinstate(id, now)),
+    guarded(|| {
+        let known = match rules.as_mut() {
+            Some(r) => traced!(trace, SxSquadTrace::of, |sink| s
+                .reinstate_traced(id, now, r, sink)),
+            // Without rules such a squad does not activate a due plan: the
+            // plain call, untraced.
+            None if s.needs_rules() => s.reinstate(id, now),
+            None => traced!(trace, SxSquadTrace::of, |sink| s.reinstate_traced(
+                id,
+                now,
+                &mut BuiltInRules,
+                sink
+            )),
+        };
+        i32::from(known)
     })
 }
 
@@ -1209,64 +1232,126 @@ pub unsafe extern "C" fn sx_squad_decider(squad: *mut SxSquad) -> *mut SxDecider
     s.decider
 }
 
-/// `sx_score_event`.
+/// `sx_squad_trace`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SxScoreEvent {
-    /// Index of the tactic.
+pub struct SxSquadTrace {
+    /// `SX_SQUAD_TRACE_*`.
+    pub kind: u32,
+    /// `DECIDE`, `ABORT`, `PICKED`: the tactic.
     pub tactic: u32,
-    /// The target's subject id (when `has_target`).
+    /// `DECIDE`, `ABORT`, `PICKED`: the target, if `has_target`.
     pub target: u32,
+    /// `ASSIGNED`, `SPOT_*`, `DELAY`: the member.
+    pub member: u32,
+    /// `ASSIGNED`: the slot.
+    pub slot: u32,
+    /// `ABORT`: the rule's index.
+    pub abort: u32,
+    /// `THINKING`: the plan.
+    pub plan: u32,
+    /// `THINKING`: when it becomes active.
+    pub until: u32,
+    /// `PICKED`: the score.
+    pub score: u32,
+    /// `DELAY`: the ticks until it arrives, if `has_delay`.
+    pub delay: u32,
+    /// `SPOT_*`: the spot's index, if `has_spot`.
+    pub spot: u32,
+    /// `SPOT_PICKED` without a spot: the unchecked wish point.
+    pub pos: [i32; 3],
     /// 1 if `target` is set.
     pub has_target: u8,
-    /// The event; its candidate is the index in the candidate list.
-    pub event: SxDecideTrace,
+    /// 1 if `delay` is set (0: the order does not reach the member).
+    pub has_delay: u8,
+    /// 1 if `spot` is set.
+    pub has_spot: u8,
+    /// `ABORT`, `TRIGGER`: 1 when it fired.
+    pub fired: u8,
+    /// `TARGET`: 1 when the targets slot kept it.
+    pub kept: u8,
+    /// `SPOT_RANKED`: 1 when the spot has every wanted tag.
+    pub fits: u8,
+    /// `ASSIGNED`: the member cost (saturated).
+    pub cost: i64,
+    /// `SPOT_RANKED`: the distance from the wish point (saturated).
+    pub distance: i64,
+    /// `TARGET`: the target.
+    pub fact: SxFact,
+    /// `REPORT`: the report.
+    pub msg: SxMessage,
+    /// `DECIDE`: the decider's record.
+    pub decide: SxDecideTrace,
+    /// `KNOWLEDGE`: the knowledge record.
+    pub knowledge: SxKnowledgeTrace,
+    /// `AREAS`: the areas record.
+    pub areas: SxAreasTrace,
 }
 
-/// `sx_squad_set_score_log`.
-///
-/// # Safety
-/// `squad` is null or valid.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_squad_set_score_log(squad: *mut SxSquad, on: u32) -> i32 {
-    squad!(squad).set_score_log(on != 0);
-    0
-}
-
-/// `sx_squad_score_log`: returns how many events were written; `total` (may
-/// be null) gets the number of all of them.
-///
-/// # Safety
-/// `squad` is null or valid; `out` is null or has room for `cap` events;
-/// `total` is null or writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_squad_score_log(
-    squad: *mut SxSquad,
-    out: *mut SxScoreEvent,
-    cap: u32,
-    total: *mut u32,
-) -> i32 {
-    let s = &mut squad!(squad);
-    if out.is_null() && cap > 0 {
-        return ERROR_ARGUMENT;
-    }
-    let log = s.score_log();
-    let mut written = 0usize;
-    for (i, e) in log.iter().take(cap as usize).enumerate() {
-        // SAFETY: within `cap` (see above).
-        unsafe {
-            out.add(i).write(SxScoreEvent {
-                tactic: u32::try_from(e.tactic).unwrap_or(u32::MAX),
-                target: e.target.unwrap_or(0),
-                has_target: u8::from(e.target.is_some()),
-                event: SxDecideTrace::of(e.event),
-            });
+impl SxSquadTrace {
+    pub(crate) fn of_code(c: SquadTraceCode) -> Self {
+        Self {
+            kind: c.kind,
+            tactic: c.tactic,
+            target: c.target.unwrap_or_default(),
+            member: c.member,
+            slot: c.slot,
+            abort: c.abort,
+            plan: c.plan,
+            until: c.until,
+            score: c.score,
+            delay: c.delay.unwrap_or_default(),
+            spot: c.spot.unwrap_or_default(),
+            pos: c.pos,
+            has_target: u8::from(c.target.is_some()),
+            has_delay: u8::from(c.delay.is_some()),
+            has_spot: u8::from(c.spot.is_some()),
+            fired: u8::from(c.fired),
+            kept: u8::from(c.kept),
+            fits: u8::from(c.fits),
+            cost: c.cost,
+            distance: c.distance,
+            fact: c.fact,
+            msg: c.msg,
+            decide: SxDecideTrace::of_code(c.decide),
+            knowledge: SxKnowledgeTrace {
+                kind: c.knowledge.kind,
+                fact: c.knowledge.fact,
+            },
+            areas: SxAreasTrace {
+                kind: c.areas.kind,
+                index: c.areas.index,
+                area: c.areas.area,
+            },
         }
-        written += 1;
     }
-    // SAFETY: null or writable (see above).
-    unsafe { put(total, u32::try_from(log.len()).unwrap_or(u32::MAX)) };
-    to_i32(written)
+
+    /// The record of a squad trace.
+    pub fn of(event: SquadTrace) -> Self {
+        Self::of_code(convert::squad_trace(event))
+    }
+}
+
+/// `sx_squad_trace_fn`.
+pub type SquadTraceFn = unsafe extern "C" fn(*mut c_void, *const SxSquadTrace);
+
+/// `sx_squad_set_trace`.
+///
+/// # Safety
+/// `squad` is null or valid; `trace` and `context` stay valid while tracing
+/// is on.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_trace(
+    squad: *mut SxSquad,
+    trace: Option<SquadTraceFn>,
+    context: *mut c_void,
+) -> i32 {
+    // SAFETY: see above.
+    set_trace(
+        unsafe { squad.as_mut() }.map(|s| &mut s.trace),
+        trace,
+        context,
+    )
 }
 
 /// `sx_squad_set_shout`.
@@ -1450,8 +1535,13 @@ pub unsafe extern "C" fn sx_squad_observe(
     fact: *const SxFact,
     evicted: *mut SxFact,
 ) -> i32 {
-    let s = &mut squad!(squad);
-    match s.observe(now, *input!(fact)) {
+    let h = get!(squad);
+    let trace = h.trace;
+    let s = &mut *h.squad;
+    let fact = *input!(fact);
+    match traced!(trace, SxSquadTrace::of, |sink| s
+        .observe_traced(now, fact, sink))
+    {
         Some(gone) => {
             // SAFETY: see above.
             unsafe { put(evicted, gone) };
@@ -1796,7 +1886,9 @@ pub unsafe extern "C" fn sx_squad_plan_with(
     rules: *const SxSquadRules,
     plan: *mut u32,
 ) -> i32 {
-    let s = &mut squad!(squad);
+    let h = get!(squad);
+    let trace = h.trace;
+    let s = &mut *h.squad;
     // SAFETY: see above.
     let Some((extra, spots)) = (unsafe { lists(extra, extra_count, spots, spot_count) }) else {
         return ERROR_ARGUMENT;
@@ -1805,8 +1897,17 @@ pub unsafe extern "C" fn sx_squad_plan_with(
     let mut rules = unsafe { CRules::of(rules) };
     guarded(|| {
         let made = match rules.as_mut() {
-            Some(r) => s.plan_with(now, extra, spots, seed, r),
-            None => s.plan(now, extra, spots, seed),
+            Some(r) => traced!(trace, SxSquadTrace::of, |sink| s
+                .plan_traced(now, extra, spots, seed, r, sink)),
+            None if s.needs_rules() => Err(PlanError::NeedsRules),
+            None => traced!(trace, SxSquadTrace::of, |sink| s.plan_traced(
+                now,
+                extra,
+                spots,
+                seed,
+                &mut BuiltInRules,
+                sink
+            )),
         };
         match made {
             Ok(Some(id)) => {
@@ -1871,7 +1972,9 @@ pub unsafe extern "C" fn sx_squad_check_with(
     rules: *const SxSquadRules,
     plan: *mut u32,
 ) -> i32 {
-    let s = &mut squad!(squad);
+    let h = get!(squad);
+    let trace = h.trace;
+    let s = &mut *h.squad;
     // SAFETY: see above.
     let Some((extra, spots)) = (unsafe { lists(extra, extra_count, spots, spot_count) }) else {
         return ERROR_ARGUMENT;
@@ -1880,8 +1983,17 @@ pub unsafe extern "C" fn sx_squad_check_with(
     let mut rules = unsafe { CRules::of(rules) };
     guarded(|| {
         let checked = match rules.as_mut() {
-            Some(r) => s.check_with(now, extra, spots, seed, r),
-            None => s.check(now, extra, spots, seed),
+            Some(r) => traced!(trace, SxSquadTrace::of, |sink| s
+                .check_traced(now, extra, spots, seed, r, sink)),
+            None if s.needs_rules() => Err(PlanError::NeedsRules),
+            None => traced!(trace, SxSquadTrace::of, |sink| s.check_traced(
+                now,
+                extra,
+                spots,
+                seed,
+                &mut BuiltInRules,
+                sink
+            )),
         };
         match checked.map(convert::squad_status) {
             Ok((code, id)) => {
@@ -1913,7 +2025,9 @@ pub unsafe extern "C" fn sx_squad_orders_due(
     if (out.is_null() && cap > 0) || s.squad.is_lent() {
         return ERROR_ARGUMENT;
     }
-    s.squad.orders_due(now, &mut s.due);
+    traced!(s.trace, SxSquadTrace::of, |sink| s
+        .squad
+        .orders_due_traced(now, &mut s.due, sink));
     // Orders held back from an earlier call may be stale by now: drop those
     // of another plan and of members no longer active.
     let squad = &s.squad;
@@ -1940,7 +2054,8 @@ pub unsafe extern "C" fn sx_squad_orders_due(
 /// `squad` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_signal(squad: *mut SxSquad, now: u32) -> i32 {
-    i32::from(squad!(squad).signal(now))
+    // SAFETY: see above; no rules.
+    unsafe { sx_squad_signal_with(squad, now, std::ptr::null()) }
 }
 
 /// `sx_squad_signal_with`: the signal over custom channels too.
@@ -1953,12 +2068,23 @@ pub unsafe extern "C" fn sx_squad_signal_with(
     now: u32,
     rules: *const SxSquadRules,
 ) -> i32 {
-    let s = &mut squad!(squad);
+    let h = get!(squad);
+    let trace = h.trace;
+    let s = &mut *h.squad;
     // SAFETY: null or valid (see above).
     let mut rules = unsafe { CRules::of(rules) };
-    guarded(|| match rules.as_mut() {
-        Some(r) => i32::from(s.signal_with(now, r)),
-        None => i32::from(s.signal(now)),
+    guarded(|| {
+        let given = match rules.as_mut() {
+            Some(r) => traced!(trace, SxSquadTrace::of, |sink| s
+                .signal_traced(now, r, sink)),
+            None if s.needs_rules() => false,
+            None => traced!(trace, SxSquadTrace::of, |sink| s.signal_traced(
+                now,
+                &mut BuiltInRules,
+                sink
+            )),
+        };
+        i32::from(given)
     })
 }
 
@@ -2048,8 +2174,60 @@ pub unsafe extern "C" fn sx_squad_active_plan(
 
 // ---- keeper -------------------------------------------------------------------
 
-/// `sx_keeper`.
-pub struct SxKeeper(pub(crate) Held<GoalKeeper>);
+/// `sx_keeper`: the keeper and where `sx_keeper_set_trace` sends its
+/// records.
+pub struct SxKeeper(
+    pub(crate) Held<GoalKeeper>,
+    pub(crate) TraceSlot<SxKeeperTrace>,
+);
+
+/// `sx_keeper_trace`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SxKeeperTrace {
+    /// `SX_KEEPER_TRACE_*`.
+    pub kind: u32,
+    /// Ticks since the goal was postponed; 0 when it is not.
+    pub waited: u32,
+    /// The give-up ticks it was checked against.
+    pub limit: u32,
+    /// 1 when the goal counts as broken.
+    pub broken: u8,
+}
+
+impl SxKeeperTrace {
+    pub(crate) fn of_code(c: KeeperTraceCode) -> Self {
+        Self {
+            kind: c.kind,
+            waited: c.waited,
+            limit: c.limit,
+            broken: u8::from(c.broken),
+        }
+    }
+
+    /// The record of a keeper trace.
+    pub fn of(event: KeeperTrace) -> Self {
+        Self::of_code(convert::keeper_trace(event))
+    }
+}
+
+/// `sx_keeper_trace_fn`.
+pub type KeeperTraceFn = unsafe extern "C" fn(*mut c_void, *const SxKeeperTrace);
+
+/// `sx_keeper_set_trace`.
+///
+/// # Safety
+/// `keeper` is null or valid; `trace` and `context` stay valid while
+/// tracing is on.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_keeper_set_trace(
+    keeper: *mut SxKeeper,
+    trace: Option<KeeperTraceFn>,
+    context: *mut c_void,
+) -> i32 {
+    // SAFETY: see above.
+    set_trace(unsafe { keeper.as_mut() }.map(|k| &mut k.1), trace, context)
+}
 
 /// The keeper behind a handle, or `ERROR_ARGUMENT` (also for a stale lent
 /// one).
@@ -2065,7 +2243,7 @@ macro_rules! keeper {
 /// `sx_keeper_new`.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_keeper_new() -> *mut SxKeeper {
-    create(|| Some(SxKeeper(Held::Own(GoalKeeper::new()))))
+    create(|| Some(SxKeeper(Held::Own(GoalKeeper::new()), None)))
 }
 
 /// `sx_keeper_free`: does nothing for a keeper lent by a crew.
@@ -2181,7 +2359,13 @@ pub unsafe extern "C" fn sx_keeper_broken(
     now: u32,
     give_up_ticks: u32,
 ) -> i32 {
-    i32::from(keeper!(keeper).broken(now, give_up_ticks))
+    let trace = get!(keeper).1;
+    let k = keeper!(keeper);
+    i32::from(traced!(trace, SxKeeperTrace::of, |sink| k.broken_traced(
+        now,
+        give_up_ticks,
+        sink
+    )))
 }
 
 /// `sx_keeper_inputs`.

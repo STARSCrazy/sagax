@@ -1431,24 +1431,71 @@ int32_t sx_squad_skill_table(sx_squad *squad, sx_skill_table *out);
  * Null for a null squad. */
 sx_decider *sx_squad_decider(sx_squad *squad);
 
-/* One event of the last scoring in sx_squad_plan or sx_squad_check. */
-typedef struct sx_score_event {
-	uint32_t tactic;            /* the tactic's index */
-	uint32_t target;            /* the candidate's target (subject id), if has_target */
-	uint8_t has_target;         /* 0 for a tactic without a target */
-	sx_decide_trace event;      /* SX_DECIDE_TRACE_FACTOR or _SCORED; candidate is the
-	                             * index in the candidate list (tactic order, then target
-	                             * order) */
-} sx_score_event;
+/* What the squad's calls did (since version 12): sx_squad_observe,
+ * sx_squad_plan, sx_squad_check, sx_squad_orders_due, sx_squad_signal,
+ * sx_squad_reinstate and their _with forms. A plan or check sends, in order:
+ * the orders that go out (DELAY), the reports it reads (REPORT, then what
+ * they did to knowledge and areas), the expired danger areas (AREAS), the
+ * targets slot's answer per known target (TARGET), the abort rules of the
+ * active row (check) and of each candidate (ABORT), the decider records of each
+ * candidate (DECIDE: FACTOR and SCORED; candidate is the index in the
+ * candidate list, tactic order, then target order), then PICKED or NO_PICK,
+ * the slot assignment (ASSIGNED), the spot ranking of each member that
+ * wants a spot (SPOT_RANKED best first, then SPOT_PICKED) and THINKING.
+ * Fields that do not apply to kind are 0. */
+#define SX_SQUAD_TRACE_TARGET      1   /* fact: a known target; kept 1 if the targets slot kept it */
+#define SX_SQUAD_TRACE_DECIDE      2   /* decide: a decider record of tactic (and target) */
+#define SX_SQUAD_TRACE_ABORT       3   /* abort rule abort of tactic (and target): fired 1 or 0 */
+#define SX_SQUAD_TRACE_PICKED      4   /* the new plan's tactic (and target) with score */
+#define SX_SQUAD_TRACE_NO_PICK     5   /* every candidate scored 0 */
+#define SX_SQUAD_TRACE_THINKING    6   /* plan becomes active at until */
+#define SX_SQUAD_TRACE_ASSIGNED    7   /* member takes slot at cost (saturated) */
+#define SX_SQUAD_TRACE_SPOT_RANKED 8   /* member's spot: fits 1 if it has every wanted tag;
+                                        * distance from the wish point (saturated) */
+#define SX_SQUAD_TRACE_SPOT_PICKED 9   /* member goes to spot (has_spot 1) or to the
+                                        * unchecked wish point pos (has_spot 0) */
+#define SX_SQUAD_TRACE_TRIGGER     10  /* the active plan's trigger: fired 1 or 0 */
+#define SX_SQUAD_TRACE_REPORT      11  /* msg: a report the leader reads */
+#define SX_SQUAD_TRACE_DELAY       12  /* an order or report to or from member arrives in
+                                        * delay ticks (has_delay 0: never) */
+#define SX_SQUAD_TRACE_KNOWLEDGE   13  /* knowledge: what it did to the leader's knowledge */
+#define SX_SQUAD_TRACE_AREAS       14  /* areas: what it did to the danger areas */
 
-/* Switch the score log on (on != 0) or off (default; off clears it).
- * Returns 0. */
-int32_t sx_squad_set_score_log(sx_squad *squad, uint32_t on);
-/* The events of the last scoring in plan or check (cleared at its start;
- * empty while off): the first cap go to out (may be null if cap is 0).
- * Returns how many were written; total (may be null) gets how many there
- * are. */
-int32_t sx_squad_score_log(sx_squad *squad, sx_score_event *out, uint32_t cap, uint32_t *total);
+typedef struct sx_squad_trace {
+	uint32_t kind;              /* SX_SQUAD_TRACE_* */
+	uint32_t tactic;            /* DECIDE, ABORT, PICKED */
+	uint32_t target;            /* DECIDE, ABORT, PICKED: if has_target */
+	uint32_t member;            /* ASSIGNED, SPOT_*, DELAY */
+	uint32_t slot;              /* ASSIGNED */
+	uint32_t abort;             /* ABORT: the rule's index */
+	uint32_t plan;              /* THINKING */
+	uint32_t until;             /* THINKING */
+	uint32_t score;             /* PICKED */
+	uint32_t delay;             /* DELAY: if has_delay */
+	uint32_t spot;              /* SPOT_*: the spot's index, if has_spot */
+	int32_t pos[3];             /* SPOT_PICKED without a spot: the wish point */
+	uint8_t has_target;
+	uint8_t has_delay;
+	uint8_t has_spot;           /* 1 for every SPOT_RANKED */
+	uint8_t fired;              /* ABORT, TRIGGER */
+	uint8_t kept;               /* TARGET */
+	uint8_t fits;               /* SPOT_RANKED */
+	int64_t cost;               /* ASSIGNED */
+	int64_t distance;           /* SPOT_RANKED */
+	sx_fact fact;               /* TARGET */
+	sx_message msg;             /* REPORT */
+	sx_decide_trace decide;     /* DECIDE */
+	sx_knowledge_trace knowledge; /* KNOWLEDGE */
+	sx_areas_trace areas;       /* AREAS */
+} sx_squad_trace;
+
+/* trace gets every record of the calls above on squad, with context; NULL
+ * turns it off (the default). For sx_crew_squad it covers the calls made
+ * through that handle only; the crew's own work goes to sx_crew_set_trace.
+ * Without rules a squad that needs them refuses plan and check (nothing is
+ * traced) and reinstates untraced. Returns 0. */
+typedef void (*sx_squad_trace_fn)(void *context, const sx_squad_trace *trace);
+int32_t sx_squad_set_trace(sx_squad *squad, sx_squad_trace_fn trace, void *context);
 /* How orders (and reports) reach the member; the default is radio 0, 0: at
  * once. The leader always has its own orders at once. Distances run from the
  * leader in the squad's metric (Euclid: the root). Each returns 1, or 0 if
@@ -1918,6 +1965,23 @@ int32_t sx_keeper_unsuspend(sx_keeper *keeper, uint32_t now);
 /* Return 1 once the goal has been postponed for at least give_up_ticks
  * (give_up_ticks of the member's skill level), never while suspended. */
 int32_t sx_keeper_broken(sx_keeper *keeper, uint32_t now, uint32_t give_up_ticks);
+
+/* What sx_keeper_broken did (since version 12): one record per call. */
+#define SX_KEEPER_TRACE_CHECKED 1  /* waited ticks since the goal was postponed (0 when
+                                    * it is not) against limit; broken: the answer */
+
+typedef struct sx_keeper_trace {
+	uint32_t kind;              /* SX_KEEPER_TRACE_* */
+	uint32_t waited;
+	uint32_t limit;             /* give_up_ticks */
+	uint8_t broken;
+} sx_keeper_trace;
+
+/* trace gets every record of sx_keeper_broken on keeper, with context; NULL
+ * turns it off (the default). For sx_crew_keeper it covers the calls made
+ * through that handle only (it stays set while the handle does). Returns 0. */
+typedef void (*sx_keeper_trace_fn)(void *context, const sx_keeper_trace *trace);
+int32_t sx_keeper_set_trace(sx_keeper *keeper, sx_keeper_trace_fn trace, void *context);
 /* The member's decider inputs at x, y, z to out (room for 5): has_goal,
  * dist_to_goal (in metric SX_METRIC_*, Euclid the root; -1 without a goal
  * or pos), goal_age (saturated), signal_given (0 or 1), discipline (see
@@ -2098,6 +2162,37 @@ int32_t sx_crew_goal(sx_crew *crew, uint32_t id, sx_goal *out);
  * squad returns SX_ERROR_ARGUMENT. Null for a null crew or an unknown id. */
 sx_squad *sx_crew_squad(sx_crew *crew);
 sx_keeper *sx_crew_keeper(sx_crew *crew, uint32_t id);
+
+/* What the crew's calls did (since version 12): sx_crew_observe,
+ * sx_crew_tick, sx_crew_reinstate, sx_crew_report and their _with forms.
+ * The squad's records come wrapped in SQUAD (with hex_grid in offset
+ * coordinates), each keeper check of a tick in KEEPER, each report the crew
+ * sends (its own and the game's) in SENT. Fields that do not apply to kind
+ * are 0. */
+#define SX_CREW_TRACE_SQUAD  1     /* squad: a record of the crew's squad */
+#define SX_CREW_TRACE_KEEPER 2     /* keeper: the check of member's keeper */
+#define SX_CREW_TRACE_SENT   3     /* member (msg.sender) sent msg; it arrives in delay
+                                    * ticks (has_delay 0: never, it was dropped); queued
+                                    * 1 when the inbox took it */
+
+typedef struct sx_crew_trace {
+	uint32_t kind;              /* SX_CREW_TRACE_* */
+	uint32_t member;            /* KEEPER, SENT */
+	uint32_t delay;             /* SENT: if has_delay */
+	uint8_t has_delay;
+	uint8_t queued;             /* SENT */
+	sx_message msg;             /* SENT */
+	sx_keeper_trace keeper;     /* KEEPER */
+	sx_squad_trace squad;       /* SQUAD */
+} sx_crew_trace;
+
+/* trace gets every record of the calls above on crew, with context; NULL
+ * turns it off (the default). Calls through sx_crew_squad and sx_crew_keeper
+ * go to their own traces, not to this one. Without rules a crew whose squad
+ * needs them refuses the tick (nothing is traced) and reinstates untraced.
+ * Returns 0. */
+typedef void (*sx_crew_trace_fn)(void *context, const sx_crew_trace *trace);
+int32_t sx_crew_set_trace(sx_crew *crew, sx_crew_trace_fn trace, void *context);
 
 /* -- goal and report helpers -- */
 
@@ -2745,8 +2840,35 @@ _Static_assert(offsetof(sx_slot, gather_dist) == 72, "sx_slot.gather_dist layout
 _Static_assert(sizeof(sx_skill_table) == 204, "sx_skill_table layout");
 _Static_assert(offsetof(sx_skill_table, hold_bonus) == 132, "sx_skill_table.hold_bonus layout");
 _Static_assert(offsetof(sx_skill_table, spot_rank_error) == 196, "sx_skill_table.spot_rank_error layout");
-_Static_assert(sizeof(sx_score_event) == 48, "sx_score_event layout");
-_Static_assert(offsetof(sx_score_event, event) == 12, "sx_score_event.event layout");
+_Static_assert(sizeof(sx_squad_trace) == 296, "sx_squad_trace layout");
+_Static_assert(offsetof(sx_squad_trace, tactic) == 4, "sx_squad_trace.tactic layout");
+_Static_assert(offsetof(sx_squad_trace, target) == 8, "sx_squad_trace.target layout");
+_Static_assert(offsetof(sx_squad_trace, member) == 12, "sx_squad_trace.member layout");
+_Static_assert(offsetof(sx_squad_trace, slot) == 16, "sx_squad_trace.slot layout");
+_Static_assert(offsetof(sx_squad_trace, abort) == 20, "sx_squad_trace.abort layout");
+_Static_assert(offsetof(sx_squad_trace, plan) == 24, "sx_squad_trace.plan layout");
+_Static_assert(offsetof(sx_squad_trace, until) == 28, "sx_squad_trace.until layout");
+_Static_assert(offsetof(sx_squad_trace, score) == 32, "sx_squad_trace.score layout");
+_Static_assert(offsetof(sx_squad_trace, delay) == 36, "sx_squad_trace.delay layout");
+_Static_assert(offsetof(sx_squad_trace, spot) == 40, "sx_squad_trace.spot layout");
+_Static_assert(offsetof(sx_squad_trace, pos) == 44, "sx_squad_trace.pos layout");
+_Static_assert(offsetof(sx_squad_trace, has_target) == 56, "sx_squad_trace.has_target layout");
+_Static_assert(offsetof(sx_squad_trace, has_delay) == 57, "sx_squad_trace.has_delay layout");
+_Static_assert(offsetof(sx_squad_trace, has_spot) == 58, "sx_squad_trace.has_spot layout");
+_Static_assert(offsetof(sx_squad_trace, fired) == 59, "sx_squad_trace.fired layout");
+_Static_assert(offsetof(sx_squad_trace, kept) == 60, "sx_squad_trace.kept layout");
+_Static_assert(offsetof(sx_squad_trace, fits) == 61, "sx_squad_trace.fits layout");
+_Static_assert(offsetof(sx_squad_trace, cost) == 64, "sx_squad_trace.cost layout");
+_Static_assert(offsetof(sx_squad_trace, distance) == 72, "sx_squad_trace.distance layout");
+_Static_assert(offsetof(sx_squad_trace, fact) == 80, "sx_squad_trace.fact layout");
+_Static_assert(offsetof(sx_squad_trace, msg) == 116, "sx_squad_trace.msg layout");
+_Static_assert(offsetof(sx_squad_trace, decide) == 156, "sx_squad_trace.decide layout");
+_Static_assert(offsetof(sx_squad_trace, knowledge) == 192, "sx_squad_trace.knowledge layout");
+_Static_assert(offsetof(sx_squad_trace, areas) == 232, "sx_squad_trace.areas layout");
+_Static_assert(sizeof(sx_keeper_trace) == 16, "sx_keeper_trace layout");
+_Static_assert(offsetof(sx_keeper_trace, waited) == 4, "sx_keeper_trace.waited layout");
+_Static_assert(offsetof(sx_keeper_trace, limit) == 8, "sx_keeper_trace.limit layout");
+_Static_assert(offsetof(sx_keeper_trace, broken) == 12, "sx_keeper_trace.broken layout");
 _Static_assert(sizeof(sx_goal) == 68, "sx_goal layout");
 _Static_assert(offsetof(sx_goal, pos) == 8, "sx_goal.pos layout");
 _Static_assert(offsetof(sx_goal, then_pos) == 20, "sx_goal.then_pos layout");
@@ -2777,6 +2899,14 @@ _Static_assert(sizeof(sx_crew_event) == 88, "sx_crew_event layout");
 _Static_assert(offsetof(sx_crew_event, start_at) == 12, "sx_crew_event.start_at layout");
 _Static_assert(offsetof(sx_crew_event, goal) == 16, "sx_crew_event.goal layout");
 _Static_assert(offsetof(sx_crew_event, has_start_at) == 84, "sx_crew_event.has_start_at layout");
+_Static_assert(sizeof(sx_crew_trace) == 368, "sx_crew_trace layout");
+_Static_assert(offsetof(sx_crew_trace, member) == 4, "sx_crew_trace.member layout");
+_Static_assert(offsetof(sx_crew_trace, delay) == 8, "sx_crew_trace.delay layout");
+_Static_assert(offsetof(sx_crew_trace, has_delay) == 12, "sx_crew_trace.has_delay layout");
+_Static_assert(offsetof(sx_crew_trace, queued) == 13, "sx_crew_trace.queued layout");
+_Static_assert(offsetof(sx_crew_trace, msg) == 16, "sx_crew_trace.msg layout");
+_Static_assert(offsetof(sx_crew_trace, keeper) == 56, "sx_crew_trace.keeper layout");
+_Static_assert(offsetof(sx_crew_trace, squad) == 72, "sx_crew_trace.squad layout");
 _Static_assert(sizeof(sx_place_ctx) == 72, "sx_place_ctx layout");
 _Static_assert(offsetof(sx_place_ctx, dist) == 12, "sx_place_ctx.dist layout");
 _Static_assert(offsetof(sx_place_ctx, leader) == 16, "sx_place_ctx.leader layout");

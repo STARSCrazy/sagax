@@ -1,5 +1,6 @@
 use super::tactic::{Place, Side};
 use crate::memory::{Metric, Pos, distance};
+use sagax_core::{NoopSink, Sink};
 
 /// A candidate position with tag bits (cover, high, hidden, choke, ... as
 /// the game defines them). Laid out as C's `sx_spot`.
@@ -19,6 +20,25 @@ pub enum SpotPick {
     Spot(usize),
     /// No free spot: the wish point itself, not checked by the game.
     Unchecked(Pos),
+}
+
+/// The trace record of [`pick_spot_traced`] (and, wrapped in
+/// [`SquadTrace::Spot`](super::SquadTrace::Spot), of a squad's spot picks).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SpotTrace {
+    /// A spot in the ranking, in rank order (best first): every free spot
+    /// within the radius that may be used.
+    Ranked {
+        /// Index of the spot in the caller's list.
+        spot: usize,
+        /// True when it has every wanted tag.
+        fits: bool,
+        /// Its distance from the wish point in the metric (x and y; squared
+        /// for [`Metric::Euclid`]).
+        distance: i128,
+    },
+    /// The result, after the skill's rank skip.
+    Picked(SpotPick),
 }
 
 /// sin 45° times 65536, rounded (as `sine(32, Sine::Fine)`).
@@ -215,6 +235,31 @@ pub fn pick_spot(
     metric: Metric,
     radius: i64,
 ) -> SpotPick {
+    pick_spot_traced(
+        wish,
+        want_tags,
+        spots,
+        taken,
+        skip,
+        metric,
+        radius,
+        &mut NoopSink,
+    )
+}
+
+/// [`pick_spot`] with a trace: [`SpotTrace::Ranked`] for every spot of the
+/// ranking in rank order, then [`SpotTrace::Picked`] with the result.
+#[allow(clippy::too_many_arguments)]
+pub fn pick_spot_traced<S: Sink<SpotTrace>>(
+    wish: Pos,
+    want_tags: u32,
+    spots: &[Spot],
+    taken: &[bool],
+    skip: u8,
+    metric: Metric,
+    radius: i64,
+    sink: &mut S,
+) -> SpotPick {
     let limit = if metric == Metric::Euclid {
         i128::from(radius) * i128::from(radius)
     } else {
@@ -228,23 +273,39 @@ pub fn pick_spot(
     };
     // Select rank by rank, each the smallest key above the previous one;
     // no allocation, and `skip` is small.
-    let mut picked = None;
-    for _ in 0..=skip {
-        let next = spots
+    let next = |after: Option<(bool, i128, usize)>| {
+        spots
             .iter()
             .enumerate()
             .filter(|&(i, _)| !taken.get(i).copied().unwrap_or(false))
             .map(|(i, s)| key(i, s))
             .filter(|k| radius >= 0 && k.1 <= limit)
-            .filter(|k| picked.is_none_or(|p| *k > p))
-            .min();
-        match next {
+            .filter(|k| after.is_none_or(|p| *k > p))
+            .min()
+    };
+    let mut picked = None;
+    for _ in 0..=skip {
+        match next(picked) {
             Some(k) => picked = Some(k),
             None => break,
         }
     }
-    match picked {
+    let pick = match picked {
         Some((_, _, i)) => SpotPick::Spot(i),
         None => SpotPick::Unchecked(wish),
+    };
+    if sink.enabled() {
+        // The whole ranking, only for the trace.
+        let mut at = None;
+        while let Some(k) = next(at) {
+            sink.emit(SpotTrace::Ranked {
+                spot: k.2,
+                fits: !k.0,
+                distance: k.1,
+            });
+            at = Some(k);
+        }
+        sink.emit(SpotTrace::Picked(pick));
     }
+    pick
 }
