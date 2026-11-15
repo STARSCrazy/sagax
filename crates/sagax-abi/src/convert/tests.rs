@@ -359,8 +359,18 @@ fn mission_outputs() {
         channel: 2,
         kind: 3,
         pos: [4, 5, 0],
+        motive: Motive::defeat(9),
     });
-    assert_eq!((e.a, e.b, e.pos), (2, 3, Some([4, 5, 0])));
+    assert_eq!(
+        (e.kind, e.a, e.b, e.pos, e.motive),
+        (
+            MISSION_EVENT_CALL,
+            2,
+            3,
+            Some([4, 5, 0]),
+            Some(Motive::defeat(9))
+        )
+    );
     let e = mission_event(Event::DetourEnded(DetourEnd::Arrived));
     assert_eq!(
         (e.kind, e.a),

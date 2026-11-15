@@ -3036,7 +3036,8 @@ mod conventions {
                 pos,
                 has_pos,
                 has_subject,
-                fail
+                fail,
+                motive
             ),
             layout!("sx_mission_out", SxMissionOut, event_count, events),
             layout!(
@@ -4436,6 +4437,24 @@ mod mission {
         let last = t.trace.last().unwrap().action;
         assert_eq!((last.kind, last.subject), (ACTION_ATTACK, THIEF));
         assert_eq!((last.pos, last.has_pos), ([13, 6, 0], 1));
+    }
+
+    #[test]
+    fn call_carries_the_motive() {
+        let mut t = twin(LEEWAY_FREE);
+        let steps = [c_step(STEP_CALL, 2, 3, SxWhere::default()), c_go(EAST)];
+        assert_eq!(
+            unsafe { sx_mission_set_plan(t.c, steps.as_ptr(), 2, 0, null(), 0) },
+            0
+        );
+        t.r.set_plan(&Plan::once(&[Step::call(2, 3), Step::go_to(EAST)]))
+            .unwrap();
+        t.tick(0);
+        let calls = t.events(MISSION_EVENT_CALL);
+        assert_eq!(calls.len(), 1);
+        assert_eq!((calls[0].a, calls[0].b), (2, 3));
+        assert_eq!((calls[0].pos, calls[0].has_pos), ([3, 2, 0], 1));
+        assert_eq!(calls[0].motive, guard_motive());
     }
 
     /// What the C callbacks saw, and what they answer.

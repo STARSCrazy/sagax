@@ -249,7 +249,7 @@ impl Mission {
     /// ([`BreakReason::PlanEnded`]). A plan that ends in a `Wander` step
     /// wanders instead (no replan) until a condition of the plan fires.
     /// `Call` and `Squad` steps emit [`Event::Call`] (with the character's
-    /// position) and [`Event::WantsSquad`] when the character may widen
+    /// position and motive) and [`Event::WantsSquad`] when the character may widen
     /// ([`Leeway::replan`] and [`Leeway::widen`]); else they only count as
     /// done.
     ///
@@ -369,6 +369,7 @@ impl Mission {
                 channel,
                 kind,
                 pos: self.pos_out(view.pos),
+                motive: self.motive,
             }),
             StepKind::Squad { tactic, target } if widen => {
                 let pos = self.resolve(target, view).map(|p| self.pos_out(p));

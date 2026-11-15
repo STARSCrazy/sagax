@@ -375,6 +375,8 @@ pub struct SxMissionEvent {
     pub has_subject: u8,
     /// `BROKEN` with `SX_BREAK_FAIL`: the condition that fired.
     pub fail: SxFail,
+    /// `CALL`: the caller's motive.
+    pub motive: SxMotive,
 }
 
 /// `sx_mission_out`.
@@ -849,6 +851,7 @@ pub(crate) fn event_of(e: sagax_decide::mission::Event) -> SxMissionEvent {
         has_pos: u8::from(c.pos.is_some()),
         has_subject: u8::from(c.subject.is_some()),
         fail: c.fail.map(SxFail::of).unwrap_or_default(),
+        motive: c.motive.map(SxMotive::of).unwrap_or_default(),
     }
 }
 

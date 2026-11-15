@@ -2168,7 +2168,8 @@ typedef struct sx_mission_action {
 #define SX_MISSION_EVENT_DETOUR_ENDED   7  /* a = SX_DETOUR_END_* */
 #define SX_MISSION_EVENT_RETURNED       8  /* back at the anchor, the plan resumes */
 #define SX_MISSION_EVENT_SIGNAL         9  /* signal a was given */
-#define SX_MISSION_EVENT_CALL           10 /* call on channel a, kind b, from pos */
+#define SX_MISSION_EVENT_CALL           10 /* call on channel a, kind b, from pos, with
+                                            * the caller's motive */
 #define SX_MISSION_EVENT_WANTS_SQUAD    11 /* squad tactic a, against pos (has_pos) or
                                             * subject (has_subject) */
 
@@ -2194,6 +2195,7 @@ typedef struct sx_mission_event {
 	uint8_t has_pos;
 	uint8_t has_subject;
 	sx_fail fail;               /* BROKEN with SX_BREAK_FAIL */
+	sx_motive motive;           /* CALL: the caller's motive (since version 12) */
 } sx_mission_event;
 
 /* What one tick gives: the action and the events in order. */
@@ -2584,13 +2586,14 @@ _Static_assert(offsetof(sx_mission_action, pos) == 4, "sx_mission_action.pos lay
 _Static_assert(offsetof(sx_mission_action, subject) == 16, "sx_mission_action.subject layout");
 _Static_assert(offsetof(sx_mission_action, param) == 24, "sx_mission_action.param layout");
 _Static_assert(offsetof(sx_mission_action, has_pos) == 28, "sx_mission_action.has_pos layout");
-_Static_assert(sizeof(sx_mission_event) == 72, "sx_mission_event layout");
+_Static_assert(sizeof(sx_mission_event) == 104, "sx_mission_event layout");
 _Static_assert(offsetof(sx_mission_event, subject) == 12, "sx_mission_event.subject layout");
 _Static_assert(offsetof(sx_mission_event, pos) == 16, "sx_mission_event.pos layout");
 _Static_assert(offsetof(sx_mission_event, has_pos) == 28, "sx_mission_event.has_pos layout");
 _Static_assert(offsetof(sx_mission_event, has_subject) == 29, "sx_mission_event.has_subject layout");
 _Static_assert(offsetof(sx_mission_event, fail) == 32, "sx_mission_event.fail layout");
-_Static_assert(sizeof(sx_mission_out) == 616, "sx_mission_out layout");
+_Static_assert(offsetof(sx_mission_event, motive) == 72, "sx_mission_event.motive layout");
+_Static_assert(sizeof(sx_mission_out) == 872, "sx_mission_out layout");
 _Static_assert(offsetof(sx_mission_out, event_count) == 32, "sx_mission_out.event_count layout");
 _Static_assert(offsetof(sx_mission_out, events) == 40, "sx_mission_out.events layout");
 _Static_assert(sizeof(sx_mission_fail_ctx) == 60, "sx_mission_fail_ctx layout");

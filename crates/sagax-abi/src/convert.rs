@@ -11,8 +11,8 @@ use sagax_decide::group::{
 };
 use sagax_decide::memory::Metric;
 use sagax_decide::mission::{
-    Action, BreakReason, Detour, DetourEnd, Event, Fail, Leeway, MotiveKind, OnLost, StepKind,
-    Where,
+    Action, BreakReason, Detour, DetourEnd, Event, Fail, Leeway, Motive, MotiveKind, OnLost,
+    StepKind, Where,
 };
 use sagax_decide::{Combine, Decider, Pick};
 use sagax_nav::nav::{Budget, Output, Status};
@@ -777,6 +777,8 @@ pub struct MissionEventCode {
     pub subject: Option<u32>,
     /// `BROKEN` with `SX_BREAK_FAIL`: the condition that fired.
     pub fail: Option<Fail>,
+    /// `CALL`: the caller's motive.
+    pub motive: Option<Motive>,
 }
 
 /// The numbers of a mission event.
@@ -789,6 +791,7 @@ pub const fn mission_event(event: Event) -> MissionEventCode {
             pos: None,
             subject: None,
             fail: None,
+            motive: None,
         }
     }
     match event {
@@ -818,9 +821,15 @@ pub const fn mission_event(event: Event) -> MissionEventCode {
         ),
         Event::Returned => of(MISSION_EVENT_RETURNED, 0),
         Event::Signal(n) => of(MISSION_EVENT_SIGNAL, n),
-        Event::Call { channel, kind, pos } => MissionEventCode {
+        Event::Call {
+            channel,
+            kind,
+            pos,
+            motive,
+        } => MissionEventCode {
             b: kind,
             pos: Some(pos),
+            motive: Some(motive),
             ..of(MISSION_EVENT_CALL, channel)
         },
         Event::WantsSquad {

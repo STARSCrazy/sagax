@@ -668,6 +668,8 @@ pub enum Event {
         kind: u32,
         /// Where the caller is.
         pos: Pos,
+        /// The caller's motive at the time of the call.
+        motive: Motive,
     },
     /// The mission wants a squad tactic.
     WantsSquad {

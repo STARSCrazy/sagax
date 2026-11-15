@@ -1539,6 +1539,7 @@ fn widening_emits_call() {
             Step::hold(Where::MotivePlace)
         ]
     );
+    let motive = m.motive();
     let out = m.tick(1, [1, 0, 0], &k, 0);
     assert_eq!(
         out.events(),
@@ -1546,7 +1547,8 @@ fn widening_emits_call() {
             Event::Call {
                 channel: 0,
                 kind: 0,
-                pos: [1, 0, 0]
+                pos: [1, 0, 0],
+                motive,
             },
             Event::StepDone(0)
         ]
