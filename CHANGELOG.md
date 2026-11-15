@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.12.0 (unreleased)
+
+The mission's open small items. A call for help now names the caller's
+motive, a game can see why a replan took a plan, and the C interface reads
+back the motive, the leeway and the running plan. **C API version 12.**
+`SX_API_VERSION` is 12, so a game built with the new header refuses an
+older library; `sx_mission_event` and `sx_mission_out` grew (see below).
+
+### New
+
+- **Traced replanning:** `Mission::tick_traced(now, pos, knowledge, flags,
+  rules, sink)` takes a `sagax_core::Sink<MissionTraceEvent>`, like
+  `Decider::decide_traced`; `tick_with` is `tick_traced` with `NoopSink`, so
+  an untraced tick costs nothing extra. Each replan scoring sends, per
+  candidate in option order, its row (`MissionTraceEvent::Column`), its
+  considerations (`Factor`) and its score (`Scored`: product, the decider's
+  score and the score after the `score` slot), then the winner (`Picked`,
+  `None` when every candidate scored 0; `MissionTraceEvent` is in the
+  prelude). The events are plain data, so
+  `sagax_debug::Collector` keeps them. A trace never changes an action or
+  an event.
+- **C:** `sx_mission_set_trace(mission, fn, context)` in the style of
+  `sx_decider_set_trace` (`NULL` turns it off) with
+  `sx_mission_trace_event` and the codes `SX_MISSION_TRACE_COLUMN`,
+  `_FACTOR`, `_SCORED`, `_PICKED`.
+- **C getters:** `sx_mission_motive`, `sx_mission_leeway` and
+  `sx_mission_plan` (the summary in `sx_mission_plan_info`: step count,
+  `repeat`, the plan's conditions; the first `cap` steps into the caller's
+  buffer, as `sx_mission_set_plan` takes them). They read what
+  `Mission::motive`, `leeway` and `plan` give in Rust.
+- `sagax-abi`: `where_code` and `step_kind_code` (the inverses of `where_of`
+  and `step_kind`), `mission_trace_event`.
+
+### Changed
+
+- **`Event::Call` carries the caller's motive** (`motive: Motive`, the
+  motive at the time of the call); the C `sx_mission_event` gains
+  `sx_motive motive` (valid for `SX_MISSION_EVENT_CALL`). The struct grows
+  from 72 to 104 bytes and `sx_mission_out` from 616 to 872.
+  *Migration:* a Rust `match` that names every field of `Event::Call` adds
+  `motive` (or `..`); code that builds an `Event::Call` sets it. C code
+  recompiles against the new header; nothing else changes.
+
 ## 0.11.0
 
 The mission planner. A character can now run a mission: a motive (what it

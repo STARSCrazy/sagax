@@ -1756,7 +1756,9 @@ character's position, the character's own `Knowledge` and a `u64` of
 condition bits (`flags`); it gives back one `Action` (go to, wait, follow,
 hold, attack, search, wander, flee or your own) and the `Event`s of that
 tick (step done, looped, broken, replanned, detour started and ended,
-signal, call, squad wish). The game walks and fights, and tells the mission
+signal, call, squad wish). A call (`Event::Call`) names the channel, the
+kind, where the caller stands and its motive, so whoever answers knows what
+the caller is after. The game walks and fights, and tells the mission
 when a custom step is over (`finish_step`). A step that is done hands over to
 the next within the same tick, but at most one step change happens per tick,
 so a plan of many `Signal` steps needs several ticks.
@@ -1905,6 +1907,33 @@ candidate, `FailCtx::candidate` is its option (`None` for the running
 plan). `PlanCtx` and `FailCtx` are in the prelude, the mission's
 `BuiltInRules` as `MissionBuiltInRules`.
 
+### Why did it take that plan?
+
+`Mission::tick_traced` is `tick_with` with a `sagax_core::Sink` of
+`MissionTraceEvent`s, the same pattern as `Decider::decide_traced`. Each
+replan scoring sends, per candidate in option order, its row
+(`Column { option, column, value }`, after your `columns` slot), the
+decider's considerations (`Factor { option, consideration, input, value }`)
+and its score (`Scored { option, product, built_in, score }`: `built_in` is
+the decider's, `score` what your `score` slot made of it), then the winner
+(`Picked { option, score }`, `None` when all scored 0 and the fallback
+applies). A tick that does not replan sends nothing; a character holding
+after a fallback may score twice in one tick. The actions and events are the
+same with or without a sink, and `NoopSink` (what `tick` and `tick_with`
+use) costs nothing.
+
+```rust
+use sagax::debug::{Collector, Overflow};
+
+let mut log = Collector::new(512, Overflow::DropOldest);
+let out = mission.tick_traced(now, pos, &knowledge, flags, &mut MissionBuiltInRules, &mut log);
+for r in log.records() {
+    if let MissionTraceEvent::Scored { option, built_in, score, .. } = r.event {
+        println!("plan {option}: decider {built_in}, final {score}");
+    }
+}
+```
+
 ### C
 
 ```c
@@ -1934,8 +1963,34 @@ sx_mission_free(m);
 
 The rules are `sx_mission_rules` (callbacks `fail`, `columns`, `score`, all
 optional) lent to `sx_mission_tick_with`. `sx_mission_detour` returns 1 if
-the detour was taken and 0 if it was refused. JavaScript has no mission
-binding yet.
+the detour was taken and 0 if it was refused. A `SX_MISSION_EVENT_CALL`
+carries the caller's motive in `motive`.
+
+`sx_mission_motive` and `sx_mission_leeway` read back what is set;
+`sx_mission_plan` reads the plan that runs (or ran last, also a playbook,
+default or fallback plan) in the form `sx_mission_set_plan` takes:
+
+```c
+sx_mission_plan_info info;
+sx_step steps[16];
+if (sx_mission_plan(m, &info, steps, 16) == 1)       /* 0: no plan yet */
+    show_plan(steps, info.step_count < 16 ? info.step_count : 16, info.repeat);
+```
+
+`sx_mission_set_trace(m, on_trace, ctx)` sends every replan scoring to a
+callback, one `sx_mission_trace_event` at a time (`kind` is
+`SX_MISSION_TRACE_COLUMN`, `_FACTOR`, `_SCORED` or `_PICKED`; `NULL` turns it
+off), as `sx_decider_set_trace` does for a decider:
+
+```c
+static void on_trace(void *ctx, const sx_mission_trace_event *e) {
+	if (e->kind == SX_MISSION_TRACE_SCORED)
+		log_plan(ctx, e->option, e->built_in, e->score);
+}
+sx_mission_set_trace(m, on_trace, my_log);
+```
+
+JavaScript has no mission binding yet.
 
 ### Hex
 

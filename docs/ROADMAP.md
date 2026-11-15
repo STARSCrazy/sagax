@@ -19,11 +19,6 @@
   scores from a playbook, and a mission would run them unchanged. A
   **JavaScript binding** of the mission follows on demand. *Perception*
   (below) is the natural knowledge source for the characters' `Knowledge`.
-- **Missions, open small items:** `Event::Call` carries no motive (the game
-  knows the caller's motive and can look it up); replan scoring has no traced
-  variant yet (like the decider's events, to see why a plan won); the C
-  interface has no getters for the running plan, the motive and the leeway
-  (`Mission::plan`, `motive`, `leeway` exist only in Rust).
 - **Next slim item:** the remaining per-layer duplicates in C and WASM (the
   tactic builder, the add-abort and slot codecs, `sine_of`, the route rule
   decoders) move to `sagax-abi`. `sx_spot_ctx` may gain separate miss and
