@@ -352,12 +352,12 @@ fn mission_outputs() {
         (a.kind, a.pos, a.subject),
         (ACTION_ATTACK, Some([1, 2, 0]), 3)
     );
-    let e = mission_event(Event::Broken(BreakReason::Fail(Fail::Custom(2))));
+    let e = mission_event(MissionEvent::Broken(BreakReason::Fail(Fail::Custom(2))));
     assert_eq!(
         (e.kind, e.a, e.fail),
         (MISSION_EVENT_BROKEN, BREAK_FAIL, Some(Fail::Custom(2)))
     );
-    let e = mission_event(Event::WantsSquad {
+    let e = mission_event(MissionEvent::WantsSquad {
         tactic: 1,
         target: None,
         subject: Some(7),
@@ -366,7 +366,7 @@ fn mission_outputs() {
         (e.kind, e.a, e.pos, e.subject),
         (MISSION_EVENT_WANTS_SQUAD, 1, None, Some(7))
     );
-    let e = mission_event(Event::Call {
+    let e = mission_event(MissionEvent::Call {
         channel: 2,
         kind: 3,
         pos: [4, 5, 0],
@@ -382,52 +382,173 @@ fn mission_outputs() {
             Some(Motive::defeat(9))
         )
     );
-    let e = mission_event(Event::DetourEnded(DetourEnd::Arrived));
+    let e = mission_event(MissionEvent::DetourEnded(DetourEnd::Arrived));
     assert_eq!(
         (e.kind, e.a),
         (MISSION_EVENT_DETOUR_ENDED, DETOUR_END_ARRIVED)
     );
-    assert_eq!(mission_event(Event::StepDone(3)).a, 3);
+    assert_eq!(mission_event(MissionEvent::StepDone(3)).a, 3);
 }
 
 #[test]
-fn mission_trace_events() {
-    let c = mission_trace_event(MissionTraceEvent::Column {
+fn mission_trace_codes() {
+    let c = mission_trace(MissionTrace::Column {
         option: 2,
         column: 5,
         value: -7,
     });
     assert_eq!(
-        (c.kind, c.option, c.index, c.input),
-        (MISSION_TRACE_COLUMN, Some(2), 5, -7)
+        c,
+        MissionTraceCode {
+            kind: MISSION_TRACE_COLUMN,
+            option: Some(2),
+            column: 5,
+            value: -7,
+            ..MissionTraceCode::default()
+        }
     );
-    let f = mission_trace_event(MissionTraceEvent::Factor {
-        option: 1,
+    let factor = DecideTrace::Factor {
+        candidate: 0,
         consideration: 3,
         input: 9,
         value: 100,
+    };
+    let d = mission_trace(MissionTrace::Decide {
+        option: 1,
+        event: factor,
     });
     assert_eq!(
-        (f.kind, f.option, f.index, f.input, f.value),
-        (MISSION_TRACE_FACTOR, Some(1), 3, 9, 100)
+        d,
+        MissionTraceCode {
+            kind: MISSION_TRACE_DECIDE,
+            option: Some(1),
+            decide: decide_trace(factor),
+            ..MissionTraceCode::default()
+        }
     );
-    let s = mission_trace_event(MissionTraceEvent::Scored {
+    let r = mission_trace(MissionTrace::Rescored {
         option: 8,
-        product: 10,
         built_in: 20,
         score: 30,
     });
     assert_eq!(
-        (s.kind, s.option, s.index, s.value, s.built_in, s.score),
-        (MISSION_TRACE_SCORED, Some(8), -1, 10, 20, 30)
+        (r.kind, r.option, r.built_in, r.score),
+        (MISSION_TRACE_RESCORED, Some(8), 20, 30)
     );
-    let p = mission_trace_event(MissionTraceEvent::Picked {
+    let p = mission_trace(MissionTrace::Picked {
         option: None,
         score: 0,
     });
     assert_eq!(
-        (p.kind, p.option, p.index, p.score),
-        (MISSION_TRACE_PICKED, None, -1, 0)
+        p,
+        MissionTraceCode {
+            kind: MISSION_TRACE_PICKED,
+            ..MissionTraceCode::default()
+        }
+    );
+    let b = mission_trace(MissionTrace::Begin {
+        index: 2,
+        at: Some([4, 5, 0]),
+    });
+    assert_eq!(
+        (b.kind, b.option, b.index, b.at),
+        (MISSION_TRACE_BEGIN, None, 2, Some([4, 5, 0]))
+    );
+    let none = mission_trace(MissionTrace::Begin { index: 0, at: None });
+    assert_eq!(none.at, None);
+}
+
+#[test]
+fn decide_trace_codes() {
+    let f = decide_trace(DecideTrace::Factor {
+        candidate: 4,
+        consideration: 1,
+        input: -3,
+        value: 77,
+    });
+    assert_eq!(
+        f,
+        DecideTraceCode {
+            kind: DECIDE_TRACE_FACTOR,
+            candidate: 4,
+            consideration: 1,
+            input: -3,
+            value: 77,
+            ..DecideTraceCode::default()
+        }
+    );
+    let s = decide_trace(DecideTrace::Scored {
+        candidate: 2,
+        product: 10,
+        score: 0,
+        cooled: true,
+    });
+    assert_eq!(
+        s,
+        DecideTraceCode {
+            kind: DECIDE_TRACE_SCORED,
+            candidate: 2,
+            product: 10,
+            cooled: true,
+            ..DecideTraceCode::default()
+        }
+    );
+    let r = decide_trace(DecideTrace::Ranked { rank: 3 });
+    assert_eq!(
+        r,
+        DecideTraceCode {
+            kind: DECIDE_TRACE_RANKED,
+            rank: 3,
+            ..DecideTraceCode::default()
+        }
+    );
+    let c = decide_trace(DecideTrace::Chosen {
+        candidate: 1,
+        score: 9,
+    });
+    assert_eq!((c.kind, c.candidate, c.score), (DECIDE_TRACE_CHOSEN, 1, 9));
+}
+
+#[test]
+fn state_trace_codes() {
+    let changed = state_trace(StateTrace::Changed(Change {
+        from: 1,
+        to: 2,
+        reason: Reason::Transition(3),
+    }));
+    assert_eq!(
+        changed,
+        StateTraceCode {
+            kind: MACHINE_TRACE_CHANGED,
+            change: ChangeCode {
+                from: 1,
+                to: 2,
+                reason: REASON_TRANSITION,
+                transition: 3,
+            },
+            ..StateTraceCode::default()
+        }
+    );
+    let timeout = change(Change {
+        from: 0,
+        to: 1,
+        reason: Reason::Timeout,
+    });
+    assert_eq!((timeout.reason, timeout.transition), (REASON_TIMEOUT, -1));
+    let waiting = state_trace(StateTrace::Waiting {
+        transition: 2,
+        elapsed: 3,
+        after: 10,
+    });
+    assert_eq!(
+        waiting,
+        StateTraceCode {
+            kind: MACHINE_TRACE_WAITING,
+            transition: 2,
+            elapsed: 3,
+            after: 10,
+            ..StateTraceCode::default()
+        }
     );
 }
 

@@ -5,11 +5,11 @@ use super::{Activity, Hooks, Mission, View};
 use crate::memory::{Fact, Metric, Pos, distance};
 use crate::mission::rules::{MissionRules, PlanCtx};
 use crate::mission::types::{
-    Action, Event, MissionConfig, MissionError, MissionTraceEvent, MotiveKind, Plan, Step,
+    Action, MissionConfig, MissionError, MissionEvent, MissionTrace, MotiveKind, Plan, Step,
     StepKind, Where,
 };
-use crate::{Apply, Candidate, Consideration, Curve, DecideEvent, Decider, ONE, choose, mix};
-use sagax_core::Sink;
+use crate::{Apply, Candidate, Consideration, Curve, Decider, ONE, choose, mix};
+use sagax_core::{MapSink, Sink};
 
 /// Row column: 1 when the candidate's conditions hold now and its first
 /// position can be filled, else 0.
@@ -45,34 +45,6 @@ const MAX_DEFAULT_STEPS: usize = 3;
 /// Most steps of a built-in plan (the widening plan: a call, then the
 /// default plan).
 pub(super) const MAX_BUILT_IN_STEPS: usize = MAX_DEFAULT_STEPS + 1;
-
-/// Hands the decider's factors of one candidate on as mission events and
-/// keeps its product.
-struct FactorSink<'a> {
-    trace: &'a mut dyn Sink<MissionTraceEvent>,
-    option: u32,
-    product: u32,
-}
-
-impl Sink<DecideEvent> for FactorSink<'_> {
-    fn emit(&mut self, event: DecideEvent) {
-        match event {
-            DecideEvent::Factor {
-                consideration,
-                input,
-                value,
-                ..
-            } => self.trace.emit(MissionTraceEvent::Factor {
-                option: self.option,
-                consideration,
-                input,
-                value,
-            }),
-            DecideEvent::Scored { product, .. } => self.product = product,
-            DecideEvent::Chosen { .. } => {}
-        }
-    }
-}
 
 /// One playbook slot.
 #[derive(Clone, Debug)]
@@ -242,12 +214,12 @@ impl Mission {
         rules: &mut Hooks<'_>,
     ) -> Action {
         if !self.leeway.replan {
-            return self.hold_here(view);
+            return self.hold_here(view, rules);
         }
         let choice = self.pick(view, excluded, broke, rules);
-        match self.take(choice, view) {
+        match self.take(choice, view, rules) {
             Some(action) => action,
-            None => self.hold_here(view),
+            None => self.hold_here(view, rules),
         }
     }
 
@@ -260,21 +232,26 @@ impl Mission {
         rules: &mut Hooks<'_>,
     ) -> Option<Action> {
         let choice = self.pick(view, None, false, rules);
-        self.take(choice, view)
+        self.take(choice, view, rules)
     }
 
     /// Starts what [`Mission::pick`] chose: the winner
-    /// ([`Event::Replanned`]), else the default plan if it is feasible
-    /// ([`Event::FellBack`]); `None` when neither.
-    fn take(&mut self, choice: (Option<u32>, bool), view: View<'_>) -> Option<Action> {
+    /// ([`MissionEvent::Replanned`]), else the default plan if it is feasible
+    /// ([`MissionEvent::FellBack`]); `None` when neither.
+    fn take(
+        &mut self,
+        choice: (Option<u32>, bool),
+        view: View<'_>,
+        rules: &mut Hooks<'_>,
+    ) -> Option<Action> {
         match choice {
             (Some(option), _) => {
-                self.emit(Event::Replanned { option });
-                Some(self.start_option(option, view))
+                self.emit(MissionEvent::Replanned { option });
+                Some(self.start_option(option, view, rules))
             }
             (None, true) => {
-                self.emit(Event::FellBack);
-                Some(self.start_option(self.default_option(), view))
+                self.emit(MissionEvent::FellBack);
+                Some(self.start_option(self.default_option(), view, rules))
             }
             (None, false) => None,
         }
@@ -332,29 +309,27 @@ impl Mission {
             rules.columns(&ctx, &mut row[IN_EXTRA..]);
             let candidate = Candidate::new(option, 0);
             let decider = &self.replan.decider;
-            let (built_in, product) = if tracing {
+            let built_in = if tracing {
                 for (column, &value) in row.iter().enumerate() {
-                    rules.trace.emit(MissionTraceEvent::Column {
+                    rules.trace.emit(MissionTrace::Column {
                         option,
                         column,
                         value,
                     });
                 }
-                let mut sink = FactorSink {
-                    trace: &mut *rules.trace,
+                let mut sink = MapSink::new(&mut *rules.trace, |event| MissionTrace::Decide {
                     option,
-                    product: 0,
-                };
-                let built_in = decider.score_traced(0, candidate, row, &mut sink);
-                (built_in.unwrap_or(0), sink.product)
+                    event,
+                });
+                decider.score_traced(0, candidate, row, &mut sink)
             } else {
-                (decider.score(candidate, row).unwrap_or(0), 0)
-            };
+                decider.score(candidate, row)
+            }
+            .unwrap_or(0);
             let score = rules.score(&ctx, built_in).unwrap_or(built_in);
             if tracing {
-                rules.trace.emit(MissionTraceEvent::Scored {
+                rules.trace.emit(MissionTrace::Rescored {
                     option,
-                    product,
                     built_in,
                     score,
                 });
@@ -366,7 +341,7 @@ impl Mission {
         let choice = choose(&scores, self.config.pick, seed, &mut order);
         let chosen = choice.map(|c| options[c.candidate]);
         if tracing {
-            rules.trace.emit(MissionTraceEvent::Picked {
+            rules.trace.emit(MissionTrace::Picked {
                 option: chosen,
                 score: choice.map_or(0, |c| c.score),
             });
@@ -379,11 +354,11 @@ impl Mission {
     }
 
     /// Falls back to holding where the character stands.
-    pub(super) fn hold_here(&mut self, view: View<'_>) -> Action {
-        self.emit(Event::FellBack);
+    pub(super) fn hold_here(&mut self, view: View<'_>, rules: &mut Hooks<'_>) -> Action {
+        self.emit(MissionEvent::FellBack);
         self.plan.set_steps(&[Step::hold(Where::Here)], false);
         self.running_option = None;
-        let action = self.start_running(view);
+        let action = self.start_running(view, rules);
         self.fallback_hold = true;
         action
     }
@@ -410,7 +385,7 @@ impl Mission {
     }
 
     /// Copies the plan of `option` in and starts it.
-    fn start_option(&mut self, option: u32, view: View<'_>) -> Action {
+    fn start_option(&mut self, option: u32, view: View<'_>, rules: &mut Hooks<'_>) -> Action {
         let r = &self.replan;
         let plan = match r.playbook.get(option as usize) {
             Some(slot) => &slot.plan,
@@ -420,15 +395,15 @@ impl Mission {
         self.plan.copy_from(plan);
         self.running_option = Some(option);
         self.fallback_hold = false;
-        self.start_running(view)
+        self.start_running(view, rules)
     }
 
     /// The plan in `self.plan` begins now; its first action.
-    fn start_running(&mut self, view: View<'_>) -> Action {
+    fn start_running(&mut self, view: View<'_>, rules: &mut Hooks<'_>) -> Action {
         self.has_plan = true;
         self.pending_start = false;
         self.activity = Activity::Plan;
-        self.begin(0, view);
+        self.begin(0, view, rules);
         let kind = self.plan.steps()[0].kind;
         // Checked from the next tick on, like a step begun by `advance`.
         self.step_action(kind, view).unwrap_or(Action::None)

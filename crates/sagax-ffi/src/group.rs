@@ -9,7 +9,7 @@ use sagax_decide::{Consideration, Curve, Decider};
 use std::ffi::c_void;
 
 use super::crew::SxCrew;
-use super::decide::{SxConsideration, SxDecideEvent, SxDecider};
+use super::decide::{SxConsideration, SxDecideTrace, SxDecider};
 use super::memory::{SxArea, SxAreas, SxFact, SxKnowledge, SxMessage, pos3, put};
 use super::rules::{CRules, SxSquadRules};
 use super::{ERROR_ARGUMENT, create, destroy, guarded, slice_of, to_i32};
@@ -1181,7 +1181,7 @@ pub struct SxScoreEvent {
     /// 1 if `target` is set.
     pub has_target: u8,
     /// The event; its candidate is the index in the candidate list.
-    pub event: SxDecideEvent,
+    pub event: SxDecideTrace,
 }
 
 /// `sx_squad_set_score_log`.
@@ -1220,7 +1220,7 @@ pub unsafe extern "C" fn sx_squad_score_log(
                 tactic: u32::try_from(e.tactic).unwrap_or(u32::MAX),
                 target: e.target.unwrap_or(0),
                 has_target: u8::from(e.target.is_some()),
-                event: SxDecideEvent::of(e.event),
+                event: SxDecideTrace::of(e.event),
             });
         }
         written += 1;

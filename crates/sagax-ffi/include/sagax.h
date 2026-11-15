@@ -454,18 +454,26 @@ int32_t sx_decider_decide(sx_decider *decider, const sx_candidate *candidates,
                           uint32_t pick, uint32_t top, uint64_t seed,
                           uint32_t *scores, sx_choice *choice);
 
-#define SX_DECIDE_FACTOR 1   /* one consideration of one candidate */
-#define SX_DECIDE_SCORED 2   /* value: product before weight; score */
-#define SX_DECIDE_CHOSEN 3
+/* What a decision did (sx_decider_set_trace): per candidate its factors and
+ * its score, then RANKED when the ranks are mixed, then the winner. Fields
+ * that do not apply to the kind are 0. */
+#define SX_DECIDE_TRACE_FACTOR 1   /* consideration of candidate read input, gave value */
+#define SX_DECIDE_TRACE_SCORED 2   /* candidate scored score; product before the weight;
+                                    * cooled 1 if a cooldown forced the score to 0 */
+#define SX_DECIDE_TRACE_CHOSEN 3   /* candidate won with score */
+#define SX_DECIDE_TRACE_RANKED 4   /* mixed ranks: only candidates of rank take part */
 
-typedef struct sx_decide_event {
-	int32_t kind;               /* SX_DECIDE_* */
-	int32_t candidate;
-	int32_t consideration;      /* SX_DECIDE_FACTOR, else -1 */
-	int32_t input;              /* SX_DECIDE_FACTOR: raw input */
-	uint32_t value;             /* factor, or product */
-	uint32_t score;
-} sx_decide_event;
+typedef struct sx_decide_trace {
+	uint32_t kind;              /* SX_DECIDE_TRACE_* */
+	int32_t candidate;          /* FACTOR, SCORED, CHOSEN */
+	int32_t consideration;      /* FACTOR */
+	int32_t input;              /* FACTOR: the raw input */
+	uint32_t value;             /* FACTOR: the factor after its pull */
+	uint32_t score;             /* SCORED, CHOSEN */
+	uint32_t product;           /* SCORED */
+	uint32_t rank;              /* RANKED */
+	uint8_t cooled;             /* SCORED */
+} sx_decide_trace;
 
 /* ---- decisions, finer control (since version 5) ----------------------- */
 
@@ -515,7 +523,10 @@ int32_t sx_decider_set_window(sx_decider *decider, uint32_t time);
 /* After the option was done it scores 0 until time has passed (0: none). */
 int32_t sx_decider_set_cooldown(sx_decider *decider, uint32_t option, uint32_t time);
 
-typedef void (*sx_decide_trace_fn)(void *context, const sx_decide_event *event);
+/* trace gets every record of the following sx_decider_decide calls, with
+ * context; NULL turns it off (the default). On a lent decider it covers the
+ * calls made through that handle only. Returns 0. */
+typedef void (*sx_decide_trace_fn)(void *context, const sx_decide_trace *trace);
 int32_t sx_decider_set_trace(sx_decider *decider, sx_decide_trace_fn trace, void *context);
 
 /* ---- state machine (since version 6) ------------------------------------ */
@@ -551,6 +562,26 @@ int32_t sx_machine_update(sx_machine *machine, uint32_t now, uint64_t flags, sx_
 int32_t sx_machine_state(sx_machine *machine);
 int32_t sx_machine_entered(sx_machine *machine, uint32_t *entered);
 int32_t sx_machine_set_state(sx_machine *machine, uint32_t state, uint32_t now);
+
+/* What an update did (since version 12): each transition of the current
+ * state whose conditions hold but whose after has not passed yet (WAITING:
+ * why the machine does not switch), checked before the one that fires, then
+ * the change (CHANGED). Fields that do not apply to the kind are 0. */
+#define SX_MACHINE_TRACE_CHANGED 1   /* change */
+#define SX_MACHINE_TRACE_WAITING 2   /* transition: the state has run elapsed of after */
+
+typedef struct sx_machine_trace {
+	uint32_t kind;              /* SX_MACHINE_TRACE_* */
+	sx_change change;           /* CHANGED */
+	uint32_t transition;        /* WAITING: the transition's index */
+	uint32_t elapsed;           /* WAITING */
+	uint32_t after;             /* WAITING */
+} sx_machine_trace;
+
+/* trace gets every record of the following sx_machine_update calls, with
+ * context; NULL turns it off (the default). Returns 0. */
+typedef void (*sx_machine_trace_fn)(void *context, const sx_machine_trace *trace);
+int32_t sx_machine_set_trace(sx_machine *machine, sx_machine_trace_fn trace, void *context);
 
 /* ---- world memory ---------------------------------------------------------- */
 
@@ -1323,7 +1354,7 @@ typedef struct sx_score_event {
 	uint32_t tactic;            /* the tactic's index */
 	uint32_t target;            /* the candidate's target (subject id), if has_target */
 	uint8_t has_target;         /* 0 for a tactic without a target */
-	sx_decide_event event;      /* SX_DECIDE_FACTOR or SX_DECIDE_SCORED; candidate is the
+	sx_decide_trace event;      /* SX_DECIDE_TRACE_FACTOR or _SCORED; candidate is the
 	                             * index in the candidate list (tactic order, then target
 	                             * order) */
 } sx_score_event;
@@ -2464,36 +2495,46 @@ sx_decider *sx_mission_decider(sx_mission *mission);
 #define SX_MISSION_DEFAULT_PREFERENCE 32767
 #define SX_MISSION_WIDEN_PREFERENCE   49149
 
-/* Tracing a replan (since version 12): why a plan won. Each scoring sends,
- * per candidate in option order, its row (one COLUMN per column, after the
- * columns callback), its considerations (FACTOR) and its score (SCORED),
- * then the winner (PICKED). A tick may score twice (holding after a
- * fallback it looks again, then its plan breaks); a tick that does not
- * replan sends nothing. The actions and events are the same with tracing
- * on or off. */
-#define SX_MISSION_TRACE_COLUMN 0 /* column index of the candidate's row has value input */
-#define SX_MISSION_TRACE_FACTOR 1 /* consideration index read input, gave the factor value */
-#define SX_MISSION_TRACE_SCORED 2 /* value: the product before the weight (0 when a
-                                   * consideration reads beyond the row), built_in: the
-                                   * decider's score, score: after the score callback */
-#define SX_MISSION_TRACE_PICKED 3 /* the winner option and its score; has_option 0 when
-                                   * every candidate scored 0 (the fallback applies) */
+/* Tracing a mission (since version 12): why a plan won, and where each
+ * step goes. Each replan scoring sends, per candidate in option order, its
+ * row (one COLUMN per column, after the columns callback), the decider's
+ * records of it (DECIDE: its factors and its score, candidate always 0) and
+ * its score after the score callback (RESCORED), then the winner (PICKED).
+ * A tick may score twice (holding after a fallback it looks again, then its
+ * plan breaks). Each step that begins sends BEGIN. Fields that do not apply
+ * to the kind are 0. The actions and events are the same with tracing on or
+ * off. */
+#define SX_MISSION_TRACE_COLUMN   1 /* column of the candidate's row has value */
+#define SX_MISSION_TRACE_DECIDE   2 /* decide: a decider record of the candidate */
+#define SX_MISSION_TRACE_RESCORED 3 /* built_in: the decider's score (0 when a
+                                     * consideration reads beyond the row), score:
+                                     * after the score callback */
+#define SX_MISSION_TRACE_PICKED   4 /* the winner option and its score; has_option 0
+                                     * when every candidate scored 0 (the fallback
+                                     * applies) */
+#define SX_MISSION_TRACE_BEGIN    5 /* step index begins; at: the place its where
+                                     * stands for now, if has_at (0 for a step without
+                                     * one or an unknown place) */
 
-typedef struct sx_mission_trace_event {
+typedef struct sx_mission_trace {
 	uint32_t kind;              /* SX_MISSION_TRACE_* */
-	uint32_t option;            /* the candidate's decider option; valid if has_option */
-	int32_t index;              /* COLUMN: the column; FACTOR: the consideration; else -1 */
-	int32_t input;              /* COLUMN: its value; FACTOR: the raw input; else 0 */
-	uint32_t value;             /* FACTOR: the factor; SCORED: the product */
-	uint32_t built_in;          /* SCORED */
-	uint32_t score;             /* SCORED, PICKED */
+	uint32_t option;            /* COLUMN, DECIDE, RESCORED, PICKED: the candidate's
+	                             * decider option, if has_option */
+	uint32_t column;            /* COLUMN */
+	uint32_t built_in;          /* RESCORED */
+	uint32_t score;             /* RESCORED, PICKED */
+	uint32_t index;             /* BEGIN: the step */
+	int32_t value;              /* COLUMN */
+	int32_t at[3];              /* BEGIN */
 	uint8_t has_option;
-} sx_mission_trace_event;
+	uint8_t has_at;
+	sx_decide_trace decide;     /* DECIDE */
+} sx_mission_trace;
 
-/* trace gets every event of every replan scoring of the following ticks,
- * with context; NULL turns it off (the default). trace must not call any
- * function on the same mission. Returns 0. */
-typedef void (*sx_mission_trace_fn)(void *context, const sx_mission_trace_event *event);
+/* trace gets every record of the following ticks, with context; NULL turns
+ * it off (the default). trace must not call any function on the same
+ * mission. Returns 0. */
+typedef void (*sx_mission_trace_fn)(void *context, const sx_mission_trace *trace);
 int32_t sx_mission_set_trace(sx_mission *mission, sx_mission_trace_fn trace, void *context);
 
 #ifdef __cplusplus
@@ -2539,10 +2580,22 @@ _Static_assert(sizeof(sx_candidate) == 8, "sx_candidate layout");
 _Static_assert(offsetof(sx_candidate, target) == 4, "sx_candidate.target layout");
 _Static_assert(sizeof(sx_choice) == 8, "sx_choice layout");
 _Static_assert(offsetof(sx_choice, score) == 4, "sx_choice.score layout");
-_Static_assert(sizeof(sx_decide_event) == 24, "sx_decide_event layout");
-_Static_assert(offsetof(sx_decide_event, score) == 20, "sx_decide_event.score layout");
+_Static_assert(sizeof(sx_decide_trace) == 36, "sx_decide_trace layout");
+_Static_assert(offsetof(sx_decide_trace, candidate) == 4, "sx_decide_trace.candidate layout");
+_Static_assert(offsetof(sx_decide_trace, consideration) == 8, "sx_decide_trace.consideration layout");
+_Static_assert(offsetof(sx_decide_trace, input) == 12, "sx_decide_trace.input layout");
+_Static_assert(offsetof(sx_decide_trace, value) == 16, "sx_decide_trace.value layout");
+_Static_assert(offsetof(sx_decide_trace, score) == 20, "sx_decide_trace.score layout");
+_Static_assert(offsetof(sx_decide_trace, product) == 24, "sx_decide_trace.product layout");
+_Static_assert(offsetof(sx_decide_trace, rank) == 28, "sx_decide_trace.rank layout");
+_Static_assert(offsetof(sx_decide_trace, cooled) == 32, "sx_decide_trace.cooled layout");
 _Static_assert(sizeof(sx_change) == 16, "sx_change layout");
 _Static_assert(offsetof(sx_change, transition) == 12, "sx_change.transition layout");
+_Static_assert(sizeof(sx_machine_trace) == 32, "sx_machine_trace layout");
+_Static_assert(offsetof(sx_machine_trace, change) == 4, "sx_machine_trace.change layout");
+_Static_assert(offsetof(sx_machine_trace, transition) == 20, "sx_machine_trace.transition layout");
+_Static_assert(offsetof(sx_machine_trace, elapsed) == 24, "sx_machine_trace.elapsed layout");
+_Static_assert(offsetof(sx_machine_trace, after) == 28, "sx_machine_trace.after layout");
 _Static_assert(sizeof(sx_fact) == 36, "sx_fact layout");
 _Static_assert(offsetof(sx_fact, pos) == 8, "sx_fact.pos layout");
 _Static_assert(offsetof(sx_fact, seen_at) == 20, "sx_fact.seen_at layout");
@@ -2595,7 +2648,7 @@ _Static_assert(offsetof(sx_slot, gather_dist) == 72, "sx_slot.gather_dist layout
 _Static_assert(sizeof(sx_skill_table) == 204, "sx_skill_table layout");
 _Static_assert(offsetof(sx_skill_table, hold_bonus) == 132, "sx_skill_table.hold_bonus layout");
 _Static_assert(offsetof(sx_skill_table, spot_rank_error) == 196, "sx_skill_table.spot_rank_error layout");
-_Static_assert(sizeof(sx_score_event) == 36, "sx_score_event layout");
+_Static_assert(sizeof(sx_score_event) == 48, "sx_score_event layout");
 _Static_assert(offsetof(sx_score_event, event) == 12, "sx_score_event.event layout");
 _Static_assert(sizeof(sx_goal) == 68, "sx_goal layout");
 _Static_assert(offsetof(sx_goal, pos) == 8, "sx_goal.pos layout");
@@ -2721,10 +2774,17 @@ _Static_assert(offsetof(sx_mission_fail_ctx, candidate) == 20, "sx_mission_fail_
 _Static_assert(offsetof(sx_mission_fail_ctx, motive) == 24, "sx_mission_fail_ctx.motive layout");
 _Static_assert(offsetof(sx_mission_fail_ctx, has_step) == 56, "sx_mission_fail_ctx.has_step layout");
 _Static_assert(offsetof(sx_mission_fail_ctx, has_candidate) == 57, "sx_mission_fail_ctx.has_candidate layout");
-_Static_assert(sizeof(sx_mission_trace_event) == 32, "sx_mission_trace_event layout");
-_Static_assert(offsetof(sx_mission_trace_event, index) == 8, "sx_mission_trace_event.index layout");
-_Static_assert(offsetof(sx_mission_trace_event, score) == 24, "sx_mission_trace_event.score layout");
-_Static_assert(offsetof(sx_mission_trace_event, has_option) == 28, "sx_mission_trace_event.has_option layout");
+_Static_assert(sizeof(sx_mission_trace) == 80, "sx_mission_trace layout");
+_Static_assert(offsetof(sx_mission_trace, option) == 4, "sx_mission_trace.option layout");
+_Static_assert(offsetof(sx_mission_trace, column) == 8, "sx_mission_trace.column layout");
+_Static_assert(offsetof(sx_mission_trace, built_in) == 12, "sx_mission_trace.built_in layout");
+_Static_assert(offsetof(sx_mission_trace, score) == 16, "sx_mission_trace.score layout");
+_Static_assert(offsetof(sx_mission_trace, index) == 20, "sx_mission_trace.index layout");
+_Static_assert(offsetof(sx_mission_trace, value) == 24, "sx_mission_trace.value layout");
+_Static_assert(offsetof(sx_mission_trace, at) == 28, "sx_mission_trace.at layout");
+_Static_assert(offsetof(sx_mission_trace, has_option) == 40, "sx_mission_trace.has_option layout");
+_Static_assert(offsetof(sx_mission_trace, has_at) == 41, "sx_mission_trace.has_at layout");
+_Static_assert(offsetof(sx_mission_trace, decide) == 44, "sx_mission_trace.decide layout");
 _Static_assert(sizeof(sx_mission_plan_ctx) == 68, "sx_mission_plan_ctx layout");
 _Static_assert(offsetof(sx_mission_plan_ctx, option) == 16, "sx_mission_plan_ctx.option layout");
 _Static_assert(offsetof(sx_mission_plan_ctx, first) == 20, "sx_mission_plan_ctx.first layout");

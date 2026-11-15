@@ -151,7 +151,7 @@ fn mission_rules_with_the_prelude() {
         plans: vec![(near, 1), (1, 8)],
     };
     let out = m.tick_with(0, [0, 0, 0], &knowledge, 0, &mut rules);
-    assert_eq!(out.events(), &[Event::Replanned { option: near }]);
+    assert_eq!(out.events(), &[MissionEvent::Replanned { option: near }]);
     assert_eq!(out.action, Action::GoTo([1, 0, 0]));
     let plain = m.tick_with(1, [0, 0, 0], &knowledge, 0, &mut MissionBuiltInRules);
     assert_eq!(plain.action, Action::GoTo([1, 0, 0]));

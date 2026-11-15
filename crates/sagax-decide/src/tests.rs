@@ -212,40 +212,127 @@ fn trace_shows_every_factor() {
     assert_eq!(
         events,
         [
-            DecideEvent::Factor {
+            DecideTrace::Factor {
                 candidate: 0,
                 consideration: 0,
                 input: 1,
                 value: ONE
             },
-            DecideEvent::Factor {
+            DecideTrace::Factor {
                 candidate: 0,
                 consideration: 1,
                 input: 100,
                 value: ONE
             },
-            DecideEvent::Scored {
+            DecideTrace::Scored {
                 candidate: 0,
                 product: ONE,
-                score: ONE
+                score: ONE,
+                cooled: false
             },
-            DecideEvent::Factor {
+            DecideTrace::Factor {
                 candidate: 1,
                 consideration: 0,
                 input: 100,
                 value: 0
             },
-            DecideEvent::Scored {
+            DecideTrace::Scored {
                 candidate: 1,
                 product: 0,
-                score: 0
+                score: 0,
+                cooled: false
             },
-            DecideEvent::Chosen {
+            DecideTrace::Chosen {
                 candidate: 0,
                 score: ONE
             },
         ]
     );
+}
+
+#[test]
+fn trace_marks_cooldowns_and_mixed_ranks() {
+    let mut d = Decider::new();
+    let idle = d.add_option(ONE);
+    let strike = d.add_option(ONE);
+    let flee = d.add_option(ONE / 10);
+    assert!(d.set_rank(flee, 1));
+    assert!(d.set_cooldown(strike, 3));
+    d.set_now(10);
+    d.record(9, Candidate::new(strike, 0));
+    let cands = [
+        Candidate::new(idle, 0),
+        Candidate::new(strike, 0),
+        Candidate::new(flee, 0),
+    ];
+    let mut log = sagax_debug::Collector::new(100, sagax_debug::Overflow::DropNewest);
+    let mut scores = Vec::new();
+    let c = d
+        .decide_traced(&cands, &[], 0, Pick::Best, 0, &mut scores, &mut log)
+        .unwrap()
+        .unwrap();
+    assert_eq!(c.candidate, 2);
+    let events: Vec<_> = log.records().map(|r| r.event).collect();
+    assert_eq!(
+        events,
+        [
+            DecideTrace::Scored {
+                candidate: 0,
+                product: ONE,
+                score: ONE,
+                cooled: false
+            },
+            DecideTrace::Scored {
+                candidate: 1,
+                product: 0,
+                score: 0,
+                cooled: true
+            },
+            DecideTrace::Scored {
+                candidate: 2,
+                product: ONE,
+                score: ONE / 10,
+                cooled: false
+            },
+            DecideTrace::Ranked { rank: 1 },
+            DecideTrace::Chosen {
+                candidate: 2,
+                score: ONE / 10
+            },
+        ]
+    );
+}
+
+#[test]
+fn traced_decisions_match_the_plain_ones_and_off_is_off() {
+    use sagax_debug::{Collector, Overflow};
+
+    let inputs = [[1, 100, 1, 100], [5, 50, 9, 10], [10, 0, 1, 1]];
+    for pick in [
+        Pick::Best,
+        Pick::Weighted { top: 0 },
+        Pick::Uniform { top: 0 },
+    ] {
+        for (seed, row) in inputs.iter().enumerate() {
+            let cands = [Candidate::new(0, 0), Candidate::new(1, 0)];
+            let (mut plain, mut traced, mut silent) = (two_options(), two_options(), two_options());
+            let (mut a, mut b, mut c) = (Vec::new(), Vec::new(), Vec::new());
+            let mut log = Collector::new(1000, Overflow::DropNewest);
+            let mut off = Collector::new(0, Overflow::DropNewest);
+            let seed = seed as u64;
+            let p = plain.decide(&cands, row, 2, pick, seed, &mut a);
+            let t = traced.decide_traced(&cands, row, 2, pick, seed, &mut b, &mut log);
+            let o = silent.decide_traced(&cands, row, 2, pick, seed, &mut c, &mut off);
+            assert_eq!((p, &a), (t, &b));
+            assert_eq!((p, &a), (o, &c));
+            assert!(log.records().len() > 0);
+            assert_eq!(off.offered(), 0);
+            let s = plain.score(cands[0], &row[..2]);
+            let mut off = Collector::new(0, Overflow::DropNewest);
+            assert_eq!(s, traced.score_traced(0, cands[0], &row[..2], &mut off));
+            assert_eq!(off.offered(), 0);
+        }
+    }
 }
 
 const H: u32 = ONE / 2;

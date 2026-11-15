@@ -51,6 +51,27 @@ pub const NAV_TRACE_UNPLACED: u32 = 4;
 /// `SX_NAV_TRACE_FLEE_BEST`: the cell a flee chose.
 pub const NAV_TRACE_FLEE_BEST: u32 = 5;
 
+/// `SX_DECIDE_TRACE_FACTOR`: one consideration of one candidate.
+pub const DECIDE_TRACE_FACTOR: u32 = 1;
+/// `SX_DECIDE_TRACE_SCORED`: the score of one candidate.
+pub const DECIDE_TRACE_SCORED: u32 = 2;
+/// `SX_DECIDE_TRACE_CHOSEN`: the chosen candidate.
+pub const DECIDE_TRACE_CHOSEN: u32 = 3;
+/// `SX_DECIDE_TRACE_RANKED`: mixed ranks, only the highest takes part.
+pub const DECIDE_TRACE_RANKED: u32 = 4;
+
+/// `SX_REASON_TRANSITION`: a transition matched.
+pub const REASON_TRANSITION: i32 = 1;
+/// `SX_REASON_TIMEOUT`: the state ran out of time.
+pub const REASON_TIMEOUT: i32 = 2;
+/// `SX_REASON_SET`: the game set the state.
+pub const REASON_SET: i32 = 3;
+
+/// `SX_MACHINE_TRACE_CHANGED`: a transition or the timeout fired.
+pub const MACHINE_TRACE_CHANGED: u32 = 1;
+/// `SX_MACHINE_TRACE_WAITING`: a transition holds but its time has not come.
+pub const MACHINE_TRACE_WAITING: u32 = 2;
+
 /// `SX_GRID_SQUARE`.
 pub const GRID_SQUARE: u32 = 0;
 /// `SX_GRID_HEX_ODD_R`.
@@ -302,13 +323,15 @@ pub const MISSION_EVENT_CALL: u32 = 10;
 pub const MISSION_EVENT_WANTS_SQUAD: u32 = 11;
 
 /// `SX_MISSION_TRACE_COLUMN`: one column of a candidate's row.
-pub const MISSION_TRACE_COLUMN: u32 = 0;
-/// `SX_MISSION_TRACE_FACTOR`: one consideration of a candidate.
-pub const MISSION_TRACE_FACTOR: u32 = 1;
-/// `SX_MISSION_TRACE_SCORED`: a candidate's score.
-pub const MISSION_TRACE_SCORED: u32 = 2;
+pub const MISSION_TRACE_COLUMN: u32 = 1;
+/// `SX_MISSION_TRACE_DECIDE`: a decider record of a candidate.
+pub const MISSION_TRACE_DECIDE: u32 = 2;
+/// `SX_MISSION_TRACE_RESCORED`: a candidate's score after the game's slot.
+pub const MISSION_TRACE_RESCORED: u32 = 3;
 /// `SX_MISSION_TRACE_PICKED`: the winner of a scoring.
-pub const MISSION_TRACE_PICKED: u32 = 3;
+pub const MISSION_TRACE_PICKED: u32 = 4;
+/// `SX_MISSION_TRACE_BEGIN`: a step begins.
+pub const MISSION_TRACE_BEGIN: u32 = 5;
 
 /// `SX_BREAK_FAIL`: a fail condition fired.
 pub const BREAK_FAIL: u32 = 0;

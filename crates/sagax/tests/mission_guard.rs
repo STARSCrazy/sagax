@@ -214,7 +214,9 @@ fn nothing_happens_the_trace_is_the_plain_script() {
             assert_eq!(m.step_index(), row.step);
             assert!(!row.events.iter().any(|e| matches!(
                 e,
-                Event::Broken(_) | Event::DetourStarted | Event::Replanned { .. }
+                MissionEvent::Broken(_)
+                    | MissionEvent::DetourStarted
+                    | MissionEvent::Replanned { .. }
             )));
             pos = row.pos;
             let t = match row.action {
@@ -243,12 +245,15 @@ fn strict_follows_three_cells_and_returns() {
     let rows = rows_of('A');
     let started = rows
         .iter()
-        .find(|r| r.events.contains(&Event::DetourStarted))
+        .find(|r| r.events.contains(&MissionEvent::DetourStarted))
         .unwrap();
     assert_eq!(started.tick, ATTACKER_FROM);
     let left_at = rows
         .iter()
-        .find(|r| r.events.contains(&Event::DetourEnded(DetourEnd::Leash)))
+        .find(|r| {
+            r.events
+                .contains(&MissionEvent::DetourEnded(DetourEnd::Leash))
+        })
         .unwrap();
     // The anchor is where A stood at the last tick before the detour.
     let Action::GoTo(anchor) = left_at.action else {
@@ -259,7 +264,7 @@ fn strict_follows_three_cells_and_returns() {
     assert_eq!(chebyshev(anchor, left_at.pos), 4);
     let back = rows
         .iter()
-        .find(|r| r.events.contains(&Event::Returned))
+        .find(|r| r.events.contains(&MissionEvent::Returned))
         .unwrap();
     assert_eq!(back.pos, anchor);
     // It resumes the step it left (the walk east) and never breaks.
@@ -268,7 +273,7 @@ fn strict_follows_three_cells_and_returns() {
     assert!(!rows.iter().any(|r| {
         r.events
             .iter()
-            .any(|e| matches!(e, Event::Broken(_) | Event::Replanned { .. }))
+            .any(|e| matches!(e, MissionEvent::Broken(_) | MissionEvent::Replanned { .. }))
     }));
     // Told of nothing, it patrols to the end.
     assert!(
@@ -281,11 +286,11 @@ fn strict_follows_three_cells_and_returns() {
 #[test]
 fn flexible_chases_loses_sight_searches_returns_and_resumes() {
     let rows = rows_of('B');
-    let find = |e: Event| rows.iter().find(|r| r.events.contains(&e)).unwrap();
-    let started = find(Event::DetourStarted);
+    let find = |e: MissionEvent| rows.iter().find(|r| r.events.contains(&e)).unwrap();
+    let started = find(MissionEvent::DetourStarted);
     assert_eq!(started.tick, ATTACKER_FROM);
-    let lost = find(Event::DetourEnded(DetourEnd::Lost));
-    let back = find(Event::Returned);
+    let lost = find(MissionEvent::DetourEnded(DetourEnd::Lost));
+    let back = find(MissionEvent::Returned);
     // Same tick: the walk back is skipped, the target is the same step.
     assert_eq!(lost.tick, back.tick);
     let chase: Vec<&Row> = rows
@@ -312,11 +317,12 @@ fn flexible_chases_loses_sight_searches_returns_and_resumes() {
     assert!(points.len() >= 2, "walks a search around: {points:?}");
     // It resumes at the step it left; nothing broke.
     assert_eq!(back.step, Some(2));
-    assert!(
-        !rows
-            .iter()
-            .any(|r| r.tick < THEFT_AT && r.events.iter().any(|e| matches!(e, Event::Broken(_))))
-    );
+    assert!(!rows.iter().any(|r| {
+        r.tick < THEFT_AT
+            && r.events
+                .iter()
+                .any(|e| matches!(e, MissionEvent::Broken(_)))
+    }));
 }
 
 #[test]
@@ -328,13 +334,13 @@ fn only_the_told_guard_replans_to_the_thief() {
     assert_eq!(
         at_theft.events,
         vec![
-            Event::Broken(BreakReason::Fail(Fail::Fact {
+            MissionEvent::Broken(BreakReason::Fail(Fail::Fact {
                 subject: 20,
                 kind: 1,
                 mask: 1,
                 value: 1
             })),
-            Event::Replanned { option: 0 }
+            MissionEvent::Replanned { option: 0 }
         ]
     );
     assert_eq!(
@@ -350,10 +356,11 @@ fn only_the_told_guard_replans_to_the_thief() {
             .filter(|r| r.tick >= THEFT_AT)
             .all(|r| matches!(r.action, Action::Attack { subject: THIEF, .. }))
     );
-    assert!(
-        a.iter()
-            .all(|r| !r.events.iter().any(|e| matches!(e, Event::Broken(_))))
-    );
+    assert!(a.iter().all(|r| {
+        !r.events
+            .iter()
+            .any(|e| matches!(e, MissionEvent::Broken(_)))
+    }));
     assert!(
         a.iter()
             .filter(|r| r.tick >= THEFT_AT)

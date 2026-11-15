@@ -383,7 +383,7 @@ fn shipped_tactics_valid() {
 // ---- Squad planning ----
 
 use crate::memory::{Area, Fact};
-use crate::{Candidate, Combine, Consideration, Curve, DecideEvent, ONE};
+use crate::{Candidate, Combine, Consideration, Curve, DecideTrace, ONE};
 
 /// Fact kind the squad tests use for enemies.
 const ENEMY: u32 = 1;
@@ -3118,7 +3118,7 @@ fn score_log_lists_candidates() {
         .score_log()
         .iter()
         .filter_map(|e| match e.event {
-            DecideEvent::Scored { score, .. } => Some((e.tactic, e.target, score)),
+            DecideTrace::Scored { score, .. } => Some((e.tactic, e.target, score)),
             _ => None,
         })
         .collect();
@@ -3136,7 +3136,7 @@ fn score_log_lists_candidates() {
         .score_log()
         .iter()
         .filter_map(|e| match e.event {
-            DecideEvent::Scored { candidate, .. } => Some(candidate),
+            DecideTrace::Scored { candidate, .. } => Some(candidate),
             _ => None,
         })
         .collect();
@@ -3144,7 +3144,7 @@ fn score_log_lists_candidates() {
     assert!(
         sq.score_log()
             .iter()
-            .any(|e| matches!(e.event, DecideEvent::Factor { .. }))
+            .any(|e| matches!(e.event, DecideTrace::Factor { .. }))
     );
     // The next check scores again: the log holds that scoring only.
     let before = sq.score_log().len();

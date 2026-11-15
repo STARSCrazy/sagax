@@ -86,6 +86,25 @@ pub struct Change {
     pub reason: Reason,
 }
 
+/// What an update did, for debugging: the record of
+/// [`StateMachine::update_traced`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StateTrace {
+    /// A transition or the timeout fired (the update's return value).
+    Changed(Change),
+    /// A transition of the current state whose conditions hold but whose
+    /// `after` has not passed yet: why the machine does not switch. One per
+    /// such transition checked before the one that fired.
+    Waiting {
+        /// Index of the transition in the order added.
+        transition: usize,
+        /// How long the current state has run.
+        elapsed: u32,
+        /// How long it must run first ([`Transition::after`]).
+        after: u32,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct StateDef {
     /// 0: none.
@@ -191,19 +210,36 @@ impl StateMachine {
         self.update_traced(now, flags, &mut NoopSink)
     }
 
-    /// [`StateMachine::update`]; a change also goes to `sink`.
-    pub fn update_traced<S: Sink<Change>>(
+    /// [`StateMachine::update`] with a trace: each waiting transition
+    /// ([`StateTrace::Waiting`]) checked before the one that fires, then the
+    /// change ([`StateTrace::Changed`]).
+    pub fn update_traced<S: Sink<StateTrace>>(
         &mut self,
         now: u32,
         flags: u64,
         sink: &mut S,
     ) -> Option<Change> {
         let elapsed = self.elapsed(now);
-        let fired = self.transitions.iter().position(|t| {
+        let ready = |t: &Transition| {
             (t.from == self.current || (t.from == ANY && t.to != self.current))
                 && flags & t.mask == t.value
-                && elapsed >= t.after
-        });
+        };
+        let fired = self
+            .transitions
+            .iter()
+            .position(|t| ready(t) && elapsed >= t.after);
+        if sink.enabled() {
+            let checked = fired.unwrap_or(self.transitions.len());
+            for (transition, t) in self.transitions[..checked].iter().enumerate() {
+                if ready(t) {
+                    sink.emit(StateTrace::Waiting {
+                        transition,
+                        elapsed,
+                        after: t.after,
+                    });
+                }
+            }
+        }
         let (to, reason) = match fired {
             Some(i) => (self.transitions[i].to, Reason::Transition(i)),
             None => {
@@ -222,7 +258,7 @@ impl StateMachine {
         self.current = to;
         self.entered = now;
         if sink.enabled() {
-            sink.emit(change);
+            sink.emit(StateTrace::Changed(change));
         }
         Some(change)
     }
@@ -231,6 +267,7 @@ impl StateMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sagax_debug::{Collector, Overflow};
 
     const PATROL: u32 = 0;
     const CHASE: u32 = 1;
@@ -285,6 +322,65 @@ mod tests {
         m.set_state(SEARCH, u32::MAX - 5).unwrap();
         assert_eq!(m.elapsed(3), 9);
         assert_eq!(m.update(94, 0).map(|c| c.reason), Some(Reason::Timeout));
+    }
+
+    #[test]
+    fn the_trace_tells_why_the_machine_waits() {
+        let mut m = guard();
+        m.update(2, SEEN).unwrap();
+        let mut log = Collector::new(10, Overflow::DropNewest);
+        assert_eq!(m.update_traced(5, 0, &mut log), None);
+        let wait = StateTrace::Waiting {
+            transition: 2,
+            elapsed: 3,
+            after: 10,
+        };
+        assert_eq!(log.records().map(|r| r.event).collect::<Vec<_>>(), [wait]);
+        log.clear();
+        let c = m.update_traced(12, 0, &mut log).unwrap();
+        assert_eq!(
+            log.records().map(|r| r.event).collect::<Vec<_>>(),
+            [StateTrace::Changed(c)]
+        );
+        // a transition that fires first hides the waiting one behind it
+        let mut m = guard();
+        m.set_state(CHASE, 0).unwrap();
+        log.clear();
+        let c = m.update_traced(1, KILLED, &mut log).unwrap();
+        assert_eq!(c.reason, Reason::Transition(0));
+        assert_eq!(
+            log.records().map(|r| r.event).collect::<Vec<_>>(),
+            [StateTrace::Changed(c)]
+        );
+    }
+
+    #[test]
+    fn traced_updates_match_the_plain_ones_and_off_is_off() {
+        let ticks = [
+            (1, 0),
+            (2, SEEN),
+            (5, 0),
+            (12, 0),
+            (50, SEEN),
+            (60, 0),
+            (70, 0),
+            (200, 0),
+            (201, KILLED),
+        ];
+        let (mut plain, mut traced, mut silent) = (guard(), guard(), guard());
+        let mut log = Collector::new(100, Overflow::DropNewest);
+        let mut off = Collector::new(0, Overflow::DropNewest);
+        for (now, flags) in ticks {
+            let p = plain.update(now, flags);
+            assert_eq!(p, traced.update_traced(now, flags, &mut log));
+            assert_eq!(p, silent.update_traced(now, flags, &mut off));
+            assert_eq!(
+                (plain.state(), plain.entered()),
+                (traced.state(), traced.entered())
+            );
+        }
+        assert!(log.records().len() > 0);
+        assert_eq!(off.offered(), 0);
     }
 
     #[test]

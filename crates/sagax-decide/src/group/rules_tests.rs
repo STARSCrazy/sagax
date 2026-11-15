@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::memory::{Area, Fact, Message, Metric, Pos, ZeroCapacity};
-use crate::{Consideration, Curve, DecideEvent, ONE, mix};
+use crate::{Consideration, Curve, DecideTrace, ONE, mix};
 
 /// Fact kind of the enemies in these tests.
 const ENEMY: u32 = 1;
@@ -333,7 +333,7 @@ fn targets_slot_drops_candidates() {
         .score_log()
         .iter()
         .filter_map(|e| match e.event {
-            DecideEvent::Factor { input, .. } => Some((e.target, input)),
+            DecideTrace::Factor { input, .. } => Some((e.target, input)),
             _ => None,
         })
         .collect();
@@ -403,7 +403,7 @@ fn columns_slot_fills_after_extra() {
         .score_log()
         .iter()
         .filter_map(|e| match e.event {
-            DecideEvent::Factor { input, value, .. } => Some((input, value)),
+            DecideTrace::Factor { input, value, .. } => Some((input, value)),
             _ => None,
         })
         .collect();

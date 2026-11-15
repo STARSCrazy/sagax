@@ -1126,7 +1126,7 @@ mod squad {
         assert_eq!(size_of::<SxOrder>(), 72);
         assert_eq!(size_of::<SxPlan>(), 28);
         assert_eq!(size_of::<SxSkillTable>(), 204);
-        assert_eq!(size_of::<SxScoreEvent>(), 36);
+        assert_eq!(size_of::<SxScoreEvent>(), 48);
         assert_eq!(define("SX_API_VERSION"), 12);
         assert_eq!(define("SX_ERROR_PLAN"), i64::from(ERROR_PLAN));
         assert_eq!(define("SX_IDLE"), i64::from(IDLE));
@@ -1194,6 +1194,9 @@ mod squad {
     fn abi_codes_match_header() {
         let numbers = [
             ("SX_ERROR_ARGUMENT", i64::from(ERROR_ARGUMENT)),
+            ("SX_REASON_TRANSITION", i64::from(REASON_TRANSITION)),
+            ("SX_REASON_TIMEOUT", i64::from(REASON_TIMEOUT)),
+            ("SX_REASON_SET", i64::from(REASON_SET)),
             ("SX_ERROR_INTERNAL", i64::from(ERROR_INTERNAL)),
             ("SX_ERROR_PLAN", i64::from(ERROR_PLAN)),
             ("SX_ERROR_NEEDS_RULES", i64::from(ERROR_NEEDS_RULES)),
@@ -1306,9 +1309,16 @@ mod squad {
             ("SX_NAV_TRACE_UNPLACED", NAV_TRACE_UNPLACED),
             ("SX_NAV_TRACE_FLEE_BEST", NAV_TRACE_FLEE_BEST),
             ("SX_MISSION_TRACE_COLUMN", MISSION_TRACE_COLUMN),
-            ("SX_MISSION_TRACE_FACTOR", MISSION_TRACE_FACTOR),
-            ("SX_MISSION_TRACE_SCORED", MISSION_TRACE_SCORED),
+            ("SX_MISSION_TRACE_DECIDE", MISSION_TRACE_DECIDE),
+            ("SX_MISSION_TRACE_RESCORED", MISSION_TRACE_RESCORED),
             ("SX_MISSION_TRACE_PICKED", MISSION_TRACE_PICKED),
+            ("SX_MISSION_TRACE_BEGIN", MISSION_TRACE_BEGIN),
+            ("SX_DECIDE_TRACE_FACTOR", DECIDE_TRACE_FACTOR),
+            ("SX_DECIDE_TRACE_SCORED", DECIDE_TRACE_SCORED),
+            ("SX_DECIDE_TRACE_CHOSEN", DECIDE_TRACE_CHOSEN),
+            ("SX_DECIDE_TRACE_RANKED", DECIDE_TRACE_RANKED),
+            ("SX_MACHINE_TRACE_CHANGED", MACHINE_TRACE_CHANGED),
+            ("SX_MACHINE_TRACE_WAITING", MACHINE_TRACE_WAITING),
             ("SX_BREAK_FAIL", BREAK_FAIL),
             ("SX_BREAK_IMPOSSIBLE", BREAK_IMPOSSIBLE),
             ("SX_BREAK_PLAN_ENDED", BREAK_PLAN_ENDED),
@@ -2979,20 +2989,20 @@ mod conventions {
 
     fn rust_layouts() -> Vec<Layout> {
         use crate::crew::{SxCrewConfig, SxCrewEvent, SxMemberInputs};
-        use crate::decide::{SxCandidate, SxChoice, SxConsideration, SxDecideEvent};
+        use crate::decide::{SxCandidate, SxChoice, SxConsideration, SxDecideTrace};
         use crate::group::{
             SxGatherCandidate, SxGoal, SxMember, SxOrder, SxPlace, SxPlan, SxScoreEvent,
             SxSkillTable, SxSlot, SxSpot, SxSquadConfig,
         };
-        use crate::machine::SxChange;
+        use crate::machine::{SxChange, SxMachineTrace};
         use crate::memory::{
             SxAlertConfig, SxAlertness, SxArea, SxFact, SxInterval, SxMessage, SxNearby,
             SxPointPattern, SxProgress,
         };
         use crate::mission::{
             SxDetour, SxFail, SxLeeway, SxMissionAction, SxMissionConfig, SxMissionEvent,
-            SxMissionFailCtx, SxMissionOut, SxMissionPlanCtx, SxMissionPlanInfo,
-            SxMissionTraceEvent, SxMotive, SxStep, SxWhere,
+            SxMissionFailCtx, SxMissionOut, SxMissionPlanCtx, SxMissionPlanInfo, SxMissionTrace,
+            SxMotive, SxStep, SxWhere,
         };
         use crate::rules::{SxChannelCtx, SxCostCtx, SxPlaceCtx, SxSpotCtx, SxViewPlan};
         use crate::{Point, SxNavTrace, SxResult, SxRules, SxSearchTrace};
@@ -3040,8 +3050,27 @@ mod conventions {
             layout!("sx_consideration", SxConsideration, max),
             layout!("sx_candidate", SxCandidate, target),
             layout!("sx_choice", SxChoice, score),
-            layout!("sx_decide_event", SxDecideEvent, score),
+            layout!(
+                "sx_decide_trace",
+                SxDecideTrace,
+                candidate,
+                consideration,
+                input,
+                value,
+                score,
+                product,
+                rank,
+                cooled
+            ),
             layout!("sx_change", SxChange, transition),
+            layout!(
+                "sx_machine_trace",
+                SxMachineTrace,
+                change,
+                transition,
+                elapsed,
+                after
+            ),
             layout!("sx_fact", SxFact, pos, seen_at, data, source),
             layout!("sx_message", SxMessage, pos, sender, keep_if_sender_gone),
             layout!("sx_area", SxArea, radius, source, blocking, has_source),
@@ -3186,11 +3215,18 @@ mod conventions {
                 search
             ),
             layout!(
-                "sx_mission_trace_event",
-                SxMissionTraceEvent,
-                index,
+                "sx_mission_trace",
+                SxMissionTrace,
+                option,
+                column,
+                built_in,
                 score,
-                has_option
+                index,
+                value,
+                at,
+                has_option,
+                has_at,
+                decide
             ),
             layout!(
                 "sx_mission_plan_info",
@@ -4212,7 +4248,10 @@ mod mission {
     //! that every tick gives the same action and events.
 
     use super::squad::define;
-    use crate::decide::{SxConsideration, sx_decider_add_consideration, sx_decider_free};
+    use crate::decide::{
+        SxConsideration, SxDecideTrace, sx_decider_add_consideration, sx_decider_free,
+        sx_decider_set_trace,
+    };
     use crate::memory::{SxKnowledge, sx_knowledge_free, sx_knowledge_learn, sx_knowledge_new};
     use crate::mission::*;
     use sagax_abi::codes::*;
@@ -4766,8 +4805,8 @@ mod mission {
         }
     }
 
-    unsafe extern "C" fn collect_trace(ctx: *mut c_void, e: *const SxMissionTraceEvent) {
-        let events = unsafe { &mut *ctx.cast::<Vec<SxMissionTraceEvent>>() };
+    unsafe extern "C" fn collect_trace(ctx: *mut c_void, e: *const SxMissionTrace) {
+        let events = unsafe { &mut *ctx.cast::<Vec<SxMissionTrace>>() };
         events.push(unsafe { *e });
     }
 
@@ -4778,7 +4817,7 @@ mod mission {
         unsafe { sx_mission_add_playbook(t.c, attack.as_ptr(), 1, 0, null(), 0, ONE, 0) };
         t.r.add_playbook(&Plan::once(&[Step::attack(THIEF)]), ONE, false)
             .unwrap();
-        let mut c_events: Vec<SxMissionTraceEvent> = Vec::new();
+        let mut c_events: Vec<SxMissionTrace> = Vec::new();
         let ctx = (&raw mut c_events).cast();
         assert_eq!(
             unsafe { sx_mission_set_trace(t.c, Some(collect_trace), ctx) },
@@ -4787,6 +4826,19 @@ mod mission {
         assert_eq!(
             unsafe { sx_mission_set_trace(null_mut(), None, null_mut()) },
             -1
+        );
+        // The lent decider's trace covers only calls made through it: the
+        // mission's own scorings go to the mission's trace.
+        let mut lent: Vec<SxDecideTrace> = Vec::new();
+        unsafe extern "C" fn collect_lent(ctx: *mut c_void, e: *const SxDecideTrace) {
+            let records = unsafe { &mut *ctx.cast::<Vec<SxDecideTrace>>() };
+            records.push(unsafe { *e });
+        }
+        let decider = unsafe { sx_mission_decider(t.c) };
+        let lent_ctx = (&raw mut lent).cast();
+        assert_eq!(
+            unsafe { sx_decider_set_trace(decider, Some(collect_lent), lent_ctx) },
+            0
         );
         let k = t.k;
         let mut r_events = Vec::new();
@@ -4799,7 +4851,7 @@ mod mission {
             let mut out = SxMissionOut::default();
             unsafe { sx_mission_tick(t.c, now, pos.as_ptr(), k, 0, &mut out) };
             let know = unsafe { &(*k).0 };
-            let mut sink = sagax_core::CallbackSink(|e| r_events.push(SxMissionTraceEvent::of(e)));
+            let mut sink = sagax_core::CallbackSink(|e| r_events.push(SxMissionTrace::of(e)));
             let r = t.r.tick_traced(
                 now,
                 pos,
@@ -4821,10 +4873,30 @@ mod mission {
         assert_eq!((picked[0].option, picked[0].has_option), (0, 1));
         let scored: Vec<u32> = c_events
             .iter()
-            .filter(|e| e.kind == MISSION_TRACE_SCORED)
+            .filter(|e| e.kind == MISSION_TRACE_RESCORED)
             .map(|e| e.option)
             .collect();
         assert_eq!(scored, [0, 8]);
+        // The decider's records arrive whole, embedded.
+        let decided: Vec<(u32, u32)> = c_events
+            .iter()
+            .filter(|e| e.kind == MISSION_TRACE_DECIDE && e.decide.kind == DECIDE_TRACE_SCORED)
+            .map(|e| (e.option, e.decide.score))
+            .collect();
+        let rescored: Vec<(u32, u32)> = c_events
+            .iter()
+            .filter(|e| e.kind == MISSION_TRACE_RESCORED)
+            .map(|e| (e.option, e.built_in))
+            .collect();
+        assert_eq!(decided, rescored);
+        // Each step that begins, with its place: the attack has none.
+        let begins: Vec<_> = c_events
+            .iter()
+            .filter(|e| e.kind == MISSION_TRACE_BEGIN)
+            .map(|e| (e.index, e.has_at))
+            .collect();
+        assert!(begins.contains(&(0, 0)), "{begins:?}");
+        assert!(lent.is_empty());
         let columns = c_events
             .iter()
             .filter(|e| e.kind == MISSION_TRACE_COLUMN)

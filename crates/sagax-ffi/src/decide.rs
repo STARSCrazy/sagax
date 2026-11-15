@@ -3,16 +3,11 @@
 use std::ffi::c_void;
 
 use sagax_abi::codes::ALL_OPTIONS;
-use sagax_abi::convert::{self, CombineTarget};
-use sagax_core::CallbackSink;
-use sagax_decide::{Apply, Candidate, Consideration, Curve, DecideEvent, Decider, Pick};
+use sagax_abi::convert::{self, CombineTarget, DecideTraceCode};
+use sagax_decide::{Apply, Candidate, Consideration, Curve, DecideTrace, Decider, Pick};
 
 use super::group::Held;
-use super::{ERROR_ARGUMENT, create, destroy, guarded, slice_of, to_i32};
-
-const FACTOR: i32 = 1;
-const SCORED: i32 = 2;
-const CHOSEN: i32 = 3;
+use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, guarded, set_trace, slice_of, to_i32};
 
 /// `sx_consideration`.
 #[repr(C)]
@@ -48,73 +43,60 @@ pub struct SxChoice {
     pub score: u32,
 }
 
-/// `sx_decide_event`.
+/// `sx_decide_trace`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SxDecideEvent {
-    /// `SX_DECIDE_FACTOR`, `SX_DECIDE_SCORED`, `SX_DECIDE_CHOSEN`.
-    pub kind: i32,
-    /// Index of the candidate.
+pub struct SxDecideTrace {
+    /// `SX_DECIDE_TRACE_*`.
+    pub kind: u32,
+    /// `FACTOR`, `SCORED`, `CHOSEN`: index of the candidate.
     pub candidate: i32,
-    /// Factor: index of the consideration; otherwise -1.
+    /// `FACTOR`: index of the consideration.
     pub consideration: i32,
-    /// Factor: the raw input; otherwise 0.
+    /// `FACTOR`: the raw input.
     pub input: i32,
-    /// Factor: the factor; scored: the product before the weight.
+    /// `FACTOR`: the factor.
     pub value: u32,
-    /// Scored and chosen: the score.
+    /// `SCORED`, `CHOSEN`: the score.
     pub score: u32,
+    /// `SCORED`: the product before the weight.
+    pub product: u32,
+    /// `RANKED`: the rank that takes part.
+    pub rank: u32,
+    /// `SCORED`: 1 if a cooldown forced the score to 0.
+    pub cooled: u8,
 }
 
-impl SxDecideEvent {
-    pub(crate) fn of(e: DecideEvent) -> Self {
-        match e {
-            DecideEvent::Factor {
-                candidate,
-                consideration,
-                input,
-                value,
-            } => Self {
-                kind: FACTOR,
-                candidate: to_i32(candidate),
-                consideration: to_i32(consideration),
-                input,
-                value,
-                score: 0,
-            },
-            DecideEvent::Scored {
-                candidate,
-                product,
-                score,
-            } => Self {
-                kind: SCORED,
-                candidate: to_i32(candidate),
-                consideration: -1,
-                input: 0,
-                value: product,
-                score,
-            },
-            DecideEvent::Chosen { candidate, score } => Self {
-                kind: CHOSEN,
-                candidate: to_i32(candidate),
-                consideration: -1,
-                input: 0,
-                value: 0,
-                score,
-            },
+impl SxDecideTrace {
+    pub(crate) fn of_code(c: DecideTraceCode) -> Self {
+        Self {
+            kind: c.kind,
+            candidate: c.candidate,
+            consideration: c.consideration,
+            input: c.input,
+            value: c.value,
+            score: c.score,
+            product: c.product,
+            rank: c.rank,
+            cooled: u8::from(c.cooled),
         }
+    }
+
+    /// The record of a decision trace.
+    pub fn of(event: DecideTrace) -> Self {
+        Self::of_code(convert::decide_trace(event))
     }
 }
 
 /// `sx_decide_trace_fn`.
-pub type DecideTraceFn = unsafe extern "C" fn(*mut c_void, *const SxDecideEvent);
+pub type DecideTraceFn = unsafe extern "C" fn(*mut c_void, *const SxDecideTrace);
 
 /// `sx_decider`.
 pub struct SxDecider {
     decider: Held<Decider>,
     candidates: Vec<Candidate>,
     scores: Vec<u32>,
-    trace: Option<(DecideTraceFn, *mut c_void)>,
+    trace: TraceSlot<SxDecideTrace>,
 }
 
 impl SxDecider {
@@ -426,25 +408,15 @@ pub unsafe extern "C" fn sx_decider_decide(
         d.candidates.clear();
         d.candidates
             .extend(given.iter().map(|c| Candidate::new(c.option, c.target)));
-        let result = match d.trace {
-            None => d
-                .decider
-                .decide(&d.candidates, inputs, stride, pick, seed, &mut d.scores),
-            Some((f, context)) => d.decider.decide_traced(
-                &d.candidates,
-                inputs,
-                stride,
-                pick,
-                seed,
-                &mut d.scores,
-                &mut CallbackSink(|e| {
-                    let event = SxDecideEvent::of(e);
-                    // SAFETY: the game keeps callback and context valid
-                    // while tracing is on (sagax.h).
-                    unsafe { f(context, &event) };
-                }),
-            ),
-        };
+        let result = traced!(d.trace, SxDecideTrace::of, |sink| d.decider.decide_traced(
+            &d.candidates,
+            inputs,
+            stride,
+            pick,
+            seed,
+            &mut d.scores,
+            sink,
+        ));
         let Ok(chosen) = result else {
             return ERROR_ARGUMENT;
         };
@@ -484,19 +456,19 @@ pub unsafe extern "C" fn sx_decider_set_trace(
     context: *mut c_void,
 ) -> i32 {
     // SAFETY: see above.
-    let Some(d) = (unsafe { decider.as_mut() }) else {
-        return ERROR_ARGUMENT;
-    };
-    d.trace = trace.map(|f| (f, context));
-    0
+    set_trace(
+        unsafe { decider.as_mut() }.map(|d| &mut d.trace),
+        trace,
+        context,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    unsafe extern "C" fn collect(ctx: *mut c_void, e: *const SxDecideEvent) {
-        let events = unsafe { &mut *ctx.cast::<Vec<SxDecideEvent>>() };
+    unsafe extern "C" fn collect(ctx: *mut c_void, e: *const SxDecideTrace) {
+        let events = unsafe { &mut *ctx.cast::<Vec<SxDecideTrace>>() };
         events.push(unsafe { *e });
     }
 
@@ -516,7 +488,7 @@ mod tests {
             assert_eq!(sx_decider_add_consideration(d, 7, &near), ERROR_ARGUMENT);
             let bad = SxConsideration { curve: 99, ..near };
             assert_eq!(sx_decider_add_consideration(d, 0, &bad), ERROR_ARGUMENT);
-            let mut events: Vec<SxDecideEvent> = Vec::new();
+            let mut events: Vec<SxDecideTrace> = Vec::new();
             sx_decider_set_trace(d, Some(collect), (&raw mut events).cast());
 
             let candidates = [
@@ -548,7 +520,7 @@ mod tests {
             assert_eq!(choice.candidate, 1);
             assert!(scores[1] > scores[0]);
             assert_eq!(events.len(), 5);
-            assert_eq!(events[4].kind, CHOSEN);
+            assert_eq!(events[4].kind, sagax_abi::codes::DECIDE_TRACE_CHOSEN);
 
             // Out of reach: nothing chosen.
             let far = [20, 30];
@@ -653,6 +625,69 @@ mod tests {
             assert_eq!(r, 1);
             assert_eq!(choice.candidate, 0);
             assert_eq!(sx_decider_forget(d), 0);
+            sx_decider_free(d);
+        }
+    }
+
+    #[test]
+    fn decide_trace_through_c_matches_rust() {
+        use sagax_abi::codes::{DECIDE_TRACE_RANKED, DECIDE_TRACE_SCORED};
+        use sagax_decide::ONE;
+
+        unsafe {
+            let d = sx_decider_new();
+            let mut r = Decider::new();
+            for (weight, rank, cooldown) in [(ONE, 0, 0), (ONE, 0, 3), (ONE / 10, 1, 0)] {
+                let o = sx_decider_add_option(d, weight) as u32;
+                assert_eq!(sx_decider_set_rank(d, o, rank), 0);
+                assert_eq!(sx_decider_set_cooldown(d, o, cooldown), 0);
+                let o = r.add_option(weight);
+                assert!(r.set_rank(o, rank));
+                assert!(r.set_cooldown(o, cooldown));
+            }
+            let done = SxCandidate {
+                option: 1,
+                target: 0,
+            };
+            assert_eq!(sx_decider_set_now(d, 10), 0);
+            assert_eq!(sx_decider_record(d, 9, &done), 0);
+            r.set_now(10);
+            r.record(9, Candidate::new(1, 0));
+            let mut records: Vec<SxDecideTrace> = Vec::new();
+            sx_decider_set_trace(d, Some(collect), (&raw mut records).cast());
+            let cands: Vec<SxCandidate> = (0..3)
+                .map(|option| SxCandidate { option, target: 0 })
+                .collect();
+            let mut choice = SxChoice::default();
+            let n = sx_decider_decide(
+                d,
+                cands.as_ptr(),
+                3,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+                &mut choice,
+            );
+            assert_eq!((n, choice.candidate), (1, 2));
+            let mut expected = Vec::new();
+            let rc: Vec<Candidate> = (0..3).map(|o| Candidate::new(o, 0)).collect();
+            r.decide_traced(
+                &rc,
+                &[],
+                0,
+                Pick::Best,
+                0,
+                &mut Vec::new(),
+                &mut sagax_core::CallbackSink(|e| expected.push(SxDecideTrace::of(e))),
+            )
+            .unwrap();
+            assert_eq!(records, expected);
+            assert_eq!(records[1].kind, DECIDE_TRACE_SCORED);
+            assert_eq!((records[1].score, records[1].cooled), (0, 1));
+            assert_eq!((records[3].kind, records[3].rank), (DECIDE_TRACE_RANKED, 1));
             sx_decider_free(d);
         }
     }

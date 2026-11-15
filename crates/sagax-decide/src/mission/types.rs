@@ -1,5 +1,5 @@
-use crate::Pick;
 use crate::memory::{Metric, PointPattern, Pos};
+use crate::{DecideTrace, Pick};
 use sagax_core::HexLayout;
 
 /// A place a step or detour refers to.
@@ -53,7 +53,7 @@ pub enum StepKind {
     /// Attack this subject.
     Attack(u32),
     /// Wander about. Any `Wander` step ends the plan: the steps after it
-    /// never run, and a looping plan with one emits [`Event::PlanDone`]
+    /// never run, and a looping plan with one emits [`MissionEvent::PlanDone`]
     /// instead of looping. The character then wanders until a condition
     /// of the plan fires or the game sets a new plan.
     Wander,
@@ -636,7 +636,7 @@ pub enum DetourEnd {
 
 /// Something that happened during a tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Event {
+pub enum MissionEvent {
     /// The step with this index is done.
     StepDone(u16),
     /// The plan started again.
@@ -682,11 +682,11 @@ pub enum Event {
     },
 }
 
-/// What a replan scoring did, for debugging and logs (see
-/// [`Mission::tick_traced`](super::Mission::tick_traced)). `option` is the
+/// What a tick did, for debugging: the record of
+/// [`Mission::tick_traced`](super::Mission::tick_traced). `option` is a
 /// candidate's decider option.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum MissionTraceEvent {
+pub enum MissionTrace {
     /// One column of a candidate's row, after the game's `columns` slot.
     Column {
         /// The candidate's option.
@@ -697,27 +697,22 @@ pub enum MissionTraceEvent {
         /// Its value.
         value: i32,
     },
-    /// One consideration of a candidate.
-    Factor {
+    /// The decider's record of a candidate (its factors and its score);
+    /// the candidate index in `event` is always 0.
+    Decide {
         /// The candidate's option.
         option: u32,
-        /// Index of the consideration within its option.
-        consideration: usize,
-        /// The raw input.
-        input: i32,
-        /// The factor the curve made of it, after its pull.
-        value: u32,
+        /// The decider's record, unchanged.
+        event: DecideTrace,
     },
-    /// A candidate's score.
-    Scored {
+    /// A candidate's score after the game's `score` slot; the pick uses it.
+    Rescored {
         /// The candidate's option.
         option: u32,
-        /// The factors put together, before the weight (0 when a
-        /// consideration reads beyond the row).
-        product: u32,
-        /// The decider's score.
+        /// The decider's score (0 when a consideration reads beyond the
+        /// row).
         built_in: u32,
-        /// The score after the game's `score` slot; the pick uses it.
+        /// The score after the slot.
         score: u32,
     },
     /// The end of a scoring: the winner and its score. `None` when every
@@ -727,6 +722,15 @@ pub enum MissionTraceEvent {
         option: Option<u32>,
         /// Its score.
         score: u32,
+    },
+    /// A step begins.
+    Begin {
+        /// Index of the step in the plan.
+        index: usize,
+        /// The position the step's [`Where`] stands for now (in the game's
+        /// coordinates); `None` for a step without one or when it is not
+        /// known.
+        at: Option<Pos>,
     },
 }
 

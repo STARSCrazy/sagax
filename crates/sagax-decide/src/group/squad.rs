@@ -10,7 +10,7 @@ use super::tactic::{Abort, GoalKind, Place, Slot, Start, Tactic};
 use crate::memory::{
     Area, Areas, Evict, Fact, Inbox, Knowledge, Message, Metric, Pos, ZeroCapacity, distance,
 };
-use crate::{Candidate, DecideEvent, Decider, INPUT_SINCE_OPTION, choose, mix};
+use crate::{Candidate, DecideTrace, Decider, INPUT_SINCE_OPTION, choose, mix};
 use sagax_core::{NoopSink, Sink};
 
 /// Built-in row column: own losses, every member marked gone (also the
@@ -252,9 +252,9 @@ pub struct ScoreEntry {
     /// The candidate's target (its subject id); `None` for a tactic without
     /// one.
     pub target: Option<u32>,
-    /// A [`DecideEvent::Factor`] or [`DecideEvent::Scored`]; its candidate
+    /// A [`DecideTrace::Factor`] or [`DecideTrace::Scored`]; its candidate
     /// index is the index in the candidate list of the scoring.
-    pub event: DecideEvent,
+    pub event: DecideTrace,
 }
 
 /// Collects the events of one candidate into the score log.
@@ -264,8 +264,8 @@ struct LogSink<'a> {
     target: Option<u32>,
 }
 
-impl Sink<DecideEvent> for LogSink<'_> {
-    fn emit(&mut self, event: DecideEvent) {
+impl Sink<DecideTrace> for LogSink<'_> {
+    fn emit(&mut self, event: DecideTrace) {
         self.out.push(ScoreEntry {
             tactic: self.tactic,
             target: self.target,

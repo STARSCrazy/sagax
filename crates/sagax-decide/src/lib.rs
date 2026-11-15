@@ -22,7 +22,7 @@
 //! with the smaller index wins.
 //!
 //! What happened can be followed factor by factor through a
-//! [`sagax_core::Sink`] of [`DecideEvent`]s.
+//! [`sagax_core::Sink`] of [`DecideTrace`] records.
 
 pub mod group;
 pub mod memory;
@@ -406,9 +406,10 @@ impl std::fmt::Display for DecideError {
 
 impl std::error::Error for DecideError {}
 
-/// What a decision did, for debugging and logs.
+/// What a decision did, for debugging: the record of
+/// [`Decider::score_traced`] and [`Decider::decide_traced`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum DecideEvent {
+pub enum DecideTrace {
     /// One consideration of one candidate.
     Factor {
         /// Index of the candidate.
@@ -429,6 +430,16 @@ pub enum DecideEvent {
         candidate: usize,
         /// Score after the weight and the bonus for the current action.
         score: u32,
+        /// A cooldown forced the score to 0 (see
+        /// [`Decider::set_cooldown`]).
+        cooled: bool,
+    },
+    /// The candidates are of mixed rank: only those of `rank` take part in
+    /// the choice (see [`Decider::set_rank`]). Comes after the last
+    /// `Scored`, before `Chosen`.
+    Ranked {
+        /// The highest rank that still scores.
+        rank: u32,
     },
     /// The chosen candidate.
     Chosen {
@@ -644,9 +655,10 @@ impl Decider {
         self.score_traced(0, candidate, row, &mut NoopSink)
     }
 
-    /// [`Decider::score`] with events; `index` is the candidate's index in
-    /// them.
-    pub fn score_traced<S: Sink<DecideEvent>>(
+    /// [`Decider::score`] with a trace: the candidate's
+    /// [`DecideTrace::Factor`]s and its [`DecideTrace::Scored`]; `index` is
+    /// the candidate's index in them.
+    pub fn score_traced<S: Sink<DecideTrace>>(
         &self,
         index: usize,
         candidate: Candidate,
@@ -670,7 +682,7 @@ impl Decider {
                     })?;
             let value = pull(c.curve.apply(input, c.min, c.max), f.pull);
             if sink.enabled() {
-                sink.emit(DecideEvent::Factor {
+                sink.emit(DecideTrace::Factor {
                     candidate: index,
                     consideration: i,
                     input,
@@ -682,11 +694,11 @@ impl Decider {
                 Apply::Multiply => multiply = mul(multiply, value),
             }
         }
-        if option.cooldown > 0
+        let cooled = option.cooldown > 0
             && self
                 .since(candidate.option, None)
-                .is_some_and(|s| s < option.cooldown)
-        {
+                .is_some_and(|s| s < option.cooldown);
+        if cooled {
             multiply = 0;
         }
         let how = option.combine.unwrap_or(self.combine);
@@ -699,10 +711,11 @@ impl Decider {
         }
         let score = score.min(u64::from(u32::MAX)) as u32;
         if sink.enabled() {
-            sink.emit(DecideEvent::Scored {
+            sink.emit(DecideTrace::Scored {
                 candidate: index,
                 product,
                 score,
+                cooled,
             });
         }
         Ok(score)
@@ -764,9 +777,11 @@ impl Decider {
         result
     }
 
-    /// [`Decider::decide`] with events.
+    /// [`Decider::decide`] with a trace: per candidate its factors and
+    /// score, then [`DecideTrace::Ranked`] when the ranks are mixed and
+    /// [`DecideTrace::Chosen`] for the winner.
     #[allow(clippy::too_many_arguments)]
-    pub fn decide_traced<S: Sink<DecideEvent>>(
+    pub fn decide_traced<S: Sink<DecideTrace>>(
         &mut self,
         candidates: &[Candidate],
         inputs: &[i32],
@@ -798,6 +813,9 @@ impl Decider {
             .max();
         let mixed = top_rank.is_some_and(|r| candidates.iter().any(|c| rank_of(c) != r));
         let choice = if let (true, Some(rank)) = (mixed, top_rank) {
+            if sink.enabled() {
+                sink.emit(DecideTrace::Ranked { rank });
+            }
             self.ranked.clear();
             self.ranked.extend(
                 candidates
@@ -812,7 +830,7 @@ impl Decider {
         if let Some(c) = choice
             && sink.enabled()
         {
-            sink.emit(DecideEvent::Chosen {
+            sink.emit(DecideTrace::Chosen {
                 candidate: c.candidate,
                 score: c.score,
             });

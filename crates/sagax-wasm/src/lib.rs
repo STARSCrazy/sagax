@@ -822,7 +822,8 @@ pub unsafe extern "C" fn sx_trace_dropped(g: *mut WasmGrid) -> i32 {
 
 // ---- decisions -------------------------------------------------------------
 
-use sagax_decide::{Apply, Candidate, Consideration, Curve, DecideEvent, Decider, Pick};
+use sagax_abi::codes::{DECIDE_TRACE_CHOSEN, DECIDE_TRACE_FACTOR, DECIDE_TRACE_SCORED};
+use sagax_decide::{Apply, Candidate, Consideration, Curve, DecideTrace, Decider, Pick};
 
 /// Numbers per decision trace event: kind (1 factor, 2 scored, 3 chosen),
 /// candidate, consideration (-1 if none), input, value, score.
@@ -1153,29 +1154,25 @@ pub unsafe extern "C" fn sx_decider_decide(
                 if trace.len() >= TRACE_LIMIT * DECIDE_STRIDE {
                     return;
                 }
-                trace.extend_from_slice(&match e {
-                    DecideEvent::Factor {
-                        candidate,
-                        consideration,
-                        input,
-                        value,
-                    } => [
-                        1,
-                        to_i32(candidate),
-                        to_i32(consideration),
-                        input,
-                        value as i32,
-                        0,
-                    ],
-                    DecideEvent::Scored {
-                        candidate,
-                        product,
-                        score,
-                    } => [2, to_i32(candidate), -1, 0, product as i32, score as i32],
-                    DecideEvent::Chosen { candidate, score } => {
-                        [3, to_i32(candidate), -1, 0, 0, score as i32]
-                    }
-                });
+                // The 6-number layout of JS: kind (1 factor, 2 scored,
+                // 3 chosen), candidate, consideration (-1 if none), input,
+                // value (scored: the product), score. Ranks and cooldowns
+                // are not exported.
+                let c = convert::decide_trace(e);
+                let (consideration, value) = match c.kind {
+                    DECIDE_TRACE_FACTOR => (c.consideration, c.value),
+                    DECIDE_TRACE_SCORED => (-1, c.product),
+                    DECIDE_TRACE_CHOSEN => (-1, 0),
+                    _ => return,
+                };
+                trace.extend_from_slice(&[
+                    c.kind as i32,
+                    c.candidate,
+                    consideration,
+                    c.input,
+                    value as i32,
+                    c.score as i32,
+                ]);
             }),
         )
     } else {
@@ -3312,18 +3309,21 @@ pub unsafe extern "C" fn sx_squad_score_log(s: *mut WasmSquad) -> i32 {
     w.out.clear();
     for e in w.squad.score_log() {
         let (kind, candidate, consideration, input, value, score) = match e.event {
-            DecideEvent::Factor {
+            DecideTrace::Factor {
                 candidate,
                 consideration,
                 input,
                 value,
             } => (1, candidate, to_i32(consideration), input, value, 0),
-            DecideEvent::Scored {
+            DecideTrace::Scored {
                 candidate,
                 product,
                 score,
+                ..
             } => (2, candidate, -1, 0, product, score),
-            DecideEvent::Chosen { candidate, score } => (3, candidate, -1, 0, 0, score),
+            // The squad scores candidates one by one: no ranks.
+            DecideTrace::Ranked { .. } => continue,
+            DecideTrace::Chosen { candidate, score } => (3, candidate, -1, 0, 0, score),
         };
         w.out.extend([
             to_i32(e.tactic),

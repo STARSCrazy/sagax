@@ -5,17 +5,16 @@ use std::ffi::c_void;
 
 use sagax_abi::codes::GRID_SQUARE;
 use sagax_abi::convert::{self, FailCode};
-use sagax_core::CallbackSink;
 use sagax_decide::mission::{
     BuiltInRules, Fail, FailCtx, Leash, Leeway, MAX_EVENTS, MAX_FAILS, Mission, MissionConfig,
-    MissionRules, MissionTraceEvent, Motive, Plan, PlanCtx, Step, Where,
+    MissionRules, MissionTrace, Motive, Plan, PlanCtx, Step, Where,
 };
 use sagax_decide::{Decider, Pick};
 
-use super::decide::SxDecider;
+use super::decide::{SxDecideTrace, SxDecider};
 use super::group::{Held, Inside};
 use super::memory::{SxKnowledge, SxPointPattern, pos3, put};
-use super::{ERROR_ARGUMENT, create, destroy, guarded, slice_of, to_i32};
+use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, guarded, set_trace, slice_of, to_i32};
 
 /// `sx_where`.
 #[repr(C)]
@@ -555,46 +554,55 @@ impl MissionRules for SxMissionRules {
     }
 }
 
-/// `sx_mission_trace_event`.
+/// `sx_mission_trace`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SxMissionTraceEvent {
+pub struct SxMissionTrace {
     /// `SX_MISSION_TRACE_*`.
     pub kind: u32,
-    /// The candidate's option; `PICKED`: the winner, valid if `has_option`.
+    /// The candidate's option; `PICKED`: the winner. Valid if `has_option`.
     pub option: u32,
-    /// `COLUMN`: the column; `FACTOR`: the consideration; else -1.
-    pub index: i32,
-    /// `COLUMN`: its value; `FACTOR`: the raw input; else 0.
-    pub input: i32,
-    /// `FACTOR`: the factor; `SCORED`: the product before the weight.
-    pub value: u32,
-    /// `SCORED`: the decider's score.
+    /// `COLUMN`: the column.
+    pub column: u32,
+    /// `RESCORED`: the decider's score.
     pub built_in: u32,
-    /// `SCORED`: the score after the game's slot; `PICKED`: the winner's.
+    /// `RESCORED`: the score after the game's slot; `PICKED`: the winner's.
     pub score: u32,
-    /// 1 if `option` is set (0 only for `PICKED` without a winner).
+    /// `BEGIN`: the step.
+    pub index: u32,
+    /// `COLUMN`: its value.
+    pub value: i32,
+    /// `BEGIN`: the position the step goes for, if `has_at`.
+    pub at: [i32; 3],
+    /// 1 if `option` is set.
     pub has_option: u8,
+    /// 1 if `at` is set.
+    pub has_at: u8,
+    /// `DECIDE`: the decider's record.
+    pub decide: SxDecideTrace,
 }
 
-impl SxMissionTraceEvent {
-    pub(crate) fn of(e: MissionTraceEvent) -> Self {
-        let c = convert::mission_trace_event(e);
+impl SxMissionTrace {
+    pub(crate) fn of(e: MissionTrace) -> Self {
+        let c = convert::mission_trace(e);
         Self {
             kind: c.kind,
             option: c.option.unwrap_or_default(),
-            index: c.index,
-            input: c.input,
-            value: c.value,
+            column: c.column,
             built_in: c.built_in,
             score: c.score,
+            index: c.index,
+            value: c.value,
+            at: c.at.unwrap_or_default(),
             has_option: u8::from(c.option.is_some()),
+            has_at: u8::from(c.at.is_some()),
+            decide: SxDecideTrace::of_code(c.decide),
         }
     }
 }
 
 /// `sx_mission_trace_fn`.
-pub type MissionTraceFn = unsafe extern "C" fn(*mut c_void, *const SxMissionTraceEvent);
+pub type MissionTraceFn = unsafe extern "C" fn(*mut c_void, *const SxMissionTrace);
 
 /// `sx_mission`.
 pub struct SxMission {
@@ -602,8 +610,8 @@ pub struct SxMission {
     /// The decider handle lent by `sx_mission_decider` (null until asked),
     /// freed with the mission.
     decider: *mut SxDecider,
-    /// Where `sx_mission_set_trace` sends the trace events.
-    trace: Option<(MissionTraceFn, *mut c_void)>,
+    /// Where `sx_mission_set_trace` sends the trace records.
+    trace: TraceSlot<SxMissionTrace>,
 }
 
 impl Drop for SxMission {
@@ -976,22 +984,8 @@ pub unsafe extern "C" fn sx_mission_tick_with(
                 &mut given
             }
         };
-        let output = match *trace {
-            None => m.tick_with(now, pos, &k.0, flags, rules),
-            Some((f, context)) => m.tick_traced(
-                now,
-                pos,
-                &k.0,
-                flags,
-                rules,
-                &mut CallbackSink(|e| {
-                    let event = SxMissionTraceEvent::of(e);
-                    // SAFETY: the game keeps callback and context valid
-                    // while tracing is on (sagax.h).
-                    unsafe { f(context, &event) };
-                }),
-            ),
-        };
+        let output = traced!(*trace, SxMissionTrace::of, |sink| m
+            .tick_traced(now, pos, &k.0, flags, rules, sink));
         let events = output.events();
         if !out.is_null() {
             let mut o = SxMissionOut {
@@ -1021,7 +1015,7 @@ pub(crate) fn action_of(a: sagax_decide::mission::Action) -> SxMissionAction {
     }
 }
 
-pub(crate) fn event_of(e: sagax_decide::mission::Event) -> SxMissionEvent {
+pub(crate) fn event_of(e: sagax_decide::mission::MissionEvent) -> SxMissionEvent {
     let c = convert::mission_event(e);
     SxMissionEvent {
         kind: c.kind,
@@ -1123,8 +1117,8 @@ pub unsafe extern "C" fn sx_mission_returning(mission: *const SxMission) -> i32 
     i32::from(mission_ref!(mission).returning())
 }
 
-/// `sx_mission_set_trace`: `trace` gets the events of every replan scoring;
-/// `None` turns it off.
+/// `sx_mission_set_trace`: `trace` gets the records of every following
+/// tick; `None` turns it off.
 ///
 /// # Safety
 /// `mission` is null or valid; `trace` and `context` stay valid while
@@ -1136,11 +1130,11 @@ pub unsafe extern "C" fn sx_mission_set_trace(
     context: *mut c_void,
 ) -> i32 {
     // SAFETY: null or valid (see above).
-    let Some(m) = (unsafe { mission.as_mut() }) else {
-        return ERROR_ARGUMENT;
-    };
-    m.trace = trace.map(|f| (f, context));
-    0
+    set_trace(
+        unsafe { mission.as_mut() }.map(|m| &mut m.trace),
+        trace,
+        context,
+    )
 }
 
 /// `sx_mission_decider`: the mission's decider, lent until

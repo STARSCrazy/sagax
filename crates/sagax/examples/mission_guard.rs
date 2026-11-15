@@ -103,7 +103,7 @@ pub struct Row {
     /// The action the mission gave.
     pub action: Action,
     /// The events of the tick.
-    pub events: Vec<Event>,
+    pub events: Vec<MissionEvent>,
 }
 
 /// The patrol: go, wait, go, again; it breaks when the item is stolen.
@@ -279,18 +279,18 @@ fn action_text(action: Action) -> String {
     }
 }
 
-fn event_text(event: &Event) -> String {
+fn event_text(event: &MissionEvent) -> String {
     match event {
-        Event::StepDone(i) => format!("done:{i}"),
-        Event::Looped => "looped".to_string(),
-        Event::PlanDone => "plandone".to_string(),
-        Event::Broken(BreakReason::Fail(_)) => "broken:fail".to_string(),
-        Event::Broken(BreakReason::Impossible) => "broken:impossible".to_string(),
-        Event::Broken(BreakReason::PlanEnded) => "broken:ended".to_string(),
-        Event::Replanned { option } => format!("replanned:{option}"),
-        Event::FellBack => "fellback".to_string(),
-        Event::DetourStarted => "detour".to_string(),
-        Event::DetourEnded(why) => format!(
+        MissionEvent::StepDone(i) => format!("done:{i}"),
+        MissionEvent::Looped => "looped".to_string(),
+        MissionEvent::PlanDone => "plandone".to_string(),
+        MissionEvent::Broken(BreakReason::Fail(_)) => "broken:fail".to_string(),
+        MissionEvent::Broken(BreakReason::Impossible) => "broken:impossible".to_string(),
+        MissionEvent::Broken(BreakReason::PlanEnded) => "broken:ended".to_string(),
+        MissionEvent::Replanned { option } => format!("replanned:{option}"),
+        MissionEvent::FellBack => "fellback".to_string(),
+        MissionEvent::DetourStarted => "detour".to_string(),
+        MissionEvent::DetourEnded(why) => format!(
             "detour_end:{}",
             match why {
                 DetourEnd::Defeated => "defeated",
@@ -302,10 +302,10 @@ fn event_text(event: &Event) -> String {
                 DetourEnd::Ended => "ended",
             }
         ),
-        Event::Returned => "returned".to_string(),
-        Event::Signal(n) => format!("signal:{n}"),
-        Event::Call { channel, kind, .. } => format!("call:{channel},{kind}"),
-        Event::WantsSquad { tactic, .. } => format!("squad:{tactic}"),
+        MissionEvent::Returned => "returned".to_string(),
+        MissionEvent::Signal(n) => format!("signal:{n}"),
+        MissionEvent::Call { channel, kind, .. } => format!("call:{channel},{kind}"),
+        MissionEvent::WantsSquad { tactic, .. } => format!("squad:{tactic}"),
     }
 }
 

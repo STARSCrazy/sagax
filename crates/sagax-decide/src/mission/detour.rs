@@ -2,7 +2,7 @@
 
 use super::{Activity, Hooks, Mission, View};
 use crate::memory::{Knowledge, Pos};
-use crate::mission::types::{Action, Detour, DetourEnd, Event, OnLost, StepKind, Where};
+use crate::mission::types::{Action, Detour, DetourEnd, MissionEvent, OnLost, StepKind, Where};
 
 /// The search that runs when the subject of an `Engage` is lost and the
 /// leash says [`OnLost::Search`].
@@ -31,7 +31,7 @@ pub(super) struct DetourState {
     /// How long the plan's step had run when the detour began; on resume
     /// the step goes on with the time it had left.
     step_elapsed: u32,
-    /// [`Event::DetourStarted`] is due at the next tick.
+    /// [`MissionEvent::DetourStarted`] is due at the next tick.
     pub(super) announce: bool,
     /// The game called [`Mission::end_detour`].
     end_asked: bool,
@@ -72,7 +72,7 @@ impl Mission {
     /// A detour during the walk back keeps the anchor and starts its time
     /// anew.
     ///
-    /// The next tick emits [`Event::DetourStarted`]. A detour ends:
+    /// The next tick emits [`MissionEvent::DetourStarted`]. A detour ends:
     ///
     /// - [`Detour::Engage`]: the subject is known as defeated
     ///   ([`DetourEnd::Defeated`]) or no longer known
@@ -98,10 +98,10 @@ impl Mission {
     /// - [`Detour::Custom`]: only by [`Mission::end_detour`]. The action is
     ///   [`Action::Custom`].
     ///
-    /// On the end the tick emits [`Event::DetourEnded`] and the character
+    /// On the end the tick emits [`MissionEvent::DetourEnded`] and the character
     /// walks back ([`Action::GoTo`] the anchor), unless the step it resumes
     /// is a `GoTo`, `Hold` or `Search` with another target, then it resumes
-    /// at once. Resuming emits [`Event::Returned`]; the step goes on with
+    /// at once. Resuming emits [`MissionEvent::Returned`]; the step goes on with
     /// its state (a `Wait` keeps the time it had left, a `Search` starts
     /// again) and its fail conditions are checked again.
     ///
@@ -301,7 +301,7 @@ impl Mission {
 
     /// Ends the detour: emits the event and starts the walk back.
     fn end_with(&mut self, why: DetourEnd, view: View<'_>, rules: &mut Hooks<'_>) -> Action {
-        self.emit(Event::DetourEnded(why));
+        self.emit(MissionEvent::DetourEnded(why));
         self.activity = Activity::Returning;
         self.detour.search = None;
         self.detour.end_asked = false;
@@ -339,7 +339,7 @@ impl Mission {
 
     /// Back from the detour: what ran before goes on.
     fn resume(&mut self, view: View<'_>, rules: &mut Hooks<'_>) -> Action {
-        self.emit(Event::Returned);
+        self.emit(MissionEvent::Returned);
         self.activity = self.detour.resume;
         match self.activity {
             Activity::Plan => {

@@ -11,10 +11,11 @@ use sagax_decide::group::{
 };
 use sagax_decide::memory::Metric;
 use sagax_decide::mission::{
-    Action, BreakReason, Detour, DetourEnd, Event, Fail, Leeway, MissionTraceEvent, Motive,
+    Action, BreakReason, Detour, DetourEnd, Fail, Leeway, MissionEvent, MissionTrace, Motive,
     MotiveKind, OnLost, StepKind, Where,
 };
-use sagax_decide::{Combine, Decider, Pick};
+use sagax_decide::state::{Change, Reason, StateTrace};
+use sagax_decide::{Combine, DecideTrace, Decider, Pick};
 use sagax_nav::Cost;
 use sagax_nav::formation::FormationTrace;
 use sagax_nav::grid::Cell;
@@ -31,12 +32,11 @@ use crate::codes::{
     LEEWAY_FLEXIBLE, LEEWAY_FREE, LEEWAY_STRICT, MISSION_EVENT_BROKEN, MISSION_EVENT_CALL,
     MISSION_EVENT_DETOUR_ENDED, MISSION_EVENT_DETOUR_STARTED, MISSION_EVENT_FELL_BACK,
     MISSION_EVENT_LOOPED, MISSION_EVENT_PLAN_DONE, MISSION_EVENT_REPLANNED, MISSION_EVENT_RETURNED,
-    MISSION_EVENT_SIGNAL, MISSION_EVENT_STEP_DONE, MISSION_EVENT_WANTS_SQUAD, MISSION_TRACE_COLUMN,
-    MISSION_TRACE_FACTOR, MISSION_TRACE_PICKED, MISSION_TRACE_SCORED, MOTIVE_CUSTOM, MOTIVE_DEFEAT,
-    MOTIVE_GUARD, MOTIVE_REACH, ON_LOST_KEEP, ON_LOST_RETURN, ON_LOST_SEARCH, STEP_ATTACK,
-    STEP_CALL, STEP_CUSTOM, STEP_FOLLOW, STEP_GO_TO, STEP_HOLD, STEP_PAUSE, STEP_SEARCH,
-    STEP_SIGNAL, STEP_SQUAD, STEP_WAIT, STEP_WAIT_FOR, STEP_WANDER, WHERE_FIXED, WHERE_HERE,
-    WHERE_MOTIVE_PLACE, WHERE_MOTIVE_SUBJECT, WHERE_SUBJECT,
+    MISSION_EVENT_SIGNAL, MISSION_EVENT_STEP_DONE, MISSION_EVENT_WANTS_SQUAD, MOTIVE_CUSTOM,
+    MOTIVE_DEFEAT, MOTIVE_GUARD, MOTIVE_REACH, ON_LOST_KEEP, ON_LOST_RETURN, ON_LOST_SEARCH,
+    STEP_ATTACK, STEP_CALL, STEP_CUSTOM, STEP_FOLLOW, STEP_GO_TO, STEP_HOLD, STEP_PAUSE,
+    STEP_SEARCH, STEP_SIGNAL, STEP_SQUAD, STEP_WAIT, STEP_WAIT_FOR, STEP_WANDER, WHERE_FIXED,
+    WHERE_HERE, WHERE_MOTIVE_PLACE, WHERE_MOTIVE_SUBJECT, WHERE_SUBJECT,
 };
 use crate::codes::{
     CMP_AT_LEAST, CMP_AT_MOST, CMP_EQUAL, CMP_NOT_EQUAL, COMBINE_FOLLOW, CREW_ACTIVATED,
@@ -49,6 +49,12 @@ use crate::codes::{
     SHAPE_COLUMN, SHAPE_LINE, SHAPE_WEDGE, SIDE_FRONT, SIDE_LEFT, SIDE_REAR, SIDE_RIGHT,
     SQUAD_KEEP, SQUAD_NO_PLAN, SQUAD_REPLAN, SQUAD_SIGNAL, START_AFTER_TICKS, START_NOW,
     START_ON_SIGNAL, UNREACHABLE,
+};
+use crate::codes::{
+    DECIDE_TRACE_CHOSEN, DECIDE_TRACE_FACTOR, DECIDE_TRACE_RANKED, DECIDE_TRACE_SCORED,
+    MACHINE_TRACE_CHANGED, MACHINE_TRACE_WAITING, MISSION_TRACE_BEGIN, MISSION_TRACE_COLUMN,
+    MISSION_TRACE_DECIDE, MISSION_TRACE_PICKED, MISSION_TRACE_RESCORED, REASON_SET, REASON_TIMEOUT,
+    REASON_TRANSITION,
 };
 use crate::codes::{
     NAV_TRACE_FLEE_BEST, NAV_TRACE_PLACED, NAV_TRACE_SEARCH, NAV_TRACE_SHORTCUT,
@@ -321,6 +327,139 @@ pub fn nav_trace(event: NavTrace) -> NavTraceCode {
             distance: to_i32::<Cost>(distance),
             cost: to_i32(cost),
             ..of(NAV_TRACE_FLEE_BEST)
+        },
+    }
+}
+
+// ---- traces of decisions and the state machine --------------------------------
+
+/// The numbers of a decision trace record (`sx_decide_trace`). Fields that
+/// do not apply to `kind` are 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DecideTraceCode {
+    /// `SX_DECIDE_TRACE_*`.
+    pub kind: u32,
+    /// `FACTOR`, `SCORED`, `CHOSEN`: index of the candidate.
+    pub candidate: i32,
+    /// `FACTOR`: index of the consideration within its option.
+    pub consideration: i32,
+    /// `FACTOR`: the raw input.
+    pub input: i32,
+    /// `FACTOR`: the factor after its pull.
+    pub value: u32,
+    /// `SCORED`, `CHOSEN`: the score.
+    pub score: u32,
+    /// `SCORED`: the factors put together, before the weight.
+    pub product: u32,
+    /// `RANKED`: the rank that takes part.
+    pub rank: u32,
+    /// `SCORED`: a cooldown forced the score to 0.
+    pub cooled: bool,
+}
+
+/// The numbers of a decision trace record.
+pub fn decide_trace(event: DecideTrace) -> DecideTraceCode {
+    let of = |kind, candidate| DecideTraceCode {
+        kind,
+        candidate: to_i32(candidate),
+        ..DecideTraceCode::default()
+    };
+    match event {
+        DecideTrace::Factor {
+            candidate,
+            consideration,
+            input,
+            value,
+        } => DecideTraceCode {
+            consideration: to_i32(consideration),
+            input,
+            value,
+            ..of(DECIDE_TRACE_FACTOR, candidate)
+        },
+        DecideTrace::Scored {
+            candidate,
+            product,
+            score,
+            cooled,
+        } => DecideTraceCode {
+            product,
+            score,
+            cooled,
+            ..of(DECIDE_TRACE_SCORED, candidate)
+        },
+        DecideTrace::Ranked { rank } => DecideTraceCode {
+            rank,
+            ..of(DECIDE_TRACE_RANKED, 0)
+        },
+        DecideTrace::Chosen { candidate, score } => DecideTraceCode {
+            score,
+            ..of(DECIDE_TRACE_CHOSEN, candidate)
+        },
+    }
+}
+
+/// The numbers of a state change (`sx_change`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChangeCode {
+    /// The state left.
+    pub from: i32,
+    /// The state entered.
+    pub to: i32,
+    /// `SX_REASON_*`.
+    pub reason: i32,
+    /// The transition's index, or -1.
+    pub transition: i32,
+}
+
+/// The numbers of a state change.
+pub fn change(c: Change) -> ChangeCode {
+    let (reason, transition) = match c.reason {
+        Reason::Transition(i) => (REASON_TRANSITION, to_i32(i)),
+        Reason::Timeout => (REASON_TIMEOUT, -1),
+        Reason::Set => (REASON_SET, -1),
+    };
+    ChangeCode {
+        from: to_i32(c.from),
+        to: to_i32(c.to),
+        reason,
+        transition,
+    }
+}
+
+/// The numbers of a state machine trace record (`sx_machine_trace`).
+/// Fields that do not apply to `kind` are 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StateTraceCode {
+    /// `SX_MACHINE_TRACE_*`.
+    pub kind: u32,
+    /// `CHANGED`: the change.
+    pub change: ChangeCode,
+    /// `WAITING`: the transition's index.
+    pub transition: u32,
+    /// `WAITING`: how long the state has run.
+    pub elapsed: u32,
+    /// `WAITING`: how long it must run first.
+    pub after: u32,
+}
+
+/// The numbers of a state machine trace record.
+pub fn state_trace(event: StateTrace) -> StateTraceCode {
+    match event {
+        StateTrace::Changed(c) => StateTraceCode {
+            kind: MACHINE_TRACE_CHANGED,
+            change: change(c),
+            ..StateTraceCode::default()
+        },
+        StateTrace::Waiting {
+            transition,
+            elapsed,
+            after,
+        } => StateTraceCode {
+            kind: MACHINE_TRACE_WAITING,
+            transition: u32::try_from(transition).unwrap_or(u32::MAX),
+            elapsed,
+            after,
+            ..StateTraceCode::default()
         },
     }
 }
@@ -989,7 +1128,7 @@ pub struct MissionEventCode {
 }
 
 /// The numbers of a mission event.
-pub const fn mission_event(event: Event) -> MissionEventCode {
+pub const fn mission_event(event: MissionEvent) -> MissionEventCode {
     const fn of(kind: u32, a: u32) -> MissionEventCode {
         MissionEventCode {
             kind,
@@ -1002,19 +1141,19 @@ pub const fn mission_event(event: Event) -> MissionEventCode {
         }
     }
     match event {
-        Event::StepDone(i) => of(MISSION_EVENT_STEP_DONE, i as u32),
-        Event::Looped => of(MISSION_EVENT_LOOPED, 0),
-        Event::PlanDone => of(MISSION_EVENT_PLAN_DONE, 0),
-        Event::Broken(BreakReason::Fail(f)) => MissionEventCode {
+        MissionEvent::StepDone(i) => of(MISSION_EVENT_STEP_DONE, i as u32),
+        MissionEvent::Looped => of(MISSION_EVENT_LOOPED, 0),
+        MissionEvent::PlanDone => of(MISSION_EVENT_PLAN_DONE, 0),
+        MissionEvent::Broken(BreakReason::Fail(f)) => MissionEventCode {
             fail: Some(f),
             ..of(MISSION_EVENT_BROKEN, BREAK_FAIL)
         },
-        Event::Broken(BreakReason::Impossible) => of(MISSION_EVENT_BROKEN, BREAK_IMPOSSIBLE),
-        Event::Broken(BreakReason::PlanEnded) => of(MISSION_EVENT_BROKEN, BREAK_PLAN_ENDED),
-        Event::Replanned { option } => of(MISSION_EVENT_REPLANNED, option),
-        Event::FellBack => of(MISSION_EVENT_FELL_BACK, 0),
-        Event::DetourStarted => of(MISSION_EVENT_DETOUR_STARTED, 0),
-        Event::DetourEnded(why) => of(
+        MissionEvent::Broken(BreakReason::Impossible) => of(MISSION_EVENT_BROKEN, BREAK_IMPOSSIBLE),
+        MissionEvent::Broken(BreakReason::PlanEnded) => of(MISSION_EVENT_BROKEN, BREAK_PLAN_ENDED),
+        MissionEvent::Replanned { option } => of(MISSION_EVENT_REPLANNED, option),
+        MissionEvent::FellBack => of(MISSION_EVENT_FELL_BACK, 0),
+        MissionEvent::DetourStarted => of(MISSION_EVENT_DETOUR_STARTED, 0),
+        MissionEvent::DetourEnded(why) => of(
             MISSION_EVENT_DETOUR_ENDED,
             match why {
                 DetourEnd::Defeated => DETOUR_END_DEFEATED,
@@ -1026,9 +1165,9 @@ pub const fn mission_event(event: Event) -> MissionEventCode {
                 DetourEnd::Ended => DETOUR_END_ENDED,
             },
         ),
-        Event::Returned => of(MISSION_EVENT_RETURNED, 0),
-        Event::Signal(n) => of(MISSION_EVENT_SIGNAL, n),
-        Event::Call {
+        MissionEvent::Returned => of(MISSION_EVENT_RETURNED, 0),
+        MissionEvent::Signal(n) => of(MISSION_EVENT_SIGNAL, n),
+        MissionEvent::Call {
             channel,
             kind,
             pos,
@@ -1039,7 +1178,7 @@ pub const fn mission_event(event: Event) -> MissionEventCode {
             motive: Some(motive),
             ..of(MISSION_EVENT_CALL, channel)
         },
-        Event::WantsSquad {
+        MissionEvent::WantsSquad {
             tactic,
             target,
             subject,
@@ -1051,68 +1190,69 @@ pub const fn mission_event(event: Event) -> MissionEventCode {
     }
 }
 
-/// A mission trace event as numbers.
+/// The numbers of a mission trace record (`sx_mission_trace`). Fields that
+/// do not apply to `kind` are 0 (`None`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MissionTraceCode {
     /// `SX_MISSION_TRACE_*`.
     pub kind: u32,
-    /// The candidate's option; `PICKED`: the winner, `None` for none.
+    /// `COLUMN`, `DECIDE`, `RESCORED`: the candidate's option; `PICKED`:
+    /// the winner, `None` for none.
     pub option: Option<u32>,
-    /// `COLUMN`: the column; `FACTOR`: the consideration; else -1.
-    pub index: i32,
-    /// `COLUMN`: its value; `FACTOR`: the raw input; else 0.
-    pub input: i32,
-    /// `FACTOR`: the factor; `SCORED`: the product before the weight.
-    pub value: u32,
-    /// `SCORED`: the decider's score.
+    /// `COLUMN`: the column.
+    pub column: u32,
+    /// `RESCORED`: the decider's score.
     pub built_in: u32,
-    /// `SCORED`: the score after the game's slot; `PICKED`: the winner's.
+    /// `RESCORED`: the score after the game's slot; `PICKED`: the winner's.
     pub score: u32,
+    /// `BEGIN`: the step.
+    pub index: u32,
+    /// `COLUMN`: its value.
+    pub value: i32,
+    /// `BEGIN`: the position the step goes for, if any.
+    pub at: Option<Pos>,
+    /// `DECIDE`: the decider's record.
+    pub decide: DecideTraceCode,
 }
 
-/// The numbers of a mission trace event.
-pub fn mission_trace_event(event: MissionTraceEvent) -> MissionTraceCode {
+/// The numbers of a mission trace record.
+pub fn mission_trace(event: MissionTrace) -> MissionTraceCode {
     let of = |kind, option| MissionTraceCode {
         kind,
         option,
-        index: -1,
         ..MissionTraceCode::default()
     };
     match event {
-        MissionTraceEvent::Column {
+        MissionTrace::Column {
             option,
             column,
             value,
         } => MissionTraceCode {
-            index: to_i32(column),
-            input: value,
+            column: u32::try_from(column).unwrap_or(u32::MAX),
+            value,
             ..of(MISSION_TRACE_COLUMN, Some(option))
         },
-        MissionTraceEvent::Factor {
-            option,
-            consideration,
-            input,
-            value,
-        } => MissionTraceCode {
-            index: to_i32(consideration),
-            input,
-            value,
-            ..of(MISSION_TRACE_FACTOR, Some(option))
+        MissionTrace::Decide { option, event } => MissionTraceCode {
+            decide: decide_trace(event),
+            ..of(MISSION_TRACE_DECIDE, Some(option))
         },
-        MissionTraceEvent::Scored {
+        MissionTrace::Rescored {
             option,
-            product,
             built_in,
             score,
         } => MissionTraceCode {
-            value: product,
             built_in,
             score,
-            ..of(MISSION_TRACE_SCORED, Some(option))
+            ..of(MISSION_TRACE_RESCORED, Some(option))
         },
-        MissionTraceEvent::Picked { option, score } => MissionTraceCode {
+        MissionTrace::Picked { option, score } => MissionTraceCode {
             score,
             ..of(MISSION_TRACE_PICKED, option)
+        },
+        MissionTrace::Begin { index, at } => MissionTraceCode {
+            index: u32::try_from(index).unwrap_or(u32::MAX),
+            at,
+            ..of(MISSION_TRACE_BEGIN, None)
         },
     }
 }
