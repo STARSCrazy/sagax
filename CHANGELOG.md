@@ -10,28 +10,29 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
 
 ### New
 
-- **Traced replanning:** `Mission::tick_traced(now, pos, knowledge, flags,
-  rules, sink)` takes a `sagax_core::Sink<MissionTraceEvent>`, like
+- **Traced missions:** `Mission::tick_traced(now, pos, knowledge, flags,
+  rules, sink)` takes a `Sink<MissionTrace>`, like
   `Decider::decide_traced`; `tick_with` is `tick_traced` with `NoopSink`, so
   an untraced tick costs nothing extra. Each replan scoring sends, per
-  candidate in option order, its row (`MissionTraceEvent::Column`), its
-  considerations (`Factor`) and its score (`Scored`: product, the decider's
-  score and the score after the `score` slot), then the winner (`Picked`,
-  `None` when every candidate scored 0; `MissionTraceEvent` is in
-  `sagax::decide::mission`). The events are plain data, so
-  `sagax_debug::Collector` keeps them. A trace never changes an action or
-  an event.
-- **C:** `sx_mission_set_trace(mission, fn, context)` in the style of
-  `sx_decider_set_trace` (`NULL` turns it off) with
-  `sx_mission_trace_event` and the codes `SX_MISSION_TRACE_COLUMN`,
-  `_FACTOR`, `_SCORED`, `_PICKED`.
+  candidate in option order, its row (`MissionTrace::Column`), the
+  decider's own records of it unchanged (`Decide { option, event:
+  DecideTrace }`: its factors and its score) and its score after the
+  `score` slot (`Rescored { option, built_in, score }`), then the winner
+  (`Picked`, `None` when every candidate scored 0). Each step that begins
+  sends `Begin { index, at }` with the place its `Where` stands for (game
+  coordinates; `None` for a step without one or an unknown place). A trace
+  never changes an action or an event.
+- **C:** `sx_mission_set_trace(mission, fn, context)` with
+  `sx_mission_trace` (the decider's record embedded as `sx_decide_trace
+  decide`) and the codes `SX_MISSION_TRACE_COLUMN`, `_DECIDE`, `_RESCORED`,
+  `_PICKED`, `_BEGIN` (1 to 5).
 - **C getters:** `sx_mission_motive`, `sx_mission_leeway` and
   `sx_mission_plan` (the summary in `sx_mission_plan_info`: step count,
   `repeat`, the plan's conditions; the first `cap` steps into the caller's
   buffer, as `sx_mission_set_plan` takes them). They read what
   `Mission::motive`, `leeway` and `plan` give in Rust.
 - `sagax-abi`: `where_code` and `step_kind_code` (the inverses of `where_of`
-  and `step_kind`), `mission_trace_event`.
+  and `step_kind`).
 - **One trace pattern** (navigation first): a trace is a `Sink` parameter.
   Every operation that decides something is `op_traced(.., sink)` with the
   sink last; the plain `op(..)` is `op_traced(.., &mut NoopSink)` and costs
@@ -55,9 +56,26 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   `place_members_traced`, `place_members_hex_traced`;
   `Topology::smooth_traced`, `Topology::place_members_traced`;
   `nav::write_way_traced`. `sagax_nav::search` is a public module.
+- **Decision traces:** `DecideTrace` (was `DecideEvent`) gains
+  `Scored::cooled` (a cooldown forced the score to 0, so a 0 is no longer
+  ambiguous) and `Ranked { rank }` (mixed ranks: only `rank` takes part;
+  after the last `Scored`, before `Chosen`).
+- **State machine trace:** `StateMachine::update_traced` reports
+  `StateTrace` records: `Changed(Change)` and `Waiting { transition,
+  elapsed, after }`, each transition of the current state whose conditions
+  hold but whose `after` has not passed yet (checked before the one that
+  fires): why the machine does not switch.
+- `sagax::debug` also exports `DecideTrace`, `StateTrace` and
+  `MissionTrace`.
 - `sagax-abi`: `search_trace` / `SearchTraceCode`, `nav_trace` /
-  `NavTraceCode` and the codes `SEARCH_TRACE_*`, `NAV_TRACE_*`, shared by
-  the C and the WebAssembly layer.
+  `NavTraceCode`, `decide_trace` / `DecideTraceCode`, `state_trace` /
+  `StateTraceCode`, `change` / `ChangeCode`, `mission_trace` /
+  `MissionTraceCode` and the codes `SEARCH_TRACE_*`, `NAV_TRACE_*`,
+  `DECIDE_TRACE_*`, `MACHINE_TRACE_*`, `MISSION_TRACE_*`, `REASON_*`,
+  shared by the C and the WebAssembly layer.
+- **C:** `sx_machine_set_trace` with `sx_machine_trace`
+  (`sx_machine_trace_fn`; `SX_MACHINE_TRACE_CHANGED` with the `sx_change`,
+  `SX_MACHINE_TRACE_WAITING` with `transition`, `elapsed`, `after`).
 - **C:** `sx_search_trace` (`sx_search_trace_fn`) for flow fields and D*
   Lite, `sx_nav_trace` (`sx_nav_trace_fn`) for the navigator with the codes
   `SX_SEARCH_TRACE_STARTED` .. `_FINISHED` and `SX_NAV_TRACE_SEARCH`,
@@ -67,13 +85,26 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
 
 ### Changed
 
-- **`Event::Call` carries the caller's motive** (`motive: Motive`, the
-  motive at the time of the call); the C `sx_mission_event` gains
+- **`mission::Event` is renamed `MissionEvent`** (also in the prelude; a
+  bare `Event` was too generic). The variants stay.
+- **`MissionEvent::Call` carries the caller's motive** (`motive: Motive`,
+  the motive at the time of the call); the C `sx_mission_event` gains
   `sx_motive motive` (valid for `SX_MISSION_EVENT_CALL`). The struct grows
   from 72 to 104 bytes and `sx_mission_out` from 616 to 872.
-  *Migration:* a Rust `match` that names every field of `Event::Call` adds
-  `motive` (or `..`); code that builds an `Event::Call` sets it. C code
-  recompiles against the new header; nothing else changes.
+  *Migration:* a Rust `match` that names every field of `Call` adds
+  `motive` (or `..`); code that builds a `Call` sets it. C code recompiles
+  against the new header; nothing else changes.
+- **`DecideEvent` is renamed `DecideTrace`**; `Scored` gains `cooled`, and
+  `decide_traced` sends `Ranked` when the ranks are mixed.
+- **`StateMachine::update_traced` takes a `Sink<StateTrace>`** instead of a
+  `Sink<Change>`; the change arrives as `StateTrace::Changed`.
+- **C:** `sx_decide_event` is replaced by `sx_decide_trace` (the callback
+  `sx_decide_trace_fn` keeps its name). `kind` is `uint32_t` with the codes
+  `SX_DECIDE_TRACE_FACTOR`, `_SCORED`, `_CHOSEN` (the same numbers 1 to 3)
+  and the new `_RANKED` (4); the product of `SCORED` moves from `value` to
+  its own `product`; new `rank` and `cooled`; fields that do not apply are
+  0 (`consideration` was -1). The struct grows from 24 to 36 bytes, and
+  `sx_score_event`, which embeds it, from 36 to 48.
 - **The navigator stores no tracer any more**: `Navigator::set_tracer`, the
   module `sagax_nav::trace` (`TraceEvent`, `TraceKind`, `Tracer`,
   `TraceSink`) are removed; pass a sink to the `_traced` calls instead.
@@ -105,6 +136,12 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
 | C `SX_TRACE_STARTED` .. `SX_TRACE_FINISHED` | `SX_SEARCH_TRACE_STARTED` .. `SX_SEARCH_TRACE_FINISHED` (same numbers) |
 | C `sx_nav_set_trace(nav, sx_trace_fn, ..)` | `sx_nav_set_trace(nav, sx_nav_trace_fn, ..)` |
 | C `sx_flow_set_trace`, `sx_dstar_set_trace` with `sx_trace_fn` | the same names with `sx_search_trace_fn` |
+| `DecideEvent` | `DecideTrace` (`Scored` gains `cooled`; new `Ranked`) |
+| `StateMachine::update_traced(.., &mut impl Sink<Change>)` | `update_traced(.., &mut impl Sink<StateTrace>)`; the change is `StateTrace::Changed(change)` |
+| `mission::Event` (prelude `Event`) | `mission::MissionEvent` (prelude `MissionEvent`) |
+| C `sx_decide_event` | `sx_decide_trace` (`product` separate from `value`, unused fields 0) |
+| C `SX_DECIDE_FACTOR`, `_SCORED`, `_CHOSEN` | `SX_DECIDE_TRACE_FACTOR`, `_SCORED`, `_CHOSEN` (same numbers; new `_RANKED`) |
+| — | C `sx_machine_set_trace`, `sx_machine_trace` |
 
 ## 0.11.0
 
