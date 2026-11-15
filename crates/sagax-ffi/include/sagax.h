@@ -346,7 +346,9 @@ int32_t sx_dstar_cells_changed(sx_dstar *dstar, const sx_map *map, const sx_poin
 
 typedef struct sx_search_trace {
 	uint32_t kind;              /* SX_SEARCH_TRACE_* */
-	uint32_t search;            /* number of the search within its handle, from 1 */
+	uint32_t search;            /* number of the search within its handle, from 1:
+	                             * nav: every search (a flee runs two); flow: every
+	                             * build; D* Lite: every compute */
 	sx_point cell;              /* STARTED: the start; EXPANDED, IMPROVED: the cell */
 	sx_point parent;            /* IMPROVED */
 	int32_t cost;               /* EXPANDED, IMPROVED. nav: from the start; flow,
@@ -360,7 +362,7 @@ typedef struct sx_search_trace {
 typedef void (*sx_search_trace_fn)(void *context, const sx_search_trace *trace);
 
 /* What a navigator did: its searches (a flee runs two: the threats' first,
- * then the walker's, each with its own search numbers), the line tests of
+ * then the walker's, each with its own search number), the line tests of
  * SX_OUT_SMOOTH, the member placements of sx_nav_formation and the cell a
  * flee chose. Covers sx_nav_find_path, sx_nav_continue, sx_nav_reachable,
  * sx_nav_flee, sx_nav_path_to, sx_nav_way, sx_nav_formation and

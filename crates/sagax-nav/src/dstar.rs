@@ -246,7 +246,8 @@ impl<N: Copy + Eq + Hash, H: Heuristic<N>> DStarLite<N, H> {
     }
 
     /// As [`compute`](Self::compute), reporting every expansion to `sink`
-    /// (cost: to the goal as known now).
+    /// (cost: to the goal as known now). Each call is one search: its
+    /// `search` number counts the calls of this planner, from 1.
     pub fn compute_traced<G: Graph<Node = N>, S: Sink<SearchTrace<N>> + ?Sized>(
         &mut self,
         graph: &mut G,
@@ -256,8 +257,8 @@ impl<N: Copy + Eq + Hash, H: Heuristic<N>> DStarLite<N, H> {
         let Some(start) = self.start else {
             return DStarStatus::Idle;
         };
-        let search = u32::try_from(self.computes).unwrap_or(u32::MAX);
         self.computes += 1;
+        let search = u32::try_from(self.computes).unwrap_or(u32::MAX);
         if sink.enabled() {
             sink.emit(SearchTrace::Started {
                 search,

@@ -52,8 +52,9 @@ use crate::topology::Topology;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NavTrace {
     /// A step of a search: of a path, an area, or one of the two searches of
-    /// a flee (the threats' search first, then the walker's; each counts its
-    /// `search` numbers on its own).
+    /// a flee (the threats' search first, then the walker's). The `search`
+    /// number counts every search of the navigator, from 1: no two share
+    /// one.
     Search(SearchTrace<Cell>),
     /// A line test of the smoothing ([`Output::Smooth`]).
     Smooth(SmoothTrace<Cell>),
@@ -212,6 +213,7 @@ pub struct Navigator {
     start: Cell,
     goals: Vec<Cell>,
     flee: Option<Search<Cell>>,
+    searches: u32,
     last: Last,
     keep_first: bool,
     smooth_max_extra: Cost,
@@ -232,6 +234,7 @@ impl Navigator {
             start: Cell::new(0, 0, 0),
             goals: Vec::new(),
             flee: None,
+            searches: 0,
             last: Last::Nothing,
             keep_first: false,
             smooth_max_extra: 0,
@@ -240,6 +243,13 @@ impl Navigator {
             scratch: Vec::with_capacity(capacity),
             members: Vec::new(),
         }
+    }
+
+    /// The number of the next search: one count for every search of the
+    /// navigator, so the two searches of a flee never share one.
+    fn next_number(&mut self) -> u32 {
+        self.searches = self.searches.wrapping_add(1);
+        self.searches
     }
 
     /// The rules.
@@ -306,11 +316,13 @@ impl Navigator {
             max_nodes: self.capacity,
             ..Limits::default()
         };
+        let number = self.next_number();
         let goal = Goals {
             cells: &self.goals,
             topology: self.topology,
         };
         self.search.begin(start, &goal, limits);
+        self.search.set_number(number);
         self.start = start;
         self.last = Last::Path;
         self.run_path(map, budget.into(), sink)
@@ -370,7 +382,9 @@ impl Navigator {
             max_nodes: self.capacity,
             max_cost,
         };
+        let number = self.next_number();
         self.search.begin(start, &NoGoal, limits);
+        self.search.set_number(number);
         self.start = start;
         self.last = Last::Area;
         self.path.clear();
@@ -411,6 +425,7 @@ impl Navigator {
         sink: &mut S,
     ) -> Report {
         // how far each cell is from the nearest threat, by the threats' walk
+        let number = self.next_number();
         let capacity = self.capacity;
         let danger = self
             .flee
@@ -420,6 +435,7 @@ impl Navigator {
             ..Limits::default()
         };
         danger.begin_many(threats.iter().copied(), &NoGoal, limits);
+        danger.set_number(number);
         danger.advance(
             &mut self.topology.graph(&mut *map, None),
             &NoGoal,
@@ -1002,6 +1018,43 @@ mod tests {
             };
             assert_eq!((cell, cost), (end, b.cost), "{topology:?}");
         }
+    }
+
+    #[test]
+    fn every_search_of_a_navigator_has_its_own_number() {
+        use sagax_core::CallbackSink;
+
+        let mut map = DenseGrid::new(20, 20);
+        let mut nav = square();
+        let mut numbers = Vec::new();
+        let start = Cell::new(5, 5, 0);
+        let threats = [Cell::new(3, 5, 0)];
+        {
+            let mut sink = CallbackSink(|e: NavTrace| {
+                if let NavTrace::Search(SearchTrace::Started { search, .. }) = e {
+                    numbers.push(search);
+                }
+            });
+            nav.flee_traced(&mut map, start, &threats, 40, &mut sink);
+        }
+        // a fresh navigator's first flee: two searches, two numbers
+        assert_eq!(numbers, [1, 2]);
+        {
+            let mut sink = CallbackSink(|e: NavTrace| {
+                if let NavTrace::Search(SearchTrace::Started { search, .. }) = e {
+                    numbers.push(search);
+                }
+            });
+            let goal = [Cell::new(18, 18, 0)];
+            nav.find_path_traced(&mut map, start, &goal, Budget::UNLIMITED, &mut sink);
+            nav.reachable_traced(&mut map, start, 30, Budget::UNLIMITED, &mut sink);
+            nav.flee_traced(&mut map, start, &threats, 40, &mut sink);
+            // untraced searches count too
+            nav.flee(&mut map, start, &threats, 40);
+            nav.find_path_traced(&mut map, start, &goal, Budget::UNLIMITED, &mut sink);
+        }
+        assert_eq!(numbers, [1, 2, 3, 4, 5, 6, 9]);
+        assert!(numbers.windows(2).all(|w| w[0] < w[1]));
     }
 
     #[test]

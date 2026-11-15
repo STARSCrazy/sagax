@@ -52,7 +52,8 @@ impl<N: Copy + Eq + Hash> FlowField<N> {
     }
 
     /// As [`build`](Self::build), reporting every step to `sink` (costs are
-    /// costs to the nearest goal).
+    /// costs to the nearest goal). Each build is one search: its `search`
+    /// number counts the builds of this field, from 1.
     pub fn build_traced<G: Graph<Node = N>, S: Sink<SearchTrace<N>> + ?Sized>(
         &mut self,
         graph: &mut G,

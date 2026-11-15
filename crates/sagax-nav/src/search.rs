@@ -447,6 +447,20 @@ impl<N: Copy + Eq + Hash> Search<N> {
         });
     }
 
+    /// The number the current search reports in its [`SearchTrace`]
+    /// records: each `begin*` counts up by one, from 1.
+    pub fn number(&self) -> u32 {
+        self.search_number
+    }
+
+    /// Gives the current search another number, for an owner that runs
+    /// several searches and numbers them together (a
+    /// [`Navigator`](crate::nav::Navigator)). Call it right after `begin*`;
+    /// the next `begin*` counts on from `number`.
+    pub fn set_number(&mut self, number: u32) {
+        self.search_number = number;
+    }
+
     /// Where the search stands.
     pub fn status(&self) -> SearchStatus {
         self.status

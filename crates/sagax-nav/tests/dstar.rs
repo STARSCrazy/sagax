@@ -409,3 +409,24 @@ fn hex_maps_match_astar() {
         }
     }
 }
+
+#[test]
+fn every_compute_is_a_search_numbered_from_one() {
+    use sagax_nav::search::SearchTrace;
+    let r = rules(false);
+    let mut g = GridGraph::new(DenseGrid::new(8, 8), r, None);
+    let mut d = DStarLite::new();
+    let mut numbers = Vec::new();
+    let mut sink = sagax_core::CallbackSink(|e: SearchTrace<Cell>| {
+        if let SearchTrace::Started { search, .. } = e {
+            numbers.push(search);
+        }
+    });
+    d.begin(Cell::new(0, 0, 0), Cell::new(7, 7, 0), r);
+    d.compute_traced(&mut g, 3, &mut sink);
+    d.compute_traced(&mut g, usize::MAX, &mut sink);
+    d.begin(Cell::new(7, 7, 0), Cell::new(0, 0, 0), r);
+    d.compute_traced(&mut g, usize::MAX, &mut sink);
+    drop(sink);
+    assert_eq!(numbers, [1, 2, 3]);
+}
