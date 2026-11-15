@@ -1,13 +1,14 @@
 //! Sagax in one crate: paths, decisions and group tactics for game AI.
 //!
 //! `use sagax::prelude::*;` brings the types most games need. The parts are
-//! also reachable as [`nav`] and [`decide`]; [`debug`] holds everything
-//! trace related.
+//! also reachable as [`nav`] and [`decide`]; [`perception`] holds sight
+//! with its nav adapters; [`debug`] holds everything trace related.
 
 pub use sagax_core::{Cell, HexLayout, Pos};
 pub use sagax_decide as decide;
 pub use sagax_nav as nav;
 
+pub mod perception;
 pub mod prelude;
 pub mod rules;
 

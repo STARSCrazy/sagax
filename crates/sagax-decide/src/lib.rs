@@ -854,13 +854,7 @@ pub fn compensate(product: u32, factors: usize) -> u32 {
     (p + make_up * p / one) as u32
 }
 
-/// A well-mixed number from `seed` (SplitMix64 finaliser).
-pub fn mix(seed: u64) -> u64 {
-    let mut z = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
-}
+pub use sagax_core::mix;
 
 /// Chooses among `scores` (index = candidate). `order` is scratch space.
 pub fn choose(scores: &[u32], pick: Pick, seed: u64, order: &mut Vec<usize>) -> Option<Choice> {

@@ -2,8 +2,9 @@
 //!
 //! Deliberately small: only what more than one module needs. Today that is the
 //! diagnostic [`Sink`], through which algorithms report what they do without
-//! depending on any debug UI or log format, and the shared places: [`Pos`],
-//! [`Cell`] and [`HexLayout`].
+//! depending on any debug UI or log format, the shared places: [`Pos`],
+//! [`Cell`] and [`HexLayout`], and the heading tables [`sine`] with the seed
+//! [`mix`].
 //!
 //! A trace is always a `Sink` parameter: every operation that decides
 //! something has an `op_traced(.., sink)` form, and the plain `op(..)` is
@@ -12,9 +13,11 @@
 
 mod cell;
 mod hex;
+mod turn;
 
 pub use cell::{Cell, Pos};
 pub use hex::{HexLayout, axial_step};
+pub use turn::{Sine, mix, sine};
 
 /// Receives diagnostic events of an algorithm.
 ///

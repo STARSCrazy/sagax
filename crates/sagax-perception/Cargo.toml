@@ -1,0 +1,20 @@
+[package]
+name = "sagax-perception"
+description = "Deterministic perception for game AI: view cones, exact integer sight lines with fog and light, on square and hex grids."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+repository.workspace = true
+
+[dependencies]
+sagax-core = { path = "../sagax-core" }
+
+[dev-dependencies]
+sagax-debug = { path = "../sagax-debug" }
+
+[lints]
+workspace = true
