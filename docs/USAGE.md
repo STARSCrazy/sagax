@@ -2030,12 +2030,12 @@ Everything lives in `sagax::debug` (`use sagax::debug::*;`): the sink pieces
 
 | Module | Record | Traced operations (next to the plain one) |
 |---|---|---|
-| search, flow, D* Lite | `SearchTrace` | `Search::advance`, `Flow::build_traced`, `DStar::compute_traced` |
+| search, flow, D* Lite | `SearchTrace` | `Search::advance`, `FlowField::build_traced`, `DStarLite::compute_traced` |
 | `Navigator` | `NavTrace` | `find_path_traced`, `continue_search_traced`, `reachable_traced`, `flee_traced`, `output_traced`, `formation_traced` |
 | smoothing, formation | `SmoothTrace`, `FormationTrace` | `smooth_path_traced`, `place_members_traced` (and `_hex_`) |
 | `Decider` | `DecideTrace` | `score_traced`, `decide_traced` |
 | `StateMachine` | `StateTrace` | `update_traced` |
-| `Knowledge`, `Areas`, `Timers` | `KnowledgeTrace`, `AreasTrace`, `TimersTrace` | `learn_traced`, `merge_traced`, `expire_traced`, `add_traced`, `set_traced`, ... |
+| `Knowledge`, `Areas`, `Timers` | `KnowledgeTrace`, `AreasTrace`, `TimersTrace` | `learn_traced`, `merge_traced`, `expire_traced`, `remove_traced`, `add_traced`, `set_traced`, ... |
 | `Outbox`, `Inbox` | `MessageTrace` | `post_traced`, `due_traced`, `push_traced`, `take_due_traced`, ... |
 | spots, `GoalKeeper` | `SpotTrace`, `KeeperTrace` | `pick_spot_traced`, `broken_traced` |
 | `Squad` | `SquadTrace` | `plan_traced`, `check_traced`, `observe_traced`, `report_traced`, `signal_traced`, `reinstate_traced`, `orders_due_traced` |
@@ -2044,6 +2044,8 @@ Everything lives in `sagax::debug` (`use sagax::debug::*;`): the sink pieces
 
 Where an operation has a `_with(.., rules)` form, `op_traced` takes the rules
 too (pass the built-in rules for none); there is never an `op_with_traced`.
+One exception: `reinstate_traced` takes `Option` rules, because the plain
+`reinstate` differs from built-in rules (`None` is the plain call).
 Setters, getters and constructors are not traced.
 
 A `Collector` keeps the records of a call; read it after the call:
@@ -2090,10 +2092,12 @@ sx_squad_set_trace(squad, on_trace, my_log);   /* NULL turns it off (the default
 `sx_<x>_set_trace(obj, fn, ctx)` returns 0 (`SX_ERROR_ARGUMENT` for a null
 handle). Off it costs one check per call. The callback runs inside the call,
 in record order. The record is valid only during the callback, so copy what
-you keep, and do not call into the same handle from it. A record is a flat
-struct: `kind` first, then named fields (0 when they do not apply to the
-kind); a wrapped sub-record is a field by value (`decide`, `knowledge`,
-`areas`, `keeper`, `squad`, `search`).
+you keep. From the callback, call no function on the same handle, on the
+handle that lent it (its parent) or on any handle it lent (see *Lent
+handles* below): they share the state the running call is changing. A
+record is a flat struct: `kind` first, then named fields (0 when they do not
+apply to the kind); a wrapped sub-record is a field by value (`decide`,
+`knowledge`, `areas`, `inbox`, `keeper`, `squad`, `search`).
 
 | Handle | Set | Record | Kind codes |
 |---|---|---|---|
@@ -2111,7 +2115,10 @@ kind); a wrapped sub-record is a field by value (`decide`, `knowledge`,
 | `sx_crew` | `sx_crew_set_trace` | `sx_crew_trace` | `SX_CREW_TRACE_*` |
 
 `sx_nav` covers everything that runs through it: `sx_nav_find_path`,
-`_continue`, `_reachable`, `_flee`, `_way` (smoothing) and `_formation`.
+`_continue`, `_reachable`, `_flee`, `_path_to`, `_way` (smoothing),
+`_formation` and `sx_path_cost`. Its `search` numbers count every search of
+the navigator (a flee runs two); a flow field counts its builds, a D* Lite
+planner its computes.
 The smoothing and spot records of the Rust table arrive inside these
 records (a spot pick only inside `sx_squad_trace`). The header has the exact
 fields of every record.
@@ -2120,7 +2127,10 @@ fields of every record.
 `sx_squad_knowledge`, `sx_squad_areas`, `sx_mission_decider`) accept
 `set_trace` too, and it covers only the calls made through that handle. What
 the parent does with its parts goes to the parent's trace, wrapped: one place
-per call, never two.
+per call, never two. A lent handle and its parent share state: a trace
+callback of one must not call the other, nor another handle the same parent
+lent (a squad trace callback must not read `sx_squad_knowledge`, a crew one
+not `sx_crew_squad`). A crew counts its squad's lent handles as its own.
 
 There is no C collector: the callback already gives you the copy, and the game
 knows best what to keep (only `FINISHED`, only one member). The example

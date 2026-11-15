@@ -328,7 +328,13 @@ int32_t sx_dstar_cells_changed(sx_dstar *dstar, const sx_map *map, const sx_poin
  *
  *  - It runs inside the call, synchronously, in record order. The record is
  *    valid only during the callback: copy what you keep.
- *  - The callback must not call into the same handle.
+ *  - The callback must not call any function on the same handle, on the
+ *    handle that lent it (its parent) or on any handle it lent: they share
+ *    the state the running call is changing. Lent handles are
+ *    sx_squad_knowledge, sx_squad_areas and sx_squad_decider (parent: the
+ *    squad), sx_crew_squad and sx_crew_keeper (parent: the crew) and
+ *    sx_mission_decider (parent: the mission); a crew also counts its
+ *    squad's lent handles as its own.
  *  - Records are flat structs: a kind first, then named fields; fields that
  *    do not apply to the kind are 0. Sub-records are embedded by value.
  *  - A trace never changes a result: every call answers the same with
@@ -391,6 +397,7 @@ typedef struct sx_nav_trace {
 
 typedef void (*sx_nav_trace_fn)(void *context, const sx_nav_trace *trace);
 
+/* trace must not call any function on the same handle. */
 int32_t sx_nav_set_trace(sx_nav *nav, sx_nav_trace_fn trace, void *context);
 int32_t sx_flow_set_trace(sx_flow *flow, sx_search_trace_fn trace, void *context);
 int32_t sx_dstar_set_trace(sx_dstar *dstar, sx_search_trace_fn trace, void *context);
@@ -527,7 +534,9 @@ int32_t sx_decider_set_cooldown(sx_decider *decider, uint32_t option, uint32_t t
 
 /* trace gets every record of the following sx_decider_decide calls, with
  * context; NULL turns it off (the default). On a lent decider it covers the
- * calls made through that handle only. Returns 0. */
+ * calls made through that handle only. trace must not call any function on
+ * the same decider or, for a lent one, on the squad, crew or mission that
+ * lent it or their other lent handles. Returns 0. */
 typedef void (*sx_decide_trace_fn)(void *context, const sx_decide_trace *trace);
 int32_t sx_decider_set_trace(sx_decider *decider, sx_decide_trace_fn trace, void *context);
 
@@ -581,7 +590,8 @@ typedef struct sx_machine_trace {
 } sx_machine_trace;
 
 /* trace gets every record of the following sx_machine_update calls, with
- * context; NULL turns it off (the default). Returns 0. */
+ * context; NULL turns it off (the default). trace must not call any function
+ * on the same machine. Returns 0. */
 typedef void (*sx_machine_trace_fn)(void *context, const sx_machine_trace *trace);
 int32_t sx_machine_set_trace(sx_machine *machine, sx_machine_trace_fn trace, void *context);
 
@@ -799,7 +809,9 @@ typedef struct sx_knowledge_trace {
 
 /* trace gets every record of the following calls on k, with context; NULL
  * turns it off (the default). For sx_squad_knowledge it covers the calls
- * made through that handle only. Returns 0. */
+ * made through that handle only. trace must not call any function on k or,
+ * for sx_squad_knowledge, on the squad (or crew) that lent it or their other
+ * lent handles. Returns 0. */
 typedef void (*sx_knowledge_trace_fn)(void *context, const sx_knowledge_trace *trace);
 int32_t sx_knowledge_set_trace(sx_knowledge *k, sx_knowledge_trace_fn trace, void *context);
 
@@ -855,7 +867,8 @@ typedef struct sx_message_trace {
 } sx_message_trace;
 
 /* trace gets every record of the following calls on the outbox or inbox,
- * with context; NULL turns it off (the default). Returns 0. */
+ * with context; NULL turns it off (the default). trace must not call any
+ * function on the same outbox or inbox. Returns 0. */
 typedef void (*sx_message_trace_fn)(void *context, const sx_message_trace *trace);
 int32_t sx_outbox_set_trace(sx_outbox *o, sx_message_trace_fn trace, void *context);
 int32_t sx_inbox_set_trace(sx_inbox *b, sx_message_trace_fn trace, void *context);
@@ -950,7 +963,9 @@ typedef struct sx_areas_trace {
 
 /* trace gets every record of the following calls on a, with context; NULL
  * turns it off (the default). For sx_squad_areas it covers the calls made
- * through that handle only. Returns 0. */
+ * through that handle only. trace must not call any function on a or, for
+ * sx_squad_areas, on the squad (or crew) that lent it or their other lent
+ * handles. Returns 0. */
 typedef void (*sx_areas_trace_fn)(void *context, const sx_areas_trace *trace);
 int32_t sx_areas_set_trace(sx_areas *a, sx_areas_trace_fn trace, void *context);
 
@@ -986,7 +1001,8 @@ typedef struct sx_timers_trace {
 } sx_timers_trace;
 
 /* trace gets every record of the following sx_timers_set calls on t, with
- * context; NULL turns it off (the default). Returns 0. */
+ * context; NULL turns it off (the default). trace must not call any function
+ * on t. Returns 0. */
 typedef void (*sx_timers_trace_fn)(void *context, const sx_timers_trace *trace);
 int32_t sx_timers_set_trace(sx_timers *t, sx_timers_trace_fn trace, void *context);
 
@@ -1500,6 +1516,9 @@ typedef struct sx_squad_trace {
 /* trace gets every record of the calls above on squad, with context; NULL
  * turns it off (the default). For sx_crew_squad it covers the calls made
  * through that handle only; the crew's own work goes to sx_crew_set_trace.
+ * trace must not call any function on the same squad, on the crew that lent
+ * it (sx_crew_squad) or on a handle the squad or that crew lent
+ * (sx_squad_knowledge, sx_squad_areas, sx_squad_decider, sx_crew_keeper).
  * Without rules a squad that needs them refuses plan and check (nothing is
  * traced). Returns 0. */
 typedef void (*sx_squad_trace_fn)(void *context, const sx_squad_trace *trace);
@@ -1550,7 +1569,8 @@ int32_t sx_squad_set_spot_radius(sx_squad *squad, int64_t radius);
  * per squad, lent until sx_squad_free; sx_knowledge_free and sx_areas_free
  * do nothing to them. Null for a null squad. They reach into the squad:
  * use them only between squad calls, never while another call on the same
- * squad runs (on another thread). Their traces see only the calls made
+ * squad runs (on another thread, or from a trace or rules callback of that
+ * call). Their traces see only the calls made
  * through them, not the squad's own work.
  * sx_squad_plan and sx_squad_check expire the areas (sx_areas_expire); the
  * game ages the knowledge itself (sx_knowledge_expire). */
@@ -1987,7 +2007,9 @@ typedef struct sx_keeper_trace {
 
 /* trace gets every record of sx_keeper_broken on keeper, with context; NULL
  * turns it off (the default). For sx_crew_keeper it covers the calls made
- * through that handle only (it stays set while the handle does). Returns 0. */
+ * through that handle only (it stays set while the handle does). trace must
+ * not call any function on keeper or, for sx_crew_keeper, on the crew that
+ * lent it or its other lent handles. Returns 0. */
 typedef void (*sx_keeper_trace_fn)(void *context, const sx_keeper_trace *trace);
 int32_t sx_keeper_set_trace(sx_keeper *keeper, sx_keeper_trace_fn trace, void *context);
 /* The member's decider inputs at x, y, z to out (room for 5): has_goal,
@@ -2196,7 +2218,10 @@ typedef struct sx_crew_trace {
 
 /* trace gets every record of the calls above on crew, with context; NULL
  * turns it off (the default). Calls through sx_crew_squad and sx_crew_keeper
- * go to their own traces, not to this one. Without rules a crew whose squad
+ * go to their own traces, not to this one. trace must not call any function
+ * on the same crew or on a handle it lent (sx_crew_squad, sx_crew_keeper and
+ * the squad's sx_squad_knowledge, sx_squad_areas and sx_squad_decider).
+ * Without rules a crew whose squad
  * needs them refuses the tick (nothing is traced). Returns 0. */
 typedef void (*sx_crew_trace_fn)(void *context, const sx_crew_trace *trace);
 int32_t sx_crew_set_trace(sx_crew *crew, sx_crew_trace_fn trace, void *context);
@@ -2719,7 +2744,7 @@ typedef struct sx_mission_trace {
 
 /* trace gets every record of the following ticks, with context; NULL turns
  * it off (the default). trace must not call any function on the same
- * mission. Returns 0. */
+ * mission or on its decider (sx_mission_decider). Returns 0. */
 typedef void (*sx_mission_trace_fn)(void *context, const sx_mission_trace *trace);
 int32_t sx_mission_set_trace(sx_mission *mission, sx_mission_trace_fn trace, void *context);
 
