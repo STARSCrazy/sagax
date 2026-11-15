@@ -1102,7 +1102,7 @@ test('route: all, to, bad rules, hex distance', () => {
 });
 
 test('stealth guard slice: noise, alertness, shout with delay, told', () => {
-  // The first rounds of crates/sagax-decide/tests/stealth_guard.rs. Guards on
+  // The first of the pre-0.13 stealth guard rounds. Guards on
   // hex cells (q, r): 0 at (0, 0), 1 at (4, -6), 2 at (-2, 0). Hex distance
   // (|dq| + |dr| + |dq + dr|) / 2. Alertness: thresholds 20/50/80,
   // hysteresis 5, hold 3, then 10 per tick.

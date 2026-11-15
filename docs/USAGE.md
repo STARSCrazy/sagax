@@ -1091,7 +1091,9 @@ values: `SenseProfile::human`, `guard` and `watcher` with `with_night`,
 passed on every call (`sight_scale`, `notice_scale`, `hearing_scale`,
 `reaction_ticks`), so a game stat or a boost acts without touching the
 profile. The game keeps one `Awareness` per observer–target pair and one
-`Attention` per observer, zeroed to start.
+`Attention` per observer, zeroed to start. A zeroed `Awareness` was last
+checked at tick 0, so a check credits the ticks since then: start your clock
+at 1, or the first check at tick 0 credits nothing.
 
 ```rust
 use sagax::perception::{Attention, Budget, Lit};
@@ -1113,6 +1115,8 @@ of view. `look` checks targets with an instant cue first (up to
 `instant_cap`), then kept ones (noticed, up to `keep`), then the rest round
 robin, at most `checks` of the last two; skipped time is never paid back, so
 a crowd really dilutes attention. `observe` checks one pair directly.
+`aware` must be parallel to `targets`, of the same length (a debug build
+asserts it).
 
 What comes out per check (at most `MAX_PERCEPTS_PER_CHECK`, 4): `Noticed`,
 `Recognized`, `Cues { new }` (cue bits seen at stage recognised), `Seen`
@@ -1133,7 +1137,9 @@ What comes out per check (at most `MAX_PERCEPTS_PER_CHECK`, 4): `Noticed`,
 **Disguise.** A target with `disguise > 0` is perceived, flagged
 `disguised`, and the cue bits in `eye.disguise.hides` are never reported.
 By default that always holds; `see_through: Some(..)` lets an observer
-grow doubt and see through it (a `SeenThrough` percept).
+grow doubt and see through it (a `SeenThrough` percept). A `Stimulus` has a
+`disguise` too: a disguised source's noise is heard as `disguised` (unless
+the pair has already seen through it); hearing never grows the doubt.
 
 ### Hearing, with a second channel
 
@@ -1155,7 +1161,9 @@ hear(&world, &mut map, now, &eye, &stimulus, None, Some(&mut aware), &mut percep
 
 `hear` pushes a `Heard` percept with a deterministically fuzzed whole cell
 and `margin`, `arrive_at`. With an `Awareness` it raises the pair at most to
-*noticed*; without one (`None`) it is stateless. One call returns up to 3
+*noticed*; without one (`None`) it is stateless. A recognition by sight
+that becomes due during a `hear` call is reported unplaced (the sound is
+not where the target was seen). One call returns up to 3
 percepts (`Heard`, `Noticed`, a due `Recognized` or `Forgotten`); in C give
 `sx_perception_hear` a cap of at least 3, `sx_perception_look` at least
 4 × (`checks` + `instant_cap`).
@@ -1164,7 +1172,13 @@ Around corners: `flood_sound(nav, world, map, stimulus, budget, out)` spreads
 the stimulus with one `Navigator::reachable` over `SoundCost`, bounded by the
 stimulus' loudness; each listener then calls `hear` with `Some(cost)` of its
 cell. It expects the navigator's straight step cost (on hex every step) to
-equal `world.cell_size`, so the costs are fine units.
+equal `world.cell_size`, so the costs are fine units (a debug build asserts
+it). The flood is bounded by the loudness alone: `hearing` or
+`hearing_scale` above 256 let `hear` accept a larger cost but do not widen
+the flood. With `Moves::Eight` a diagonal step asks `sound_edge` for the
+diagonal pair of cells, so the map must answer those too. `count_crowds`
+measures Euclid on the point's `x`, `y`: on hex that is axial Euclid, an
+approximation.
 
 ### Into knowledge: `learn_percepts`
 
@@ -1202,10 +1216,12 @@ The names follow Rust: `sx_perception_line`, `_in_sight`, `_observe`,
 `_look`, `_hear`, `_flood`, `_cell_centre`, `_cell_of`, `_set_trace`;
 `sx_percept_fact`, `sx_percept_alert`, `sx_learn_percepts`,
 `sx_count_crowds`, `sx_hex_heading`, `sx_awareness_*`. Two families of
-constants look alike: **`SX_SENSES_*` are profile bit flags**
-(`sx_sense_profile.senses`: `SIGHT` 1, `NIGHT` 2, `THERMAL` 4, `SCANNER` 8),
-**`SX_SENSE_*` are percept sense codes** (`sx_percept.sense`: `SIGHT` 0,
-`THERMAL` 1, `SCANNER` 2, `HEARING` 3). Callbacks must not call any
+constants look alike: **`SX_SENSE_FLAG_*` are profile bit flags**
+(`sx_sense_profile.senses`, OR them: `SIGHT` 1, `NIGHT` 2, `THERMAL` 4,
+`SCANNER` 8; Rust `SIGHT`, `NIGHT`, `THERMAL`, `SCANNER`), **`SX_SENSE_*`
+without `FLAG` are percept sense codes** (`sx_percept.sense`, one value:
+`SIGHT` 0, `THERMAL` 1, `SCANNER` 2, `HEARING` 3), and `SX_SENSE_PRESET_*`
+pick a ready profile. `sx_stimulus.disguise` follows `sx_target.disguise`. Callbacks must not call any
 function on the same `sx_perception`. `examples/c/perception.c` (a guard,
 smoke, a crowd and a shot) prints the same lines as
 `crates/sagax/examples/perception_scene.rs`.
@@ -2387,8 +2403,8 @@ a full memory gave up.
   `leaveCost` take whole numbers.
 - Crew handles lent to C or JavaScript (squad, keepers) end with the crew; a
   keeper is stale after the next call that changes the crew.
-- Perception: `SX_SENSES_*` (profile bits) are not `SX_SENSE_*` (percept
-  sense codes). A percept with `placed == false` has no position. Give
+- Perception: `SX_SENSE_FLAG_*` (profile bits) are not `SX_SENSE_*`
+  (percept sense codes). A percept with `placed == false` has no position. Give
   `sx_perception_look` a cap of 4 × (`checks` + `instant_cap`) and
   `sx_perception_hear` at least 3, or percepts are lost.
 - Load the library at run time, check `sx_api_version()`, and fall back to

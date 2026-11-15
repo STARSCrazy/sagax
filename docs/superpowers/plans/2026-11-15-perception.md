@@ -6,7 +6,7 @@
 
 **Architecture:** `sagax-perception` depends on `sagax-core` only: geometry (`world.rs`, `line.rs`, `cone.rs`), the game hook (`map.rs`), values and the per-pair check (`profile.rs`, `awareness.rs`, `look.rs`), hearing (`hear.rs`), outputs and trace (`percept.rs`, `trace.rs`). Everything that joins perception with `Knowledge`, `Alertness` or `Navigator` lives in `crates/sagax/src/perception.rs`. C bindings in `crates/sagax-ffi/src/perception.rs`, codes and trace conversion in `sagax-abi`.
 
-**Tech Stack:** Rust 2024 (workspace `sagax`), C99/C11 header `crates/sagax-ffi/include/sagax.h`, mingw64 gcc for `examples/c/run.sh`.
+**Tech Stack:** Rust 2024 (workspace `sagax`), C99/C11 header `crates/sagax-ffi/include/sagax.h`, a C compiler on PATH (gcc) for `examples/c/run.sh`.
 
 **Spec:** `docs/superpowers/specs/2026-11-15-perception-design.md` — read it first and keep it open. Its type definitions (sections 2–7), the gain chain (5, step 5), the stage rule (5, step 8), the hearing rules (6), the `learn_percepts` table (7), the trace records (8) and the C sketch (9) are binding and are not repeated here. "Decisions (owner)" and section 12 override anything that reads otherwise.
 
@@ -15,7 +15,7 @@
 - Integer only (`i32`/`i64`/`i128`/`u64`), no `f32`/`f64` anywhere in `sagax-perception`, no global state, no own randomness (seeds from the caller), no allocation inside the library (outputs go to the caller's `Vec`/array; `push` only).
 - Deterministic: same inputs → same outputs on every machine; ties by lower index.
 - `sagax-perception` depends only on `sagax-core` (dev-dependency `sagax-debug` allowed).
-- Every public item documented (`missing_docs`); every chunk ends green: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`, `CC=gcc sh examples/c/run.sh` (gcc from `D:\Dev-Tools` mingw64 on `PATH`).
+- Every public item documented (`missing_docs`); every chunk ends green: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`, `CC=gcc sh examples/c/run.sh` (a C compiler on PATH (gcc)).
 - Public repo: no names of private games or projects in code, docs, tests, commits. Commit author is the configured git user.
 - Square and hex everywhere; fine points inside, whole cells at every edge; hex offset conversion only on whole cells (C).
 - Everything opt-in: no existing test, example output or golden trace may change except the `ambush_rules` re-baseline allowed in Task 5.

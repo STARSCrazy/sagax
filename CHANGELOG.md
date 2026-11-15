@@ -62,6 +62,9 @@ game built with the new header refuses an older library.
     the channel's spread or a cost the game passes; a `Heard` percept with
     a deterministically fuzzed whole cell; with an `Awareness` it raises
     the pair at most to *noticed* (up to 3 percepts per call).
+    `Stimulus.disguise` (as `Target.disguise`, 0 none): a disguised
+    source's noise gives `disguised` percepts unless the pair has seen
+    through it; hearing never grows the doubt.
   - `PerceptionTrace`, also in `sagax::debug`.
 - **`sagax::perception` helpers** that join it with nav and memory:
   `GridSight::square` / `hex` (a sense map from a `DenseGrid`),
@@ -88,8 +91,11 @@ game built with the new header refuses an older library.
   `_cell_of`, `sx_hex_heading`, `sx_count_crowds`; `sx_fact_kinds`,
   `sx_alert_amounts`, `sx_percept_fact`, `sx_percept_alert`,
   `sx_learn_percepts`; `sx_perception_trace` with
-  `SX_PERCEPTION_TRACE_*`. `SX_SENSES_*` are the profile's bit flags,
-  `SX_SENSE_*` the percept's sense codes. On hex the whole cells are
+  `SX_PERCEPTION_TRACE_*`. `SX_SENSE_FLAG_*` are the profile's bit flags
+  (renamed from `SX_SENSES_*` before the release, so they no longer differ
+  from the codes by one letter), `SX_SENSE_*` the percept's sense codes.
+  `sx_stimulus` has `uint8_t disguise` right after `channel` (the struct
+  stays 36 bytes). On hex the whole cells are
   offset cells of the handle's layout, the fine points axial. Caps: give
   `observe` at least 4, `look` 4 × (`checks` + `instant_cap`), `hear` 3.
 - `sagax-abi`: the perception codes and the `perception_trace` codec.
