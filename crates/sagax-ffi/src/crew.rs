@@ -3,7 +3,7 @@
 
 use sagax_decide::group::{
     BuiltInRules, Crew, CrewConfig, CrewEvent, CrewTrace, GoalKeeper, KeeperInputs, Squad,
-    SquadConfig, SquadRules,
+    SquadRules,
 };
 use std::ffi::c_void;
 
@@ -13,7 +13,7 @@ use super::group::{
 };
 use super::memory::{SxFact, SxMessage, pos3, put};
 use super::rules::{CRules, SxSquadRules};
-use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, guarded, hex_layout, set_trace, to_i32};
+use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, guarded, set_trace, to_i32};
 use sagax_abi::convert;
 
 /// `sx_crew_config`.
@@ -247,24 +247,10 @@ pub unsafe extern "C" fn sx_crew_new(config: *const SxCrewConfig) -> *mut SxCrew
     };
     let root = create(|| {
         let s = c.squad;
-        let layout = match c.hex_grid {
-            0 => None,
-            grid => Some(hex_layout(grid)?),
-        };
         let crew = Crew::new(CrewConfig {
-            squad: SquadConfig {
-                members: s.members as usize,
-                memory: s.memory as usize,
-                areas: s.areas as usize,
-                inbox: s.inbox as usize,
-                dangers: s.dangers as usize,
-                metric: convert::metric(s.metric)?,
-                roles: convert::roles(s.role_count, &s.role_masks)?,
-                rule_columns: s.rule_columns as usize,
-                ..SquadConfig::default()
-            },
+            squad: s.config()?,
             arrive_radius: c.arrive_radius,
-            hex_layout: layout,
+            hex_layout: convert::grid_layout(c.hex_grid)?,
         })
         .ok()?;
         Some(SxCrew {

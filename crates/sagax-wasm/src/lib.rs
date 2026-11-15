@@ -16,7 +16,7 @@
 //!
 //! The JS wrapper (`js/sagax.mjs`) hides the raw calls.
 
-use sagax_abi::codes::{CUT_CORNERS, ERROR_ARGUMENT, FOUND, FOUR_WAYS, RUNNING, UNREACHABLE};
+use sagax_abi::codes::{ERROR_ARGUMENT, FOUND, POSTED, ROUTE_ALL, ROUTE_IN_RANGE, UNREACHABLE};
 use sagax_abi::convert::{self, nav_status, to_i32, u32_of, whole_i64};
 use sagax_core::{CallbackSink, NoopSink, Sink};
 use sagax_nav::Cost;
@@ -24,7 +24,7 @@ use sagax_nav::Limits;
 use sagax_nav::dstar::{DStarLite, DStarStatus};
 use sagax_nav::flow::FlowField;
 use sagax_nav::formation::Formation;
-use sagax_nav::grid::{Cell, DenseGrid, GridRules, Moves};
+use sagax_nav::grid::{Cell, DenseGrid};
 use sagax_nav::nav::{NavTrace, Navigator, Output, Report, WayOptions, write_way};
 use sagax_nav::search::SearchTrace;
 use sagax_nav::topology::Topology;
@@ -122,33 +122,6 @@ pub struct WasmGrid {
     tracing: bool,
 }
 
-/// Grid kinds as in `sx_rules.grid`: 0 square, 1..4 hex odd rows, even rows,
-/// odd columns, even columns (Foundry grid types 2..5 minus 1).
-fn topology_of(kind: i32, straight: i32, diagonal: i32, flags: u32) -> Option<Topology> {
-    let positive = |v: i32| Cost::try_from(v).ok().filter(|&c| c > 0);
-    let straight = positive(straight)?;
-    let layout = match kind {
-        0 => None,
-        kind => Some(convert::hex_layout(u32_of(kind)?)?),
-    };
-    Some(match layout {
-        Some(layout) => Topology::Hex {
-            layout,
-            step_cost: straight,
-        },
-        None => Topology::Square(GridRules {
-            moves: if flags & FOUR_WAYS != 0 {
-                Moves::Four
-            } else {
-                Moves::Eight
-            },
-            cut_corners: flags & CUT_CORNERS != 0,
-            straight,
-            diagonal: positive(diagonal)?,
-        }),
-    })
-}
-
 impl WasmGrid {
     fn new(mut grid: DenseGrid, topology: Topology) -> Self {
         let capacity = grid.costs_mut().len();
@@ -243,7 +216,11 @@ pub extern "C" fn sx_grid_new(
     diagonal: i32,
     flags: u32,
 ) -> *mut WasmGrid {
-    let Some(topology) = topology_of(kind, straight, diagonal, flags) else {
+    // Grid kinds as in `sx_rules.grid`: 0 square, 1..4 hex odd rows, even
+    // rows, odd columns, even columns (Foundry grid types 2..5 minus 1).
+    let Some(topology) =
+        u32_of(kind).and_then(|grid| convert::topology(grid, flags, straight, diagonal))
+    else {
         return std::ptr::null_mut();
     };
     if width <= 0 || height <= 0 || levels <= 0 {
@@ -716,13 +693,7 @@ pub unsafe extern "C" fn sx_dstar_compute(g: *mut WasmGrid, budget: i32, output:
         }
         status
     };
-    let code = match status {
-        DStarStatus::Idle => 0,
-        DStarStatus::Running => RUNNING,
-        DStarStatus::Found if w.path.is_empty() => UNREACHABLE,
-        DStarStatus::Found => FOUND,
-        DStarStatus::Unreachable => UNREACHABLE,
-    };
+    let code = convert::dstar_status(status, w.path.is_empty());
     let cost = if code == FOUND {
         w.dstar.cost().map_or(0, to_i32)
     } else {
@@ -823,7 +794,7 @@ pub unsafe extern "C" fn sx_trace_dropped(g: *mut WasmGrid) -> i32 {
 // ---- decisions -------------------------------------------------------------
 
 use sagax_abi::codes::{DECIDE_TRACE_CHOSEN, DECIDE_TRACE_FACTOR, DECIDE_TRACE_SCORED};
-use sagax_decide::{Apply, Candidate, Consideration, Curve, DecideTrace, Decider, Pick};
+use sagax_decide::{Apply, Candidate, DecideTrace, Decider, Pick};
 
 /// Numbers per decision trace event: kind (1 factor, 2 scored, 3 chosen),
 /// candidate, consideration (-1 if none), input, value, score.
@@ -909,12 +880,10 @@ pub unsafe extern "C" fn sx_decider_add_consideration(
     max: i32,
 ) -> i32 {
     let w = decider!(d, ERROR_ARGUMENT);
-    let Some(curve) = Curve::from_u32(curve) else {
+    let Some(c) = convert::consideration(input, curve, min, max) else {
         return ERROR_ARGUMENT;
     };
-    if w.decider
-        .add_consideration(option, Consideration::new(input, curve, min, max))
-    {
+    if w.decider.add_consideration(option, c) {
         0
     } else {
         ERROR_ARGUMENT
@@ -939,10 +908,12 @@ pub unsafe extern "C" fn sx_decider_add_weighted(
     apply: u32,
 ) -> i32 {
     let w = decider!(d, ERROR_ARGUMENT);
-    let (Some(curve), Some(apply)) = (Curve::from_u32(curve), Apply::from_u32(apply)) else {
+    let (Some(c), Some(apply)) = (
+        convert::consideration(input, curve, min, max),
+        Apply::from_u32(apply),
+    ) else {
         return ERROR_ARGUMENT;
     };
-    let c = Consideration::new(input, curve, min, max);
     if w.decider.add_weighted(option, c, pull, apply) {
         0
     } else {
@@ -1218,7 +1189,7 @@ pub unsafe extern "C" fn sx_decider_trace_take(d: *mut WasmDecider) -> i32 {
 
 // ---- state machine ---------------------------------------------------------
 
-use sagax_decide::state::{ANY, Reason, StateMachine, Transition};
+use sagax_decide::state::{ANY, StateMachine, Transition};
 
 /// A state machine and its last change.
 pub struct WasmMachine {
@@ -1324,12 +1295,8 @@ pub unsafe extern "C" fn sx_machine_update(
     w.change = match w.machine.update(now, flags) {
         None => [state, state, 0, -1],
         Some(c) => {
-            let (reason, index) = match c.reason {
-                Reason::Transition(i) => (1, to_i32(i)),
-                Reason::Timeout => (2, -1),
-                Reason::Set => (3, -1),
-            };
-            [to_i32(c.from), to_i32(c.to), reason, index]
+            let c = convert::change(c);
+            [c.from, c.to, c.reason, c.transition]
         }
     };
     i32::from(w.change[2] != 0)
@@ -1387,8 +1354,8 @@ pub unsafe extern "C" fn sx_machine_set_state(m: *mut WasmMachine, state: u32, n
 // the tables that hand out several records have an out buffer too.
 
 use sagax_decide::memory::{
-    Area, Areas, Evict, Fact, Inbox, Knowledge, LOOK_OFFSETS, Message, Outbox, PointPattern,
-    Refused, Route, Sine, Timers, points_around, route, sine, sweep_heading,
+    Area, Areas, Fact, Inbox, Knowledge, LOOK_OFFSETS, Message, Outbox, PointPattern, Timers,
+    points_around, route, sine, sweep_heading,
 };
 
 /// Numbers per fact record: subject, kind, x, y, z, seen at, strength, data,
@@ -1601,10 +1568,8 @@ macro_rules! knowledge {
 /// full, 1 the weakest. Null if `capacity` is 0 or `evict` unknown.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_knowledge_new(capacity: u32, evict: u32) -> *mut WasmKnowledge {
-    let evict = match evict {
-        0 => Evict::Oldest,
-        1 => Evict::Weakest,
-        _ => return std::ptr::null_mut(),
+    let Some(evict) = convert::evict(evict) else {
+        return std::ptr::null_mut();
     };
     match Knowledge::new(capacity as usize, evict) {
         Ok(knowledge) => Box::into_raw(Box::new(WasmKnowledge {
@@ -1938,9 +1903,8 @@ pub unsafe extern "C" fn sx_outbox_post(
 ) -> i32 {
     let w = outbox!(o);
     match w.outbox.post(now, message_of(&w.record), delay, cooldown) {
-        Ok(()) => 0,
-        Err(Refused::Full) => 1,
-        Err(Refused::Cooldown) => 2,
+        Ok(()) => POSTED as i32,
+        Err(why) => convert::refused(why) as i32,
     }
 }
 
@@ -2392,19 +2356,13 @@ pub extern "C" fn sx_scratch(count: i32) -> *mut i32 {
     })
 }
 
-fn sine_of(mode: i32) -> Option<Sine> {
-    match mode {
-        0 => Some(Sine::Fine),
-        1 => Some(Sine::Coarse),
-        _ => None,
-    }
-}
-
 /// The sine of a heading (256 = full turn): `mode` 0 fine (times 65536), 1
 /// coarse (times 256). Returns `i32::MIN` for an unknown mode.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_sine(heading: i32, mode: i32) -> i32 {
-    sine_of(mode).map_or(i32::MIN, |s| sine(heading, s))
+    u32_of(mode)
+        .and_then(convert::sine)
+        .map_or(i32::MIN, |s| sine(heading, s))
 }
 
 /// Picks recipients. Scratch in: `n` triples (id, x, y); scratch out: the
@@ -2422,15 +2380,19 @@ pub extern "C" fn sx_route(
     metric: i32,
     divisor: i32,
 ) -> i32 {
-    let rule = match rule {
-        0 if arg >= 0.0 => Route::Nearest(arg as usize),
-        1 => match whole_i64(arg) {
-            Some(range) => Route::InRange(range),
-            None => return ERROR_ARGUMENT,
-        },
-        2 => Route::All,
-        3 if arg >= 0.0 => Route::To(arg as u32),
-        _ => return ERROR_ARGUMENT,
+    // The argument as before: a whole range, a count or id truncated and
+    // clamped to `u32`, nothing for "all"; the rule itself is shared.
+    let arg = match u32_of(rule) {
+        Some(ROUTE_IN_RANGE) => whole_i64(arg),
+        Some(ROUTE_ALL) => Some(0),
+        _ if arg >= 0.0 => Some(arg.min(f64::from(u32::MAX)) as i64),
+        _ => None,
+    };
+    let Some(rule) = u32_of(rule)
+        .zip(arg)
+        .and_then(|(rule, arg)| convert::route_rule(rule, arg))
+    else {
+        return ERROR_ARGUMENT;
     };
     let Some(metric) = u32_of(metric).and_then(convert::metric) else {
         return ERROR_ARGUMENT;
@@ -2459,6 +2421,23 @@ pub extern "C" fn sx_route(
 /// Number of integers a point pattern takes in the scratch buffer.
 const PATTERN_SIZE: usize = 23;
 
+/// The pattern of a scratch record (see [`sx_points_around`]) with the
+/// `SX_SINE_*` `sine`; `None` for a count below 0 or above 8.
+fn pattern_of(r: &[i32], sine: u32) -> Option<PointPattern> {
+    let mut codes = PatternCodes {
+        heading_step: r[0],
+        first_distance: r[1],
+        count: u32_of(r[2])?,
+        sine,
+        min: (r[19], r[20]),
+        max: (r[21], r[22]),
+        ..PatternCodes::default()
+    };
+    codes.offsets.copy_from_slice(&r[3..11]);
+    codes.distances.copy_from_slice(&r[11..19]);
+    convert::point_pattern(&codes)
+}
+
 /// A point around a place. With `custom` not 0 the scratch buffer holds the
 /// pattern (heading step, first distance, count at most 8, 8 offsets, 8
 /// distances, min x, min y, max x, max y); otherwise the default pattern is
@@ -2475,28 +2454,19 @@ pub extern "C" fn sx_points_around(
     custom: i32,
     sine: i32,
 ) -> i32 {
-    let Some(sine) = sine_of(sine) else {
+    let Some((code, table)) = u32_of(sine).and_then(|c| Some((c, convert::sine(c)?))) else {
         return ERROR_ARGUMENT;
     };
     SCRATCH.with(|s| {
         let mut s = s.borrow_mut();
         let pattern = if custom != 0 {
-            if s.len() < PATTERN_SIZE || !(0..=8).contains(&s[2]) {
+            let Some(pattern) = s.get(..PATTERN_SIZE).and_then(|r| pattern_of(r, code)) else {
                 return ERROR_ARGUMENT;
-            }
-            let n = s[2] as usize;
-            PointPattern {
-                heading_step: s[0],
-                first_distance: s[1],
-                offsets: s[3..3 + n].to_vec(),
-                distances: s[11..11 + n].to_vec(),
-                sine,
-                min: (s[19], s[20]),
-                max: (s[21], s[22]),
-            }
+            };
+            pattern
         } else {
             PointPattern {
-                sine,
+                sine: table,
                 ..PointPattern::default()
             }
         };
@@ -2537,11 +2507,13 @@ pub extern "C" fn sx_sweep_heading(base: i32, elapsed: u32, step_ticks: u32, cou
 // `sagax.h` (`SX_PLACE_*`, `SX_GOAL_*`, `SX_START_*`, ...). Values beyond
 // 32 bits (radii, ranges) come as `f64`, like the route argument.
 
-use sagax_abi::convert::{CombineTarget, SkillCodes};
+use sagax_abi::convert::{
+    CombineTarget, PatternCodes, PlaceCodes, SkillCodes, SlotCodes, SquadCodes,
+};
 use sagax_decide::group::{
-    Abort, BuiltInRules, Channel, Goal, GoalKeeper, MAX_ROLE_COUNTS, Member, MemberState, Nearby,
-    Order, Place, Plan, PlanError, RoleCounts, SkillTable, Slot, Spot, Squad, SquadConfig,
-    SquadTrace, Tactic, Trigger, gather, tactics,
+    BuiltInRules, Channel, Goal, GoalKeeper, MAX_ROLE_COUNTS, Member, MemberState, Nearby, Order,
+    Plan, PlanError, SkillTable, Slot, Spot, Squad, SquadConfig, SquadTrace, Tactic, Trigger,
+    gather, tactics,
 };
 
 /// Numbers per member record: id, x, y, z, roles, skill, state.
@@ -2575,14 +2547,29 @@ fn scratch_copy(count: usize) -> Option<Vec<i32>> {
     SCRATCH.with(|s| s.borrow().get(..count).map(<[i32]>::to_vec))
 }
 
-/// The role list of `count` masks in the scratch buffer; `None` above 8.
-fn role_list(count: u32) -> Option<RoleCounts> {
-    if count as usize > MAX_ROLE_COUNTS {
-        return None;
+/// The squad config of the call's numbers with the `role_count` role masks
+/// in the scratch buffer; `None` for an unknown or negative metric, more
+/// than 8 roles or fewer masks in the buffer.
+fn squad_config(capacities: [u32; 5], metric: i32, role_count: u32) -> Option<SquadConfig> {
+    let n = usize::try_from(role_count)
+        .ok()
+        .filter(|&n| n <= MAX_ROLE_COUNTS)?;
+    let mut role_masks = [0; MAX_ROLE_COUNTS];
+    for (m, &v) in role_masks.iter_mut().zip(&scratch_copy(n)?) {
+        *m = v as u32;
     }
-    let masks = scratch_copy(count as usize)?;
-    let masks: Vec<u32> = masks.iter().map(|&m| m as u32).collect();
-    convert::roles(count, &masks)
+    let [members, memory, areas, inbox, dangers] = capacities;
+    convert::squad_config(&SquadCodes {
+        members,
+        memory,
+        areas,
+        inbox,
+        dangers,
+        metric: u32_of(metric)?,
+        role_count,
+        role_masks,
+        rule_columns: 0,
+    })
 }
 
 /// Writes `values` to the start of the scratch buffer (it has room).
@@ -2620,21 +2607,29 @@ fn member_record(m: &Member) -> [i32; MEMBER_SIZE] {
     ]
 }
 
-/// The place of five numbers: kind, x, y, z, value. `Some(None)` for no
-/// place (kind 0), `None` if invalid.
-fn place_from(r: &[i32]) -> Option<Option<Place>> {
-    convert::place(u32_of(r[0])?, r[4] as u32, [r[1], r[2], r[3]])
+/// The place of five numbers: kind, x, y, z, value; `None` for a negative
+/// kind.
+fn place_codes(r: &[i32]) -> Option<PlaceCodes> {
+    Some(PlaceCodes {
+        kind: u32_of(r[0])?,
+        value: r[4] as u32,
+        offset: [r[1], r[2], r[3]],
+    })
 }
 
+/// The slot of a slot record; `None` if invalid (see [`convert::slot`]) or
+/// for a negative min, max, kind or start.
 fn slot_of(r: &[i32]) -> Option<Slot> {
-    Some(Slot {
+    convert::slot(&SlotCodes {
         roles: r[0] as u32,
-        min: u8::try_from(r[1]).ok()?,
-        max: u8::try_from(r[2]).ok()?,
-        place: place_from(&r[3..8])??,
-        gather: place_from(&r[8..13])?,
-        kind: convert::goal_kind(u32_of(r[13])?, r[14] as u32)?,
-        start: convert::start(u32_of(r[15])?, r[16] as u32)?,
+        min: u32_of(r[1])?,
+        max: u32_of(r[2])?,
+        place: place_codes(&r[3..8])?,
+        gather: place_codes(&r[8..13])?,
+        kind: u32_of(r[13])?,
+        custom: r[14] as u32,
+        start: u32_of(r[15])?,
+        start_ticks: r[16] as u32,
         want_tags: r[17] as u32,
         dist: r[18],
         gather_dist: r[19],
@@ -2843,19 +2838,7 @@ macro_rules! tactic {
 /// A new, empty tactic (see `sx_tactic_new`). Null if `min_skill > 255`.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_tactic_new(weight: u32, min_skill: u32, needs_target: u32) -> *mut WasmTactic {
-    let Ok(min_skill) = u8::try_from(min_skill) else {
-        return std::ptr::null_mut();
-    };
-    Box::into_raw(Box::new(WasmTactic(Tactic {
-        slots: Vec::new(),
-        considerations: Vec::new(),
-        weight,
-        aborts: Vec::new(),
-        trigger: Trigger::None,
-        min_skill,
-        needs_target: needs_target != 0,
-        abort_if_target_lost: true,
-    })))
+    convert::tactic(weight, min_skill, needs_target).map_or(std::ptr::null_mut(), shipped)
 }
 
 /// A tactic as a handle for [`sx_squad_add_tactic`].
@@ -2953,11 +2936,10 @@ pub unsafe extern "C" fn sx_tactic_add_consideration(
     max: i32,
 ) -> i32 {
     let t = tactic!(t);
-    let Some(curve) = Curve::from_u32(curve) else {
+    let Some(c) = convert::consideration(input, curve, min, max) else {
         return ERROR_ARGUMENT;
     };
-    t.considerations
-        .push(Consideration::new(input, curve, min, max));
+    t.considerations.push(c);
     0
 }
 
@@ -2969,7 +2951,7 @@ pub unsafe extern "C" fn sx_tactic_add_consideration(
 pub unsafe extern "C" fn sx_tactic_add_abort(t: *mut WasmTactic, input: u32, at_least: i32) -> i32 {
     tactic!(t)
         .aborts
-        .push(Abort::at_least(input as usize, at_least));
+        .push(convert::abort_at_least(input, at_least));
     0
 }
 
@@ -2985,14 +2967,10 @@ pub unsafe extern "C" fn sx_tactic_add_abort_when(
     cmp: u32,
     value: i32,
 ) -> i32 {
-    let Some(cmp) = convert::compare(cmp) else {
+    let Some(abort) = convert::abort_when(input, cmp, value) else {
         return ERROR_ARGUMENT;
     };
-    tactic!(t).aborts.push(Abort::When {
-        input: input as usize,
-        cmp,
-        value,
-    });
+    tactic!(t).aborts.push(abort);
     0
 }
 
@@ -3222,22 +3200,8 @@ pub extern "C" fn sx_squad_new(
     metric: i32,
     role_count: u32,
 ) -> *mut WasmSquad {
-    let Some(metric) = u32_of(metric).and_then(convert::metric) else {
-        return std::ptr::null_mut();
-    };
-    let Some(roles) = role_list(role_count) else {
-        return std::ptr::null_mut();
-    };
-    let Ok(squad) = Squad::new(SquadConfig {
-        members: members as usize,
-        memory: memory as usize,
-        areas: areas as usize,
-        inbox: inbox as usize,
-        dangers: dangers as usize,
-        metric,
-        roles,
-        ..SquadConfig::default()
-    }) else {
+    let capacities = [members, memory, areas, inbox, dangers];
+    let Some(Ok(squad)) = squad_config(capacities, metric, role_count).map(Squad::new) else {
         return std::ptr::null_mut();
     };
     boxed_squad(Held::Own(squad))
@@ -3737,16 +3701,10 @@ pub unsafe extern "C" fn sx_squad_extra_start(s: *mut WasmSquad) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_set_spot_radius(s: *mut WasmSquad, radius: f64) -> i32 {
     let w = squad!(s);
-    let Some(radius) = whole_i64(radius) else {
+    let Some(radius) = whole_i64(radius).and_then(convert::spot_radius) else {
         return ERROR_ARGUMENT;
     };
-    if radius < 0 {
-        w.squad.set_spot_radius(None);
-    } else if let Ok(radius) = u32::try_from(radius) {
-        w.squad.set_spot_radius(Some(radius));
-    } else {
-        return ERROR_ARGUMENT;
-    }
+    w.squad.set_spot_radius(radius);
     0
 }
 

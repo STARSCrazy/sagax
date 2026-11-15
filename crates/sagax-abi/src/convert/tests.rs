@@ -1038,3 +1038,217 @@ fn group_trace_codes() {
         }
     );
 }
+
+#[test]
+fn topology_of_the_rules() {
+    let square = topology(GRID_SQUARE, FOUR_WAYS | CUT_CORNERS, 10, 14);
+    assert_eq!(
+        square,
+        Some(Topology::Square(GridRules {
+            moves: Moves::Four,
+            cut_corners: true,
+            straight: 10,
+            diagonal: 14,
+        }))
+    );
+    let Some(Topology::Square(eight)) = topology(GRID_SQUARE, 0, 1, 1) else {
+        panic!("square");
+    };
+    assert_eq!((eight.moves, eight.cut_corners), (Moves::Eight, false));
+    // A hex step costs `straight`; the diagonal is not read.
+    assert_eq!(
+        topology(GRID_HEX_EVEN_Q, 0, 3, 0),
+        Some(Topology::Hex {
+            layout: HexLayout::EvenQ,
+            step_cost: 3,
+        })
+    );
+    assert_eq!(topology(GRID_SQUARE, 0, 10, 0), None);
+    assert_eq!(topology(GRID_SQUARE, 0, 0, 14), None);
+    assert_eq!(topology(GRID_HEX_ODD_R, 0, -1, 14), None);
+    assert_eq!(topology(GRID_HEX_EVEN_Q + 1, 0, 10, 14), None);
+}
+
+#[test]
+fn grid_layout_is_the_inverse_of_grid_code() {
+    for grid in GRID_SQUARE..=GRID_HEX_EVEN_Q {
+        let layout = grid_layout(grid).expect("known grid");
+        assert_eq!(grid_code(layout), grid);
+    }
+    assert_eq!(grid_layout(GRID_HEX_EVEN_Q + 1), None);
+}
+
+#[test]
+fn route_rules() {
+    assert_eq!(route_rule(ROUTE_NEAREST, 3), Some(Route::Nearest(3)));
+    assert_eq!(route_rule(ROUTE_NEAREST, -1), None);
+    assert_eq!(route_rule(ROUTE_IN_RANGE, -5), Some(Route::InRange(-5)));
+    assert_eq!(route_rule(ROUTE_ALL, -9), Some(Route::All));
+    assert_eq!(route_rule(ROUTE_TO, 7), Some(Route::To(7)));
+    assert_eq!(route_rule(ROUTE_TO, i64::from(u32::MAX) + 1), None);
+    assert_eq!(route_rule(ROUTE_TO, -1), None);
+    assert_eq!(route_rule(ROUTE_TO + 1, 0), None);
+}
+
+#[test]
+fn sines_evictions_and_dstar_status() {
+    for code in [SINE_FINE, SINE_COARSE] {
+        assert_eq!(sine(code).map(sine_code), Some(code));
+    }
+    assert_eq!(sine(SINE_COARSE + 1), None);
+    assert_eq!(evict(EVICT_OLDEST), Some(Evict::Oldest));
+    assert_eq!(evict(EVICT_WEAKEST), Some(Evict::Weakest));
+    assert_eq!(evict(EVICT_WEAKEST + 1), None);
+    assert_eq!(dstar_status(DStarStatus::Idle, true), IDLE);
+    assert_eq!(dstar_status(DStarStatus::Running, true), RUNNING);
+    assert_eq!(dstar_status(DStarStatus::Found, false), FOUND);
+    assert_eq!(dstar_status(DStarStatus::Found, true), UNREACHABLE);
+    assert_eq!(dstar_status(DStarStatus::Unreachable, false), UNREACHABLE);
+}
+
+#[test]
+fn point_pattern_round_trip() {
+    let pattern = PointPattern {
+        sine: Sine::Coarse,
+        min: (-4, -5),
+        max: (6, 7),
+        ..PointPattern::default()
+    };
+    let codes = pattern_codes(&pattern).expect("fits");
+    assert_eq!((codes.count, codes.sine), (3, SINE_COARSE));
+    assert_eq!(point_pattern(&codes), Some(pattern));
+    let full = PatternCodes { count: 8, ..codes };
+    assert_eq!(point_pattern(&full).map(|p| p.offsets.len()), Some(8));
+    assert_eq!(point_pattern(&PatternCodes { count: 9, ..codes }), None);
+    assert_eq!(point_pattern(&PatternCodes { sine: 2, ..codes }), None);
+    let uneven = PointPattern {
+        offsets: vec![1],
+        ..PointPattern::default()
+    };
+    assert_eq!(pattern_codes(&uneven), None);
+    let long = PointPattern {
+        offsets: vec![0; 9],
+        distances: vec![0; 9],
+        ..PointPattern::default()
+    };
+    assert_eq!(pattern_codes(&long), None);
+}
+
+#[test]
+fn tactic_slot_abort_and_consideration() {
+    let t = tactic(65535, 200, 1).expect("tactic");
+    assert_eq!((t.weight, t.min_skill, t.needs_target), (65535, 200, true));
+    assert!(t.abort_if_target_lost);
+    assert_eq!(t.trigger, Trigger::None);
+    assert!(t.slots.is_empty() && t.aborts.is_empty() && t.considerations.is_empty());
+    assert!(tactic(1, 256, 0).is_none());
+
+    let codes = SlotCodes {
+        roles: 3,
+        min: 1,
+        max: 255,
+        place: PlaceCodes {
+            kind: PLACE_SIDE,
+            value: SIDE_LEFT,
+            offset: [0; 3],
+        },
+        gather: PlaceCodes::default(),
+        kind: GOAL_CUSTOM,
+        custom: 9,
+        start: START_AFTER_TICKS,
+        start_ticks: 4,
+        want_tags: 2,
+        dist: 5,
+        gather_dist: 6,
+    };
+    let s = slot(&codes).expect("slot");
+    assert_eq!((s.roles, s.min, s.max), (3, 1, 255));
+    assert_eq!(s.place, Place::Side(Side::Left));
+    assert_eq!(s.gather, None);
+    assert_eq!(s.kind, GoalKind::Custom(9));
+    assert_eq!(s.start, Start::AfterTicks(4));
+    assert_eq!((s.want_tags, s.dist, s.gather_dist), (2, 5, 6));
+    let none = PlaceCodes::default();
+    let bad_side = PlaceCodes {
+        value: 9,
+        ..codes.place
+    };
+    for bad in [
+        SlotCodes { max: 256, ..codes },
+        SlotCodes { min: 256, ..codes },
+        SlotCodes {
+            place: none,
+            ..codes
+        },
+        SlotCodes {
+            place: bad_side,
+            ..codes
+        },
+        SlotCodes {
+            gather: bad_side,
+            ..codes
+        },
+        SlotCodes {
+            kind: GOAL_CUSTOM + 1,
+            ..codes
+        },
+        SlotCodes { start: 3, ..codes },
+    ] {
+        assert_eq!(slot(&bad), None, "{bad:?}");
+    }
+
+    assert_eq!(abort_at_least(2, 5), Abort::at_least(2, 5));
+    assert_eq!(
+        abort_when(1, CMP_NOT_EQUAL, -3),
+        Some(Abort::When {
+            input: 1,
+            cmp: Compare::NotEqual,
+            value: -3,
+        })
+    );
+    assert_eq!(abort_when(1, CMP_NOT_EQUAL + 1, 0), None);
+    assert!(consideration(0, 0, 0, 10).is_some());
+    assert!(consideration(0, u32::MAX, 0, 10).is_none());
+}
+
+#[test]
+fn squad_config_round_trip() {
+    let config = SquadConfig::default();
+    let codes = squad_codes(&config);
+    let back = squad_config(&codes).expect("default");
+    assert_eq!(squad_codes(&back), codes);
+    assert_eq!(codes.metric, metric_code(config.metric));
+    let wide = SquadCodes {
+        rule_columns: 2,
+        role_count: 8,
+        role_masks: [1, 2, 4, 8, 16, 32, 64, 128],
+        metric: METRIC_HEX,
+        ..codes
+    };
+    let c = squad_config(&wide).expect("eight roles");
+    assert_eq!(c.rule_columns, 2);
+    assert_eq!(c.roles.as_slice(), &wide.role_masks);
+    assert_eq!(c.metric, Metric::Hex);
+    assert!(
+        squad_config(&SquadCodes {
+            role_count: 9,
+            ..codes
+        })
+        .is_none()
+    );
+    assert!(
+        squad_config(&SquadCodes {
+            metric: METRIC_HEX + 1,
+            ..codes
+        })
+        .is_none()
+    );
+}
+
+#[test]
+fn spot_radius_of_a_number() {
+    assert_eq!(spot_radius(-1), Some(None));
+    assert_eq!(spot_radius(0), Some(Some(0)));
+    assert_eq!(spot_radius(i64::from(u32::MAX)), Some(Some(u32::MAX)));
+    assert_eq!(spot_radius(i64::from(u32::MAX) + 1), None);
+}

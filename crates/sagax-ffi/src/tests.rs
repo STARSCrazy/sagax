@@ -1,7 +1,8 @@
 #![allow(deprecated)]
 
 use super::*;
-use sagax_abi::codes::{IDLE, PARTIAL};
+use sagax_abi::codes::{IDLE, PARTIAL, RUNNING};
+use sagax_nav::grid::GridRules;
 use sagax_nav::nav::ANY_LEVEL;
 
 /// A 20 x 20 map, one level; context points to a list of blocked cells.
@@ -1216,6 +1217,14 @@ mod squad {
             ("SX_METRIC_MANHATTAN", i64::from(METRIC_MANHATTAN)),
             ("SX_METRIC_CHEBYSHEV", i64::from(METRIC_CHEBYSHEV)),
             ("SX_METRIC_HEX", i64::from(METRIC_HEX)),
+            ("SX_ROUTE_NEAREST", i64::from(ROUTE_NEAREST)),
+            ("SX_ROUTE_IN_RANGE", i64::from(ROUTE_IN_RANGE)),
+            ("SX_ROUTE_ALL", i64::from(ROUTE_ALL)),
+            ("SX_ROUTE_TO", i64::from(ROUTE_TO)),
+            ("SX_SINE_FINE", i64::from(SINE_FINE)),
+            ("SX_SINE_COARSE", i64::from(SINE_COARSE)),
+            ("SX_EVICT_OLDEST", i64::from(EVICT_OLDEST)),
+            ("SX_EVICT_WEAKEST", i64::from(EVICT_WEAKEST)),
             ("SX_PICK_BEST", i64::from(PICK_BEST)),
             ("SX_PICK_WEIGHTED", i64::from(PICK_WEIGHTED)),
             ("SX_PICK_UNIFORM", i64::from(PICK_UNIFORM)),
@@ -1406,6 +1415,10 @@ mod squad {
             "fn set_combine",
             "fn status_code",
             "fn to_i32",
+            "fn sine_of",
+            "fn topology_of",
+            "fn role_list",
+            "fn place_from",
         ];
         for source in sources {
             for name in gone {

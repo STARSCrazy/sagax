@@ -3,7 +3,6 @@
 
 use std::ffi::c_void;
 
-use sagax_abi::codes::GRID_SQUARE;
 use sagax_abi::convert::{self, FailCode};
 use sagax_decide::mission::{
     BuiltInRules, Fail, FailCtx, Leash, Leeway, MAX_EVENTS, MAX_FAILS, Mission, MissionConfig,
@@ -327,10 +326,7 @@ impl SxMissionConfig {
             reached_signal: self.reached_signal,
             metric: convert::metric(self.metric)?,
             search: self.search.pattern()?,
-            hex_layout: match self.grid {
-                GRID_SQUARE => None,
-                grid => Some(convert::hex_layout(grid)?),
-            },
+            hex_layout: convert::grid_layout(self.grid)?,
             extra_columns: self.extra_columns as usize,
             pick: Pick::from_u32(self.pick, self.pick_top)?,
         })

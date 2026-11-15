@@ -4,15 +4,15 @@
 use std::ffi::c_void;
 
 use sagax_decide::memory::{
-    AlertConfig, Alertness, Area, Areas, AreasTrace, Evict, Fact, Inbox, Interval, Knowledge,
-    KnowledgeTrace, LOOK_OFFSETS, Message, MessageTrace, Outbox, PointPattern, Progress, Route,
-    Sine, Timers, TimersTrace, arrival, points_around, route, sine, sweep_heading,
+    AlertConfig, Alertness, Area, Areas, AreasTrace, Fact, Inbox, Interval, Knowledge,
+    KnowledgeTrace, LOOK_OFFSETS, Message, MessageTrace, Outbox, PointPattern, Progress, Timers,
+    TimersTrace, arrival, points_around, route, sine, sweep_heading,
 };
 
 use super::group::{Held, Inside};
 use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, set_trace, slice_of, to_i32};
 use sagax_abi::codes::POSTED;
-use sagax_abi::convert;
+use sagax_abi::convert::{self, PATTERN_MAX, PatternCodes};
 use sagax_nav::grid::Cell;
 
 /// `sx_fact`.
@@ -41,9 +41,6 @@ pub struct SxNearby {
     /// Place, y.
     pub y: i32,
 }
-
-/// Most entries of a point pattern.
-const PATTERN_MAX: usize = 8;
 
 /// `sx_point_pattern`.
 #[repr(C)]
@@ -74,16 +71,13 @@ pub struct SxPointPattern {
 impl SxPointPattern {
     /// The pattern; `None` for more than 8 entries or an unknown sine.
     pub(crate) fn pattern(&self) -> Option<PointPattern> {
-        let n = self.count as usize;
-        if n > PATTERN_MAX {
-            return None;
-        }
-        Some(PointPattern {
+        convert::point_pattern(&PatternCodes {
             heading_step: self.heading_step,
             first_distance: self.first_distance,
-            offsets: self.offsets[..n].to_vec(),
-            distances: self.distances[..n].to_vec(),
-            sine: sine_of(self.sine)?,
+            count: self.count,
+            offsets: self.offsets,
+            distances: self.distances,
+            sine: self.sine,
             min: (self.min_x, self.min_y),
             max: (self.max_x, self.max_y),
         })
@@ -92,40 +86,24 @@ impl SxPointPattern {
     /// The C form of a pattern; `None` for more than 8 entries or
     /// `offsets` and `distances` of different lengths.
     pub(crate) fn of(p: &PointPattern) -> Option<Self> {
-        let n = p.distances.len();
-        if n > PATTERN_MAX || p.offsets.len() != n {
-            return None;
-        }
-        let mut c = Self {
-            heading_step: p.heading_step,
-            first_distance: p.first_distance,
-            count: n as u32,
-            sine: match p.sine {
-                Sine::Fine => 0,
-                Sine::Coarse => 1,
-            },
-            min_x: p.min.0,
-            min_y: p.min.1,
-            max_x: p.max.0,
-            max_y: p.max.1,
-            ..Self::default()
-        };
-        c.offsets[..n].copy_from_slice(&p.offsets);
-        c.distances[..n].copy_from_slice(&p.distances);
-        Some(c)
+        let c = convert::pattern_codes(p)?;
+        Some(Self {
+            heading_step: c.heading_step,
+            first_distance: c.first_distance,
+            count: c.count,
+            offsets: c.offsets,
+            distances: c.distances,
+            sine: c.sine,
+            min_x: c.min.0,
+            min_y: c.min.1,
+            max_x: c.max.0,
+            max_y: c.max.1,
+        })
     }
 }
 
 fn flag(b: bool) -> i32 {
     i32::from(b)
-}
-
-fn sine_of(code: u32) -> Option<Sine> {
-    match code {
-        0 => Some(Sine::Fine),
-        1 => Some(Sine::Coarse),
-        _ => None,
-    }
 }
 
 /// A mutable reference to a handle or value struct, or `ERROR_ARGUMENT`.
@@ -241,11 +219,7 @@ impl SxKnowledge {
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_knowledge_new(capacity: u32, evict: u32) -> *mut SxKnowledge {
     create(|| {
-        let evict = match evict {
-            0 => Evict::Oldest,
-            1 => Evict::Weakest,
-            _ => return None,
-        };
+        let evict = convert::evict(evict)?;
         Knowledge::new(capacity as usize, evict)
             .ok()
             .map(|k| SxKnowledge {
@@ -887,18 +861,8 @@ pub unsafe extern "C" fn sx_route(
     let Some(metric) = convert::metric(metric) else {
         return ERROR_ARGUMENT;
     };
-    let rule = match rule {
-        0 => match usize::try_from(arg) {
-            Ok(k) => Route::Nearest(k),
-            Err(_) => return ERROR_ARGUMENT,
-        },
-        1 => Route::InRange(arg),
-        2 => Route::All,
-        3 => match u32::try_from(arg) {
-            Ok(id) => Route::To(id),
-            Err(_) => return ERROR_ARGUMENT,
-        },
-        _ => return ERROR_ARGUMENT,
+    let Some(rule) = convert::route_rule(rule, arg) else {
+        return ERROR_ARGUMENT;
     };
     // SAFETY: see above.
     let list: Vec<(u32, i32, i32)> = unsafe { slice_of(c, n as usize) }
@@ -1485,7 +1449,7 @@ pub unsafe extern "C" fn sx_alertness_level(a: *mut SxAlertness) -> i32 {
 /// `sx_sine`.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_sine(heading: i32, kind: u32) -> i32 {
-    sine(heading, sine_of(kind).unwrap_or_default())
+    sine(heading, convert::sine(kind).unwrap_or_default())
 }
 
 /// `sx_points_around`.

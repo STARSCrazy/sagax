@@ -8,17 +8,15 @@
 use std::ffi::c_void;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use sagax_abi::codes::{
-    CUT_CORNERS, DONE, ERROR_ARGUMENT, ERROR_INTERNAL, FOUND, FOUR_WAYS, RUNNING, UNREACHABLE,
-};
-use sagax_abi::convert::{self, NavTraceCode, SearchTraceCode, hex_layout, nav_status, to_i32};
+use sagax_abi::codes::{DONE, ERROR_ARGUMENT, ERROR_INTERNAL, FOUND, UNREACHABLE};
+use sagax_abi::convert::{self, NavTraceCode, SearchTraceCode, nav_status, to_i32};
 use sagax_core::CallbackSink;
 use sagax_nav::Cost;
 use sagax_nav::Limits;
 use sagax_nav::dstar::{DStarLite, DStarStatus};
 use sagax_nav::flow::FlowField;
 use sagax_nav::formation::Formation;
-use sagax_nav::grid::{Cell, CellMap, GridRules, Moves, Preset};
+use sagax_nav::grid::{Cell, CellMap, Preset};
 use sagax_nav::nav::{NavTrace, Navigator, Output, Report, WayOptions, write_way};
 use sagax_nav::search::SearchTrace;
 use sagax_nav::topology::Topology;
@@ -463,32 +461,16 @@ impl CellMap for CallbackMap {
 fn rules_of(rules: *const SxRules) -> Option<(Topology, usize, Cost)> {
     // SAFETY: the caller passes null or valid rules.
     let rules = *unsafe { rules.as_ref() }?;
-    let positive = |v: i32| Cost::try_from(v).ok().filter(|&c| c > 0);
-    let straight = positive(rules.cost_straight)?;
+    let topology = convert::topology(
+        rules.grid,
+        rules.flags,
+        rules.cost_straight,
+        rules.cost_diagonal,
+    )?;
     let capacity = usize::try_from(rules.node_capacity)
         .ok()
         .filter(|&c| c > 0)?;
     let tolerance = Cost::try_from(rules.smooth_max_extra).ok()?;
-    let layout = match rules.grid {
-        0 => None,
-        grid => Some(hex_layout(grid)?),
-    };
-    let topology = match layout {
-        Some(layout) => Topology::Hex {
-            layout,
-            step_cost: straight,
-        },
-        None => Topology::Square(GridRules {
-            moves: if rules.flags & FOUR_WAYS != 0 {
-                Moves::Four
-            } else {
-                Moves::Eight
-            },
-            cut_corners: rules.flags & CUT_CORNERS != 0,
-            straight,
-            diagonal: positive(rules.cost_diagonal)?,
-        }),
-    };
     Some((topology, capacity, tolerance))
 }
 
@@ -513,7 +495,7 @@ pub unsafe extern "C" fn sx_rules_default(grid: u32, preset: u32, out: *mut SxRu
     let Some(preset) = preset_of(preset) else {
         return ERROR_ARGUMENT;
     };
-    if grid != 0 && hex_layout(grid).is_none() {
+    if convert::grid_layout(grid).is_none() {
         return ERROR_ARGUMENT;
     }
     // SAFETY: the caller passes null or valid rules.
@@ -1217,13 +1199,7 @@ pub unsafe extern "C" fn sx_dstar_compute(
             }
             status
         };
-        let code = match status {
-            DStarStatus::Idle => 0,
-            DStarStatus::Running => RUNNING,
-            DStarStatus::Found if d.path.is_empty() => UNREACHABLE,
-            DStarStatus::Found => FOUND,
-            DStarStatus::Unreachable => UNREACHABLE,
-        };
+        let code = convert::dstar_status(status, d.path.is_empty());
         write_result(
             result,
             SxResult {

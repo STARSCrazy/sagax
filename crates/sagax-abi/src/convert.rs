@@ -6,25 +6,28 @@ use std::num::NonZeroUsize;
 
 use sagax_core::{HexLayout, Pos};
 use sagax_decide::group::{
-    Compare, CrewEvent, CrewTrace, Goal, GoalKind, KeeperTrace, MemberState, Place, PlanError,
-    PlanId, RoleCounts, Shape, Side, SkillTable, SpotPick, SpotTrace, SquadTrace, Start,
-    Status as SquadStatus,
+    Abort, Compare, CrewEvent, CrewTrace, Goal, GoalKind, KeeperTrace, MAX_ROLE_COUNTS,
+    MemberState, Place, PlanError, PlanId, RoleCounts, Shape, Side, SkillTable, Slot, SpotPick,
+    SpotTrace, SquadConfig, SquadTrace, Start, Status as SquadStatus, Tactic, Trigger,
 };
 use sagax_decide::memory::{
-    Area, AreasTrace, Fact, KnowledgeTrace, Message, MessageTrace, Metric, Refused, TimersTrace,
+    Area, AreasTrace, Evict, Fact, KnowledgeTrace, Message, MessageTrace, Metric, PointPattern,
+    Refused, Route, Sine, TimersTrace,
 };
 use sagax_decide::mission::{
     Action, BreakReason, Detour, DetourEnd, Fail, Leeway, MissionEvent, MissionTrace, Motive,
     MotiveKind, OnLost, StepKind, Where,
 };
 use sagax_decide::state::{Change, Reason, StateTrace};
-use sagax_decide::{Combine, DecideTrace, Decider, Pick};
+use sagax_decide::{Combine, Consideration, Curve, DecideTrace, Decider, Pick};
 use sagax_nav::Cost;
+use sagax_nav::dstar::DStarStatus;
 use sagax_nav::formation::FormationTrace;
-use sagax_nav::grid::Cell;
+use sagax_nav::grid::{Cell, GridRules, Moves};
 use sagax_nav::nav::{Budget, NavTrace, Output, Status};
 use sagax_nav::search::{SearchStatus, SearchTrace};
 use sagax_nav::smooth::SmoothTrace;
+use sagax_nav::topology::Topology;
 
 use crate::codes::{
     ACTION_ATTACK, ACTION_CUSTOM, ACTION_FLEE, ACTION_FOLLOW, ACTION_GO_TO, ACTION_HOLD,
@@ -67,6 +70,10 @@ use crate::codes::{
     SQUAD_TRACE_INBOX, SQUAD_TRACE_KNOWLEDGE, SQUAD_TRACE_NO_PICK, SQUAD_TRACE_PICKED,
     SQUAD_TRACE_REPORT, SQUAD_TRACE_SPOT_PICKED, SQUAD_TRACE_SPOT_RANKED, SQUAD_TRACE_TARGET,
     SQUAD_TRACE_THINKING, SQUAD_TRACE_TRIGGER,
+};
+use crate::codes::{
+    CUT_CORNERS, EVICT_OLDEST, EVICT_WEAKEST, FOUR_WAYS, ROUTE_ALL, ROUTE_IN_RANGE, ROUTE_NEAREST,
+    ROUTE_TO, SINE_COARSE, SINE_FINE,
 };
 use crate::codes::{
     DECIDE_TRACE_CHOSEN, DECIDE_TRACE_FACTOR, DECIDE_TRACE_RANKED, DECIDE_TRACE_SCORED,
@@ -127,6 +134,32 @@ pub fn hex_from_axial(grid: u32, p: Pos) -> Option<Pos> {
     hex_layout(grid).map(|layout| layout.from_axial_pos(p))
 }
 
+/// The topology of the grid rules: `grid` is `SX_GRID_*`, `flags` the
+/// `SX_FOUR_WAYS` / `SX_CUT_CORNERS` bits (square grids only), `straight`
+/// and `diagonal` the step costs (`diagonal` is read on a square grid only;
+/// a hex step costs `straight`). `None` for an unknown grid or a cost below
+/// 1.
+pub fn topology(grid: u32, flags: u32, straight: i32, diagonal: i32) -> Option<Topology> {
+    let positive = |v: i32| Cost::try_from(v).ok().filter(|&c| c > 0);
+    let straight = positive(straight)?;
+    Some(match grid {
+        GRID_SQUARE => Topology::Square(GridRules {
+            moves: if flags & FOUR_WAYS != 0 {
+                Moves::Four
+            } else {
+                Moves::Eight
+            },
+            cut_corners: flags & CUT_CORNERS != 0,
+            straight,
+            diagonal: positive(diagonal)?,
+        }),
+        grid => Topology::Hex {
+            layout: hex_layout(grid)?,
+            step_cost: straight,
+        },
+    })
+}
+
 /// The metric of an `SX_METRIC_*` value.
 pub fn metric(code: u32) -> Option<Metric> {
     match code {
@@ -175,6 +208,18 @@ pub fn output(code: u32) -> Option<Output> {
         1 => Some(Output::Turns),
         2 => Some(Output::Smooth),
         _ => None,
+    }
+}
+
+/// The `SX_IDLE` .. `SX_UNREACHABLE` value of a D* Lite status; `found`
+/// with an empty way (`no_way`) counts as `SX_UNREACHABLE`.
+pub const fn dstar_status(status: DStarStatus, no_way: bool) -> i32 {
+    match status {
+        DStarStatus::Idle => IDLE,
+        DStarStatus::Running => RUNNING,
+        DStarStatus::Found if no_way => UNREACHABLE,
+        DStarStatus::Found => FOUND,
+        DStarStatus::Unreachable => UNREACHABLE,
     }
 }
 
@@ -876,6 +921,112 @@ pub fn crew_trace(event: CrewTrace) -> CrewTraceCode {
     }
 }
 
+// ---- routes and geometry ------------------------------------------------------
+
+/// The eviction of an `SX_EVICT_*` value.
+pub fn evict(code: u32) -> Option<Evict> {
+    match code {
+        EVICT_OLDEST => Some(Evict::Oldest),
+        EVICT_WEAKEST => Some(Evict::Weakest),
+        _ => None,
+    }
+}
+
+/// The route rule of an `SX_ROUTE_*` value and its argument: the count of
+/// `SX_ROUTE_NEAREST`, the distance of `SX_ROUTE_IN_RANGE`, the id of
+/// `SX_ROUTE_TO` (ignored for `SX_ROUTE_ALL`). `None` for an unknown rule or
+/// a count or id out of range (negative, or beyond `usize` / `u32`).
+pub fn route_rule(rule: u32, arg: i64) -> Option<Route> {
+    match rule {
+        ROUTE_NEAREST => usize::try_from(arg).ok().map(Route::Nearest),
+        ROUTE_IN_RANGE => Some(Route::InRange(arg)),
+        ROUTE_ALL => Some(Route::All),
+        ROUTE_TO => u32::try_from(arg).ok().map(Route::To),
+        _ => None,
+    }
+}
+
+/// The sine table of an `SX_SINE_*` value.
+pub fn sine(code: u32) -> Option<Sine> {
+    match code {
+        SINE_FINE => Some(Sine::Fine),
+        SINE_COARSE => Some(Sine::Coarse),
+        _ => None,
+    }
+}
+
+/// The `SX_SINE_*` value of a sine table, the inverse of [`sine`].
+pub const fn sine_code(sine: Sine) -> u32 {
+    match sine {
+        Sine::Fine => SINE_FINE,
+        Sine::Coarse => SINE_COARSE,
+    }
+}
+
+/// Most entries of a point pattern (`offsets` and `distances`).
+pub const PATTERN_MAX: usize = 8;
+
+/// A point pattern as numbers (`sx_point_pattern`): the first `count`
+/// entries of `offsets` and `distances` are used.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PatternCodes {
+    /// Heading between neighbouring agents.
+    pub heading_step: i32,
+    /// Distance of step 0.
+    pub first_distance: i32,
+    /// Number of used entries (at most [`PATTERN_MAX`]).
+    pub count: u32,
+    /// Turn of each later step.
+    pub offsets: [i32; PATTERN_MAX],
+    /// Distance of each later step.
+    pub distances: [i32; PATTERN_MAX],
+    /// `SX_SINE_*`.
+    pub sine: u32,
+    /// Smallest allowed `(x, y)`.
+    pub min: (i32, i32),
+    /// Largest allowed `(x, y)`.
+    pub max: (i32, i32),
+}
+
+/// The point pattern of its numbers; `None` for more than
+/// [`PATTERN_MAX`] entries or an unknown sine.
+pub fn point_pattern(codes: &PatternCodes) -> Option<PointPattern> {
+    let n = usize::try_from(codes.count)
+        .ok()
+        .filter(|&n| n <= PATTERN_MAX)?;
+    Some(PointPattern {
+        heading_step: codes.heading_step,
+        first_distance: codes.first_distance,
+        offsets: codes.offsets[..n].to_vec(),
+        distances: codes.distances[..n].to_vec(),
+        sine: sine(codes.sine)?,
+        min: codes.min,
+        max: codes.max,
+    })
+}
+
+/// The numbers of a point pattern, the inverse of [`point_pattern`];
+/// `None` for more than [`PATTERN_MAX`] entries or `offsets` and
+/// `distances` of different lengths.
+pub fn pattern_codes(pattern: &PointPattern) -> Option<PatternCodes> {
+    let n = pattern.distances.len();
+    if n > PATTERN_MAX || pattern.offsets.len() != n {
+        return None;
+    }
+    let mut c = PatternCodes {
+        heading_step: pattern.heading_step,
+        first_distance: pattern.first_distance,
+        count: u32::try_from(n).ok()?,
+        sine: sine_code(pattern.sine),
+        min: pattern.min,
+        max: pattern.max,
+        ..PatternCodes::default()
+    };
+    c.offsets[..n].copy_from_slice(&pattern.offsets);
+    c.distances[..n].copy_from_slice(&pattern.distances);
+    Some(c)
+}
+
 // ---- places, goals, members ---------------------------------------------------
 
 /// A side of the target.
@@ -1073,6 +1224,105 @@ pub fn skill_codes(table: &SkillTable) -> SkillCodes {
     }
 }
 
+// ---- tactics ------------------------------------------------------------------
+
+/// A new tactic as `sx_tactic_new` makes it: no slots, considerations or
+/// aborts, trigger none, ending when its target is lost. `None` for a
+/// `min_skill` above 255.
+pub fn tactic(weight: u32, min_skill: u32, needs_target: u32) -> Option<Tactic> {
+    Some(Tactic {
+        slots: Vec::new(),
+        considerations: Vec::new(),
+        weight,
+        aborts: Vec::new(),
+        trigger: Trigger::None,
+        min_skill: u8::try_from(min_skill).ok()?,
+        needs_target: needs_target != 0,
+        abort_if_target_lost: true,
+    })
+}
+
+/// A place as numbers (`sx_place`): `SX_PLACE_*`, the value and the offset
+/// (see [`place`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlaceCodes {
+    /// `SX_PLACE_*`.
+    pub kind: u32,
+    /// `SX_SIDE_*`, tag bits or the id of `SX_PLACE_CUSTOM`.
+    pub value: u32,
+    /// The offset of `SX_PLACE_OFFSET`.
+    pub offset: Pos,
+}
+
+/// A slot as numbers (`sx_slot`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SlotCodes {
+    /// Role bits a member must all have.
+    pub roles: u32,
+    /// Fewest members (at most 255).
+    pub min: u32,
+    /// Most members (at most 255).
+    pub max: u32,
+    /// Where the members go; not `SX_PLACE_NONE`.
+    pub place: PlaceCodes,
+    /// Where they gather first, or `SX_PLACE_NONE`.
+    pub gather: PlaceCodes,
+    /// `SX_GOAL_*`.
+    pub kind: u32,
+    /// The game's kind for `SX_GOAL_CUSTOM`.
+    pub custom: u32,
+    /// `SX_START_*`.
+    pub start: u32,
+    /// Ticks for `SX_START_AFTER_TICKS`.
+    pub start_ticks: u32,
+    /// Tag bits a spot should have.
+    pub want_tags: u32,
+    /// Distance from the target for sides and between.
+    pub dist: i32,
+    /// Like `dist`, for the gather place.
+    pub gather_dist: i32,
+}
+
+/// The slot of its numbers; `None` for an unknown place, side, goal kind
+/// or start, a goal place of `SX_PLACE_NONE`, or a `min` or `max` above
+/// 255.
+pub fn slot(codes: &SlotCodes) -> Option<Slot> {
+    let at = |p: &PlaceCodes| place(p.kind, p.value, p.offset);
+    Some(Slot {
+        roles: codes.roles,
+        min: u8::try_from(codes.min).ok()?,
+        max: u8::try_from(codes.max).ok()?,
+        place: at(&codes.place)??,
+        gather: at(&codes.gather)?,
+        kind: goal_kind(codes.kind, codes.custom)?,
+        start: start(codes.start, codes.start_ticks)?,
+        want_tags: codes.want_tags,
+        dist: codes.dist,
+        gather_dist: codes.gather_dist,
+    })
+}
+
+/// The plan ends when `row[input] >= at_least` (`sx_tactic_add_abort`).
+pub const fn abort_at_least(input: u32, at_least: i32) -> Abort {
+    Abort::at_least(input as usize, at_least)
+}
+
+/// The plan ends when `row[input]` compares to `value` as `cmp`
+/// (`SX_CMP_*`); `None` for an unknown `cmp`.
+pub fn abort_when(input: u32, cmp: u32, value: i32) -> Option<Abort> {
+    Some(Abort::When {
+        input: input as usize,
+        cmp: compare(cmp)?,
+        value,
+    })
+}
+
+/// A factor over a row or an option's inputs: input column, `SX_CURVE_*`,
+/// min, max; `None` for an unknown curve.
+pub fn consideration(input: u32, curve: u32, min: i32, max: i32) -> Option<Consideration> {
+    Some(Consideration::new(input, Curve::from_u32(curve)?, min, max))
+}
+
 // ---- decider ------------------------------------------------------------------
 
 /// Which options [`set_combine`] changes.
@@ -1103,6 +1353,74 @@ pub fn set_combine(decider: &mut Decider, target: CombineTarget, combine: u32) -
 }
 
 // ---- squad and crew -----------------------------------------------------------
+
+/// The spot radius of `sx_squad_set_spot_radius`: `Some(None)` (the
+/// default) for a negative radius, `None` above `u32::MAX`.
+pub fn spot_radius(radius: i64) -> Option<Option<u32>> {
+    if radius < 0 {
+        return Some(None);
+    }
+    u32::try_from(radius).ok().map(Some)
+}
+
+/// A squad config as numbers (`sx_squad_config`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SquadCodes {
+    /// Most members.
+    pub members: u32,
+    /// Most facts.
+    pub memory: u32,
+    /// Most danger areas.
+    pub areas: u32,
+    /// Most waiting member reports.
+    pub inbox: u32,
+    /// Most waiting danger reports.
+    pub dangers: u32,
+    /// `SX_METRIC_*`.
+    pub metric: u32,
+    /// How many of `role_masks` are used (at most 8).
+    pub role_count: u32,
+    /// The role list.
+    pub role_masks: [u32; MAX_ROLE_COUNTS],
+    /// Columns the rules fill.
+    pub rule_columns: u32,
+}
+
+/// The squad config of its numbers; `None` for an unknown metric or more
+/// than 8 roles. The capacities are checked by `Squad::new`.
+pub fn squad_config(codes: &SquadCodes) -> Option<SquadConfig> {
+    Some(SquadConfig {
+        members: codes.members as usize,
+        memory: codes.memory as usize,
+        areas: codes.areas as usize,
+        inbox: codes.inbox as usize,
+        dangers: codes.dangers as usize,
+        metric: metric(codes.metric)?,
+        roles: roles(codes.role_count, &codes.role_masks)?,
+        rule_columns: codes.rule_columns as usize,
+        ..SquadConfig::default()
+    })
+}
+
+/// The numbers of a squad config, the inverse of [`squad_config`]
+/// (capacities beyond `u32` saturate).
+pub fn squad_codes(config: &SquadConfig) -> SquadCodes {
+    let wide = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    let roles = config.roles.as_slice();
+    let mut role_masks = [0; MAX_ROLE_COUNTS];
+    role_masks[..roles.len()].copy_from_slice(roles);
+    SquadCodes {
+        members: wide(config.members),
+        memory: wide(config.memory),
+        areas: wide(config.areas),
+        inbox: wide(config.inbox),
+        dangers: wide(config.dangers),
+        metric: metric_code(config.metric),
+        role_count: wide(roles.len()),
+        role_masks,
+        rule_columns: wide(config.rule_columns),
+    }
+}
 
 /// The `SX_SQUAD_*` value of a check result, and the new plan's id for
 /// `SX_SQUAD_REPLAN`.
@@ -1184,6 +1502,16 @@ pub const fn pick_code(pick: Pick) -> (u32, u32) {
         Pick::Best => (PICK_BEST, 0),
         Pick::Weighted { top } => (PICK_WEIGHTED, top),
         Pick::Uniform { top } => (PICK_UNIFORM, top),
+    }
+}
+
+/// The hex layout of an `SX_GRID_*` value: `Some(None)` for
+/// `SX_GRID_SQUARE`, `None` for an unknown grid; the inverse of
+/// [`grid_code`].
+pub fn grid_layout(grid: u32) -> Option<Option<HexLayout>> {
+    match grid {
+        GRID_SQUARE => Some(None),
+        grid => hex_layout(grid).map(Some),
     }
 }
 

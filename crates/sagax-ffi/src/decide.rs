@@ -4,7 +4,7 @@ use std::ffi::c_void;
 
 use sagax_abi::codes::ALL_OPTIONS;
 use sagax_abi::convert::{self, CombineTarget, DecideTraceCode};
-use sagax_decide::{Apply, Candidate, Consideration, Curve, DecideTrace, Decider, Pick};
+use sagax_decide::{Apply, Candidate, DecideTrace, Decider, Pick};
 
 use super::group::Held;
 use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, guarded, set_trace, slice_of, to_i32};
@@ -175,13 +175,11 @@ pub unsafe extern "C" fn sx_decider_add_consideration(
     }) else {
         return ERROR_ARGUMENT;
     };
-    let Some(curve) = Curve::from_u32(c.curve) else {
+    let Some(c) = convert::consideration(c.input, c.curve, c.min, c.max) else {
         return ERROR_ARGUMENT;
     };
     guarded(|| {
-        let added = d
-            .decider
-            .add_consideration(option, Consideration::new(c.input, curve, c.min, c.max));
+        let added = d.decider.add_consideration(option, c);
         if added { 0 } else { ERROR_ARGUMENT }
     })
 }
@@ -204,11 +202,13 @@ pub unsafe extern "C" fn sx_decider_add_weighted(
     }) else {
         return ERROR_ARGUMENT;
     };
-    let (Some(curve), Some(apply)) = (Curve::from_u32(c.curve), Apply::from_u32(apply)) else {
+    let (Some(c), Some(apply)) = (
+        convert::consideration(c.input, c.curve, c.min, c.max),
+        Apply::from_u32(apply),
+    ) else {
         return ERROR_ARGUMENT;
     };
     guarded(|| {
-        let c = Consideration::new(c.input, curve, c.min, c.max);
         if d.decider.add_weighted(option, c, pull, apply) {
             0
         } else {

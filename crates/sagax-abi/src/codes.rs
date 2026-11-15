@@ -180,6 +180,25 @@ pub const METRIC_CHEBYSHEV: u32 = 2;
 /// `SX_METRIC_HEX`.
 pub const METRIC_HEX: u32 = 3;
 
+/// `SX_ROUTE_NEAREST`: the `arg` nearest candidates.
+pub const ROUTE_NEAREST: u32 = 0;
+/// `SX_ROUTE_IN_RANGE`: every candidate within distance `arg`.
+pub const ROUTE_IN_RANGE: u32 = 1;
+/// `SX_ROUTE_ALL`: every candidate (`arg` is ignored).
+pub const ROUTE_ALL: u32 = 2;
+/// `SX_ROUTE_TO`: the candidate with id `arg`.
+pub const ROUTE_TO: u32 = 3;
+
+/// `SX_EVICT_OLDEST`: a full knowledge drops the fact seen longest ago.
+pub const EVICT_OLDEST: u32 = 0;
+/// `SX_EVICT_WEAKEST`: a full knowledge drops the weakest fact.
+pub const EVICT_WEAKEST: u32 = 1;
+
+/// `SX_SINE_FINE`: 65536 = 1.0.
+pub const SINE_FINE: u32 = 0;
+/// `SX_SINE_COARSE`: 256 = 1.0.
+pub const SINE_COARSE: u32 = 1;
+
 /// `SX_PICK_BEST`.
 pub const PICK_BEST: u32 = 0;
 /// `SX_PICK_WEIGHTED`.

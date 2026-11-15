@@ -2,12 +2,12 @@
 //! see `sagax.h`.
 
 use sagax_abi::convert::{KeeperTraceCode, SquadTraceCode};
+use sagax_decide::Decider;
 use sagax_decide::group::{
     Abort, BuiltInRules, Channel, Goal, GoalKeeper, KeeperTrace, Member, MemberState, Nearby,
-    Order, Place, Plan, PlanError, SkillTable, Slot, Spot, Squad, SquadConfig, SquadRules,
-    SquadTrace, Tactic, Trigger, gather, tactics,
+    Order, Plan, PlanError, SkillTable, Slot, Spot, Squad, SquadConfig, SquadRules, SquadTrace,
+    Tactic, Trigger, gather, tactics,
 };
-use sagax_decide::{Consideration, Curve, Decider};
 use std::ffi::c_void;
 
 use super::crew::SxCrew;
@@ -19,7 +19,7 @@ use super::memory::{
 use super::rules::{CRules, SxSquadRules};
 use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, guarded, set_trace, slice_of, to_i32};
 use sagax_abi::convert;
-use sagax_decide::memory::{Areas, Knowledge, Metric};
+use sagax_decide::memory::{Areas, Knowledge};
 
 // ---- value structs ------------------------------------------------------------
 
@@ -95,9 +95,12 @@ pub struct SxPlace {
 }
 
 impl SxPlace {
-    /// The place, `Some(None)` for `SX_PLACE_NONE`, `None` if invalid.
-    fn place(&self) -> Option<Option<Place>> {
-        convert::place(self.kind, self.value, [self.x, self.y, self.z])
+    fn codes(&self) -> convert::PlaceCodes {
+        convert::PlaceCodes {
+            kind: self.kind,
+            value: self.value,
+            offset: [self.x, self.y, self.z],
+        }
     }
 }
 
@@ -134,14 +137,16 @@ pub struct SxSlot {
 
 impl SxSlot {
     fn slot(&self) -> Option<Slot> {
-        Some(Slot {
+        convert::slot(&convert::SlotCodes {
             roles: self.roles,
-            min: self.min,
-            max: self.max,
-            gather: self.gather.place()?,
-            place: self.place.place()??,
-            kind: convert::goal_kind(self.kind, self.custom)?,
-            start: convert::start(self.start, self.start_ticks)?,
+            min: u32::from(self.min),
+            max: u32::from(self.max),
+            place: self.place.codes(),
+            gather: self.gather.codes(),
+            kind: self.kind,
+            custom: self.custom,
+            start: self.start,
+            start_ticks: self.start_ticks,
             want_tags: self.want_tags,
             dist: self.dist,
             gather_dist: self.gather_dist,
@@ -380,19 +385,7 @@ pub struct SxTactic(Tactic);
 /// `sx_tactic_new`.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_tactic_new(weight: u32, min_skill: u32, needs_target: u32) -> *mut SxTactic {
-    create(|| {
-        let min_skill = u8::try_from(min_skill).ok()?;
-        Some(SxTactic(Tactic {
-            slots: Vec::new(),
-            considerations: Vec::new(),
-            weight,
-            aborts: Vec::new(),
-            trigger: Trigger::None,
-            min_skill,
-            needs_target: needs_target != 0,
-            abort_if_target_lost: true,
-        }))
-    })
+    create(|| convert::tactic(weight, min_skill, needs_target).map(SxTactic))
 }
 
 /// `sx_tactic_free`.
@@ -430,11 +423,10 @@ pub unsafe extern "C" fn sx_tactic_add_consideration(
 ) -> i32 {
     let t = get!(tactic);
     let c = input!(consideration);
-    let Some(curve) = Curve::from_u32(c.curve) else {
+    let Some(c) = convert::consideration(c.input, c.curve, c.min, c.max) else {
         return ERROR_ARGUMENT;
     };
-    t.0.considerations
-        .push(Consideration::new(c.input, curve, c.min, c.max));
+    t.0.considerations.push(c);
     0
 }
 
@@ -451,7 +443,7 @@ pub unsafe extern "C" fn sx_tactic_add_abort(
     get!(tactic)
         .0
         .aborts
-        .push(Abort::at_least(input as usize, at_least));
+        .push(convert::abort_at_least(input, at_least));
     0
 }
 
@@ -466,14 +458,10 @@ pub unsafe extern "C" fn sx_tactic_add_abort_when(
     cmp: u32,
     value: i32,
 ) -> i32 {
-    let Some(cmp) = convert::compare(cmp) else {
+    let Some(abort) = convert::abort_when(input, cmp, value) else {
         return ERROR_ARGUMENT;
     };
-    get!(tactic).0.aborts.push(Abort::When {
-        input: input as usize,
-        cmp,
-        value,
-    });
+    get!(tactic).0.aborts.push(abort);
     0
 }
 
@@ -757,6 +745,38 @@ pub struct SxSquadConfig {
     pub rule_columns: u32,
 }
 
+impl SxSquadConfig {
+    /// The config; `None` for an unknown metric or more than 8 roles.
+    pub(crate) fn config(&self) -> Option<SquadConfig> {
+        convert::squad_config(&convert::SquadCodes {
+            members: self.members,
+            memory: self.memory,
+            areas: self.areas,
+            inbox: self.inbox,
+            dangers: self.dangers,
+            metric: self.metric,
+            role_count: self.role_count,
+            role_masks: self.role_masks,
+            rule_columns: self.rule_columns,
+        })
+    }
+
+    fn of(c: &SquadConfig) -> Self {
+        let c = convert::squad_codes(c);
+        Self {
+            members: c.members,
+            memory: c.memory,
+            areas: c.areas,
+            inbox: c.inbox,
+            dangers: c.dangers,
+            metric: c.metric,
+            role_count: c.role_count,
+            role_masks: c.role_masks,
+            rule_columns: c.rule_columns,
+        }
+    }
+}
+
 /// `sx_squad_config_default`.
 ///
 /// # Safety
@@ -766,33 +786,8 @@ pub unsafe extern "C" fn sx_squad_config_default(out: *mut SxSquadConfig) -> i32
     if out.is_null() {
         return ERROR_ARGUMENT;
     }
-    let c = SquadConfig::default();
-    let metric = match c.metric {
-        Metric::Euclid => 0,
-        Metric::Manhattan => 1,
-        Metric::Chebyshev => 2,
-        Metric::Hex => 3,
-    };
-    let mut role_masks = [0; 8];
-    let roles = c.roles.as_slice();
-    role_masks[..roles.len()].copy_from_slice(roles);
     // SAFETY: see above.
-    unsafe {
-        put(
-            out,
-            SxSquadConfig {
-                members: c.members as u32,
-                memory: c.memory as u32,
-                areas: c.areas as u32,
-                inbox: c.inbox as u32,
-                dangers: c.dangers as u32,
-                metric,
-                role_count: roles.len() as u32,
-                role_masks,
-                rule_columns: c.rule_columns as u32,
-            },
-        );
-    }
+    unsafe { put(out, SxSquadConfig::of(&SquadConfig::default())) };
     0
 }
 
@@ -808,18 +803,7 @@ pub unsafe extern "C" fn sx_squad_new(config: *const SxSquadConfig) -> *mut SxSq
         return std::ptr::null_mut();
     };
     create(|| {
-        let squad = Squad::new(SquadConfig {
-            members: c.members as usize,
-            memory: c.memory as usize,
-            areas: c.areas as usize,
-            inbox: c.inbox as usize,
-            dangers: c.dangers as usize,
-            metric: convert::metric(c.metric)?,
-            roles: convert::roles(c.role_count, &c.role_masks)?,
-            rule_columns: c.rule_columns as usize,
-            ..SquadConfig::default()
-        })
-        .ok()?;
+        let squad = Squad::new(c.config()?).ok()?;
         Some(SxSquad {
             squad: Held::Own(squad),
             due: Vec::new(),
@@ -1460,17 +1444,11 @@ pub unsafe extern "C" fn sx_squad_extra_start(squad: *mut SxSquad) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_set_spot_radius(squad: *mut SxSquad, radius: i64) -> i32 {
     let s = &mut squad!(squad);
-    if radius < 0 {
-        s.set_spot_radius(None);
-        return 0;
-    }
-    match u32::try_from(radius) {
-        Ok(r) => {
-            s.set_spot_radius(Some(r));
-            0
-        }
-        Err(_) => ERROR_ARGUMENT,
-    }
+    let Some(radius) = convert::spot_radius(radius) else {
+        return ERROR_ARGUMENT;
+    };
+    s.set_spot_radius(radius);
+    0
 }
 
 /// `sx_squad_knowledge`: the leader's knowledge, lent until `sx_squad_free`;

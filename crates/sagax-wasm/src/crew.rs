@@ -2,14 +2,14 @@
 //! tick (see `sx_crew_*` in `sagax.h`). Records go in through the scratch
 //! buffer and come out of the crew's out buffer, as for the squad.
 
-use sagax_decide::group::{Crew, CrewConfig, CrewEvent, GoalKeeper, Squad, SquadConfig};
+use sagax_decide::group::{Crew, CrewConfig, CrewEvent, GoalKeeper, Squad};
 
 use super::{
     ERROR_ARGUMENT, FACT_SIZE, GOAL_SIZE, Held, Lend, MEMBER_SIZE, WasmKeeper, WasmSquad,
     boxed_squad, drop_squad, fact_of, fact_record, goal_record, member_of, plan_error_to,
-    plan_input, role_list, scratch_copy,
+    plan_input, scratch_copy, squad_config,
 };
-use sagax_abi::convert::{self, to_i32, u32_of};
+use sagax_abi::convert::{self, to_i32};
 
 /// Numbers per event record: kind (`SX_CREW_*`), member, plan, start at,
 /// has start at, then a goal record (for an order; else zeros).
@@ -103,30 +103,15 @@ pub extern "C" fn sx_crew_new(
     arrive_radius: u32,
     hex: u32,
 ) -> *mut WasmCrew {
-    let Some(metric) = u32_of(metric).and_then(convert::metric) else {
+    let capacities = [members, memory, areas, inbox, dangers];
+    let (Some(squad), Some(hex_layout)) = (
+        squad_config(capacities, metric, role_count),
+        convert::grid_layout(hex),
+    ) else {
         return std::ptr::null_mut();
-    };
-    let Some(roles) = role_list(role_count) else {
-        return std::ptr::null_mut();
-    };
-    let hex_layout = match hex {
-        0 => None,
-        layout => match convert::hex_layout(layout) {
-            Some(l) => Some(l),
-            None => return std::ptr::null_mut(),
-        },
     };
     let Ok(crew) = Crew::new(CrewConfig {
-        squad: SquadConfig {
-            members: members as usize,
-            memory: memory as usize,
-            areas: areas as usize,
-            inbox: inbox as usize,
-            dangers: dangers as usize,
-            metric,
-            roles,
-            ..SquadConfig::default()
-        },
+        squad,
         arrive_radius,
         hex_layout,
     }) else {
