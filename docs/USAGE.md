@@ -1640,7 +1640,11 @@ want_tags, spot, metric)` computes the spot score by hand (C
 `sx_spot_score_builtin`). In C, `sx_builtin_member_cost` and
 `sx_builtin_spot_score` are the two defaults as callbacks to wrap; they
 return `built_in` saturated to `int64_t`, so for exact built-in behaviour
-leave the pointer `NULL`. For a member cost by the way walked there is
+leave the pointer `NULL`. Because of that saturation every spot that misses
+a wanted tag has a C `built_in` of `INT64_MAX`; `sx_spot_ctx` also hands
+over the two parts, `miss` and `distance`, so a C callback that changes the
+score can keep the built-in order, for example with
+`(miss ? INT64_C(1) << 62 : 0) + distance + penalty`. For a member cost by the way walked there is
 `path_cost` (Rust `sagax::rules::path_cost`, and `PathCost`, a rules object
 that does only that) and C `sx_path_cost(nav, map, from, to, budget, &cost)`:
 they run a search and return the cost, or nothing when there is no way.

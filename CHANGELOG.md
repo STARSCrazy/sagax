@@ -228,6 +228,13 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   records, now taken from the squad trace; they cover the calls through
   that squad handle, so a crew's ticks no longer fill the log of
   `crew.squad()`.
+- **C:** `sx_spot_ctx` gains `distance` (the metric distance from the wish
+  point, squared for Euclid, saturated to `int64_t`) and `miss` (1: the spot
+  lacks a wanted tag), the two parts of `built_in`. `built_in` is
+  `INT64_MAX` for every spot that misses a tag, so a callback that changed
+  the score lost the built-in order among those spots; with the parts it
+  keeps it. `distance` follows `built_in`, `miss` follows `has_target`; the
+  struct grows from 96 to 104 bytes.
 
 ### Migration table, 0.11 to 0.12
 
@@ -256,6 +263,7 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
 | C `sx_squad_set_score_log`, `sx_squad_score_log`, `sx_score_event` | `sx_squad_set_trace` with `sx_squad_trace`; the `SX_SQUAD_TRACE_DECIDE` records |
 | — | `Squad::*_traced`, `Crew::*_traced`, `GoalKeeper::broken_traced`, `pick_spot_traced` with `SquadTrace`, `CrewTrace`, `KeeperTrace`, `SpotTrace` |
 | — | C `sx_squad_set_trace`, `sx_keeper_set_trace`, `sx_crew_set_trace` with `sx_squad_trace`, `sx_keeper_trace`, `sx_crew_trace` |
+| C `sx_spot_ctx` (96 bytes) | 104 bytes: new `distance` after `built_in` and `miss` after `has_target`; recompile against the new header (the static asserts catch an old build) |
 
 ## 0.11.0
 

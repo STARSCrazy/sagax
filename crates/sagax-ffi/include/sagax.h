@@ -1806,10 +1806,14 @@ typedef struct sx_cost_ctx {
 
 /* Slot 5, spot score. built_in: 2^100 added to the metric
  * distance from wish to the spot when the spot lacks a bit of want_tags, saturated
- * to int64_t (see sx_spot_score_builtin); a callback that wants the exact
- * built-in order for such spots leaves spot_score NULL. */
+ * to int64_t (see sx_spot_score_builtin), so every missing spot is INT64_MAX.
+ * miss and distance are its two parts: a callback that keeps the exact
+ * built-in order scores e.g. (miss ? 1 << 62 : 0) + distance + its own
+ * change, as long as the distances stay below 2^62. */
 typedef struct sx_spot_ctx {
 	int64_t built_in;
+	int64_t distance;           /* wish to spot in the squad's metric (Euclid:
+	                             * squared), saturated to int64_t */
 	uint32_t tactic;
 	uint32_t slot;
 	uint32_t index;             /* of the spot in the game's list */
@@ -1821,6 +1825,7 @@ typedef struct sx_spot_ctx {
 	int32_t target_pos[3];      /* valid if has_target */
 	uint8_t gather;             /* 1: ranking gather spots */
 	uint8_t has_target;
+	uint8_t miss;               /* 1: the spot lacks a bit of want_tags */
 } sx_spot_ctx;
 
 /* Slot 8, channel delay. distance: the plain distance in the squad's metric
@@ -2952,16 +2957,18 @@ _Static_assert(sizeof(sx_cost_ctx) == 56, "sx_cost_ctx layout");
 _Static_assert(offsetof(sx_cost_ctx, tactic) == 8, "sx_cost_ctx.tactic layout");
 _Static_assert(offsetof(sx_cost_ctx, member) == 16, "sx_cost_ctx.member layout");
 _Static_assert(offsetof(sx_cost_ctx, wish) == 40, "sx_cost_ctx.wish layout");
-_Static_assert(sizeof(sx_spot_ctx) == 96, "sx_spot_ctx layout");
-_Static_assert(offsetof(sx_spot_ctx, tactic) == 8, "sx_spot_ctx.tactic layout");
-_Static_assert(offsetof(sx_spot_ctx, want_tags) == 20, "sx_spot_ctx.want_tags layout");
-_Static_assert(offsetof(sx_spot_ctx, target) == 24, "sx_spot_ctx.target layout");
-_Static_assert(offsetof(sx_spot_ctx, spot) == 28, "sx_spot_ctx.spot layout");
-_Static_assert(offsetof(sx_spot_ctx, member) == 44, "sx_spot_ctx.member layout");
-_Static_assert(offsetof(sx_spot_ctx, wish) == 68, "sx_spot_ctx.wish layout");
-_Static_assert(offsetof(sx_spot_ctx, target_pos) == 80, "sx_spot_ctx.target_pos layout");
-_Static_assert(offsetof(sx_spot_ctx, gather) == 92, "sx_spot_ctx.gather layout");
-_Static_assert(offsetof(sx_spot_ctx, has_target) == 93, "sx_spot_ctx.has_target layout");
+_Static_assert(sizeof(sx_spot_ctx) == 104, "sx_spot_ctx layout");
+_Static_assert(offsetof(sx_spot_ctx, distance) == 8, "sx_spot_ctx.distance layout");
+_Static_assert(offsetof(sx_spot_ctx, tactic) == 16, "sx_spot_ctx.tactic layout");
+_Static_assert(offsetof(sx_spot_ctx, want_tags) == 28, "sx_spot_ctx.want_tags layout");
+_Static_assert(offsetof(sx_spot_ctx, target) == 32, "sx_spot_ctx.target layout");
+_Static_assert(offsetof(sx_spot_ctx, spot) == 36, "sx_spot_ctx.spot layout");
+_Static_assert(offsetof(sx_spot_ctx, member) == 52, "sx_spot_ctx.member layout");
+_Static_assert(offsetof(sx_spot_ctx, wish) == 76, "sx_spot_ctx.wish layout");
+_Static_assert(offsetof(sx_spot_ctx, target_pos) == 88, "sx_spot_ctx.target_pos layout");
+_Static_assert(offsetof(sx_spot_ctx, gather) == 100, "sx_spot_ctx.gather layout");
+_Static_assert(offsetof(sx_spot_ctx, has_target) == 101, "sx_spot_ctx.has_target layout");
+_Static_assert(offsetof(sx_spot_ctx, miss) == 102, "sx_spot_ctx.miss layout");
 _Static_assert(sizeof(sx_channel_ctx) == 44, "sx_channel_ctx layout");
 _Static_assert(offsetof(sx_channel_ctx, distance) == 8, "sx_channel_ctx.distance layout");
 _Static_assert(offsetof(sx_channel_ctx, now) == 12, "sx_channel_ctx.now layout");

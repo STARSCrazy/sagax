@@ -3387,6 +3387,7 @@ mod conventions {
             layout!(
                 "sx_spot_ctx",
                 SxSpotCtx,
+                distance,
                 tactic,
                 want_tags,
                 target,
@@ -3395,7 +3396,8 @@ mod conventions {
                 wish,
                 target_pos,
                 gather,
-                has_target
+                has_target,
+                miss
             ),
             layout!(
                 "sx_channel_ctx",

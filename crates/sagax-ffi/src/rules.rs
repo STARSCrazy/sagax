@@ -121,6 +121,8 @@ impl SxCostCtx {
 pub struct SxSpotCtx {
     /// The built-in score (saturated to `int64_t`).
     pub built_in: i64,
+    /// The distance part of `built_in` (saturated to `int64_t`).
+    pub distance: i64,
     /// Index of the tactic.
     pub tactic: u32,
     /// Index of the slot.
@@ -143,12 +145,21 @@ pub struct SxSpotCtx {
     pub gather: u8,
     /// 1 if `target` and `target_pos` are set.
     pub has_target: u8,
+    /// 1 if the spot lacks a bit of `want_tags` (the miss part of
+    /// `built_in`).
+    pub miss: u8,
 }
+
+/// The miss bit of a built-in spot score (`(miss << 100) | distance`, see
+/// `spot_score_builtin`).
+const MISS_SHIFT: u32 = 100;
 
 impl SxSpotCtx {
     fn of(c: &SpotCtx) -> Self {
         Self {
             built_in: saturate(c.built_in),
+            distance: saturate(c.built_in & ((1 << MISS_SHIFT) - 1)),
+            miss: u8::from(c.built_in >> MISS_SHIFT != 0),
             tactic: small(c.tactic),
             slot: small(c.slot),
             index: small(c.index),
@@ -2565,5 +2576,43 @@ mod tests {
             assert_eq!(sx_builtin_member_cost(null_mut(), &cost, &mut got), 1);
             assert_eq!(got, 77);
         }
+    }
+
+    #[test]
+    fn spot_ctx_splits_the_built_in_score() {
+        use sagax_decide::group::{Member, MemberState, Spot, SpotCtx, spot_score_builtin};
+        use sagax_decide::memory::Metric;
+        let ctx = |tags: u32| {
+            let spot = Spot {
+                pos: [3, 4, 0],
+                tags,
+            };
+            SpotCtx {
+                tactic: 0,
+                slot: 0,
+                gather: false,
+                member: Member {
+                    id: 1,
+                    pos: [0; 3],
+                    roles: 0,
+                    skill: 0,
+                    state: MemberState::Active,
+                },
+                wish: [0; 3],
+                want_tags: 2,
+                index: 0,
+                spot,
+                target: None,
+                built_in: spot_score_builtin([0; 3], 2, &spot, Metric::Euclid),
+            }
+        };
+        let fits = SxSpotCtx::of(&ctx(2));
+        assert_eq!((fits.built_in, fits.distance, fits.miss), (25, 25, 0));
+        // A missing tag saturates built_in; the parts keep the order.
+        let misses = SxSpotCtx::of(&ctx(1));
+        assert_eq!(
+            (misses.built_in, misses.distance, misses.miss),
+            (i64::MAX, 25, 1)
+        );
     }
 }
