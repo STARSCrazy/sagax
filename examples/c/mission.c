@@ -134,6 +134,10 @@ static int make_guard(guard *g, char name, int strict, int32_t x, int32_t y)
 	motive.kind = SX_MOTIVE_GUARD;
 	memcpy(motive.place, WEST, sizeof motive.place);
 	motive.has_place = 1;
+	/* More playbook slots than a mission allows (65535) give no mission. */
+	config.max_playbook = 65536;
+	CHECK(sx_mission_new(&config, &motive) == NULL);
+	config.max_playbook = 8;
 	g->mission = sx_mission_new(&config, &motive);
 	CHECK(g->mission != NULL);
 

@@ -92,7 +92,10 @@ impl Mission {
     ///   also when `from` cannot be filled). The action is
     ///   [`Action::Flee`] to `to`, or without `to` to the point as far
     ///   beyond the character as `from` is behind it, kept inside the
-    ///   bounds of the config's search pattern.
+    ///   bounds of the config's search pattern. When the character stands
+    ///   on `from` (say `from` is [`Where::Here`]) there is no "away": it
+    ///   flees `safe_distance + 1` cells along +x (east), or along -x when
+    ///   the bounds stop it there.
     /// - [`Detour::Custom`]: only by [`Mission::end_detour`]. The action is
     ///   [`Action::Custom`].
     ///
@@ -269,10 +272,24 @@ impl Mission {
 
     /// The point as far beyond `pos` as `from` is behind it (internal
     /// coordinates), kept inside the bounds of the search pattern (offset
-    /// coordinates with a hex layout).
+    /// coordinates with a hex layout). On `from` itself: `safe_distance + 1`
+    /// cells along +x, or along -x when the bounds stop that.
     fn away_from(&self, pos: Pos, from: Pos) -> Pos {
+        if pos[..2] == from[..2] {
+            let step = i64::from(self.config.safe_distance) + 1;
+            let east = self.bounded(pos, [i64::from(pos[0]) + step, i64::from(pos[1])]);
+            if east != pos {
+                return east;
+            }
+            return self.bounded(pos, [i64::from(pos[0]) - step, i64::from(pos[1])]);
+        }
         let mirror = |a: i32, b: i32| 2 * i64::from(a) - i64::from(b);
-        let p = [mirror(pos[0], from[0]), mirror(pos[1], from[1])];
+        self.bounded(pos, [mirror(pos[0], from[0]), mirror(pos[1], from[1])])
+    }
+
+    /// `p` (internal coordinates, on the level of `pos`) kept inside the
+    /// bounds of the search pattern.
+    fn bounded(&self, pos: Pos, p: [i64; 2]) -> Pos {
         let clamp = |v: i64| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
         let out = self.pos_out([clamp(p[0]), clamp(p[1]), pos[2]]);
         let (min, max) = (self.config.search.min, self.config.search.max);

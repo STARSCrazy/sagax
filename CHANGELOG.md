@@ -25,18 +25,28 @@ with the new header refuses an older library.
   `squad`; `fails_when`, `skip_if_impossible`), `Where`, `Fail` (unknown,
   defeated, fact, flags, custom), `Leeway` (`STRICT`, `FLEXIBLE`, `FREE`),
   `Leash`, `OnLost`, `Detour` (engage, flee, custom), `Action`, `Event`,
-  `BreakReason`, `DetourEnd`, `MissionError`.
+  `BreakReason`, `DetourEnd`, `MissionError` (`TooManyPlans` for
+  `max_playbook` above 65535).
 - **The rules object** `MissionRules` (with `BuiltInRules`, `FailCtx`,
-  `PlanCtx`): three fixed points, lent per tick and never stored. `fail`
-  (a condition of the game's own), `columns` (the game's columns in each
-  candidate plan's row) and `score` (replace or veto a candidate's score).
-  `score` is the place for a trial run: see "Missions" in the guide.
+  `PlanCtx`; in the prelude too, `BuiltInRules` as `MissionBuiltInRules`):
+  three fixed points, lent per tick and never stored. `fail` (a condition
+  of the game's own; `FailCtx::candidate` names the candidate plan while a
+  replan checks its conditions), `columns` (the game's columns in each
+  candidate plan's row) and `score` (replace or veto a candidate's score;
+  veto what cannot run). `score` is the place for a trial run: see
+  "Missions" in the guide.
 - **Replanning:** on a break the mission scores the playbook plans, the
   default plan of the motive and, for a character that may widen, a
   built-in widening plan with a `Decider` and picks one (`MissionConfig::pick`).
   `Mission::default_option`, `widen_option`, the input columns `IN_*` and
   `DEFAULT_PREFERENCE`, `WIDEN_PREFERENCE` let a game add its own
-  considerations.
+  considerations. A playbook plan that just ended or broke is no candidate
+  on that tick. A character that may replan and holds where it stands after
+  a fallback looks again each tick and takes a plan as soon as one wins
+  (one `FellBack`, then `Replanned`).
+- **Flee** from the character's own cell (`from` is where it stands) runs
+  `safe_distance + 1` cells along +x (or -x at the map bound) instead of
+  standing still.
 - **Leeway:** a strict character never takes another plan and walks back to
   its anchor after every detour; a flexible one replans; a free one also
   widens. An `Engage` is refused when its subject is outside the leash
@@ -56,7 +66,9 @@ with the new header refuses an older library.
   `sx_mission_step_index`, `sx_mission_in_detour`, `sx_mission_returning`,
   `sx_mission_decider`; the value types `sx_where`, `sx_fail`, `sx_step`,
   `sx_motive`, `sx_leeway`, `sx_mission_config`, `sx_detour`,
-  `sx_mission_action`, `sx_mission_event`, `sx_mission_out` and the
+  `sx_mission_action`, `sx_mission_event`, `sx_mission_out`, the rule
+  contexts `sx_mission_fail_ctx` (with `has_candidate`, `candidate`) and
+  `sx_mission_plan_ctx`, and the
   `SX_STEP_*`, `SX_WHERE_*`, `SX_FAIL_*`, `SX_MOTIVE_*`, `SX_ON_LOST_*`,
   `SX_LEEWAY_*`, `SX_DETOUR_*`, `SX_ACTION_*`, `SX_MISSION_EVENT_*`,
   `SX_BREAK_*`, `SX_DETOUR_END_*` codes. Layouts are checked by the

@@ -1840,3 +1840,175 @@ fn clear_playbook_forgets_the_running_slot() {
     assert_eq!(out.events().last(), Some(&Event::Replanned { option: 0 }));
     assert_eq!(m.plan().unwrap().steps(), &[Step::wait(5)]);
 }
+
+// ---- Final review fixes ----
+
+#[test]
+fn fallback_hold_takes_a_plan_once_one_wins() {
+    let config = MissionConfig::default();
+    let enemy = config.enemy_bits;
+    for motive in [Motive::defeat_enemies(), Motive::defeat(5)] {
+        let mut m = Mission::new(config.clone(), motive).unwrap();
+        m.set_leeway(Leeway::FLEXIBLE);
+        let mut k = knowledge();
+        // Nothing known: no default plan, hold where it stands.
+        let out = m.tick(0, [2, 0, 0], &k, 0);
+        assert_eq!(out.events(), &[Event::FellBack], "{motive:?}");
+        assert_eq!(out.action, Action::Hold([2, 0, 0]));
+        // It looks again each tick, but says nothing while nothing wins.
+        for now in 1..5 {
+            let out = m.tick(now, [2, 0, 0], &k, 0);
+            assert!(out.events().is_empty(), "{motive:?} {now}");
+            assert_eq!(out.action, Action::Hold([2, 0, 0]));
+        }
+        k.learn(
+            5,
+            Fact {
+                data: enemy,
+                ..fact(5, [6, 0, 0])
+            },
+        );
+        let out = m.tick(5, [2, 0, 0], &k, 0);
+        assert_eq!(
+            out.events(),
+            &[Event::Replanned { option: DEFAULT }],
+            "{motive:?}"
+        );
+        assert_eq!(
+            out.action,
+            Action::Attack {
+                subject: 5,
+                pos: [6, 0, 0]
+            }
+        );
+        assert_eq!(m.plan().unwrap().steps(), &[Step::attack(5)]);
+    }
+}
+
+#[test]
+fn flee_from_own_cell_moves_away() {
+    let mut m = mission(MissionConfig {
+        safe_distance: 3,
+        ..MissionConfig::default()
+    });
+    m.set_plan(&Plan::once(&[Step::wait(50)])).unwrap();
+    let k = knowledge();
+    m.tick(0, [0, 0, 0], &k, 0);
+    let flee = Detour::Flee {
+        from: Where::Here,
+        to: None,
+    };
+    assert!(m.detour(0, flee, &k));
+    // On the spot it flees from: safe_distance + 1 cells east.
+    let out = m.tick(1, [0, 0, 0], &k, 0);
+    assert_eq!(out.events(), &[Event::DetourStarted]);
+    assert_eq!(out.action, Action::Flee([4, 0, 0]));
+    let mut pos = step_toward([0, 0, 0], out.action);
+    let mut ended = false;
+    for now in 2..10 {
+        let out = m.tick(now, pos, &k, 0);
+        if out.events() == [Event::DetourEnded(DetourEnd::Safe)] {
+            assert_eq!(pos, [4, 0, 0]);
+            ended = true;
+            break;
+        }
+        assert!(matches!(out.action, Action::Flee(_)), "{now}");
+        pos = step_toward(pos, out.action);
+    }
+    assert!(ended);
+
+    // With the bound east of it: west.
+    let mut m = mission(MissionConfig {
+        safe_distance: 3,
+        search: PointPattern {
+            max: (0, i32::MAX),
+            ..PointPattern::default()
+        },
+        ..MissionConfig::default()
+    });
+    m.set_plan(&Plan::once(&[Step::wait(50)])).unwrap();
+    m.tick(0, [0, 0, 0], &k, 0);
+    assert!(m.detour(0, flee, &k));
+    assert_eq!(m.tick(1, [0, 0, 0], &k, 0).action, Action::Flee([-4, 0, 0]));
+}
+
+#[test]
+fn broken_playbook_plan_is_not_taken_again_at_once() {
+    let mut m = mission(MissionConfig::default());
+    // Feasible by its first step, but its second cannot run.
+    m.add_playbook(
+        &Plan::once(&[Step::go_to_where(Where::Here), Step::follow(THIEF)]),
+        ONE,
+        false,
+    )
+    .unwrap();
+    let k = knowledge();
+    let mut pos = [3, 0, 0];
+    let events = run(&mut m, &k, &mut pos, 0, 20);
+    let replans: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, Event::Replanned { .. }))
+        .collect();
+    // Slot 0 once; on its break the default plan (go to the place and hold).
+    assert_eq!(
+        replans,
+        [
+            &Event::Replanned { option: 0 },
+            &Event::Replanned { option: DEFAULT }
+        ]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Broken(_)))
+            .count(),
+        1
+    );
+    assert_eq!(pos, [0, 0, 0]);
+}
+
+#[test]
+fn new_rejects_more_plans_than_u16_numbers() {
+    let config = MissionConfig {
+        max_playbook: usize::from(u16::MAX) + 1,
+        ..MissionConfig::default()
+    };
+    assert_eq!(
+        Mission::new(config, Motive::reach([0, 0, 0])).err(),
+        Some(MissionError::TooManyPlans)
+    );
+    assert!(!MissionError::TooManyPlans.to_string().is_empty());
+}
+
+#[test]
+fn custom_fail_during_replan_sees_the_candidate() {
+    struct Log(Vec<(Option<u32>, Option<usize>, u32)>);
+    impl MissionRules for Log {
+        fn fail(&mut self, ctx: &FailCtx, id: u32) -> bool {
+            self.0.push((ctx.candidate, ctx.step, id));
+            id == 1
+        }
+    }
+    let mut m = mission(MissionConfig::default());
+    m.set_plan(&Plan::looping(&[Step::wait(9)]).fails_when(Fail::Custom(1)))
+        .unwrap();
+    m.add_playbook(
+        &Plan::once(&[Step::wait(2).fails_when(Fail::Custom(2))]).fails_when(Fail::Custom(3)),
+        ONE,
+        false,
+    )
+    .unwrap();
+    let mut rules = Log(Vec::new());
+    let out = m.tick_with(0, [0, 0, 0], &knowledge(), 0, &mut rules);
+    assert_eq!(
+        out.events(),
+        &[
+            Event::Broken(BreakReason::Fail(Fail::Custom(1))),
+            Event::Replanned { option: 0 }
+        ]
+    );
+    assert_eq!(
+        rules.0,
+        vec![(None, None, 1), (Some(0), Some(0), 2), (Some(0), None, 3)]
+    );
+}

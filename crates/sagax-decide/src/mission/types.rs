@@ -52,7 +52,10 @@ pub enum StepKind {
     Hold(Where),
     /// Attack this subject.
     Attack(u32),
-    /// Wander about.
+    /// Wander about. Any `Wander` step ends the plan: the steps after it
+    /// never run, and a looping plan with one emits [`Event::PlanDone`]
+    /// instead of looping. The character then wanders until a condition
+    /// of the plan fires or the game sets a new plan.
     Wander,
     /// Give this signal (the step is done at once).
     Signal(u32),
@@ -196,7 +199,7 @@ impl Step {
         Self::of(StepKind::Attack(subject))
     }
 
-    /// Wander about.
+    /// Wander about; ends the plan (see [`StepKind::Wander`]).
     pub const fn wander() -> Self {
         Self::of(StepKind::Wander)
     }
@@ -691,6 +694,8 @@ pub enum MissionError {
     TooManySteps,
     /// All playbook slots are in use.
     PlaybookFull,
+    /// `max_playbook` is above 65535.
+    TooManyPlans,
     /// A hex layout needs the hex metric.
     HexNeedsHexMetric,
 }
@@ -702,6 +707,7 @@ impl std::fmt::Display for MissionError {
             Self::EmptyPlan => "the plan has no steps",
             Self::TooManySteps => "the plan has more steps than the mission allows",
             Self::PlaybookFull => "the playbook is full",
+            Self::TooManyPlans => "more playbook slots than a mission allows",
             Self::HexNeedsHexMetric => "a hex layout needs the hex metric",
         })
     }

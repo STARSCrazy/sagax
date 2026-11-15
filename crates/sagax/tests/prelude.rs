@@ -117,3 +117,42 @@ fn choose_empty_is_none() {
     let rows: [[i32; 2]; 0] = [];
     assert_eq!(d.choose(&[], &rows, Pick::Best, 0), Ok(None));
 }
+
+/// The trial-run recipe of USAGE section 9 with the prelude only.
+struct TrialRun {
+    plans: Vec<(u32, u32)>, // playbook option -> cost of its dry run
+}
+
+impl MissionRules for TrialRun {
+    // Only to show FailCtx: no candidate here has a custom condition.
+    fn fail(&mut self, ctx: &FailCtx, _id: u32) -> bool {
+        ctx.candidate.is_some() && ctx.step.is_none()
+    }
+
+    fn score(&mut self, ctx: &PlanCtx, built_in: u32) -> Option<u32> {
+        if !ctx.feasible {
+            return Some(0);
+        }
+        let &(_, cost) = self.plans.iter().find(|(o, _)| *o == ctx.option)?;
+        Some(built_in / (1 + cost))
+    }
+}
+
+#[test]
+fn mission_rules_with_the_prelude() {
+    let mut m = Mission::new(MissionConfig::default(), Motive::guard_place([0, 0, 0])).unwrap();
+    let near = m
+        .add_playbook(&Plan::once(&[Step::go_to([1, 0, 0])]), ONE, false)
+        .unwrap();
+    m.add_playbook(&Plan::once(&[Step::go_to([9, 0, 0])]), ONE, false)
+        .unwrap();
+    let knowledge = Knowledge::new(4, Evict::Oldest).unwrap();
+    let mut rules = TrialRun {
+        plans: vec![(near, 1), (1, 8)],
+    };
+    let out = m.tick_with(0, [0, 0, 0], &knowledge, 0, &mut rules);
+    assert_eq!(out.events(), &[Event::Replanned { option: near }]);
+    assert_eq!(out.action, Action::GoTo([1, 0, 0]));
+    let plain = m.tick_with(1, [0, 0, 0], &knowledge, 0, &mut MissionBuiltInRules);
+    assert_eq!(plain.action, Action::GoTo([1, 0, 0]));
+}

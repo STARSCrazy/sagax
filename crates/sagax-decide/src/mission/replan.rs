@@ -200,20 +200,65 @@ impl Mission {
     }
 
     /// The plan broke or ended, or there is none yet: replan, or fall back.
-    /// `finished` is the playbook slot of a plan that ended; it is no
-    /// candidate now. Widening plans are candidates only on a real break
-    /// (`broke`: a fail condition or an impossible step) of a character that
-    /// may widen.
+    /// `excluded` is the playbook slot of a plan that just ended or broke;
+    /// it is no candidate now. Widening plans are candidates only on a real
+    /// break (`broke`: a fail condition or an impossible step) of a
+    /// character that may widen.
     pub(super) fn replace_plan(
         &mut self,
         view: View<'_>,
-        finished: Option<u32>,
+        excluded: Option<u32>,
         broke: bool,
         rules: &mut dyn MissionRules,
     ) -> Action {
         if !self.leeway.replan {
             return self.hold_here(view);
         }
+        let choice = self.pick(view, excluded, broke, rules);
+        match self.take(choice, view) {
+            Some(action) => action,
+            None => self.hold_here(view),
+        }
+    }
+
+    /// Holding after a fallback, a character that may replan looks again:
+    /// the action of the plan it takes, or `None` to hold on (no event).
+    /// No widening plans: this is no real break.
+    pub(super) fn retry_fallback(
+        &mut self,
+        view: View<'_>,
+        rules: &mut dyn MissionRules,
+    ) -> Option<Action> {
+        let choice = self.pick(view, None, false, rules);
+        self.take(choice, view)
+    }
+
+    /// Starts what [`Mission::pick`] chose: the winner
+    /// ([`Event::Replanned`]), else the default plan if it is feasible
+    /// ([`Event::FellBack`]); `None` when neither.
+    fn take(&mut self, choice: (Option<u32>, bool), view: View<'_>) -> Option<Action> {
+        match choice {
+            (Some(option), _) => {
+                self.emit(Event::Replanned { option });
+                Some(self.start_option(option, view))
+            }
+            (None, true) => {
+                self.emit(Event::FellBack);
+                Some(self.start_option(self.default_option(), view))
+            }
+            (None, false) => None,
+        }
+    }
+
+    /// Scores the candidates and picks one: the winning option (none when
+    /// every candidate scores 0) and whether the default plan is feasible.
+    fn pick(
+        &mut self,
+        view: View<'_>,
+        excluded: Option<u32>,
+        broke: bool,
+        rules: &mut dyn MissionRules,
+    ) -> (Option<u32>, bool) {
         let widen = broke && self.leeway.widen;
         self.build_defaults(view, widen);
         let mut rows = std::mem::take(&mut self.replan.rows);
@@ -226,13 +271,13 @@ impl Mission {
         let stride = IN_EXTRA + self.config.extra_columns;
         let mut default_feasible = false;
         for option in 0..=self.widen_option() {
-            if finished == Some(option) {
+            if excluded == Some(option) {
                 continue;
             }
             let Some((plan, preference, widening)) = self.candidate(option, widen) else {
                 continue;
             };
-            let (feasible, first) = self.feasible(plan, view, rules);
+            let (feasible, first) = self.feasible(option, plan, view, rules);
             if option == self.default_option() {
                 default_feasible = feasible;
             }
@@ -269,17 +314,7 @@ impl Mission {
         self.replan.scores = scores;
         self.replan.options = options;
         self.replan.order = order;
-        match chosen {
-            Some(option) => {
-                self.emit(Event::Replanned { option });
-                self.start_option(option, view)
-            }
-            None if default_feasible => {
-                self.emit(Event::FellBack);
-                self.start_option(self.default_option(), view)
-            }
-            None => self.hold_here(view),
-        }
+        (chosen, default_feasible)
     }
 
     /// Falls back to holding where the character stands.
@@ -287,7 +322,9 @@ impl Mission {
         self.emit(Event::FellBack);
         self.plan.set_steps(&[Step::hold(Where::Here)], false);
         self.running_option = None;
-        self.start_running(view)
+        let action = self.start_running(view);
+        self.fallback_hold = true;
+        action
     }
 
     /// The candidate plan of `option` with its preference and whether it
@@ -321,6 +358,7 @@ impl Mission {
         };
         self.plan.copy_from(plan);
         self.running_option = Some(option);
+        self.fallback_hold = false;
         self.start_running(view)
     }
 
@@ -335,18 +373,19 @@ impl Mission {
         self.step_action(kind, view).unwrap_or(Action::None)
     }
 
-    /// Whether `plan` can start now: the conditions of its first step and
-    /// of the plan hold, and its first position can be filled. Also that
-    /// position.
+    /// Whether `plan` (of `option`) can start now: the conditions of its
+    /// first step and of the plan hold, and its first position can be
+    /// filled. Also that position.
     fn feasible(
         &self,
+        option: u32,
         plan: &Plan,
         view: View<'_>,
         rules: &mut dyn MissionRules,
     ) -> (bool, Option<Pos>) {
         let fails = plan.steps().first().map_or(&[][..], |s| &s.fails[..]);
         let failed = self
-            .first_fail(fails, 0, plan.fails(), view, rules)
+            .first_fail(fails, 0, plan.fails(), Some(option), view, rules)
             .is_some();
         match self.first_place(plan, view) {
             Some(first) => (!failed, first),

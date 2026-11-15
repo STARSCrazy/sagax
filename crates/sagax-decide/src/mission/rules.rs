@@ -13,6 +13,10 @@ pub struct FailCtx {
     /// The index of the step the condition belongs to; `None` for a
     /// condition of the whole plan.
     pub step: Option<usize>,
+    /// While a replan scores a candidate: its decider option (the
+    /// condition is one of the candidate's, checked for its feasibility).
+    /// `None` for a condition of the running plan.
+    pub candidate: Option<u32>,
     /// The mission's motive.
     pub motive: Motive,
 }
@@ -59,7 +63,8 @@ pub struct PlanCtx {
 ///    default plan, then the widening plan): [`MissionRules::fail`] for the
 ///    `Fail::Custom`s of its first step, then of the plan (stopping at the
 ///    first that fires), then [`MissionRules::columns`], then
-///    [`MissionRules::score`].
+///    [`MissionRules::score`]. A character that holds after a fallback
+///    and may replan does this each tick.
 ///
 /// With a hex layout every position in a context is in offset coordinates.
 ///
@@ -90,10 +95,14 @@ pub trait MissionRules {
 
     /// Replaces a candidate's score (`built_in` is the decider's score,
     /// [`ONE`](crate::ONE) = 1.0); `Some(0)` vetoes it. The answer is final,
-    /// also for a candidate that is not feasible. When every candidate ends
-    /// at 0 (vetoed or not), the fallback still applies: the default plan
-    /// if it is feasible, else `Hold(Here)`. Default: `None`, keep the
-    /// built-in score.
+    /// also for a candidate that is not feasible, so a score that does not
+    /// start from `built_in` should veto (`Some(0)`) a candidate whose
+    /// `ctx.feasible` is false, and also one the game knows cannot run
+    /// (the built-in feasibility looks only at the first step and the
+    /// first position; a plan that breaks at once gets taken again and
+    /// again). When every candidate ends at 0 (vetoed or not), the
+    /// fallback still applies: the default plan if it is feasible, else
+    /// `Hold(Here)`. Default: `None`, keep the built-in score.
     fn score(&mut self, ctx: &PlanCtx, built_in: u32) -> Option<u32> {
         let _ = (ctx, built_in);
         None

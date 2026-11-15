@@ -2214,8 +2214,9 @@ int32_t sx_mission_config_default(sx_mission_config *out);
 int32_t sx_leeway_preset(uint32_t which, sx_leeway *out);
 
 /* A mission for motive, without a plan, with SX_LEEWAY_FLEXIBLE. Null for a
- * null pointer, an unknown code, max_steps 0 or above 65536, a search pattern
- * with more than 8 entries, or a hex grid without SX_METRIC_HEX. */
+ * null pointer, an unknown code, max_steps 0 or above 65536, max_playbook
+ * above 65535, a search pattern with more than 8 entries, or a hex grid
+ * without SX_METRIC_HEX. */
 sx_mission *sx_mission_new(const sx_mission_config *config, const sx_motive *motive);
 /* Frees the mission and the decider handle it lent. */
 void sx_mission_free(sx_mission *mission);
@@ -2263,7 +2264,11 @@ int32_t sx_mission_clear_playbook(sx_mission *mission);
  * by the mission's decider and the winner starts at once
  * (SX_MISSION_EVENT_REPLANNED); when every candidate scores 0, the default
  * plan if it is feasible, else holding where it stands
- * (SX_MISSION_EVENT_FELL_BACK). Without replan: holding where it stands. The
+ * (SX_MISSION_EVENT_FELL_BACK). A playbook plan that just ended or broke is
+ * no candidate on that tick. While it holds after a fallback the character
+ * looks again each tick (no widening plans) and takes a winner with
+ * SX_MISSION_EVENT_REPLANNED; while none wins it holds on without an event.
+ * Without replan: holding where it stands. The
  * default plan: GUARD follows its subject or holds its place, DEFEAT attacks
  * its subject (or the nearest known enemy) when seen within lost_after, else
  * searches its last known place, REACH goes there, gives reached_signal and
@@ -2280,24 +2285,30 @@ int32_t sx_mission_tick(sx_mission *mission, uint32_t now, const int32_t *pos,
  * (sx_mission_decider). With a hex grid
  * every position in a context is in offset coordinates.
  *   fail     1: the game's condition id (SX_FAIL_CUSTOM) holds now and breaks
- *            the step (has_step) or plan. Built-in: never.
+ *            the step (has_step) or plan. During a replan it is asked for a
+ *            candidate's conditions (has_candidate, candidate = its option).
+ *            Built-in: never.
  *   columns  fill the count game columns of a candidate's row (all 0 when
  *            called; count is config.extra_columns). Built-in: nothing.
  *   score    1 and the score in *score (preset to built_in, SX_ONE = 1.0; 0
  *            vetoes) replaces the candidate's score, also for one that is not
- *            feasible; 0 keeps built_in. When every candidate ends at 0 the
- *            fallback still applies. Built-in: keep.
+ *            feasible (so veto one that is not, or that cannot run); 0 keeps
+ *            built_in. When every candidate ends at 0 the fallback still
+ *            applies. Built-in: keep.
  * Order of calls, always the same: each tick while a plan runs, fail for the
  * running step's custom conditions, then the plan's, in list order, stopping
  * at the first condition that fires. On a replan, per candidate in option
  * order: fail for the custom conditions of its first step, then of the plan,
- * then columns, then score. */
+ * then columns, then score (also each tick while holding after a fallback
+ * with replan). */
 typedef struct sx_mission_fail_ctx {
 	uint32_t now;
 	int32_t pos[3];             /* where the character stands */
 	uint32_t step;              /* the step the condition belongs to; valid if has_step */
+	uint32_t candidate;         /* the candidate's option during a replan; valid if has_candidate */
 	sx_motive motive;
 	uint8_t has_step;           /* 0: a condition of the whole plan */
+	uint8_t has_candidate;      /* 1: a candidate's condition, 0: of the running plan */
 } sx_mission_fail_ctx;
 
 typedef struct sx_mission_plan_ctx {
@@ -2333,8 +2344,9 @@ int32_t sx_mission_tick_with(sx_mission *mission, uint32_t now, const int32_t *p
  * one; the anchor stays. The next tick gives SX_MISSION_EVENT_DETOUR_STARTED.
  * ENGAGE ends when the subject is defeated or forgotten, the leash runs out,
  * or the subject was not seen for lost_after ticks (then on_lost decides);
- * FLEE when it arrives at to or is farther than safe_distance from at;
- * CUSTOM only by sx_mission_end_detour. SX_ERROR_ARGUMENT also for an unknown
+ * FLEE when it arrives at to or is farther than safe_distance from at
+ * (without to it runs away from at; standing on at, safe_distance + 1 cells
+ * along +x, or -x at the bound); CUSTOM only by sx_mission_end_detour. SX_ERROR_ARGUMENT also for an unknown
  * code. */
 int32_t sx_mission_detour(sx_mission *mission, uint32_t now, const sx_detour *detour,
                           const sx_knowledge *knowledge);
@@ -2581,10 +2593,12 @@ _Static_assert(offsetof(sx_mission_event, fail) == 32, "sx_mission_event.fail la
 _Static_assert(sizeof(sx_mission_out) == 616, "sx_mission_out layout");
 _Static_assert(offsetof(sx_mission_out, event_count) == 32, "sx_mission_out.event_count layout");
 _Static_assert(offsetof(sx_mission_out, events) == 40, "sx_mission_out.events layout");
-_Static_assert(sizeof(sx_mission_fail_ctx) == 56, "sx_mission_fail_ctx layout");
+_Static_assert(sizeof(sx_mission_fail_ctx) == 60, "sx_mission_fail_ctx layout");
 _Static_assert(offsetof(sx_mission_fail_ctx, step) == 16, "sx_mission_fail_ctx.step layout");
-_Static_assert(offsetof(sx_mission_fail_ctx, motive) == 20, "sx_mission_fail_ctx.motive layout");
-_Static_assert(offsetof(sx_mission_fail_ctx, has_step) == 52, "sx_mission_fail_ctx.has_step layout");
+_Static_assert(offsetof(sx_mission_fail_ctx, candidate) == 20, "sx_mission_fail_ctx.candidate layout");
+_Static_assert(offsetof(sx_mission_fail_ctx, motive) == 24, "sx_mission_fail_ctx.motive layout");
+_Static_assert(offsetof(sx_mission_fail_ctx, has_step) == 56, "sx_mission_fail_ctx.has_step layout");
+_Static_assert(offsetof(sx_mission_fail_ctx, has_candidate) == 57, "sx_mission_fail_ctx.has_candidate layout");
 _Static_assert(sizeof(sx_mission_plan_ctx) == 68, "sx_mission_plan_ctx layout");
 _Static_assert(offsetof(sx_mission_plan_ctx, option) == 16, "sx_mission_plan_ctx.option layout");
 _Static_assert(offsetof(sx_mission_plan_ctx, first) == 20, "sx_mission_plan_ctx.first layout");

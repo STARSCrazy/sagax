@@ -1812,7 +1812,7 @@ free. The usual commands map like this:
 | enter a vehicle, use a switch, any act the mission does not know | `Step::custom(kind, Where::Fixed(pos), param)`; the game does it and calls `finish_step()` when done |
 | wait for an object to come near | `Step::wait_for(id, radius)` |
 | search an area | `Step::search(Where::Fixed(pos), radius, ticks)`: goes to the points of `MissionConfig::search` in turn |
-| wander | `Step::wander()` (as the last step the character keeps wandering) |
+| wander | `Step::wander()`: any `Wander` step ends the plan (later steps never run, a looping plan with one emits `PlanDone`); the character keeps wandering until a condition of the plan fires |
 | attack an object | `Step::attack(id)` |
 | mission won / lost, trigger something | `Step::signal(n)`: an `Event::Signal(n)` for the game to act on |
 | call for help | `Step::call(channel, kind)` |
@@ -1853,7 +1853,11 @@ guard's own `Knowledge` and calls `mission.detour(now, Detour::Engage(id),
 flexible one chases, loses sight, searches, returns and resumes the step it
 left. When the game tells guard B (only B) that the item is stolen, the
 patrol breaks on the fact; B scores its playbook and takes "attack the
-thief". The strict guard, if told, would only hold where it stands. The
+thief". The strict guard, if told, would only hold where it stands. A
+flexible character that holds after a fallback (nothing could be taken)
+looks again each tick and takes a plan as soon as one wins, say once it
+learns of an enemy; a playbook plan that just broke is no candidate on that
+same tick, so another plan gets its turn. The
 second number of `add_playbook` is the plan's **preference** (0 to `ONE`);
 with `widening` set, only a character that may widen takes the plan.
 
@@ -1890,11 +1894,16 @@ let out = mission.tick_with(now, pos, &knowledge, flags, &mut TrialRun { world: 
 `Some(0)` vetoes a candidate. The answer is final, also for a candidate that
 is not feasible (so the example returns 0 for it). When every candidate ends
 at 0 the mission falls back to its default plan if that is feasible, else
-holds where it stands. The slot gets no random number and must not call the
-same mission. A game that only wants to *add* a factor puts it in the
+holds where it stands. Veto also a plan you know cannot run: the built-in
+feasibility looks only at the first step and its position, and a plan that
+breaks at once would be taken again on the next look. The slot gets no
+random number and must not call the same mission. A game that only wants to *add* a factor puts it in the
 `columns` slot instead (set `MissionConfig::extra_columns`) and a
 consideration on the options of `mission.decider_mut()`. The `fail` slot
-answers a `Fail::Custom(id)` of the game's own.
+answers a `Fail::Custom(id)` of the game's own; while a replan checks a
+candidate, `FailCtx::candidate` is its option (`None` for the running
+plan). `PlanCtx` and `FailCtx` are in the prelude, the mission's
+`BuiltInRules` as `MissionBuiltInRules`.
 
 ### C
 

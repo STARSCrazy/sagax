@@ -399,10 +399,16 @@ pub struct SxMissionFailCtx {
     pub pos: [i32; 3],
     /// The step the condition belongs to; valid if `has_step`.
     pub step: u32,
+    /// The candidate's decider option while a replan scores it; valid if
+    /// `has_candidate`.
+    pub candidate: u32,
     /// The mission's motive.
     pub motive: SxMotive,
     /// 1: a step's condition, 0: the plan's.
     pub has_step: u8,
+    /// 1: a condition of a candidate during a replan, 0: of the running
+    /// plan.
+    pub has_candidate: u8,
 }
 
 /// `sx_mission_plan_ctx`.
@@ -474,8 +480,10 @@ impl MissionRules for SxMissionRules {
             now: ctx.now,
             pos: ctx.pos,
             step: ctx.step.map_or(0, |s| s as u32),
+            candidate: ctx.candidate.unwrap_or(0),
             motive: SxMotive::of(ctx.motive),
             has_step: u8::from(ctx.step.is_some()),
+            has_candidate: u8::from(ctx.candidate.is_some()),
         };
         // SAFETY: the game passed a valid callback and user for this call
         // (sagax.h).

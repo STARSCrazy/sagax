@@ -3043,8 +3043,10 @@ mod conventions {
                 "sx_mission_fail_ctx",
                 SxMissionFailCtx,
                 step,
+                candidate,
                 motive,
-                has_step
+                has_step,
+                has_candidate
             ),
             layout!(
                 "sx_mission_plan_ctx",
@@ -4604,6 +4606,83 @@ mod mission {
         }
         assert_eq!(traces[0], traces[1]);
         assert_eq!(traces[0], traces[2]);
+    }
+
+    unsafe extern "C" fn c_fail_log(
+        user: *mut c_void,
+        ctx: *const SxMissionFailCtx,
+        id: u32,
+    ) -> i32 {
+        let log = unsafe { &mut *user.cast::<Vec<(u8, u32, u8, u32)>>() };
+        let ctx = unsafe { &*ctx };
+        log.push((ctx.has_candidate, ctx.candidate, ctx.has_step, id));
+        i32::from(id == 1)
+    }
+
+    #[test]
+    fn fail_ctx_names_the_candidate() {
+        let c = unsafe { sx_mission_new(&c_config(), &guard_motive()) };
+        let k = sx_knowledge_new(4, 0);
+        let custom = |id| SxFail {
+            kind: FAIL_CUSTOM,
+            id,
+            ..SxFail::default()
+        };
+        let steps = [c_step(STEP_WAIT, 9, 0, SxWhere::default())];
+        let mut wait = c_step(STEP_WAIT, 2, 0, SxWhere::default());
+        wait.fails[0] = custom(2);
+        wait.fail_count = 1;
+        unsafe {
+            assert_eq!(
+                sx_mission_set_plan(c, steps.as_ptr(), 1, 1, &custom(1), 1),
+                0
+            );
+            assert_eq!(
+                sx_mission_add_playbook(c, &wait, 1, 0, &custom(3), 1, ONE, 0),
+                0
+            );
+        }
+        let mut log: Vec<(u8, u32, u8, u32)> = Vec::new();
+        let rules = SxMissionRules {
+            fail: Some(c_fail_log),
+            columns: None,
+            score: None,
+            user: (&mut log as *mut Vec<(u8, u32, u8, u32)>).cast(),
+        };
+        let mut out = SxMissionOut::default();
+        let pos = [0, 0, 0];
+        unsafe {
+            assert!(sx_mission_tick_with(c, 0, pos.as_ptr(), k, 0, &rules, &mut out) >= 0);
+            sx_mission_free(c);
+            sx_knowledge_free(k);
+        }
+        // The running plan's condition, then slot 0's step and plan.
+        assert_eq!(log, [(0, 0, 0, 1), (1, 0, 1, 2), (1, 0, 0, 3)]);
+        let kinds: Vec<u32> = out.events[..out.event_count as usize]
+            .iter()
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(kinds, [MISSION_EVENT_BROKEN, MISSION_EVENT_REPLANNED]);
+    }
+
+    #[test]
+    fn new_rejects_more_plans_than_u16_numbers() {
+        let motive = guard_motive();
+        unsafe {
+            let at_most = SxMissionConfig {
+                max_playbook: 65535,
+                max_steps: 1,
+                ..c_config()
+            };
+            let m = sx_mission_new(&at_most, &motive);
+            assert!(!m.is_null());
+            sx_mission_free(m);
+            let over = SxMissionConfig {
+                max_playbook: 65536,
+                ..c_config()
+            };
+            assert!(sx_mission_new(&over, &motive).is_null());
+        }
     }
 
     #[test]

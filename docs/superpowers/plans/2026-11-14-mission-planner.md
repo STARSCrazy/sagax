@@ -6,7 +6,7 @@
 
 **Architecture:** Plain data types (`types.rs`), one runner (`mission.rs`) that the game ticks with the character's own `Knowledge`, scoring in `replan.rs` on top of `Decider`, slots in `rules.rs`. C bindings in `sagax-ffi/src/mission.rs` with number codes in `sagax-abi`. No allocation after `Mission::new`.
 
-**Tech Stack:** Rust 2024 (workspace `sagax`), C99/C11 header `sagax.h`, mingw gcc for the C example.
+**Tech Stack:** Rust 2024 (workspace `sagax`), C99/C11 header `sagax.h`, a C compiler for the C example.
 
 **Spec:** `docs/superpowers/specs/2026-11-14-mission-planner-design.md` (read it first; its section "Decisions after the builder check" overrides the text above it).
 
@@ -18,9 +18,7 @@
 - Every public item documented (`missing_docs = "warn"`, CI treats warnings as errors: `cargo clippy --all-targets -- -D warnings`).
 - Version 0.11.0, C API 11 (`SX_API_VERSION 11`, `API_VERSION: u32 = 11`).
 - Square and hex; with `hex_layout` all game-facing positions (including fact positions read from `Knowledge`) are offset coordinates.
-- One commit per task; commit trailer lines:
-  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` and
-  `Claude-Session: https://claude.ai/code/session_011LMvhj8Rz3ewAEMLbCbqre`.
+- One commit per task.
 - Existing tests and golden traces must stay unchanged and green.
 
 ## Review Focus
@@ -211,7 +209,7 @@ Follow `machine.rs`/`memory.rs` patterns (`create`, `destroy`, `ERROR_ARGUMENT`,
 
 **Files:** Create `examples/c/mission.c`; modify `examples/c/run.sh` (build + run `mission`, `cargo run -q -p sagax --example mission_guard > examples/c/out/mission-rust.txt`, diff).
 
-- [ ] Steps: write `mission.c` printing the same lines as Task 5; run `PATH=/d/Dev-Tools/mingw64/bin:$PATH CC=gcc sh examples/c/run.sh` → ends with the diff line message; commit "Mission: C example".
+- [ ] Steps: write `mission.c` printing the same lines as Task 5; run `sh examples/c/run.sh` with a C compiler on PATH (`CC=gcc` if `cc` is missing) → ends with the diff line message; commit "Mission: C example".
 
 ### Task 8: Docs and version
 

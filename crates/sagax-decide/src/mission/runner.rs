@@ -92,6 +92,9 @@ struct View<'k> {
 /// knowledge; the mission works in axial coordinates inside.
 ///
 /// All storage is reserved in [`Mission::new`]; ticking allocates nothing.
+/// A clone keeps the contents but not the reserved capacity, so a cloned
+/// mission may allocate on its first ticks; make each character's mission
+/// with [`Mission::new`] where that matters.
 #[derive(Clone, Debug)]
 pub struct Mission {
     config: MissionConfig,
@@ -104,6 +107,9 @@ pub struct Mission {
     /// The decider option the running plan came from; `None` for a plan
     /// the game set and for holding after a fallback.
     running_option: Option<u32>,
+    /// The plan is the `Hold(Here)` of a fallback: with
+    /// [`Leeway::replan`] each tick looks for a plan again.
+    fallback_hold: bool,
     /// The plan was just set: its first step begins at the next tick.
     pending_start: bool,
     activity: Activity,
@@ -118,7 +124,8 @@ pub struct Mission {
 impl Mission {
     /// A mission for `motive`, without a plan. Errors on `max_steps` of 0
     /// ([`MissionError::ZeroCapacity`]), above 65536 (step numbers are
-    /// `u16`; [`MissionError::TooManySteps`]) or on a hex layout without
+    /// `u16`; [`MissionError::TooManySteps`]), on `max_playbook` above
+    /// 65535 ([`MissionError::TooManyPlans`]) or on a hex layout without
     /// [`Metric::Hex`].
     pub fn new(config: MissionConfig, motive: Motive) -> Result<Self, MissionError> {
         if config.max_steps == 0 {
@@ -126,6 +133,9 @@ impl Mission {
         }
         if config.max_steps > usize::from(u16::MAX) + 1 {
             return Err(MissionError::TooManySteps);
+        }
+        if config.max_playbook > usize::from(u16::MAX) {
+            return Err(MissionError::TooManyPlans);
         }
         if config.hex_layout.is_some() && config.metric != Metric::Hex {
             return Err(MissionError::HexNeedsHexMetric);
@@ -138,6 +148,7 @@ impl Mission {
             leeway: Leeway::default(),
             has_plan: false,
             running_option: None,
+            fallback_hold: false,
             pending_start: false,
             activity: Activity::Idle,
             step: StepState::default(),
@@ -188,6 +199,7 @@ impl Mission {
         self.plan.copy_from(plan);
         self.has_plan = true;
         self.running_option = None;
+        self.fallback_hold = false;
         self.pending_start = true;
         match self.activity {
             Activity::Detour | Activity::Returning => self.detour.resume = Activity::Plan,
@@ -257,7 +269,12 @@ impl Mission {
     ///   `now` with the mission's id). The winner starts at its first step
     ///   at once, [`Event::Replanned`]. When every candidate scores 0: the
     ///   default plan if it is feasible, else `Hold(Here)`, both
-    ///   [`Event::FellBack`].
+    ///   [`Event::FellBack`]. A playbook plan that just broke is no
+    ///   candidate on that tick either. While it holds after a fallback the
+    ///   character looks again each tick (as at a plan end: no widening
+    ///   plans) and takes the winner with [`Event::Replanned`]; when none
+    ///   wins it holds on without another event (or, once the default plan
+    ///   is feasible, falls back to it with [`Event::FellBack`]).
     /// - without: `Hold(Here)` where the character stands, [`Event::FellBack`].
     ///   A strict character always finishes the walk back to the anchor of
     ///   a detour before it resumes, so it holds at the anchor.
@@ -316,9 +333,17 @@ impl Mission {
             self.pending_start = false;
             self.begin(0, view);
         }
+        if self.fallback_hold
+            && self.leeway.replan
+            && let Some(action) = self.retry_fallback(view, rules)
+        {
+            return action;
+        }
         let index = self.step.index;
         let step = self.plan.steps()[index];
-        if let Some(fail) = self.first_fail(&step.fails, index, self.plan.fails(), view, rules) {
+        if let Some(fail) =
+            self.first_fail(&step.fails, index, self.plan.fails(), None, view, rules)
+        {
             return self.break_plan(BreakReason::Fail(fail), view, rules);
         }
         let Some(action) = self.step_action(step.kind, view) else {
@@ -361,7 +386,7 @@ impl Mission {
     /// The plan ended in a `Wander` step: wander on until a condition of
     /// the plan fires.
     fn run_wander(&mut self, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
-        match self.first_fail(&[], 0, self.plan.fails(), view, rules) {
+        match self.first_fail(&[], 0, self.plan.fails(), None, view, rules) {
             Some(fail) => self.break_plan(BreakReason::Fail(fail), view, rules),
             None => Action::Wander,
         }
@@ -405,23 +430,28 @@ impl Mission {
         rules: &mut dyn MissionRules,
     ) -> Action {
         self.emit(Event::Broken(reason));
-        self.replace_plan(view, None, true, rules)
+        // The plan that broke is no candidate on this tick.
+        let broken = self.running_option.filter(|&o| o < self.default_option());
+        self.replace_plan(view, broken, true, rules)
     }
 
     /// The first fail condition that holds: those of step `index`
-    /// (`step_fails`), then the plan's. [`Fail::Custom`] asks the rules.
+    /// (`step_fails`), then the plan's. [`Fail::Custom`] asks the rules;
+    /// `candidate` is the option scored during a replan, `None` for the
+    /// running plan.
     fn first_fail(
         &self,
         step_fails: &[Option<Fail>],
         index: usize,
         plan_fails: &[Option<Fail>],
+        candidate: Option<u32>,
         view: View<'_>,
         rules: &mut dyn MissionRules,
     ) -> Option<Fail> {
         let step = step_fails.iter().flatten().map(|&f| (Some(index), f));
         let plan = plan_fails.iter().flatten().map(|&f| (None, f));
         step.chain(plan)
-            .find(|&(step, f)| self.fails(f, step, view, rules))
+            .find(|&(step, f)| self.fails(f, step, candidate, view, rules))
             .map(|(_, f)| f)
     }
 
@@ -429,6 +459,7 @@ impl Mission {
         &self,
         fail: Fail,
         step: Option<usize>,
+        candidate: Option<u32>,
         view: View<'_>,
         rules: &mut dyn MissionRules,
     ) -> bool {
@@ -452,6 +483,7 @@ impl Mission {
                     now: view.now,
                     pos: self.pos_out(view.pos),
                     step,
+                    candidate,
                     motive: self.motive,
                 };
                 rules.fail(&ctx, id)
