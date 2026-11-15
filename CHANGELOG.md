@@ -21,9 +21,13 @@ built with the new header refuses an older library.
   `ContagionConfig` (`new(grid)`, `with_deed`, up to `MAX_DEEDS` = 8; the
   grid gives the distances: Euclid on square, the hex distance of the
   axial fine points on hex), and `Contagion`:
-  - `new(config, capacity)`: fixed slots, nothing allocates afterwards;
-  - `learn(percepts, now, is_ally)` / `learn_traced`: only recognised
-    sightings count (sense `Sight` or `Thermal`, stage 2, `placed`); an
+  - `new(config, capacity, owner)`: the memory of the character `owner`
+    (its `Eye::id`), fixed slots, nothing allocates afterwards; `owner`;
+  - `learn(percepts, now, is_ally)` / `learn_traced`: only the owner's
+    percepts (`observer`) of a check at `now` (`at`) count, so a buffer of
+    several characters may be passed and a stale percept never re-arms a
+    window; of those only recognised sightings (sense `Sight` or
+    `Thermal`, stage 2, `placed`); an
     entry keeps the cue bits of the latest sighting, a deed shown that the
     entry did not show (or that had run out) is an onset; `Lost`,
     `Forgotten`, heard, scanner and noticed-only percepts change nothing.
@@ -43,11 +47,13 @@ built with the new header refuses an older library.
 
   The prelude gains `Contagion`, `ContagionConfig`, `DeedRule` and
   `DeedInputs`.
-- **C:** the handle `sx_contagion` (`sx_contagion_new`, `_free`,
+- **C:** the handle `sx_contagion` (`sx_contagion_new(cfg, capacity,
+  owner)`, `_free`,
   `_set_trace`, `_learn`, `_inputs`, `_write_columns`, `_nearest_point`,
   `_forget`, `_clear`, `_len`) with `sx_deed_rule`, `sx_contagion_config`
   (`grid` an `SX_GRID_*` code; every hex layout means hex),
-  `sx_deed_inputs`, the callback `sx_is_ally_fn` and `sx_contagion_trace`
+  `sx_deed_inputs`, the callback `sx_is_ally_fn` (it must not call the
+  same handle) and `sx_contagion_trace`
   with `SX_CONTAGION_TRACE_*`; `SX_MAX_DEEDS`, `SX_DEED_COLUMNS`. Layout
   asserts for every struct. An unknown sense or event in the percepts or a
   null `is_ally` is `SX_ERROR_ARGUMENT` and changes nothing.

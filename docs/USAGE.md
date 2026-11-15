@@ -1223,16 +1223,24 @@ any other cue. `ContagionConfig` carries the grid for the distances (on
 hex the fine points are axial, as everywhere in perception).
 
 ```rust
+use sagax::perception::{DEED_COLUMNS, Grid};
+use sagax::prelude::*;
+
 const ATTACKING: u32 = 1;
 let config = ContagionConfig::new(Grid::Square)
     .with_deed(DeedRule { bits: ATTACKING, window: 6 });
-let mut memory = Contagion::new(config, 4);          // remembers up to 4 allies
+let mut memory = Contagion::new(config, 4, eye.id);  // up to 4 allies, eye.id's memory
 // every tick, after this character's own look:
 memory.learn(&percepts, now, |subject, disguised| is_friend(subject, disguised));
 let mut row = [0; 2 + DEED_COLUMNS];
 memory.write_columns(0, eye.point, now, &mut row[2..]);  // doing, seen, share, nearest, since
 ```
 
+- A memory has an **owner** (the character's `Eye::id`): percepts of any
+  other observer are skipped, so a game may pass one buffer with every
+  character's percepts. Only percepts of a check at `now` (`Percept::at`)
+  count: learn each tick's percepts in the same tick; a percept passed
+  again later is skipped and does not re-arm the window.
 - Only a **recognised sighting** counts: sense `Sight` or `Thermal`, stage
   2 and `placed`. Noticed-only, scanner, heard, `Lost` and `Forgotten`
   percepts change nothing, so what was seen a moment ago still counts until
@@ -1267,10 +1275,11 @@ see the intruder and attack, two comrades who see him join, one behind a
 wall who does not, then a grenade whose panic spreads to the guard who sees
 the flight and not to the one facing away.
 
-In C: `sx_contagion_new(&cfg, capacity)` with an `sx_contagion_config`
+In C: `sx_contagion_new(&cfg, capacity, owner)` with an `sx_contagion_config`
 (`grid` an `SX_GRID_*` code, `count`, `deeds[SX_MAX_DEEDS]`),
 `sx_contagion_learn(c, now, percepts, n, is_ally, ctx)` with the callback
-`int32_t (*)(void *ctx, uint32_t subject, int32_t disguised)`,
+`int32_t (*)(void *ctx, uint32_t subject, int32_t disguised)` (it must
+not call any function on the same handle),
 `sx_contagion_inputs`, `_write_columns` (`SX_DEED_COLUMNS` integers),
 `_nearest_point`, `_forget`, `_clear`, `_len`, `_set_trace`, since API
 version 14.

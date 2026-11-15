@@ -145,7 +145,7 @@ fn an_ally_seen_attacking_counts() {
     let e = eye(&p);
     let targets = [ally(7, at(3, 0), ATTACK)];
     let mut aware = [Awareness::default()];
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let out = watch(
         &square(),
         &mut OpenAir,
@@ -199,7 +199,7 @@ fn an_ally_behind_a_wall_never_counts() {
     let e = eye(&p);
     let targets = [ally(7, at(3, 0), ATTACK | FLEE)];
     let mut aware = [Awareness::default()];
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let mut map = Walls(vec![Cell::new(2, 0, 0)]);
     let out = watch(
         &square(),
@@ -226,7 +226,7 @@ fn an_ally_in_the_dark_never_counts() {
     let e = eye(&p);
     let targets = [ally(7, at(3, 0), ATTACK)];
     let mut aware = [Awareness::default()];
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     watch(
         &square(),
         &mut Dark,
@@ -262,7 +262,7 @@ fn an_ally_behind_the_observer_never_counts() {
     let e = eye(&p);
     let targets = [ally(7, at(-3, 0), ATTACK)];
     let mut aware = [Awareness::default()];
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     watch(
         &square(),
         &mut OpenAir,
@@ -297,7 +297,7 @@ fn an_ally_not_yet_recognised_never_counts() {
     let e = eye(&p);
     let targets = [ally(7, at(3, 0), ATTACK)];
     let mut aware = [Awareness::default()];
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let mut recognised_at = None;
     for now in 1..=40 {
         let out = look_on(&square(), &mut OpenAir, now, &e, &targets, &mut aware);
@@ -321,7 +321,7 @@ fn a_deed_expires_after_its_window() {
     let e = eye(&p);
     let mut targets = [ally(7, at(3, 0), ATTACK | FLEE)];
     let mut aware = [Awareness::default()];
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let mut map = Walls(vec![Cell::new(2, 1, 0)]);
     watch(
         &square(),
@@ -368,7 +368,7 @@ fn a_deed_expires_after_its_window() {
 
 #[test]
 fn reads_respect_the_window_without_learn() {
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     memory.learn(&[sighting(7, at(2, 0), ATTACK, 1)], 1, everyone);
     let o = at(0, 0);
     assert_eq!(memory.inputs(0, o, 6).doing, 1);
@@ -380,7 +380,7 @@ fn reads_respect_the_window_without_learn() {
 
 #[test]
 fn an_ally_seen_to_stop_no_longer_counts() {
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let o = at(0, 0);
     memory.learn(&[sighting(7, at(2, 0), ATTACK, 1)], 1, everyone);
     memory.learn(&[sighting(7, at(2, 0), 0, 2)], 2, everyone);
@@ -394,7 +394,7 @@ fn an_ally_seen_to_stop_no_longer_counts() {
 
 #[test]
 fn an_onset_after_expiry_is_new() {
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let o = at(0, 0);
     memory.learn(&[sighting(7, at(2, 0), FLEE, 1)], 1, everyone);
     // Seen again within the window: the same deed, the same onset.
@@ -408,7 +408,7 @@ fn an_onset_after_expiry_is_new() {
 
 #[test]
 fn share_nearest_and_since_over_several_allies() {
-    let mut memory = Contagion::new(config(Grid::Square), 8);
+    let mut memory = Contagion::new(config(Grid::Square), 8, ME);
     let o = at(0, 0);
     memory.learn(
         &[
@@ -446,7 +446,7 @@ fn share_nearest_and_since_over_several_allies() {
 
 #[test]
 fn nearest_ties_go_to_the_lower_slot() {
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let o = at(0, 0);
     memory.learn(
         &[
@@ -461,7 +461,7 @@ fn nearest_ties_go_to_the_lower_slot() {
 
 #[test]
 fn when_full_the_one_seen_longest_ago_goes() {
-    let mut memory = Contagion::new(config(Grid::Square), 2);
+    let mut memory = Contagion::new(config(Grid::Square), 2, ME);
     let o = at(0, 0);
     let mut sink = Collector::new(100, Overflow::DropNewest);
     memory.learn_traced(
@@ -492,7 +492,7 @@ fn when_full_the_one_seen_longest_ago_goes() {
         .collect();
     assert_eq!(replaced, [(1, 3), (2, 4)]);
     // Equal ages: the lower slot goes.
-    let mut memory = Contagion::new(config(Grid::Square), 2);
+    let mut memory = Contagion::new(config(Grid::Square), 2, ME);
     memory.learn(
         &[sighting(1, at(1, 0), 0, 1), sighting(2, at(2, 0), FLEE, 1)],
         1,
@@ -501,7 +501,7 @@ fn when_full_the_one_seen_longest_ago_goes() {
     memory.learn(&[sighting(3, at(3, 0), 0, 2)], 2, everyone);
     assert_eq!(memory.inputs(1, o, 2).doing, 1, "2 stays, 1 went");
     // Capacity 0 remembers nothing.
-    let mut none = Contagion::new(config(Grid::Square), 0);
+    let mut none = Contagion::new(config(Grid::Square), 0, ME);
     none.learn(&[sighting(1, at(1, 0), FLEE, 1)], 1, everyone);
     assert_eq!(none.inputs(1, o, 1), DeedInputs::NONE);
     assert_eq!(none.capacity(), 0);
@@ -524,7 +524,7 @@ fn is_ally_gets_the_disguise_and_decides() {
         ally(31, at(3, 1), 0),
     ];
     let mut aware = [Awareness::default(); 2];
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let out = look_on(&square(), &mut OpenAir, 1, &e, &targets, &mut aware);
     let mut asked = Vec::new();
     // The game takes everyone in a guard's uniform for an ally: 30 shows
@@ -540,7 +540,7 @@ fn is_ally_gets_the_disguise_and_decides() {
     // The hidden cue (attacking) is never seen.
     assert_eq!(memory.inputs(0, e.point, 1).doing, 0);
     // A game that does not trust disguises ignores it.
-    let mut wary = Contagion::new(config(Grid::Square), 4);
+    let mut wary = Contagion::new(config(Grid::Square), 4, ME);
     wary.learn(&out, 1, |_, disguised| !disguised);
     assert_eq!(wary.inputs(1, e.point, 1).doing, 0);
     assert_eq!(wary.inputs(1, e.point, 1).seen, 1);
@@ -548,7 +548,7 @@ fn is_ally_gets_the_disguise_and_decides() {
 
 #[test]
 fn a_changed_belief_drops_the_entry() {
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let o = at(0, 0);
     let mut sink = Collector::new(100, Overflow::DropNewest);
     let mut p = sighting(30, at(2, 0), FLEE, 1);
@@ -570,7 +570,7 @@ fn a_changed_belief_drops_the_entry() {
 
 #[test]
 fn heard_and_scanner_percepts_never_carry_deeds() {
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let o = at(0, 0);
     // A real heard percept.
     let p = SenseProfile::human(S);
@@ -628,7 +628,7 @@ fn heard_and_scanner_percepts_never_carry_deeds() {
 
 #[test]
 fn lost_and_forgotten_and_unplaced_percepts_change_nothing() {
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let o = at(0, 0);
     memory.learn(&[sighting(7, at(2, 0), FLEE, 1)], 1, everyone);
     for event in [PerceptKind::Lost, PerceptKind::Forgotten] {
@@ -658,7 +658,7 @@ fn thermal_sight_counts() {
         ..ally(7, at(3, 0), FLEE)
     }];
     let mut aware = [Awareness::default()];
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let out = watch(
         &square(),
         &mut Dark,
@@ -687,7 +687,7 @@ fn hex_distances_and_walls() {
     };
     let targets = [ally(7, hex(3, 0), ATTACK), ally(8, hex(2, -1), ATTACK)];
     let mut aware = [Awareness::default(); 2];
-    let mut memory = Contagion::new(config(Grid::Hex), 4);
+    let mut memory = Contagion::new(config(Grid::Hex), 4, ME);
     // A wall hex between the observer and 7.
     let mut map = Walls(vec![Cell::new(2, 0, 0)]);
     watch(
@@ -718,7 +718,7 @@ fn hex_distances_and_walls() {
     let i = memory.inputs(0, e.point, 4);
     assert_eq!((i.doing, i.nearest), (2, 2 * S));
     // On square the same fine points are farther (Euclid).
-    let mut sq = Contagion::new(config(Grid::Square), 4);
+    let mut sq = Contagion::new(config(Grid::Square), 4, ME);
     sq.learn(&[sighting(8, hex(2, -1), ATTACK, 1)], 1, everyone);
     assert_eq!(sq.inputs(0, [0; 3], 1).nearest, 572, "isqrt(512² + 256²)");
 }
@@ -736,7 +736,7 @@ fn a_cascade_runs_only_along_sight() {
     let facing = [0u8, 64, 128, 0];
     let mut cues = [FLEE, 0, 0, 0];
     let mut memories: Vec<Contagion> = (0..4)
-        .map(|_| Contagion::new(config(Grid::Square), 4))
+        .map(|me| Contagion::new(config(Grid::Square), 4, 10 + me as u32))
         .collect();
     let mut aware = [[Awareness::default(); 3]; 4];
     let mut fled_at = [Some(0u32), None, None, None];
@@ -771,7 +771,7 @@ fn a_cascade_runs_only_along_sight() {
 
 #[test]
 fn columns_and_out_of_range_deeds() {
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let o = at(0, 0);
     let mut row = [-1; 7];
     memory.write_columns(0, o, 1, &mut row[1..]);
@@ -802,7 +802,7 @@ fn the_config_holds_at_most_max_deeds() {
 
 #[test]
 fn forget_and_clear() {
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let o = at(0, 0);
     memory.learn(
         &[
@@ -824,7 +824,7 @@ fn forget_and_clear() {
 
 #[test]
 fn the_trace_reports_onset_refresh_and_inputs() {
-    let mut memory = Contagion::new(config(Grid::Square), 4);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
     let o = at(0, 0);
     let mut sink = Collector::new(100, Overflow::DropNewest);
     // Three percepts of one check: one refresh record.
@@ -855,4 +855,61 @@ fn the_trace_reports_onset_refresh_and_inputs() {
         ]
     );
     assert_eq!(row, inputs.columns());
+}
+
+#[test]
+fn percepts_of_another_observer_never_count() {
+    // One buffer with the percepts of two guards: ME sees nothing, guard 2
+    // sees 7 attack. ME's memory learns only its own.
+    let mut theirs = sighting(7, at(2, 0), ATTACK, 1);
+    theirs.observer = 2;
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
+    assert_eq!(memory.owner(), ME);
+    let mut sink = Collector::new(8, Overflow::DropNewest);
+    memory.learn_traced(&[theirs], 1, everyone, &mut sink);
+    assert!(memory.is_empty());
+    assert_eq!(sink.records().len(), 0);
+    assert_eq!(memory.inputs(0, at(0, 0), 1), DeedInputs::NONE);
+    // A real mixed buffer: ME (facing +x) and guard 2 behind a wall look at
+    // the same attacking ally; only ME's percepts count for ME, and guard
+    // 2's memory, fed the same buffer, learns nothing.
+    let p = quick();
+    let me = eye(&p);
+    let walled = Eye {
+        id: 2,
+        point: at(0, 4),
+        ..eye(&p)
+    };
+    let targets = [ally(7, at(3, 4), ATTACK)];
+    let mut map = Walls(vec![Cell::new(1, 4, 0)]);
+    let (mut a, mut b) = ([Awareness::default()], [Awareness::default()]);
+    let mut mine = Contagion::new(config(Grid::Square), 4, ME);
+    let mut blind = Contagion::new(config(Grid::Square), 4, 2);
+    for now in 1..=10 {
+        let mut all = look_on(&square(), &mut map, now, &me, &targets, &mut a);
+        all.extend(look_on(&square(), &mut map, now, &walled, &targets, &mut b));
+        mine.learn(&all, now, everyone);
+        blind.learn(&all, now, everyone);
+    }
+    assert_eq!(mine.inputs(0, me.point, 10).doing, 1);
+    assert!(blind.is_empty(), "guard 2 never saw 7");
+}
+
+#[test]
+fn a_stale_percept_does_not_rearm_the_window() {
+    let o = at(0, 0);
+    let old = sighting(7, at(2, 0), ATTACK, 1);
+    let mut memory = Contagion::new(config(Grid::Square), 4, ME);
+    memory.learn(&[old], 1, everyone);
+    // The same percept passed again at 4 is skipped: the sighting stays at
+    // 1, so the deed (window 5) has run out at 7.
+    let mut sink = Collector::new(8, Overflow::DropNewest);
+    memory.learn_traced(&[old], 4, everyone, &mut sink);
+    assert_eq!(sink.records().len(), 0);
+    assert_eq!(memory.inputs(0, o, 6).doing, 1);
+    assert_eq!(memory.inputs(0, o, 7).doing, 0);
+    // A percept of an earlier check, passed first later, teaches nothing.
+    let mut fresh = Contagion::new(config(Grid::Square), 4, ME);
+    fresh.learn(&[sighting(8, at(2, 0), FLEE, 2)], 3, everyone);
+    assert!(fresh.is_empty());
 }

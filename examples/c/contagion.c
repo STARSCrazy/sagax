@@ -219,7 +219,7 @@ static int run_scene(uint32_t grid)
 	memset(aware, 0, sizeof aware);
 	memset(attention, 0, sizeof attention);
 	for (g = 0; g < GUARDS; g++) {
-		memory[g] = sx_contagion_new(&ccfg, 4);
+		memory[g] = sx_contagion_new(&ccfg, 4, (uint32_t)g + 1);
 		CHECK(memory[g] != NULL);
 		centre(grid, posts[g][0], posts[g][1], point[g]);
 		cues[g] = 0;

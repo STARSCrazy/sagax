@@ -747,7 +747,7 @@ fn contagion_columns_feed_a_decider() {
         bits: ATTACKING,
         window: 4,
     });
-    let mut memory = Contagion::new(config, 4);
+    let mut memory = Contagion::new(config, 4, 1);
     let p = SenseProfile::guard(S);
     let e = ear(&p, at(0, 0));
     let comrade = |cues| Target {

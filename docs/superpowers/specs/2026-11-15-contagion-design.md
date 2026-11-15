@@ -179,6 +179,17 @@ Builder calls (made while building, from the spec's open points):
   nothing. `sx_contagion_nearest_point` returns 1 and writes the point, or
   0 when no ally shows the deed.
 
+Review calls (after the first build):
+
+- **Owner.** `Contagion::new(config, capacity, owner)` (C
+  `sx_contagion_new(cfg, capacity, owner)`): `learn` skips every percept
+  whose `observer` is not the owner, so a mixed buffer of several
+  characters' percepts never teaches one what another saw.
+- **Only percepts of now.** `learn` skips a percept whose `at` is not
+  `now`, so a stale percept passed again neither re-arms a window nor
+  starts a deed. A game learns each tick's percepts in the same tick.
+- `is_ally` must not call the same handle (C header note).
+
 ## Done means
 
 `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D

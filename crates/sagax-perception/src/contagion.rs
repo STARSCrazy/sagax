@@ -184,33 +184,47 @@ struct Slot {
     onset: [u32; MAX_DEEDS],
 }
 
-/// Which percepts are recognised sightings that may carry deeds: sight or
-/// thermal, stage recognised, with a place.
-fn is_sighting(p: &Percept) -> bool {
-    matches!(p.sense, Sense::Sight | Sense::Thermal) && p.stage == 2 && p.placed
+/// Which percepts are recognised sightings of `owner` at `now` that may
+/// carry deeds: its own (`observer`), from a check at `now` (`at`), sight
+/// or thermal, stage recognised, with a place.
+fn is_sighting(p: &Percept, owner: u32, now: u32) -> bool {
+    p.observer == owner
+        && p.at == now
+        && matches!(p.sense, Sense::Sight | Sense::Thermal)
+        && p.stage == 2
+        && p.placed
 }
 
 /// One character's memory of the deeds it saw its allies do: for each
 /// ally the cue bits of the latest recognised sighting, when and where it
 /// was, and when each deed started.
 ///
-/// Fed only from this character's own percepts ([`learn`](Self::learn)),
-/// so it never knows more than the character saw. A fixed number of
+/// Fed only from this character's own percepts ([`learn`](Self::learn)
+/// skips every percept whose `observer` is not its owner), so it never
+/// knows more than the character saw. A fixed number of
 /// slots, allocated in [`new`](Self::new); nothing allocates afterwards.
 /// Integer, deterministic, square and hex alike.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Contagion {
     config: ContagionConfig,
+    owner: u32,
     slots: Box<[Slot]>,
 }
 
 impl Contagion {
-    /// A memory for `capacity` allies (0 remembers nothing).
-    pub fn new(config: ContagionConfig, capacity: usize) -> Self {
+    /// The memory of the character `owner` (its `Eye::id`, which becomes
+    /// `Percept::observer`) for `capacity` allies (0 remembers nothing).
+    pub fn new(config: ContagionConfig, capacity: usize, owner: u32) -> Self {
         Self {
             config,
+            owner,
             slots: vec![Slot::default(); capacity].into_boxed_slice(),
         }
+    }
+
+    /// The character whose percepts it learns.
+    pub fn owner(&self) -> u32 {
+        self.owner
     }
 
     /// The config.
@@ -247,11 +261,16 @@ impl Contagion {
     /// Learns this character's percepts of tick `now` (the sighting time
     /// is `now`). First every deed past its window gives an `Expired`
     /// record and an entry past every window frees its slot. Then, per
-    /// percept in order, only recognised sightings count: sense
-    /// [`Sight`](Sense::Sight) or [`Thermal`](Sense::Thermal), stage 2 and
-    /// `placed` (so `Noticed` at stage 1, scanner contacts, `Heard`,
-    /// `Lost` and `Forgotten` change nothing; what was seen a moment ago
-    /// still counts until its window ends).
+    /// percept in order, only recognised sightings of the owner at `now`
+    /// count: `observer` the [`owner`](Self::owner) (a buffer of several
+    /// characters' percepts may be passed; the others' are skipped), `at`
+    /// equal to `now` (a percept of an earlier check passed again is
+    /// skipped and does not re-arm the window, so learn each tick's
+    /// percepts in the same tick), sense [`Sight`](Sense::Sight) or
+    /// [`Thermal`](Sense::Thermal), stage 2 and `placed` (so `Noticed` at
+    /// stage 1, scanner contacts, `Heard`, `Lost` and `Forgotten` change
+    /// nothing; what was seen a moment ago still counts until its window
+    /// ends).
     ///
     /// `is_ally(subject, disguised)` is the game's belief, given the
     /// percept's `disguised` flag: a disguised enemy may be taken for an
@@ -261,8 +280,6 @@ impl Contagion {
     /// longest ago (ties: the lower slot; `Replaced`). The entry then
     /// keeps the percept's cue bits, its point and `now`; a deed shown now
     /// that the entry did not show (or that had run out) is an `Onset`.
-    ///
-    /// Pass only this character's percepts.
     pub fn learn_traced(
         &mut self,
         percepts: &[Percept],
@@ -271,7 +288,8 @@ impl Contagion {
         sink: &mut impl Sink<ContagionTrace>,
     ) {
         self.expire(now, sink);
-        for p in percepts.iter().filter(|p| is_sighting(p)) {
+        let owner = self.owner;
+        for p in percepts.iter().filter(|p| is_sighting(p, owner, now)) {
             let found = self.find(p.subject);
             if !is_ally(p.subject, p.disguised) {
                 if let Some(i) = found {

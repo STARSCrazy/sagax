@@ -3272,11 +3272,15 @@ int32_t sx_perception_set_trace(sx_perception *p, sx_perception_trace_fn trace, 
  * recognised sighting, when and where that was, and when each deed started.
  * A deed is a set of the game's cue bits with a window in ticks.
  *
- * No cheating: the handle reads only the sx_percepts the game passes from
- * that character's own look (or observe). Only a percept with sense
- * SX_SENSE_SIGHT or SX_SENSE_THERMAL, stage 2 (recognised) and placed 1
- * counts; noticed-only, scanner, heard, LOST and FORGOTTEN percepts change
- * nothing (a deed seen a moment ago counts until its window ends). So
+ * No cheating: the handle belongs to one character (owner, its eye id) and
+ * reads only the sx_percepts of that character's own look (or observe): a
+ * percept whose observer is not the owner is skipped, so a buffer of several
+ * characters' percepts may be passed. Only a percept of the owner with at
+ * equal to now, sense SX_SENSE_SIGHT or SX_SENSE_THERMAL, stage 2
+ * (recognised) and placed 1 counts (a percept of an earlier check passed
+ * again is skipped and does not re-arm the window); noticed-only, scanner,
+ * heard, LOST and FORGOTTEN percepts change nothing (a deed seen a moment
+ * ago counts until its window ends). So
  * walls, darkness, the view cone, attention and disguise apply unchanged.
  *
  * Fine points (the observer, the percept points, nearest_point) are axial on
@@ -3313,19 +3317,23 @@ typedef struct sx_deed_inputs {
 
 /* The game's belief "do I take this one for an ally?", given the percept's
  * disguised flag (an enemy in a guard's uniform may be taken for one: that
- * is what the character saw). Nonzero: an ally. */
+ * is what the character saw). Nonzero: an ally. is_ally must not call any
+ * function on the same contagion handle. */
 typedef int32_t (*sx_is_ally_fn)(void *context, uint32_t subject, int32_t disguised);
 
-/* Null for a null or invalid config (unknown grid, count above
- * SX_MAX_DEEDS). capacity: allies remembered (0 remembers nothing). */
-sx_contagion *sx_contagion_new(const sx_contagion_config *cfg, uint32_t capacity);
+/* The memory of the character owner (its sx_eye.id, which becomes
+ * sx_percept.observer). Null for a null or invalid config (unknown grid,
+ * count above SX_MAX_DEEDS). capacity: allies remembered (0 remembers
+ * nothing). */
+sx_contagion *sx_contagion_new(const sx_contagion_config *cfg, uint32_t capacity, uint32_t owner);
 void sx_contagion_free(sx_contagion *c);
 
 /* Learns count percepts of tick now (the sighting time is now). First every
  * deed past its window expires and an entry past every window frees its
- * slot. Then per counted percept: is_ally false removes that subject's entry;
- * an ally not yet remembered takes a free slot or the slot of the ally seen
- * longest ago (ties: the lower slot); the entry keeps the percept's cues,
+ * slot. Then per counted percept (the owner's, at now, see above): is_ally
+ * false removes that subject's entry; an ally not yet remembered takes a
+ * free slot or the slot of the ally seen longest ago (ties: the lower
+ * slot); the entry keeps the percept's cues,
  * point and now; a deed shown now that the entry did not show (or that had
  * run out) is an onset. count 0 only expires. Returns 0, or
  * SX_ERROR_ARGUMENT for a null handle or is_ally, a null pc with count > 0

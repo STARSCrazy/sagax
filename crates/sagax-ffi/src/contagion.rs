@@ -131,7 +131,8 @@ macro_rules! observer {
     }};
 }
 
-/// `sx_contagion_new`: a memory for `capacity` allies; null for a null or
+/// `sx_contagion_new`: the memory of the character `owner` (its eye id,
+/// `sx_percept.observer`) for `capacity` allies; null for a null or
 /// invalid config (unknown grid, `count` above `SX_MAX_DEEDS`).
 ///
 /// # Safety
@@ -140,12 +141,13 @@ macro_rules! observer {
 pub unsafe extern "C" fn sx_contagion_new(
     cfg: *const SxContagionConfig,
     capacity: u32,
+    owner: u32,
 ) -> *mut SxContagion {
     create(|| {
         // SAFETY: null or valid (see above).
         let config = unsafe { cfg.as_ref() }?.config()?;
         Some(SxContagion {
-            memory: Contagion::new(config, capacity as usize),
+            memory: Contagion::new(config, capacity as usize, owner),
             trace: None,
         })
     })

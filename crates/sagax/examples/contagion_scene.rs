@@ -249,7 +249,9 @@ pub fn run_scene(grid: Grid) -> Scene {
     let mut point: Vec<Pos> = POSTS.iter().map(|g| centre(&world, (g.0, g.1))).collect();
     let mut cues = [0u32; GUARDS];
     let mut act = [HOLD; GUARDS];
-    let mut memory: Vec<Contagion> = (0..GUARDS).map(|_| Contagion::new(config, 4)).collect();
+    let mut memory: Vec<Contagion> = (0..GUARDS)
+        .map(|g| Contagion::new(config, 4, g as u32 + 1))
+        .collect();
     let mut aware = [[Awareness::default(); GUARDS]; GUARDS];
     let mut attention = [Attention::default(); GUARDS];
     let mut map = Post;

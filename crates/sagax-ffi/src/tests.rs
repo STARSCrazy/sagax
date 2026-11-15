@@ -7137,8 +7137,8 @@ mod contagion {
     /// nearest points and trace, every tick and for every deed.
     fn same_in_c(grid: u32, world: World, layout: Option<HexLayout>) {
         let ticks = scene(&world);
-        let mut rs_memory = Contagion::new(rs_config(world.grid), 3);
-        let c = unsafe { sx_contagion_new(&c_config(grid), 3) };
+        let mut rs_memory = Contagion::new(rs_config(world.grid), 3, 1);
+        let c = unsafe { sx_contagion_new(&c_config(grid), 3, 1) };
         assert!(!c.is_null());
         let mut c_records: Vec<SxContagionTrace> = Vec::new();
         let ctx = (&raw mut c_records).cast::<c_void>();
@@ -7229,8 +7229,8 @@ mod contagion {
     #[test]
     fn no_allocation_after_new() {
         let ticks = scene(&World::square(CELL));
-        let mut memory = Contagion::new(rs_config(Grid::Square), 3);
-        let c = unsafe { sx_contagion_new(&c_config(GRID_SQUARE), 3) };
+        let mut memory = Contagion::new(rs_config(Grid::Square), 3, 1);
+        let c = unsafe { sx_contagion_new(&c_config(GRID_SQUARE), 3, 1) };
         let pcs: Vec<Vec<SxPercept>> = ticks
             .iter()
             .map(|(_, out)| out.iter().map(|p| SxPercept::of(p, None)).collect())
@@ -7261,18 +7261,18 @@ mod contagion {
     #[test]
     fn errors() {
         unsafe {
-            assert!(sx_contagion_new(null(), 4).is_null());
+            assert!(sx_contagion_new(null(), 4, 1).is_null());
             let too_many = SxContagionConfig {
                 count: 9,
                 ..c_config(GRID_SQUARE)
             };
-            assert!(sx_contagion_new(&too_many, 4).is_null());
+            assert!(sx_contagion_new(&too_many, 4, 1).is_null());
             let odd_grid = SxContagionConfig {
                 grid: 99,
                 ..c_config(GRID_SQUARE)
             };
-            assert!(sx_contagion_new(&odd_grid, 4).is_null());
-            let c = sx_contagion_new(&c_config(GRID_HEX_EVEN_Q), 0);
+            assert!(sx_contagion_new(&odd_grid, 4, 1).is_null());
+            let c = sx_contagion_new(&c_config(GRID_HEX_EVEN_Q), 0, 1);
             assert!(!c.is_null());
             let o = [0i32; 3];
             let mut inputs = DeedInputs::NONE;
@@ -7344,6 +7344,62 @@ mod contagion {
             assert_eq!(sx_contagion_len(c), 0);
             sx_contagion_free(c);
             sx_contagion_free(null_mut());
+        }
+    }
+
+    /// Through C as well: a handle learns only its owner's percepts of
+    /// `now`. Owner 1 fed a mixed buffer (its own, the same tick's percepts
+    /// of an observer 2 that sees everyone attack and flee, and its own of
+    /// the previous tick again) equals Rust fed only its own of `now`;
+    /// owner 2 fed only observer 1's percepts learns nothing.
+    #[test]
+    fn c_learns_only_the_owners_percepts_of_now() {
+        let ticks = scene(&World::square(CELL));
+        let mut rs_memory = Contagion::new(rs_config(Grid::Square), 3, 1);
+        let mine = unsafe { sx_contagion_new(&c_config(GRID_SQUARE), 3, 1) };
+        let other = unsafe { sx_contagion_new(&c_config(GRID_SQUARE), 3, 2) };
+        assert!(!mine.is_null() && !other.is_null());
+        let o = [0i32; 3];
+        let mut previous: Vec<SxPercept> = Vec::new();
+        for (now, out) in &ticks {
+            let now = *now;
+            rs_memory.learn(out, now, belief);
+            let own: Vec<SxPercept> = out.iter().map(|p| SxPercept::of(p, None)).collect();
+            let mut mixed = previous.clone();
+            for p in out {
+                mixed.push(SxPercept::of(p, None));
+                let theirs = Percept {
+                    observer: 2,
+                    cues: ATTACK | FLEE,
+                    ..*p
+                };
+                mixed.push(SxPercept::of(&theirs, None));
+            }
+            unsafe {
+                let n = mixed.len() as u32;
+                assert_eq!(
+                    sx_contagion_learn(mine, now, mixed.as_ptr(), n, Some(c_belief), null_mut()),
+                    0
+                );
+                let n = own.len() as u32;
+                assert_eq!(
+                    sx_contagion_learn(other, now, own.as_ptr(), n, Some(c_belief), null_mut()),
+                    0
+                );
+            }
+            for deed in 0..2u32 {
+                let want = rs_memory.inputs(deed as usize, o, now);
+                let mut got = DeedInputs::NONE;
+                unsafe { sx_contagion_inputs(mine, deed, o.as_ptr(), now, &mut got) };
+                assert_eq!(got, want, "tick {now} deed {deed}");
+            }
+            assert_eq!(unsafe { sx_contagion_len(mine) }, rs_memory.len() as i32);
+            assert_eq!(unsafe { sx_contagion_len(other) }, 0, "tick {now}");
+            previous = own;
+        }
+        unsafe {
+            sx_contagion_free(mine);
+            sx_contagion_free(other);
         }
     }
 
