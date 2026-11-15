@@ -16,7 +16,7 @@ use sagax_facade::perception::{
 
 use super::memory::{pos3, put};
 use super::perception::SxPercept;
-use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, guarded, set_trace, slice_of, traced};
+use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, guarded, set_trace, slice_of};
 
 /// `sx_deed_rule`.
 pub type SxDeedRule = DeedRule;

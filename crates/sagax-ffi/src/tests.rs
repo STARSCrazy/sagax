@@ -78,8 +78,8 @@ fn wall_line() -> Walls {
 }
 
 #[test]
-fn version_is_13() {
-    assert_eq!(sx_api_version(), 13);
+fn version_is_14() {
+    assert_eq!(sx_api_version(), 14);
 }
 
 #[test]
@@ -7091,7 +7091,8 @@ mod contagion {
                         size: 256,
                         conspicuity: 256,
                         cues,
-                        disguise: (k % 2) as u8 * 50,
+                        // The odd ones drop their disguise at tick 16.
+                        disguise: if k % 2 == 1 && now < 16 { 50 } else { 0 },
                         ..Target::default()
                     }
                 })
@@ -7208,7 +7209,7 @@ mod contagion {
             CONTAGION_TRACE_DROPPED,
             CONTAGION_TRACE_INPUTS,
         ] {
-            assert!(kinds.contains(&kind), "kind {kind} never seen");
+            assert!(kinds.contains(&kind), "kind {kind} never seen: {kinds:?}");
         }
         unsafe { sx_contagion_free(c) };
     }
