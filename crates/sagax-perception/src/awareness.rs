@@ -20,7 +20,9 @@ pub(crate) const CHECKED: u8 = 4;
 
 /// What one observer knows of one target: the evidence counter, the
 /// counted stage and the timing. A plain value the game stores per pair
-/// (start it zeroed); there is no other state.
+/// (start it zeroed); there is no other state. A zeroed value was last
+/// checked at tick 0: start your clock at 1, or the first check at tick 0
+/// credits nothing.
 ///
 /// Stages: 0 unseen, 1 noticed, 2 recognised.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -189,7 +191,8 @@ pub fn observe(
 /// One check of one observer–target pair, in the fixed steps:
 ///
 /// 1. **Credit** `min(now - aware.last, check_interval)` (wrapping time);
-///    skipped time is never paid back.
+///    skipped time is never paid back. A zeroed `Awareness` has `last` 0:
+///    start your clock at 1, or the first check at tick 0 credits nothing.
 /// 2. **Geometry**: within `range * sight_scale / 256` and inside a band.
 /// 3. **Line**: [`sight_line`]; opaque gives nothing.
 /// 4. **Light** at the target's cell (or its glow; [`NIGHT`](crate::NIGHT) lifts it).
@@ -199,8 +202,12 @@ pub fn observe(
 ///    `max`. [`THERMAL`](crate::THERMAL) runs the chain again with heat for light and
 ///    `heat_density` for clarity; the larger counts. [`SCANNER`](crate::SCANNER) adds
 ///    `scanner_gain * credit`, but only up to `notice_at`.
-/// 6. **Instant** cues in a band that allows them, with enough clarity,
-///    raise the counter to `notice_at` or `recognize_at`.
+/// 6. **Instant** cues in a band that allows them, with enough clarity
+///    and no factor of the sight chain at 0 (band, distance, light,
+///    clarity, size, conspicuity: so not in the dark with `dark_gain` 0,
+///    nor at size or conspicuity 0), raise the counter to `notice_at` or
+///    `recognize_at`. A chain whose product only rounds to 0 (a heavily
+///    discounted but visible target) still fires.
 /// 7. **Decay** when sight and thermal saw nothing, once `hold` ticks
 ///    passed since the last sighting: `decay_per_tick * credit`; with a
 ///    scanner contact never below `notice_at`, so the scanner holds a
@@ -268,13 +275,12 @@ pub fn observe_traced(
     // scanner contact (a place, never what it is).
     let seen = found.vision > 0 || found.instant > 0;
     let in_view = seen || found.scan > 0;
-    let (sense, clarity) = if by_scan > by_vision || !seen {
-        (Sense::Scanner, 256)
-    } else {
+    // The sense: sight or thermal (the larger) whenever the eye saw it;
+    // the scanner only for a scanner-only contact.
+    let (sense, clarity) = if seen {
         (found.sense, found.clarity)
-    };
-    let (sense, clarity) = if in_view {
-        (sense, clarity)
+    } else if in_view {
+        (Sense::Scanner, 256)
     } else {
         (Sense::Sight, 0)
     };

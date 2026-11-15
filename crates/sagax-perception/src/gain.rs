@@ -95,16 +95,8 @@ impl Chain<'_> {
     /// clarity, size, conspicuity, each acting cue rule's gain (0 skipped),
     /// crowd and notice scale, each as `g * f >> 8`.
     fn gain(&self, light: u16, clarity: u16) -> u64 {
-        let t = self.target;
         let mut g = u64::from(self.eye.profile.base_gain);
-        for f in [
-            self.band,
-            self.distance,
-            light,
-            clarity,
-            t.size,
-            t.conspicuity,
-        ] {
+        for f in self.factors(light, clarity) {
             g = step(g, f);
         }
         for (rule, &acts) in self.eye.profile.cues.iter().zip(&self.rules) {
@@ -114,6 +106,27 @@ impl Chain<'_> {
         }
         g = step(g, self.crowd);
         step(g, self.eye.stats.notice_scale)
+    }
+
+    /// The pass's band, distance, light, clarity, size and conspicuity
+    /// factors.
+    fn factors(&self, light: u16, clarity: u16) -> [u16; 6] {
+        let t = self.target;
+        [
+            self.band,
+            self.distance,
+            light,
+            clarity,
+            t.size,
+            t.conspicuity,
+        ]
+    }
+
+    /// Whether the eye sees the target at all in this pass: none of
+    /// [`factors`](Self::factors) is 0 (dark, cloaked, size 0). The product
+    /// may still round to 0; that does not stop an instant cue.
+    fn visible(&self, light: u16, clarity: u16) -> bool {
+        self.factors(light, clarity).iter().all(|&f| f > 0)
     }
 }
 
@@ -200,7 +213,10 @@ pub(crate) fn sense(
                 Sense::Sight,
             );
             (found.vision, found.sense, found.clarity) = (sight, Sense::Sight, line.clarity);
-            if band.instant && line.clear {
+            // An instant cue needs the eye to see the target at all: no
+            // factor of the chain is 0, so dark, size 0 or conspicuity 0
+            // stop it. A product that only rounds to 0 does not.
+            if band.instant && line.clear && chain.visible(light, line.clarity) {
                 for (i, (rule, &on)) in (0u8..).zip(p.cues.iter().zip(&chain.rules)) {
                     if on && rule.instant > 0 && line.clarity >= rule.min_clarity {
                         found.instant = found.instant.max(rule.instant.min(2));

@@ -80,7 +80,8 @@ pub fn look(
 }
 
 /// One observer looks at its candidate targets (`aware` parallel to
-/// `targets`; only the pairs present in both count) and checks each chosen
+/// `targets` and of the same length: a debug build asserts it, a release
+/// build uses only the pairs present in both) and checks each chosen
 /// one with [`observe_traced`], in this order:
 ///
 /// 1. **Instant**: targets showing a visible cue bit of an instant rule,
@@ -108,6 +109,11 @@ pub fn look_traced<S: Sink<PerceptionTrace>>(
     out: &mut Vec<Percept>,
     sink: &mut S,
 ) {
+    debug_assert_eq!(
+        targets.len(),
+        aware.len(),
+        "look: aware must be parallel to targets"
+    );
     let n = targets.len().min(aware.len());
     let (targets, aware) = (&targets[..n], &mut aware[..n]);
     for a in aware.iter_mut() {
@@ -176,7 +182,7 @@ pub fn look_traced<S: Sink<PerceptionTrace>>(
 
 /// For each target, how many others of the same group (`group_of`) stand
 /// within `radius` fine units on the same level (Euclidean on the point's
-/// `x`, `y`; saturating at 255), written to `out[i]`. Only the first
+/// `x`, `y`: on hex that is axial Euclid, approximate; saturating at 255), written to `out[i]`. Only the first
 /// `min(targets.len(), out.len())` are written. O(n²): for a game without
 /// its own crowd count.
 pub fn count_crowds(

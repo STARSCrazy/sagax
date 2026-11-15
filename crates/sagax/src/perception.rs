@@ -164,10 +164,16 @@ impl<H: SenseMap> CellMap for SoundCost<'_, H> {
 ///
 /// The navigator's [`Topology`] decides square or hex; its straight step
 /// cost (on hex: every step) must be `world.cell_size`, so that a cost is
-/// in fine units. On hex the navigator works in offset cells of its
+/// in fine units (a debug build asserts it). On hex the navigator works in offset cells of its
 /// layout; `out` holds axial cells, as [`cell_of`] gives them. A channel
 /// past [`MAX_CHANNELS`] reaches nothing. Replaces the navigator's last
 /// search.
+///
+/// The flood is bounded by the loudness alone: a listener's `hearing` or
+/// `hearing_scale` above 256 lets [`hear`] accept a larger cost, but does
+/// not widen the flood. With `Moves::Eight` a diagonal step asks
+/// [`SenseMap::sound_edge`] for the diagonal pair of cells, so the game's
+/// map must answer those too.
 pub fn flood_sound<H: SenseMap>(
     nav: &mut Navigator,
     world: &World,
@@ -180,10 +186,15 @@ pub fn flood_sound<H: SenseMap>(
     let Some(channel) = world.channels.get(usize::from(stimulus.channel)) else {
         return;
     };
-    let layout = match nav.topology() {
-        Topology::Hex { layout, .. } => Some(layout),
-        Topology::Square(_) => None,
+    let (layout, straight) = match nav.topology() {
+        Topology::Hex { layout, step_cost } => (Some(layout), step_cost),
+        Topology::Square(rules) => (None, rules.straight),
     };
+    debug_assert_eq!(
+        i64::from(straight),
+        i64::from(world.cell_size),
+        "flood_sound: the navigator's straight step cost must be world.cell_size"
+    );
     let start = to_map(layout, cell_of(world, stimulus.point));
     let max = Cost::try_from(stimulus.loudness).unwrap_or(0);
     let mut cost = SoundCost {

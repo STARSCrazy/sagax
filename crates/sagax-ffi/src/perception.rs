@@ -1293,9 +1293,11 @@ pub unsafe extern "C" fn sx_perception_hear(
 /// `sx_perception_flood`: every cell `s` reaches around corners, with its
 /// cost in fine units, by one search of `nav` over the sense map's sound.
 /// Writes at most `cap` cells (offset on hex) and costs (`costs` may be
-/// null); returns how many, `*total` how many there were. `nav`'s grid
-/// must be the handle's (else `SX_ERROR_ARGUMENT`), its straight step cost
-/// the cell size. Replaces the navigator's last search.
+/// null); returns how many, `*total` how many there were. `nav`'s topology
+/// must match the handle's (square with square, hex with the same offset
+/// layout; else `SX_ERROR_ARGUMENT`); its size and walls are not compared.
+/// Its straight step cost must be the cell size (asserted only in a debug
+/// build, see [`flood_sound`]). Replaces the navigator's last search.
 ///
 /// # Safety
 /// `p`, `nav`, `s` are null or valid; `cells` and `costs` have room for
@@ -1349,8 +1351,8 @@ pub unsafe extern "C" fn sx_perception_flood(
 
 /// `sx_count_crowds`: for each of `count` targets, how many others of the
 /// same group (`groups[i]`, parallel; null: all one group) stand within
-/// `radius` fine units on the same level, into `out[i]` (saturating at
-/// 255). Returns 0.
+/// `radius` fine units on the same level (axial Euclid on hex,
+/// approximate), into `out[i]` (saturating at 255). Returns 0.
 ///
 /// # Safety
 /// `targets` and `out` hold `count` entries, `groups` is null or holds

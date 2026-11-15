@@ -854,3 +854,100 @@ fn trace_equals_plain() {
     );
     assert_eq!(silent, out);
 }
+
+#[test]
+fn instant_cue_needs_light() {
+    let p = SenseProfile {
+        dark_gain: 0,
+        ..instant_profile()
+    };
+    let armed = |glow| Target {
+        cues: 1,
+        glow,
+        ..person(at(3, 0))
+    };
+    let mut dark = Lit {
+        inner: OpenAir,
+        ambient: 0,
+    };
+    // In the dark with dark gain 0: the chain gives 0, so no instant.
+    let mut a = Awareness::default();
+    let out = check_on(&mut dark, 1, &eye(&p), &armed(0), &mut a);
+    assert!(out.is_empty(), "{out:?}");
+    assert_eq!((a.stage(), a.counter()), (0, 0));
+    // A glowing target is seen: the instant fires.
+    let mut a = Awareness::default();
+    let out = check_on(&mut dark, 1, &eye(&p), &armed(255), &mut a);
+    assert!(has(&out, PerceptKind::Recognized));
+    assert_eq!(a.stage(), 2);
+    // Size 0 (or conspicuity 0) also gives a 0 chain: no instant.
+    for t in [
+        Target {
+            size: 0,
+            ..armed(255)
+        },
+        Target {
+            conspicuity: 0,
+            ..armed(255)
+        },
+    ] {
+        let mut a = Awareness::default();
+        assert!(check(1, &eye(&p), &t, &mut a).is_empty());
+        assert_eq!(a.stage(), 0);
+    }
+}
+
+#[test]
+fn sight_labels_a_check_the_scanner_also_made() {
+    // Dim sight (dark gain 32) and a strong scanner on the same target:
+    // the scanner adds more, but the eye sees it, so the sense is sight.
+    let p = SenseProfile::human(S).with_scanner(5 * S);
+    let mut dark = Lit {
+        inner: OpenAir,
+        ambient: 0,
+    };
+    let mut a = Awareness::default();
+    let mut percepts = 0;
+    for now in 1..=30 {
+        for pc in check_on(&mut dark, now, &eye(&p), &person(at(3, 0)), &mut a) {
+            assert_eq!(pc.sense, Sense::Sight, "{now}: {pc:?}");
+            assert!(pc.clarity > 0);
+            percepts += 1;
+        }
+    }
+    assert!(percepts > 0);
+    // Scanner only (behind a wall): the scanner names it.
+    let mut wall = Walls(vec![Cell::new(1, 0, 0)]);
+    let mut a = Awareness::default();
+    let mut scanned = 0;
+    for now in 1..=30 {
+        for pc in check_on(&mut wall, now, &eye(&p), &person(at(3, 0)), &mut a) {
+            assert_eq!((pc.sense, pc.clarity), (Sense::Scanner, 256));
+            scanned += 1;
+        }
+    }
+    assert!(scanned > 0);
+}
+
+#[test]
+fn instant_cue_fires_when_the_chain_only_rounds_to_zero() {
+    // Every factor above 0, but conspicuity 1 makes the product round to 0:
+    // the target is visible, so the drawn weapon is recognised at once.
+    let p = instant_profile();
+    let faint = |cues| Target {
+        cues,
+        conspicuity: 1,
+        ..person(at(3, 0))
+    };
+    // Without the cue the chain gives nothing, check after check.
+    let mut a = Awareness::default();
+    for now in 1..=20 {
+        assert!(check(now, &eye(&p), &faint(0), &mut a).is_empty());
+    }
+    assert_eq!((a.stage(), a.counter()), (0, 0));
+    // With it: the instant fires.
+    let mut a = Awareness::default();
+    let out = check(1, &eye(&p), &faint(1), &mut a);
+    assert!(has(&out, PerceptKind::Recognized), "{out:?}");
+    assert_eq!(a.stage(), 2);
+}

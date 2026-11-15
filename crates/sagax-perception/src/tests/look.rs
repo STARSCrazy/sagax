@@ -255,12 +255,28 @@ fn look_empty_and_zero_budget() {
     assert!(order.is_empty() && out.is_empty());
     assert_eq!(aware, [Awareness::default(); 3]);
     assert_eq!(attention, Attention::default());
-    // `aware` shorter than `targets`: only the pairs count.
+}
+
+/// `aware` shorter than `targets`: a debug build asserts, a release build
+/// counts only the pairs.
+#[test]
+#[cfg_attr(debug_assertions, should_panic(expected = "aware must be parallel"))]
+fn look_aware_shorter_than_targets() {
+    let p = instant_profile();
+    let mut attention = Attention::default();
+    let budget = Budget {
+        checks: 4,
+        keep: 4,
+        instant_cap: 4,
+    };
+    let mut out = Vec::new();
+    let targets = crowd(3);
+    let mut aware = [Awareness::default(); 1];
     let order = picked(
         1,
         &eye(&p),
         &targets,
-        &mut aware[..1],
+        &mut aware,
         &mut attention,
         budget,
         &mut out,

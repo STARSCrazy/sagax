@@ -41,7 +41,8 @@ pub enum Sense {
     Sight,
     /// The thermal pass.
     Thermal,
-    /// The scanner.
+    /// The scanner, only for a check where sight and thermal saw nothing
+    /// (a check that both saw and scanned is `Sight` or `Thermal`).
     Scanner,
     /// Hearing on this channel.
     Hearing(u8),
