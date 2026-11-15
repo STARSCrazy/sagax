@@ -48,14 +48,17 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
 - **`Navigator` traces:** `find_path_traced`, `continue_search_traced`,
   `reachable_traced`, `flee_traced`, `output_traced`, `formation_traced`
   report `NavTrace` records: `Search(SearchTrace)` (paths, areas, both
-  searches of a flee), `Smooth(SmoothTrace)` (each line the smoothing
+  searches of a flee; one count numbers every search of the navigator, from
+  1, so no two share a number), `Smooth(SmoothTrace)` (each line the smoothing
   tested), `Formation(FormationTrace)` (each member placement) and
   `FleeBest { cell, distance, cost }` (the cell a flee chose).
 - `smooth::SmoothTrace` with `smooth_path_traced`; `formation::FormationTrace`
   (`Placed { member, step, cell, slot }`, `Unplaced { member, step }`) with
   `place_members_traced`, `place_members_hex_traced`;
   `Topology::smooth_traced`, `Topology::place_members_traced`;
-  `nav::write_way_traced`. `sagax_nav::search` is a public module.
+  `nav::write_way_traced`. `sagax_nav::search` is a public module;
+  `Search::number` and `Search::set_number` let an owner of several searches
+  number them together.
 - **Decision traces:** `DecideTrace` (was `DecideEvent`) gains
   `Scored::cooled` (a cooldown forced the score to 0, so a 0 is no longer
   ambiguous) and `Ranked { rank }` (mixed ranks: only `rank` takes part;
@@ -87,9 +90,10 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   value leaves out (a refused merge, an evicted area, a timer that gave
   way). `Knowledge::learn_traced`, `merge_traced`, `learn_message_traced`,
   `merge_message_traced`, `expire_traced`, `expire_kind_traced`,
-  `expire_with_traced` report `KnowledgeTrace` (`Added`, `Updated`,
-  `Stale`, `Evicted`, `Expired`, each with the fact; a full table sends
-  `Evicted` before `Added`; the `removed` callback of `expire*` stays).
+  `expire_with_traced`, `remove_traced`, `remove_subject_traced` report
+  `KnowledgeTrace` (`Added`, `Updated`, `Stale`, `Evicted`, `Expired`,
+  `Removed`, each with the fact; a full table sends `Evicted` before
+  `Added`; the `removed` callback of `expire*` stays).
   `Areas::add_traced`, `expire_traced` report `AreasTrace` (`Added { index,
   area }`, `Renewed { index, area }`, `Evicted`, `Expired`).
   `Timers::set_traced` reports one `TimersTrace` per call (`Started`,
@@ -113,12 +117,16 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   `sx_inbox_set_trace` (both `sx_message_trace`: `kind`, the `sx_message`,
   `at`, `refused`), with the codes `SX_KNOWLEDGE_TRACE_*`,
   `SX_AREAS_TRACE_*`, `SX_TIMERS_TRACE_*`, `SX_MESSAGE_TRACE_*` (each from
-  1). The handles of `sx_squad_knowledge` and `sx_squad_areas` take a trace
-  too; it sees only the calls made through them.
+  1; `sx_knowledge_remove` and `_remove_subject` send
+  `SX_KNOWLEDGE_TRACE_REMOVED`). The handles of `sx_squad_knowledge` and
+  `sx_squad_areas` take a trace too; it sees only the calls made through
+  them.
 - **Group traces:** the squad's calls that decide something have a
   `_traced` form with a `Sink<SquadTrace>`: `Squad::observe_traced`,
-  `plan_traced`, `check_traced`, `orders_due_traced`, `signal_traced`,
-  `reinstate_traced` (the `_with` forms are these with `NoopSink`).
+  `report_traced`, `plan_traced`, `check_traced`, `orders_due_traced`,
+  `signal_traced`, `reinstate_traced` (the `_with` forms are these with
+  `NoopSink`; `reinstate_traced` takes `Option` rules, `None` being the
+  plain `reinstate`).
   `SquadTrace` records the targets slot's answer per target (`Target {
   fact, kept }`), the decider's own records per candidate (`Decide {
   tactic, target, event: DecideTrace }`: factors and score), each abort
@@ -128,9 +136,11 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   slot, member, cost }`), the spot ranking per member (`Spot { member,
   event: SpotTrace }`), the trigger (`Trigger { fired }`), each report read
   (`Report { msg }`), each order's or report's delay (`Delay { member,
-  delay }`) and what reached the leader's knowledge and the danger areas
-  (`Knowledge(KnowledgeTrace)`, `Areas(AreasTrace)`, nested through
-  `MapSink`).
+  delay }`), what reached the leader's knowledge and the danger areas
+  (`Knowledge(KnowledgeTrace)`, also `Removed` for a `Forget` report
+  action, and `Areas(AreasTrace)`) and what the leader's inbox did with a
+  report (`Inbox(MessageTrace)`: `Queued`, or `Dropped` when full), nested
+  through `MapSink`.
 - `pick_spot_traced` with `SpotTrace` (`Ranked { spot, fits, distance }`
   best first, then `Picked(SpotPick)`); `GoalKeeper::broken_traced` with
   `KeeperTrace::Checked { waited, limit, broken }`.
@@ -138,20 +148,24 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   `reinstate_traced` with a `Sink<CrewTrace>`: `Squad(SquadTrace)` (with a
   hex layout in offset coordinates), `Keeper { member, event: KeeperTrace }`
   for each keeper check of a tick, and `Sent { msg, delay, queued }` for
-  each report the crew sends (its own and the game's). `CrewEvent` stays
+  each report the crew sends (its own and the game's), after the squad's
+  `Inbox` records of it. `CrewEvent` stays
   the game's output. All four trace types are in `sagax::debug`.
 - `sagax-abi`: `squad_trace`, `keeper_trace`, `crew_trace` (with
   `SquadTraceCode`, `KeeperTraceCode`, `CrewTraceCode`) and the codes
   `SQUAD_TRACE_*`, `KEEPER_TRACE_CHECKED`, `CREW_TRACE_*`.
 - **C:** `sx_squad_set_trace` (`sx_squad_trace`, `SX_SQUAD_TRACE_TARGET` ..
-  `_AREAS`, 1 to 14; a spot record is `SPOT_RANKED` or `SPOT_PICKED`; the
-  decider, knowledge and areas records are embedded), `sx_keeper_set_trace`
+  `_INBOX`, 1 to 15; a spot record is `SPOT_RANKED` or `SPOT_PICKED`; the
+  decider, knowledge, areas and inbox records are embedded; it covers
+  `sx_squad_report` too), `sx_keeper_set_trace`
   (`sx_keeper_trace`, `SX_KEEPER_TRACE_CHECKED`) and `sx_crew_set_trace`
   (`sx_crew_trace`, `SX_CREW_TRACE_SQUAD`, `_KEEPER`, `_SENT`, embedding the
   keeper and squad records). The lent handles of `sx_crew_squad` and
   `sx_crew_keeper` trace only the calls made through them; the crew's own
   work goes to the crew's trace. Without rules, a squad or crew that needs
-  them refuses plan, check and tick as before and reinstates untraced.
+  them refuses plan, check and tick as before; its reinstate is traced
+  too. A trace callback must not call the same handle, the handle that
+  lent it or a handle it lent.
 - **Docs and example:** USAGE section 10 is rewritten around the one trace
   rule (Rust `*_traced` with `sagax::debug`, nesting, the C handle table with
   records and kind codes, what stays untraced). `examples/c/trace.c` keeps
@@ -191,7 +205,8 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   an `sx_nav_trace_fn` (search steps arrive as `SX_NAV_TRACE_SEARCH` with the
   step in `search`), `sx_flow_set_trace` and `sx_dstar_set_trace` take an
   `sx_search_trace_fn`. The search record gains `search` (the search's
-  number) and `first`, `kind` is `uint32_t`, `found` a `uint8_t`; the kind
+  number from 1: per navigator every search, per flow field every build,
+  per D* Lite planner every compute) and `first`, `kind` is `uint32_t`, `found` a `uint8_t`; the kind
   numbers stay 1 to 5. The nav trace now also reports the smoothing, the
   formation and the flee's choice and the threats' search of a flee.
 - **C:** `sx_squad_knowledge` and `sx_squad_areas` lend one handle each

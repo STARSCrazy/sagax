@@ -51,8 +51,9 @@ Details of the rule:
 - **`_traced` extends the most general variant.** Where an operation has a
   `_with(.., rules)` form, `op_traced` takes the rules too
   (`check_traced(now, extra, spots, seed, rules, sink)`); a caller without
-  own rules passes `&mut BuiltInRules`. So an operation has at most three
-  forms: `op`, `op_with`, `op_traced`. Never `op_with_traced`.
+  own rules passes `&mut BuiltInRules` (one exception: `reinstate_traced`
+  takes the rules as an `Option`, see the squad). So an operation has at
+  most three forms: `op`, `op_with`, `op_traced`. Never `op_with_traced`.
 - **Only decisions.** Setters, getters and constructors are never traced.
   The traced operations per module are listed below.
 - **One trace type per traced object or free function**, named
@@ -169,9 +170,13 @@ cost type. "new" marks an event that does not exist yet.
 `Started { search, start, estimate }`, `Expanded { search, node, cost,
 estimate }`, `Improved { search, node, parent, cost, first }`,
 `Paused { search, expanded }`, `Finished { search, status, expanded }`.
-Traced by `Search::advance` (already takes the sink), `Flow::build_traced`,
-`DStar::compute_traced`. Area searches (`reachable`) are plain searches
-without a goal and need nothing more.
+Traced by `Search::advance` (already takes the sink),
+`FlowField::build_traced`, `DStarLite::compute_traced`. Area searches
+(`reachable`) are plain searches without a goal and need nothing more.
+`search` numbers the searches of one handle from 1: a `Search` counts its
+`begin*` calls, a flow field its builds, a D* Lite planner its computes, a
+`Navigator` every search it runs (one counter passed into its searches with
+`Search::set_number`, so the two searches of a flee never share a number).
 
 **`SmoothTrace<N>`** (new) — `smooth_path_traced(path, out, clear, sink)`:
 - `Shortcut { from: N, to: N, clear: bool }` — each straight line the
@@ -187,7 +192,8 @@ without a goal and need nothing more.
 
 **`NavTrace`** (new) — the `Navigator`'s record:
 - `Search(SearchTrace<Cell>)` — paths, areas, both searches of `flee`
-  (they differ in `search`).
+  (they differ in `search`: the navigator numbers all its searches with one
+  counter).
 - `Smooth(SmoothTrace<Cell>)` — from `output` with a smoothed output.
 - `Formation(FormationTrace)` — from `formation`.
 - `FleeBest { cell: Cell, distance: Cost, cost: Cost }` — the cell `flee`
@@ -226,10 +232,12 @@ Traced: `update_traced`.
   newer-but-older one.
 - `Evicted(Fact)` — dropped by the `Evict` rule to make room.
 - `Expired(Fact)` — dropped by an `expire*` call.
+- `Removed(Fact)` — forgotten by `remove` or `remove_subject` (also a
+  squad's `Forget` report action).
 
 Traced: `learn_traced`, `merge_traced`, `learn_message_traced`,
 `merge_message_traced`, `expire_traced`, `expire_kind_traced`,
-`expire_with_traced`. The game-facing `removed` callback of `expire*` stays
+`expire_with_traced`, `remove_traced`, `remove_subject_traced`. The game-facing `removed` callback of `expire*` stays
 (it is how the game reacts, not debugging).
 
 **`AreasTrace`**:
@@ -286,11 +294,19 @@ Traced: `Outbox::post_traced`, `due_traced`, `due_max_traced`,
 - `Delay { member: u32, delay: Option<u32> }` — the channel delay of an
   order (`None`: does not reach).
 - `Knowledge(KnowledgeTrace)`, `Areas(AreasTrace)` — the squad's own
-  memory, changed by `observe`, reports and `check`.
+  memory, changed by `observe`, reports and `check` (a `Forget` report
+  action is `Knowledge(Removed)`).
+- `Inbox(MessageTrace)` — what the leader's inbox did with a report
+  (`Queued`, or `Dropped` when full), from `report_traced`.
 
 Traced: `plan_traced`, `check_traced`, `observe_traced`, `report_traced`,
-`signal_traced`, `reinstate_traced`, `orders_due_traced`. Each takes rules
-(the most general variant). The rule slots are not traced themselves: what
+`signal_traced`, `reinstate_traced`, `orders_due_traced`. Each that has a
+`_with` form takes rules (the most general variant). `reinstate_traced`
+takes `Option<&mut dyn SquadRules>`: the plain `reinstate` differs from
+`reinstate_with(BuiltInRules)` (a squad that needs rules does not activate a
+due plan without them), so `None` is the plain call and the C reinstate
+without rules is traced too. `report_traced` has no rules (`report` has
+none). The rule slots are not traced themselves: what
 a slot answered appears as the decision it fed (`Target.kept`,
 `Abort.fired`, `Trigger.fired`, `Delay.delay`, `Assigned.cost`, the spot
 score in `Spot`).
@@ -298,6 +314,10 @@ score in `Spot`).
 **`CrewTrace`** (new):
 - `Squad(SquadTrace)` — all squad work of the crew call.
 - `Keeper { member: u32, event: KeeperTrace }` — each keeper check.
+- `Sent { msg: Message, delay: Option<u32>, queued: bool }` — each report
+  the crew sends to the leader (its own and the game's), after the squad's
+  `Inbox` records of it in `Squad(..)`. Not in the first draft: without it
+  a report that never arrives (no delay) left no record.
 
 Traced: `tick_traced`, `observe_traced`, `report_traced`,
 `reinstate_traced`. `CrewEvent` stays the game-facing output and is not
@@ -358,7 +378,9 @@ Rules for every `set_trace`:
 
 - The callback runs inside the call, synchronously, in event order. `t` is
   valid only during the callback; copy what you keep. The callback must not
-  call into the same handle (or its parent).
+  call any function on the same handle, on the handle that lent it (its
+  parent) or on any handle it lent: they share the state the running call
+  changes. A crew counts its squad's lent handles as its own.
 - The handle stores `(fn, ctx)` next to its value; the call uses the
   `_traced` Rust operation only while `fn` is set (one null check when off).
 - **Lent and inside handles** (`sx_crew_squad`, `sx_crew_keeper`,
@@ -398,9 +420,9 @@ the asserts):
 | `sx_areas_trace` | `uint32_t index; sx_area area` |
 | `sx_timers_trace` | `uint32_t id, duration, old, old_left` |
 | `sx_message_trace` | `sx_message msg; uint32_t at, refused` |
-| `sx_squad_trace` | `uint32_t tactic, target, member, slot, abort, plan, until, score, delay; int64_t cost, distance; uint8_t has_target, has_cost, has_delay, fired, kept, fits; uint32_t spot; int32_t pos[3]; uint8_t has_spot; sx_fact fact; sx_message msg; sx_decide_trace decide; sx_knowledge_trace knowledge; sx_areas_trace areas` |
+| `sx_squad_trace` | `uint32_t tactic, target, member, slot, abort, plan, until, score, delay; int64_t cost, distance; uint8_t has_target, has_cost, has_delay, fired, kept, fits; uint32_t spot; int32_t pos[3]; uint8_t has_spot; sx_fact fact; sx_message msg; sx_decide_trace decide; sx_knowledge_trace knowledge; sx_areas_trace areas; sx_message_trace inbox` |
 | `sx_keeper_trace` | `uint32_t waited, limit; uint8_t broken` |
-| `sx_crew_trace` | `uint32_t member; sx_squad_trace squad; sx_keeper_trace keeper` |
+| `sx_crew_trace` | `uint32_t member, delay; uint8_t has_delay, queued; sx_message msg; sx_keeper_trace keeper; sx_squad_trace squad` |
 | `sx_mission_trace` (was `sx_mission_trace_event`) | `uint32_t option, column, built_in, score, index; int32_t value; int32_t at[3]; uint8_t has_option, has_at; sx_decide_trace decide` |
 
 Spot traces in C arrive only inside `sx_squad_trace` (there is no C
