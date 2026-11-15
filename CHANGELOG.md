@@ -152,6 +152,11 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   `sx_crew_keeper` trace only the calls made through them; the crew's own
   work goes to the crew's trace. Without rules, a squad or crew that needs
   them refuses plan, check and tick as before and reinstates untraced.
+- **Docs and example:** USAGE section 10 is rewritten around the one trace
+  rule (Rust `*_traced` with `sagax::debug`, nesting, the C handle table with
+  records and kind codes, what stays untraced). `examples/c/trace.c` keeps
+  the records of a search and a decision in a small fixed-size ring and runs
+  in `examples/c/run.sh`.
 
 ### Changed
 

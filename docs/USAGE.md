@@ -287,6 +287,9 @@ Build `cargo build --release -p sagax-ffi`; link `target/release/sagax.dll`
 
 ### Basics
 
+To see why a search did what it did: `sx_nav_set_trace`, or in Rust `find_path_traced` (see
+[Debugging and logging](#10-debugging-and-logging)).
+
 ```c
 sx_rules rules;
 sx_rules_default(SX_GRID_SQUARE, SX_PRESET_OCTILE, &rules);  /* or SX_GRID_HEX_ODD_R ... */
@@ -552,7 +555,7 @@ assert!(matches!(choice, Some(Choice { candidate: 1, .. })));
 
 `choose` takes the rows as they are and returns `Err(DecideError::RowLengths)`
 for rows of different or wrong length, `Ok(None)` if every score is 0. Under
-it, `decide` / `decide_traced` (any `sagax_core::Sink<DecideTrace>`) take one
+it, `decide` / `decide_traced` (any `Sink<DecideTrace>`, see [Debugging and logging](#10-debugging-and-logging)) take one
 flat slice of inputs and a stride, and write the scores.
 
 C:
@@ -723,6 +726,10 @@ Time may wrap around. C: `sx_machine_*` with condition bits in a
 `uint64_t`; Rust: `sagax_decide::state::StateMachine`.
 
 ## 7. Memory of the world
+
+Every block here can say what it did (a fact evicted, a message refused, a
+timer replaced): `*_traced` in Rust, `sx_*_set_trace` in C, see
+[Debugging and logging](#10-debugging-and-logging).
 
 Characters should remember things for a while: what they saw and heard,
 where and when, what a colleague told them, which places are dangerous or
@@ -1713,6 +1720,10 @@ with `rows`, abort comparisons (`tactic.addAbortWhen`, `abortIfTargetLost`),
 
 ### Debugging the plan
 
+For the why of every decision, trace the crew or the squad: `Crew::tick_traced`,
+`Squad::plan_traced` and `sx_crew_set_trace`, `sx_squad_set_trace` (see
+[Debugging and logging](#10-debugging-and-logging)).
+
 `validate` before the first tick, then watch the events (or `Status`) and
 `active_plan()` / `pending_plan()` (tactic, target, think time, when it
 became active). The example `squad_walk` prints the whole sequence:
@@ -1920,7 +1931,8 @@ option, score }`, `None` when all scored 0 and the fallback applies). Each
 step that begins sends `Begin { index, at }` with the place its `Where`
 stands for. A character holding after a fallback may score twice in one
 tick. The actions and events are the same with or without a sink, and
-`NoopSink` (what `tick` and `tick_with` use) costs nothing.
+`NoopSink` (what `tick` and `tick_with` use) costs nothing. All sinks and
+records: [Debugging and logging](#10-debugging-and-logging).
 
 ```rust
 use sagax::debug::{Collector, MissionTrace, Overflow};
@@ -2007,32 +2019,132 @@ mission does not.)
 
 ## 10. Debugging and logging
 
-Tracing hands every step of a search to you: `started`, `expanded` (cost now
-final), `improved` (reached more cheaply, with the parent cell), `paused`
-(budget used up) and `finished` (with `found`). It works for paths, areas,
-flow fields and D* Lite. Off (the default) it costs nothing.
+One rule for every building block: **a trace is a parameter, not a setting.**
+
+**Rust.** Every operation that decides something has an
+`op_traced(.., sink)` form with the sink last; the plain `op(..)` is the same
+call with a `NoopSink`, which costs nothing. No Rust object stores a trace.
+Everything lives in `sagax::debug` (`use sagax::debug::*;`): the sink pieces
+`Sink`, `NoopSink`, `CallbackSink` and `MapSink`, the `Collector` with
+`Overflow` and `Record`, and the record types:
+
+| Module | Record | Traced operations (next to the plain one) |
+|---|---|---|
+| search, flow, D* Lite | `SearchTrace` | `Search::advance`, `Flow::build_traced`, `DStar::compute_traced` |
+| `Navigator` | `NavTrace` | `find_path_traced`, `continue_search_traced`, `reachable_traced`, `flee_traced`, `output_traced`, `formation_traced` |
+| smoothing, formation | `SmoothTrace`, `FormationTrace` | `smooth_path_traced`, `place_members_traced` (and `_hex_`) |
+| `Decider` | `DecideTrace` | `score_traced`, `decide_traced` |
+| `StateMachine` | `StateTrace` | `update_traced` |
+| `Knowledge`, `Areas`, `Timers` | `KnowledgeTrace`, `AreasTrace`, `TimersTrace` | `learn_traced`, `merge_traced`, `expire_traced`, `add_traced`, `set_traced`, ... |
+| `Outbox`, `Inbox` | `MessageTrace` | `post_traced`, `due_traced`, `push_traced`, `take_due_traced`, ... |
+| spots, `GoalKeeper` | `SpotTrace`, `KeeperTrace` | `pick_spot_traced`, `broken_traced` |
+| `Squad` | `SquadTrace` | `plan_traced`, `check_traced`, `observe_traced`, `report_traced`, `signal_traced`, `reinstate_traced`, `orders_due_traced` |
+| `Crew` | `CrewTrace` | `tick_traced`, `observe_traced`, `report_traced`, `reinstate_traced` |
+| `Mission` | `MissionTrace` | `tick_traced` |
+
+Where an operation has a `_with(.., rules)` form, `op_traced` takes the rules
+too (pass the built-in rules for none); there is never an `op_with_traced`.
+Setters, getters and constructors are not traced.
+
+A `Collector` keeps the records of a call; read it after the call:
+
+```rust
+use sagax::debug::*;
+use sagax::prelude::*;
+
+let mut log = Collector::new(256, Overflow::DropOldest);   // or DropNewest
+nav.find_path_traced(&mut map, start, &goal, Budget::UNLIMITED, &mut log);
+for r in log.records() {                                    // oldest first
+    if let NavTrace::Search(SearchTrace::Expanded { node, cost, .. }) = r.event {
+        mark_cell(node, cost);
+    }
+}
+println!("{} records, {} dropped", log.records().len(), log.dropped());
+```
+
+`CallbackSink` hands each record to your function as it happens instead.
+Code that must compute something only for the trace asks `sink.enabled()`
+first.
+
+**Nesting.** A facade that drives other blocks wraps their records and adds
+what they lack: `CrewTrace::Squad(SquadTrace)`,
+`SquadTrace::Decide { tactic, target, event: DecideTrace }`,
+`MissionTrace::Decide { option, event }`, `NavTrace::Search(SearchTrace)`. A
+trace read alone tells the whole story of one call. `MapSink` is the adapter
+(it also serves your own wrappers). A trace never changes a result: the
+traced and the plain call answer the same.
+
+**Event or trace?** `*Event` (`CrewEvent`, `MissionEvent`) is output the game
+acts on and belongs to the normal API. `*Trace` is a debug record that only
+goes through a sink; you never need it to play.
+
+**C.** Every handle that decides something carries one callback:
 
 ```c
-static void on_step(void *ctx, const sx_event *e) {
-	if (e->kind == SX_TRACE_EXPANDED) mark_cell(ctx, e->cell.x, e->cell.y, e->cost);
+static void on_trace(void *ctx, const sx_squad_trace *t) {
+	if (t->kind == SX_SQUAD_TRACE_PICKED) log_pick(ctx, t->tactic, t->score);
 }
-sx_nav_set_trace(nav, on_step, my_debug_view);   /* NULL turns it off */
+sx_squad_set_trace(squad, on_trace, my_log);   /* NULL turns it off (the default) */
 ```
 
-```js
-grid.setTrace(true);
-grid.findPath(a, b);
-const { events } = grid.takeTrace();   // [{kind, x, y, parent, cost, estimate, expanded, found}]
-```
+`sx_<x>_set_trace(obj, fn, ctx)` returns 0 (`SX_ERROR_ARGUMENT` for a null
+handle). Off it costs one check per call. The callback runs inside the call,
+in record order. The record is valid only during the callback, so copy what
+you keep, and do not call into the same handle from it. A record is a flat
+struct: `kind` first, then named fields (0 when they do not apply to the
+kind); a wrapped sub-record is a field by value (`decide`, `knowledge`,
+`areas`, `keeper`, `squad`, `search`).
 
-Rust: `nav.set_tracer(Some(Box::new(|e: &TraceEvent| ...)))`; lower down,
-every `Search::advance` takes a `sagax_core::Sink` of `SearchEvent`s, and
-`sagax-debug` keeps the last N of them.
+| Handle | Set | Record | Kind codes |
+|---|---|---|---|
+| `sx_nav` | `sx_nav_set_trace` | `sx_nav_trace` | `SX_NAV_TRACE_*` (SEARCH, SHORTCUT, PLACED, UNPLACED, FLEE_BEST) |
+| `sx_flow`, `sx_dstar` | `sx_flow_set_trace`, `sx_dstar_set_trace` | `sx_search_trace` | `SX_SEARCH_TRACE_*` |
+| `sx_decider` | `sx_decider_set_trace` | `sx_decide_trace` | `SX_DECIDE_TRACE_*` |
+| `sx_machine` | `sx_machine_set_trace` | `sx_machine_trace` | `SX_MACHINE_TRACE_*` |
+| `sx_mission` | `sx_mission_set_trace` | `sx_mission_trace` | `SX_MISSION_TRACE_*` |
+| `sx_knowledge` | `sx_knowledge_set_trace` | `sx_knowledge_trace` | `SX_KNOWLEDGE_TRACE_*` |
+| `sx_areas` | `sx_areas_set_trace` | `sx_areas_trace` | `SX_AREAS_TRACE_*` |
+| `sx_timers` | `sx_timers_set_trace` | `sx_timers_trace` | `SX_TIMERS_TRACE_*` |
+| `sx_outbox`, `sx_inbox` | `sx_outbox_set_trace`, `sx_inbox_set_trace` | `sx_message_trace` | `SX_MESSAGE_TRACE_*` |
+| `sx_squad` | `sx_squad_set_trace` | `sx_squad_trace` | `SX_SQUAD_TRACE_*` |
+| `sx_keeper` | `sx_keeper_set_trace` | `sx_keeper_trace` | `SX_KEEPER_TRACE_*` |
+| `sx_crew` | `sx_crew_set_trace` | `sx_crew_trace` | `SX_CREW_TRACE_*` |
 
-Typical uses: colour the expanded cells to see why a search is slow, log
-the `finished` event with `expanded` to find costly searches, and follow
-`improved` to see why a way goes where it goes.
+`sx_nav` covers everything that runs through it: `sx_nav_find_path`,
+`_continue`, `_reachable`, `_flee`, `_way` (smoothing) and `_formation`.
+The smoothing and spot records of the Rust table arrive inside these
+records (a spot pick only inside `sx_squad_trace`). The header has the exact
+fields of every record.
 
+**Lent handles** (`sx_crew_squad`, `sx_crew_keeper`, `sx_squad_decider`,
+`sx_squad_knowledge`, `sx_squad_areas`, `sx_mission_decider`) accept
+`set_trace` too, and it covers only the calls made through that handle. What
+the parent does with its parts goes to the parent's trace, wrapped: one place
+per call, never two.
+
+There is no C collector: the callback already gives you the copy, and the game
+knows best what to keep (only `FINISHED`, only one member). The example
+`examples/c/trace.c` keeps the last records of a search and a decision in a
+small fixed-size ring.
+
+**Untraced on purpose.** Pure functions and plain values whose result already
+says everything: `route`, `distance`, `arrival`, `points_around`,
+`sweep_heading`, `sine`, `line_clear`, `Alertness`, `Progress`, `Interval`,
+the skill table, and the rule slots of the squad and the mission (what a slot
+answered shows in the decision it fed, such as `Target.kept` or
+`Abort.fired`).
+
+**JavaScript.** JavaScript keeps its pull buffers: `grid.setTrace(true)` and
+`grid.takeTrace()` for paths, flow fields and D* Lite (`{events, dropped}`,
+each `{kind, x, y, parent, cost, estimate, expanded, found}`),
+`decider.setTrace(true)` and `decider.takeTrace()` (`factor`, `scored`,
+`chosen`), and `squad.setScoreLog(true)` with `squad.scoreLog()` for the last
+scoring of a squad. The other records are Rust and C only.
+
+Typical uses: colour the expanded cells to see why a search is slow, log the
+`Finished` record with `expanded` to find costly searches, read the squad's
+`Decide` records to see why it chose a tactic, or `Evicted` to see which fact
+a full memory gave up.
 
 ## 11. Pitfalls
 

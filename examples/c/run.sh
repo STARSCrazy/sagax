@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds the Sagax C library and runs the C examples (quickstart.c, memory.c, squad.c, ambush_rules.c, mission.c) against it.
+# Builds the Sagax C library and runs the C examples (quickstart.c, memory.c, squad.c, ambush_rules.c, mission.c, trace.c) against it.
 # Every example is built twice: as C99 (no layout checks) and as C11 (the
 # _Static_assert layout checks at the end of sagax.h are on). The output of
 # squad.c, ambush_rules.c and mission.c must equal the Rust examples' (cargo run -p sagax
@@ -13,7 +13,7 @@ cargo run -q -p sagax --example squad_walk > examples/c/out/squad-rust.txt
 cargo run -q -p sagax --example ambush_rules > examples/c/out/ambush-rust.txt
 cargo run -q -p sagax --example mission_guard > examples/c/out/mission-rust.txt
 for std in c99 c11; do
-	for name in quickstart memory squad ambush_rules mission; do
+	for name in quickstart memory squad ambush_rules mission trace; do
 		"$CC" -std=$std -O2 -Wall -Wextra -Werror -I crates/sagax-ffi/include \
 			examples/c/$name.c -L target/release -lsagax -o examples/c/out/$name-$std
 		PATH="$PWD/target/release:$PATH" LD_LIBRARY_PATH="$PWD/target/release" DYLD_LIBRARY_PATH="$PWD/target/release" \

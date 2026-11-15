@@ -36,8 +36,8 @@ dependencies).
   leave (zones of control).
 - **Your map, your rules**: the game answers "can I step from here to
   there?" through a callback. Nothing is copied.
-- **Tracing**: every step of a search for debugging and logging; free when
-  turned off.
+- **Tracing**: every building block can say why it did that (search steps,
+  scores, memory changes, squad plans); free when turned off.
 - **Deterministic**: the same answers give the same ways on every machine.
   No allocation during a search within the reserved capacity.
 
@@ -177,6 +177,7 @@ crew.free();
 | `examples/c/memory.c` | the memory blocks in C (knowledge, messages, areas, timers, alertness) |
 | `examples/c/squad.c` | four members walk around a wall and attack together, with `sx_grid`, `sx_nav_*` and `sx_crew_*` |
 | `examples/c/ambush_rules.c` | four guards ambush an intruder with the game's own sight, hand signs, kill zone and "seen" abort in an `sx_squad_rules` object |
+| `examples/c/trace.c` | a search and a decision traced into one small ring buffer in C |
 | `examples/js/quickstart.mjs` | the three jobs in JavaScript |
 | `examples/js/squad.mjs` | the same squad walk in JavaScript |
 | `crates/sagax/examples/squad_walk.rs` | the same squad walk in Rust (`cargo run -p sagax --example squad_walk`) |
