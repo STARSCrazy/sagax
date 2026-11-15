@@ -461,3 +461,68 @@ pub const DETOUR_END_SAFE: u32 = 4;
 pub const DETOUR_END_ARRIVED: u32 = 5;
 /// `SX_DETOUR_END_ENDED`.
 pub const DETOUR_END_ENDED: u32 = 6;
+
+/// `SX_SPREAD_CIRCLE`: a stimulus counts by straight distance only.
+pub const SPREAD_CIRCLE: u32 = 0;
+/// `SX_SPREAD_STRAIGHT`: distance plus the map's damping along one walk.
+pub const SPREAD_STRAIGHT: u32 = 1;
+
+/// `SX_SENSE_SIGHT`: a percept by normal sight (also `LOST`, `FORGOTTEN`).
+pub const SENSE_SIGHT: u32 = 0;
+/// `SX_SENSE_THERMAL`: a percept by the thermal pass.
+pub const SENSE_THERMAL: u32 = 1;
+/// `SX_SENSE_SCANNER`: a percept by the scanner.
+pub const SENSE_SCANNER: u32 = 2;
+/// `SX_SENSE_HEARING`: a percept by hearing (the channel is beside it).
+pub const SENSE_HEARING: u32 = 3;
+
+/// `SX_PERCEPT_NOTICED`: the counted stage rose from unseen.
+pub const PERCEPT_NOTICED: u32 = 0;
+/// `SX_PERCEPT_RECOGNIZED`: the counted stage rose to recognised.
+pub const PERCEPT_RECOGNIZED: u32 = 1;
+/// `SX_PERCEPT_SEEN`: noticed or higher and in view: its current place.
+pub const PERCEPT_SEEN: u32 = 2;
+/// `SX_PERCEPT_CUES`: recognised cue bits not reported before.
+pub const PERCEPT_CUES: u32 = 3;
+/// `SX_PERCEPT_LOST`: in view at the last check, not now.
+pub const PERCEPT_LOST: u32 = 4;
+/// `SX_PERCEPT_FORGOTTEN`: the counted stage fell to unseen.
+pub const PERCEPT_FORGOTTEN: u32 = 5;
+/// `SX_PERCEPT_SEEN_THROUGH`: the observer saw through the disguise.
+pub const PERCEPT_SEEN_THROUGH: u32 = 6;
+/// `SX_PERCEPT_HEARD`: a stimulus was heard.
+pub const PERCEPT_HEARD: u32 = 7;
+
+/// `SX_LOOK_INSTANT`: `look` checked a target for an instant cue.
+pub const LOOK_INSTANT: u32 = 0;
+/// `SX_LOOK_KEPT`: `look` checked a target already noticed.
+pub const LOOK_KEPT: u32 = 1;
+/// `SX_LOOK_ROUND_ROBIN`: `look` checked a target in its round-robin turn.
+pub const LOOK_ROUND_ROBIN: u32 = 2;
+
+/// `SX_SENSE_PRESET_HUMAN`: an ordinary person.
+pub const SENSE_PRESET_HUMAN: u32 = 1;
+/// `SX_SENSE_PRESET_GUARD`: a guard (longer range, quicker).
+pub const SENSE_PRESET_GUARD: u32 = 2;
+/// `SX_SENSE_PRESET_WATCHER`: a watcher (wide periphery, slower
+/// recognition).
+pub const SENSE_PRESET_WATCHER: u32 = 3;
+
+/// `SX_PERCEPTION_TRACE_PICKED`: `look` chose to check a target.
+pub const PERCEPTION_TRACE_PICKED: u32 = 1;
+/// `SX_PERCEPTION_TRACE_SKIPPED`: the budget ran out before a target.
+pub const PERCEPTION_TRACE_SKIPPED: u32 = 2;
+/// `SX_PERCEPTION_TRACE_LINE`: a sight line was walked.
+pub const PERCEPTION_TRACE_LINE: u32 = 3;
+/// `SX_PERCEPTION_TRACE_GAIN`: the factors of one pass of a check.
+pub const PERCEPTION_TRACE_GAIN: u32 = 4;
+/// `SX_PERCEPTION_TRACE_INSTANT`: an instant cue fired.
+pub const PERCEPTION_TRACE_INSTANT: u32 = 5;
+/// `SX_PERCEPTION_TRACE_STAGE`: a stage change, or a rise waiting.
+pub const PERCEPTION_TRACE_STAGE: u32 = 6;
+/// `SX_PERCEPTION_TRACE_DOUBT`: see-through progress.
+pub const PERCEPTION_TRACE_DOUBT: u32 = 7;
+/// `SX_PERCEPTION_TRACE_HEARD`: a stimulus was heard.
+pub const PERCEPTION_TRACE_HEARD: u32 = 8;
+/// `SX_PERCEPTION_TRACE_UNHEARD`: a stimulus was not heard.
+pub const PERCEPTION_TRACE_UNHEARD: u32 = 9;

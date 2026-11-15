@@ -202,7 +202,7 @@ pub type KnowledgeTraceFn = unsafe extern "C" fn(*mut c_void, *const SxKnowledge
 /// `sx_knowledge`: its own table, or the one of a squad (`sx_squad_knowledge`).
 pub struct SxKnowledge {
     pub(crate) value: Held<Knowledge>,
-    trace: TraceSlot<SxKnowledgeTrace>,
+    pub(crate) trace: TraceSlot<SxKnowledgeTrace>,
 }
 
 impl SxKnowledge {

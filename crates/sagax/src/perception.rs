@@ -19,8 +19,10 @@
 //! `Budget` here is the attention budget of [`look`]; the navigator's is
 //! [`sagax::nav::Budget`](sagax_nav::Budget) (also in the prelude).
 
-use sagax_core::{Cell, HexLayout};
-use sagax_decide::memory::{AlertConfig, Alertness, Fact, Knowledge, SOURCE_HEARD, SOURCE_OWN};
+use sagax_core::{Cell, HexLayout, NoopSink, Sink};
+use sagax_decide::memory::{
+    AlertConfig, Alertness, Fact, Knowledge, KnowledgeTrace, SOURCE_HEARD, SOURCE_OWN,
+};
 use sagax_nav::grid::{CellMap, DenseGrid};
 use sagax_nav::nav::Navigator;
 use sagax_nav::search::Cost;
@@ -327,6 +329,31 @@ pub fn learn_percepts(
     kinds: &FactKinds,
     amounts: &AlertAmounts,
 ) {
+    learn_percepts_traced(
+        known,
+        alert,
+        alert_cfg,
+        now,
+        percepts,
+        kinds,
+        amounts,
+        &mut NoopSink,
+    );
+}
+
+/// [`learn_percepts`] with the [`Knowledge`] trace of every `learn`,
+/// `remove` and `merge` it makes in `sink`.
+#[allow(clippy::too_many_arguments)]
+pub fn learn_percepts_traced(
+    known: &mut Knowledge,
+    alert: &mut Alertness,
+    alert_cfg: &AlertConfig,
+    now: u32,
+    percepts: &[Percept],
+    kinds: &FactKinds,
+    amounts: &AlertAmounts,
+    sink: &mut impl Sink<KnowledgeTrace>,
+) {
     for p in percepts {
         let Some((noticed, _)) = noticed_and_seen(p, kinds) else {
             continue;
@@ -340,19 +367,19 @@ pub fn learn_percepts(
         };
         match p.event {
             PerceptKind::Noticed | PerceptKind::Seen if fact.kind == noticed => {
-                known.learn(now, fact);
+                known.learn_traced(now, fact, sink);
             }
             PerceptKind::Recognized | PerceptKind::Seen => {
                 if noticed != fact.kind {
-                    known.remove(p.subject, noticed);
+                    known.remove_traced(p.subject, noticed, sink);
                 }
-                known.learn(now, fact);
+                known.learn_traced(now, fact, sink);
             }
             PerceptKind::Cues { .. } => {
                 known.set_data(p.subject, fact.kind, p.cues);
             }
             PerceptKind::Heard => {
-                known.merge(now, fact);
+                known.merge_traced(now, fact, sink);
             }
             _ => {}
         }

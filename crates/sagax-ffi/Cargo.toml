@@ -20,6 +20,10 @@ sagax-abi = { path = "../sagax-abi" }
 sagax-core = { path = "../sagax-core" }
 sagax-nav = { path = "../sagax-nav" }
 sagax-decide = { path = "../sagax-decide" }
+sagax-perception = { path = "../sagax-perception" }
+# The facade, for the helpers that join perception with nav and memory
+# (its library is also called `sagax`, like this one).
+sagax-facade = { package = "sagax", path = "../sagax" }
 
 [lints.rust]
 missing_docs = "warn"

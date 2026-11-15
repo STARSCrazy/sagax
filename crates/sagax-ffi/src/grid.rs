@@ -11,6 +11,13 @@ use crate::{ERROR_ARGUMENT, Point, SxMap, create, destroy, to_i32};
 /// `sx_grid`.
 pub struct SxGrid(DenseGrid);
 
+impl SxGrid {
+    /// The grid itself.
+    pub(crate) fn dense(&self) -> &DenseGrid {
+        &self.0
+    }
+}
+
 /// The grid behind a handle, or `None` for null.
 ///
 /// # Safety

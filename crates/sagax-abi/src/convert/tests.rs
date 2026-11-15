@@ -1252,3 +1252,186 @@ fn spot_radius_of_a_number() {
     assert_eq!(spot_radius(i64::from(u32::MAX)), Some(Some(u32::MAX)));
     assert_eq!(spot_radius(i64::from(u32::MAX) + 1), None);
 }
+
+#[test]
+fn perception_codes_round_trip() {
+    use sagax_perception::{PerceptKind, Pick as LookPick, Sense, SenseProfile, Spread};
+    for s in [Spread::Circle, Spread::Straight] {
+        assert_eq!(spread(spread_code(s)), Some(s));
+    }
+    assert_eq!(spread_code(Spread::Straight), SPREAD_STRAIGHT);
+    assert_eq!(spread(2), None);
+
+    for s in [
+        Sense::Sight,
+        Sense::Thermal,
+        Sense::Scanner,
+        Sense::Hearing(0),
+        Sense::Hearing(3),
+    ] {
+        let (code, channel) = sense_code(s);
+        assert_eq!(sense(code, channel), Some(s));
+    }
+    assert_eq!(sense_code(Sense::Hearing(2)), (SENSE_HEARING, 2));
+    assert_eq!(sense_code(Sense::Scanner), (SENSE_SCANNER, 0));
+    assert_eq!(sense(4, 0), None);
+    assert_eq!(sense(SENSE_HEARING, 256), None);
+
+    let kinds = [
+        PerceptKind::Noticed,
+        PerceptKind::Recognized,
+        PerceptKind::Seen,
+        PerceptKind::Cues { new: 0x50 },
+        PerceptKind::Lost,
+        PerceptKind::Forgotten,
+        PerceptKind::SeenThrough,
+        PerceptKind::Heard,
+    ];
+    for (i, k) in kinds.into_iter().enumerate() {
+        let (code, new) = percept_kind_code(k);
+        assert_eq!(code, i as u32);
+        assert_eq!(percept_kind(code, new), Some(k));
+    }
+    assert_eq!(percept_kind_code(kinds[3]), (PERCEPT_CUES, 0x50));
+    assert_eq!(percept_kind(PERCEPT_HEARD + 1, 0), None);
+
+    for (p, code) in [
+        (LookPick::Instant, LOOK_INSTANT),
+        (LookPick::Kept, LOOK_KEPT),
+        (LookPick::RoundRobin, LOOK_ROUND_ROBIN),
+    ] {
+        assert_eq!(look_pick_code(p), code);
+        assert_eq!(look_pick(code), Some(p));
+    }
+    assert_eq!(look_pick(3), None);
+
+    assert_eq!(
+        sense_preset(SENSE_PRESET_HUMAN, 256),
+        Some(SenseProfile::human(256))
+    );
+    assert_eq!(
+        sense_preset(SENSE_PRESET_GUARD, 100),
+        Some(SenseProfile::guard(100))
+    );
+    assert_eq!(
+        sense_preset(SENSE_PRESET_WATCHER, 256),
+        Some(SenseProfile::watcher(256))
+    );
+    assert_eq!(sense_preset(0, 256), None);
+    assert_eq!(sense_preset(4, 256), None);
+}
+
+#[test]
+fn perception_trace_all_records() {
+    use sagax_perception::{PerceptionTrace as T, Pick as LookPick, Sense};
+    let picked = perception_trace(T::Picked {
+        target: 7,
+        why: LookPick::Kept,
+    });
+    assert_eq!(
+        (picked.kind, picked.target, picked.why),
+        (PERCEPTION_TRACE_PICKED, 7, LOOK_KEPT)
+    );
+    let skipped = perception_trace(T::Skipped { target: 8 });
+    assert_eq!(
+        (skipped.kind, skipped.target),
+        (PERCEPTION_TRACE_SKIPPED, 8)
+    );
+    let line = perception_trace(T::Line {
+        target: 9,
+        clear: false,
+        clarity: 0,
+        blocked_at: Some(Cell::new(3, 4, 1)),
+    });
+    assert_eq!(line.kind, PERCEPTION_TRACE_LINE);
+    assert_eq!(
+        (line.target, line.clear, line.cell),
+        (9, false, Some([3, 4, 1]))
+    );
+    let clear = perception_trace(T::Line {
+        target: 9,
+        clear: true,
+        clarity: 200,
+        blocked_at: None,
+    });
+    assert_eq!((clear.clear, clear.clarity, clear.cell), (true, 200, None));
+    let gain = perception_trace(T::Gain {
+        target: 10,
+        band: 1,
+        distance: 250,
+        light: 128,
+        clarity: 192,
+        crowd: 144,
+        gain: 77,
+        sense: Sense::Thermal,
+    });
+    assert_eq!(gain.kind, PERCEPTION_TRACE_GAIN);
+    assert_eq!(
+        (
+            gain.target,
+            gain.band,
+            gain.distance,
+            gain.light,
+            gain.clarity,
+            gain.crowd,
+            gain.gain,
+            gain.sense
+        ),
+        (10, 1, 250, 128, 192, 144, 77, SENSE_THERMAL)
+    );
+    let instant = perception_trace(T::Instant {
+        target: 11,
+        rule: 2,
+    });
+    assert_eq!(
+        (instant.kind, instant.target, instant.rule),
+        (PERCEPTION_TRACE_INSTANT, 11, 2)
+    );
+    let stage = perception_trace(T::Stage {
+        target: 12,
+        from: 0,
+        to: 2,
+        pending: true,
+    });
+    assert_eq!(
+        (stage.kind, stage.from, stage.to, stage.pending),
+        (PERCEPTION_TRACE_STAGE, 0, 2, true)
+    );
+    let doubt = perception_trace(T::Doubt {
+        target: 13,
+        doubt: 99,
+    });
+    assert_eq!(
+        (doubt.kind, doubt.target, doubt.doubt),
+        (PERCEPTION_TRACE_DOUBT, 13, 99)
+    );
+    let heard = perception_trace(T::Heard {
+        stimulus: 14,
+        cost: 300,
+        range: 900,
+        cell: [5, 6, 0],
+    });
+    assert_eq!(heard.kind, PERCEPTION_TRACE_HEARD);
+    assert_eq!(
+        (heard.target, heard.cost, heard.range, heard.cell),
+        (14, Some(300), 900, Some([5, 6, 0]))
+    );
+    let unheard = perception_trace(T::Unheard {
+        stimulus: 15,
+        cost: None,
+        range: 900,
+    });
+    assert_eq!(unheard.kind, PERCEPTION_TRACE_UNHEARD);
+    assert_eq!(
+        (unheard.target, unheard.cost, unheard.range),
+        (15, None, 900)
+    );
+    let far = perception_trace(T::Unheard {
+        stimulus: 15,
+        cost: Some(1000),
+        range: 900,
+    });
+    assert_eq!(far.cost, Some(1000));
+    // Fields of other records stay 0.
+    assert_eq!((heard.why, heard.gain, heard.clarity), (0, 0, 0));
+}

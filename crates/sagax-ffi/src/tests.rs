@@ -78,8 +78,8 @@ fn wall_line() -> Walls {
 }
 
 #[test]
-fn version_is_12() {
-    assert_eq!(sx_api_version(), 12);
+fn version_is_13() {
+    assert_eq!(sx_api_version(), 13);
 }
 
 #[test]
@@ -1127,7 +1127,7 @@ mod squad {
         assert_eq!(size_of::<SxOrder>(), 72);
         assert_eq!(size_of::<SxPlan>(), 28);
         assert_eq!(size_of::<SxSkillTable>(), 204);
-        assert_eq!(define("SX_API_VERSION"), 12);
+        assert_eq!(define("SX_API_VERSION"), 13);
         assert_eq!(define("SX_ERROR_PLAN"), i64::from(ERROR_PLAN));
         assert_eq!(define("SX_IDLE"), i64::from(IDLE));
         let core = [
@@ -1401,6 +1401,7 @@ mod squad {
             include_str!("machine.rs"),
             include_str!("memory.rs"),
             include_str!("mission.rs"),
+            include_str!("perception.rs"),
             include_str!("../../sagax-wasm/src/lib.rs"),
             include_str!("../../sagax-wasm/src/crew.rs"),
             include_str!("../../sagax-wasm/src/values.rs"),
@@ -3107,8 +3108,9 @@ mod conventions {
     use std::ptr::null_mut;
 
     const HEADER: &str = include_str!("../include/sagax.h");
-    const SOURCES: [&str; 9] = [
+    const SOURCES: [&str; 10] = [
         include_str!("lib.rs"),
+        include_str!("perception.rs"),
         include_str!("grid.rs"),
         include_str!("memory.rs"),
         include_str!("mission.rs"),
@@ -3196,6 +3198,11 @@ mod conventions {
             SxDetour, SxFail, SxLeeway, SxMissionAction, SxMissionConfig, SxMissionEvent,
             SxMissionFailCtx, SxMissionOut, SxMissionPlanCtx, SxMissionPlanInfo, SxMissionTrace,
             SxMotive, SxStep, SxWhere,
+        };
+        use crate::perception::{
+            SxAlertAmounts, SxAttention, SxAwareness, SxBand, SxBudget, SxChannel, SxCueRule,
+            SxDisguiseRule, SxFactKinds, SxLine, SxMedium, SxPercept, SxPerceptionConfig,
+            SxPerceptionTrace, SxSeeThrough, SxSenseProfile, SxStats, SxStimulus, SxTarget,
         };
         use crate::rules::{SxChannelCtx, SxCostCtx, SxPlaceCtx, SxSpotCtx, SxViewPlan};
         use crate::{Point, SxNavTrace, SxResult, SxRules, SxSearchTrace};
@@ -3512,6 +3519,155 @@ mod conventions {
                 widening,
                 has_first
             ),
+            layout!("sx_medium", SxMedium, density, heat_density),
+            layout!("sx_channel", SxChannel, fuzz, speed, spread),
+            layout!(
+                "sx_perception_config",
+                SxPerceptionConfig,
+                cell_size,
+                channels
+            ),
+            layout!("sx_band", SxBand, gain, instant),
+            layout!("sx_cue_rule", SxCueRule, gain, instant, min_clarity, range),
+            layout!(
+                "sx_sense_profile",
+                SxSenseProfile,
+                range,
+                near,
+                far_gain,
+                bands,
+                base_gain,
+                dark,
+                bright,
+                dark_gain,
+                notice_at,
+                recognize_at,
+                max,
+                decay_per_tick,
+                hold,
+                hysteresis,
+                check_interval,
+                crowd_gain,
+                scanner_range,
+                scanner_gain,
+                hearing,
+                hear_gain,
+                cues
+            ),
+            layout!(
+                "sx_stats",
+                SxStats,
+                notice_scale,
+                hearing_scale,
+                reaction_ticks
+            ),
+            layout!("sx_see_through", SxSeeThrough, near, at),
+            layout!(
+                "sx_disguise_rule",
+                SxDisguiseRule,
+                see_through,
+                has_see_through
+            ),
+            layout!(
+                "sx_target",
+                SxTarget,
+                point,
+                size,
+                conspicuity,
+                cues,
+                disguise,
+                heat,
+                glow,
+                crowd
+            ),
+            (
+                "sx_awareness",
+                size_of::<SxAwareness>(),
+                vec![
+                    ("doubt", 2),
+                    ("stage", 4),
+                    ("pending", 5),
+                    ("flags", 6),
+                    ("last", 8),
+                    ("pending_since", 12),
+                    ("last_seen", 16),
+                    ("cues", 20),
+                ],
+            ),
+            ("sx_attention", size_of::<SxAttention>(), vec![]),
+            layout!("sx_budget", SxBudget, keep, instant_cap),
+            layout!(
+                "sx_stimulus",
+                SxStimulus,
+                source,
+                kind,
+                point,
+                loudness,
+                channel,
+                at
+            ),
+            layout!("sx_line", SxLine, has_blocked_at, clarity, blocked_at),
+            layout!(
+                "sx_percept",
+                SxPercept,
+                subject,
+                sense,
+                channel,
+                event,
+                new_cues,
+                point,
+                cell,
+                cues,
+                margin,
+                arrive_at,
+                at,
+                clarity,
+                stage,
+                placed,
+                disguised
+            ),
+            layout!(
+                "sx_fact_kinds",
+                SxFactKinds,
+                seen_kind,
+                heard_kind,
+                disguised_kind,
+                has_disguised_kind
+            ),
+            layout!(
+                "sx_alert_amounts",
+                SxAlertAmounts,
+                recognized,
+                seen,
+                heard,
+                cue_bits,
+                cue_amount
+            ),
+            layout!(
+                "sx_perception_trace",
+                SxPerceptionTrace,
+                target,
+                why,
+                sense,
+                channel,
+                gain,
+                cost,
+                range,
+                cell,
+                clarity,
+                distance,
+                light,
+                crowd,
+                doubt,
+                band,
+                rule,
+                from,
+                to,
+                clear,
+                pending,
+                has_cell,
+                has_cost
+            ),
         ]
     }
 
@@ -3557,8 +3713,10 @@ mod conventions {
     }
 
     /// Structs holding pointers: no size assert (they differ between 32 and 64 bit).
-    const POINTER_STRUCTS: [&str; 5] = [
+    const POINTER_STRUCTS: [&str; 7] = [
         "sx_map",
+        "sx_sense_map",
+        "sx_eye",
         "sx_areas_cost_ctx",
         "sx_row_ctx",
         "sx_squad_rules",
@@ -5844,6 +6002,939 @@ mod mission {
             assert_eq!(sx_mission_in_detour(n), ERROR_ARGUMENT);
             assert_eq!(sx_mission_returning(n), ERROR_ARGUMENT);
             sx_mission_free(n);
+        }
+    }
+}
+
+mod perception {
+    //! C API 13: perception through C equals perception in Rust.
+
+    use super::squad::define;
+    use crate::grid::{SxGrid, sx_grid_free, sx_grid_map, sx_grid_new, sx_grid_set};
+    use crate::memory::{
+        SxAlertConfig, SxAlertness, SxFact, sx_knowledge_free, sx_knowledge_get, sx_knowledge_new,
+    };
+    use crate::perception::*;
+    use crate::{ERROR_ARGUMENT, Point, SxMap, SxRules, sx_nav_free, sx_nav_new};
+    use sagax_abi::codes::*;
+    use sagax_core::{CallbackSink, HexLayout, Pos, mix};
+    use sagax_decide::memory::{Knowledge, LOOK_OFFSETS, sweep_heading};
+    use sagax_facade::perception as rs;
+    use sagax_facade::perception::{
+        Attention, Awareness, Budget, CueRule, Eye, Percept, PerceptionTrace, SenseMap,
+        SenseProfile, Stats, Stimulus, Target, World,
+    };
+    use sagax_nav::grid::Cell;
+    use sagax_nav::nav::Navigator;
+    use std::ffi::c_void;
+    use std::mem::{offset_of, size_of};
+    use std::ptr::{null, null_mut};
+
+    const CELL: i32 = 256;
+    /// Cue bit: a drawn weapon (instant recognition in the focus).
+    const WEAPON: u32 = 1;
+
+    fn handle(grid: u32, map: Option<&SxSenseMap>) -> *mut SxPerception {
+        let mut cfg = SxPerceptionConfig::default();
+        assert_eq!(
+            unsafe { sx_perception_config_default(grid, CELL, &mut cfg) },
+            0
+        );
+        let p = unsafe { sx_perception_new(&cfg, map.map_or(null(), |m| m)) };
+        assert!(!p.is_null());
+        p
+    }
+
+    fn profile() -> SenseProfile {
+        SenseProfile::guard(CELL).with_cue(CueRule {
+            bits: WEAPON,
+            gain: 512,
+            instant: 2,
+            min_clarity: 0,
+            range: 0,
+        })
+    }
+
+    fn c_eye(profile: &SxSenseProfile, point: Pos, facing: i32) -> SxEye {
+        SxEye {
+            id: 1,
+            point,
+            facing,
+            profile,
+            stats: Stats::NORMAL,
+            disguise: SxDisguiseRule::default(),
+        }
+    }
+
+    fn rs_eye(profile: &SenseProfile, point: Pos, facing: i32) -> Eye<'_> {
+        Eye {
+            id: 1,
+            point,
+            facing: facing as u8,
+            profile,
+            stats: Stats::NORMAL,
+            disguise: Default::default(),
+        }
+    }
+
+    fn centre(world: &World, x: i32, y: i32) -> Pos {
+        rs::cell_centre(world, Cell::new(x, y, 0))
+    }
+
+    fn target(id: u32, point: Pos, cues: u32) -> Target {
+        Target {
+            id,
+            point,
+            size: 256,
+            conspicuity: 256,
+            cues,
+            ..Target::default()
+        }
+    }
+
+    /// A 12 x 12 grid with a few walls, as an `sx_grid`.
+    fn walled_grid() -> *mut SxGrid {
+        let g = sx_grid_new(12, 12, 1);
+        for (x, y) in [(5, 3), (5, 4), (5, 5), (7, 8), (8, 8), (2, 9), (9, 2)] {
+            assert_eq!(unsafe { sx_grid_set(g, Point::new(x, y, 0), -1) }, 0);
+        }
+        g
+    }
+
+    fn c_line(p: *mut SxPerception, from: Pos, to: Pos) -> SxLine {
+        let mut line = SxLine::default();
+        let r = unsafe { sx_perception_line(p, from.as_ptr(), to.as_ptr(), &mut line) };
+        assert_eq!(r, 0);
+        line
+    }
+
+    fn same_line(rust: rs::Line, c: SxLine, layout: Option<HexLayout>) {
+        let blocked = rust.blocked_at.map(|b| match layout {
+            Some(l) => l.from_axial_pos(b.pos()),
+            None => b.pos(),
+        });
+        assert_eq!(c.clear, u8::from(rust.clear));
+        assert_eq!(c.clarity, rust.clarity);
+        assert_eq!(c.has_blocked_at, u8::from(blocked.is_some()));
+        assert_eq!(c.blocked_at, blocked.unwrap_or_default());
+    }
+
+    /// Fine points in on-grid cells (offset cells of `layout` on hex).
+    fn points(world: &World, layout: Option<HexLayout>, n: u64) -> Vec<Pos> {
+        (0..n)
+            .map(|i| {
+                let h = mix(i * 7 + 3);
+                let (x, y) = ((h % 12) as i32, ((h >> 8) % 12) as i32);
+                let cell = match layout {
+                    Some(l) => Cell::from(l.to_axial_pos([x, y, 0])),
+                    None => Cell::new(x, y, 0),
+                };
+                let mut p = rs::cell_centre(world, cell);
+                p[0] += ((h >> 16) % 61) as i32 - 30;
+                p[1] += ((h >> 24) % 61) as i32 - 30;
+                p
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ffi_line_equals_rust() {
+        let g = walled_grid();
+        let dense = unsafe { (*g).dense().clone() };
+        let mut grid_map = SxSenseMap::default();
+        assert_eq!(unsafe { sx_sense_map_from_grid(g, &mut grid_map) }, 0);
+        let mut nav_map = SxMap {
+            step: None,
+            start_step: None,
+            move_cost: None,
+            steps: None,
+            context: null_mut(),
+        };
+        assert_eq!(unsafe { sx_grid_map(g, &mut nav_map) }, 0);
+        let mut moves = SxSenseMap::default();
+        assert_eq!(unsafe { sx_sense_map_from_map(&nav_map, &mut moves) }, 0);
+
+        for (grid, layout) in [
+            (GRID_SQUARE, None),
+            (GRID_HEX_ODD_R, Some(HexLayout::OddR)),
+            (GRID_HEX_EVEN_Q, Some(HexLayout::EvenQ)),
+        ] {
+            let world = match layout {
+                Some(_) => World::hex(CELL),
+                None => World::square(CELL),
+            };
+            let sight = handle(grid, Some(&grid_map));
+            let walk = handle(grid, Some(&moves));
+            let mut rs_sight = match layout {
+                Some(l) => rs::GridSight::hex(&dense, l),
+                None => rs::GridSight::square(&dense),
+            };
+            let mut rs_walk = match layout {
+                Some(l) => rs::MoveBlocks::hex(dense.clone(), l),
+                None => rs::MoveBlocks::square(dense.clone()),
+            };
+            let pts = points(&world, layout, 40);
+            let (mut blocked, mut walk_blocked) = (0, 0);
+            for &a in &pts {
+                for &b in &pts {
+                    let r = rs::sight_line(&world, &mut rs_sight, a, b);
+                    blocked += usize::from(!r.clear);
+                    same_line(r, c_line(sight, a, b), layout);
+                    let r = rs::sight_line(&world, &mut rs_walk, a, b);
+                    walk_blocked += usize::from(!r.clear);
+                    same_line(r, c_line(walk, a, b), layout);
+                }
+            }
+            assert!(blocked > 50, "the walls block some lines ({blocked})");
+            assert!(walk_blocked > 50, "the moves block some ({walk_blocked})");
+            unsafe {
+                sx_perception_free(sight);
+                sx_perception_free(walk);
+            }
+        }
+        unsafe { sx_grid_free(g) };
+    }
+
+    /// Smoke at cell (5, 5) through a C callback.
+    unsafe extern "C" fn smoke_sight(
+        _ctx: *mut c_void,
+        x: i32,
+        y: i32,
+        _level: i32,
+        out: *mut SxMedium,
+    ) -> i32 {
+        if (x, y) == (5, 5) {
+            unsafe { (*out).density = 300 };
+        }
+        0
+    }
+
+    /// The same smoke in Rust.
+    struct Smoke;
+
+    impl SenseMap for Smoke {
+        fn sight(&mut self, cell: Cell) -> rs::Medium {
+            rs::Medium {
+                density: if (cell.x, cell.y) == (5, 5) { 300 } else { 0 },
+                ..rs::Medium::default()
+            }
+        }
+    }
+
+    fn smoke_map() -> SxSenseMap {
+        SxSenseMap {
+            sight: Some(smoke_sight),
+            ..SxSenseMap::default()
+        }
+    }
+
+    fn c_percepts(out: &[SxPercept], n: i32) -> Vec<SxPercept> {
+        out[..n as usize].to_vec()
+    }
+
+    fn of_rust(out: &[Percept], layout: Option<HexLayout>) -> Vec<SxPercept> {
+        out.iter().map(|x| SxPercept::of(x, layout)).collect()
+    }
+
+    #[test]
+    fn ffi_observe_equals_rust() {
+        let world = World::square(CELL);
+        let profile = profile();
+        let c_profile = SxSenseProfile::of(&profile);
+        assert_eq!(c_profile.profile(), profile);
+        let map = smoke_map();
+        let p = handle(GRID_SQUARE, Some(&map));
+        let (mut a_rs, mut a_c) = (Awareness::default(), Awareness::default());
+        let mut out = vec![];
+        let mut buf = [SxPercept::default(); 8];
+        let mut seen = 0;
+        for t in 0..40u32 {
+            let facing = sweep_heading(0, t, 4, &LOOK_OFFSETS);
+            let eye_at = centre(&world, 2, 5);
+            let cues = if t >= 25 { WEAPON } else { 0 };
+            let tgt = target(7, [9 * CELL + 40, (t as i32) * 40 + 100, 0], cues);
+            out.clear();
+            let eye = rs_eye(&profile, eye_at, facing);
+            rs::observe(&world, &mut Smoke, t, &eye, &tgt, &mut a_rs, &mut out);
+            let mut total = 0;
+            let eye = c_eye(&c_profile, eye_at, facing);
+            let n = unsafe {
+                sx_perception_observe(p, t, &eye, &tgt, &mut a_c, buf.as_mut_ptr(), 8, &mut total)
+            };
+            assert_eq!(total as usize, out.len());
+            assert_eq!(c_percepts(&buf, n), of_rust(&out, None), "tick {t}");
+            assert_eq!(a_c, a_rs, "tick {t}");
+            seen += out.len();
+        }
+        assert!(seen > 10, "the scene sees something ({seen})");
+        unsafe { sx_perception_free(p) };
+    }
+
+    #[test]
+    fn ffi_look_and_hear_equal_rust() {
+        let world = World::square(CELL);
+        let profile = profile().with_hearing(1, 256);
+        let c_profile = SxSenseProfile::of(&profile);
+        let map = smoke_map();
+        let p = handle(GRID_SQUARE, Some(&map));
+        let targets: Vec<Target> = (0..6)
+            .map(|i| {
+                let mut t = target(10 + i, centre(&world, 8, 2 + i as i32), 0);
+                t.crowd = 5;
+                t
+            })
+            .collect();
+        let budget = Budget {
+            checks: 3,
+            keep: 2,
+            instant_cap: 1,
+        };
+        let mut rs_aware = [Awareness::default(); 6];
+        let mut c_aware = [Awareness::default(); 6];
+        let (mut rs_att, mut c_att) = (Attention::default(), Attention::default());
+        let eye_at = centre(&world, 2, 5);
+        let mut out = vec![];
+        let mut buf = [SxPercept::default(); 16];
+        for t in 0..12u32 {
+            out.clear();
+            rs::look(
+                &world,
+                &mut Smoke,
+                t,
+                &rs_eye(&profile, eye_at, 0),
+                &targets,
+                &mut rs_aware,
+                &mut rs_att,
+                budget,
+                &mut out,
+            );
+            let mut total = 0;
+            let eye = c_eye(&c_profile, eye_at, 0);
+            let n = unsafe {
+                sx_perception_look(
+                    p,
+                    t,
+                    &eye,
+                    targets.as_ptr(),
+                    c_aware.as_mut_ptr(),
+                    6,
+                    &mut c_att,
+                    &budget,
+                    buf.as_mut_ptr(),
+                    16,
+                    &mut total,
+                )
+            };
+            assert_eq!(c_percepts(&buf, n), of_rust(&out, None), "tick {t}");
+            assert_eq!(c_aware, rs_aware);
+            assert_eq!(c_att, rs_att);
+        }
+        let cursor = unsafe { sx_attention_cursor(&c_att) };
+        assert_eq!(cursor, i64::from(c_att.cursor()));
+
+        // A shot and a smell, by spread and by a given cost.
+        let shot = Stimulus {
+            id: 3,
+            source: 99,
+            kind: 1,
+            point: centre(&world, 9, 9),
+            loudness: 20 * CELL,
+            channel: 0,
+            at: 12,
+        };
+        let cases = [
+            (0u8, 0u8, 0),
+            (0, 1, 3 * CELL),
+            (1, 0, 0),
+            (0, 1, 99 * CELL),
+        ];
+        for (ch, has_cost, cost) in cases {
+            let s = Stimulus {
+                channel: ch,
+                ..shot
+            };
+            let (mut a_rs, mut a_c) = (Awareness::default(), Awareness::default());
+            out.clear();
+            let heard = rs::hear(
+                &world,
+                &mut Smoke,
+                12,
+                &rs_eye(&profile, eye_at, 0),
+                &s,
+                (has_cost != 0).then_some(cost),
+                Some(&mut a_rs),
+                &mut out,
+                42,
+            );
+            let mut total = 0;
+            let eye = c_eye(&c_profile, eye_at, 0);
+            let n = unsafe {
+                sx_perception_hear(
+                    p,
+                    12,
+                    &eye,
+                    &s,
+                    has_cost,
+                    cost,
+                    &mut a_c,
+                    buf.as_mut_ptr(),
+                    16,
+                    &mut total,
+                    42,
+                )
+            };
+            assert_eq!(total > 0, heard);
+            assert_eq!(c_percepts(&buf, n), of_rust(&out, None));
+            assert_eq!(a_c, a_rs);
+        }
+        unsafe { sx_perception_free(p) };
+    }
+
+    #[test]
+    fn ffi_hex_cells_are_offset() {
+        let world = World::hex(CELL);
+        let layout = HexLayout::OddR;
+        let p = handle(GRID_HEX_ODD_R, None);
+        // Whole cells in: offset (2, 3) is axial (1, 3).
+        let mut eye_at = [0; 3];
+        let r = unsafe { sx_perception_cell_centre(p, Point::new(2, 3, 0), eye_at.as_mut_ptr()) };
+        assert_eq!(r, 0);
+        assert_eq!(eye_at, rs::cell_centre(&world, Cell::new(1, 3, 0)));
+        let mut tgt_at = [0; 3];
+        unsafe { sx_perception_cell_centre(p, Point::new(6, 3, 0), tgt_at.as_mut_ptr()) };
+        tgt_at[0] += 30; // fine points stay axial, also off the centre
+        let mut back = Point::default();
+        let r = unsafe { sx_perception_cell_of(p, tgt_at.as_ptr(), &mut back) };
+        assert_eq!(r, 0);
+        assert_eq!(back, Point::new(6, 3, 0));
+
+        let profile = SxSenseProfile::of(&profile());
+        let eye = c_eye(&profile, eye_at, 0);
+        let tgt = target(7, tgt_at, WEAPON);
+        let mut aware = Awareness::default();
+        let mut buf = [SxPercept::default(); 4];
+        let mut total = 0;
+        let n = unsafe {
+            sx_perception_observe(
+                p,
+                1,
+                &eye,
+                &tgt,
+                &mut aware,
+                buf.as_mut_ptr(),
+                4,
+                &mut total,
+            )
+        };
+        assert_eq!((n, total), (4, 4));
+        let kinds: Vec<u32> = buf.iter().map(|x| x.event).collect();
+        let expected = [
+            PERCEPT_NOTICED,
+            PERCEPT_RECOGNIZED,
+            PERCEPT_CUES,
+            PERCEPT_SEEN,
+        ];
+        assert_eq!(kinds, expected);
+        for pc in &buf {
+            assert_eq!(pc.placed, 1);
+            assert_eq!(pc.cell, [6, 3, 0], "whole cells are offset");
+            assert_eq!(pc.point, tgt_at, "fine points stay axial");
+        }
+        let kinds = SxFactKinds {
+            noticed_kind: 1,
+            seen_kind: 2,
+            heard_kind: 3,
+            ..SxFactKinds::default()
+        };
+        let mut fact = SxFact::default();
+        assert_eq!(unsafe { sx_percept_fact(&buf[3], &kinds, &mut fact) }, 1);
+        assert_eq!((fact.kind, fact.pos), (2, [6, 3, 0]));
+
+        let k = sx_knowledge_new(8, 0);
+        let mut alert = SxAlertness::default();
+        let cfg = SxAlertConfig {
+            max: 1000,
+            ..SxAlertConfig::default()
+        };
+        let amounts = SxAlertAmounts {
+            noticed: 5,
+            seen: 1,
+            ..SxAlertAmounts::default()
+        };
+        assert_eq!(unsafe { sx_percept_alert(&buf[0], &amounts) }, 5);
+        let r =
+            unsafe { sx_learn_percepts(k, &mut alert, &cfg, 1, buf.as_ptr(), 4, &kinds, &amounts) };
+        assert_eq!(r, 0);
+        let mut got = SxFact::default();
+        assert_eq!(unsafe { sx_knowledge_get(k, 7, 2, &mut got) }, 1);
+        assert_eq!(got.pos, [6, 3, 0]);
+        let gone = unsafe { sx_knowledge_get(k, 7, 1, &mut fact) };
+        assert_eq!(gone, 0, "recognition replaced the noticed fact");
+        // The same as Rust with the offset cells.
+        let mut known = Knowledge::new(8, sagax_decide::memory::Evict::Oldest).unwrap();
+        let mut rs_alert = SxAlertness::default();
+        let rs_percepts: Vec<Percept> = buf.iter().map(|x| x.percept().unwrap()).collect();
+        rs::learn_percepts(
+            &mut known,
+            &mut rs_alert,
+            &cfg,
+            1,
+            &rs_percepts,
+            &kinds.kinds(),
+            &amounts.amounts(),
+        );
+        assert_eq!(known.get(7, 2).copied(), Some(got));
+        assert_eq!(rs_alert, alert);
+
+        // Lost: not placed, so the cell stays [0, 0, 0].
+        let far = target(7, [tgt_at[0] + 100 * CELL, tgt_at[1], 0], 0);
+        let n = unsafe {
+            sx_perception_observe(
+                p,
+                2,
+                &eye,
+                &far,
+                &mut aware,
+                buf.as_mut_ptr(),
+                4,
+                &mut total,
+            )
+        };
+        assert_eq!(n, 1);
+        let lost = (buf[0].event, buf[0].placed, buf[0].cell);
+        assert_eq!(lost, (PERCEPT_LOST, 0, [0; 3]));
+
+        // The flood: offset cells out, the same as Rust in axial.
+        let rules = SxRules {
+            grid: GRID_HEX_ODD_R,
+            flags: 0,
+            cost_straight: CELL,
+            cost_diagonal: CELL,
+            node_capacity: 4096,
+            smooth_max_extra: 0,
+        };
+        let nav = unsafe { sx_nav_new(&rules) };
+        let s = Stimulus {
+            id: 1,
+            source: 50,
+            point: eye_at,
+            loudness: 3 * CELL,
+            ..Stimulus::default()
+        };
+        let mut cells = [Point::default(); 64];
+        let mut costs = [0; 64];
+        let (c, cs) = (cells.as_mut_ptr(), costs.as_mut_ptr());
+        let n = unsafe { sx_perception_flood(p, nav, &s, c, cs, 64, &mut total) };
+        assert_eq!(n as u32, total);
+        let topology = sagax_abi::convert::topology(GRID_HEX_ODD_R, 0, CELL, CELL).unwrap();
+        let mut rs_nav = Navigator::new(topology, 4096);
+        let mut rs_cells = vec![];
+        let unlimited = sagax_nav::Budget::UNLIMITED;
+        let mut air = rs::OpenAir;
+        rs::flood_sound(&mut rs_nav, &world, &mut air, &s, unlimited, &mut rs_cells);
+        let expected: Vec<(Point, i32)> = rs_cells
+            .iter()
+            .map(|&(c, cost)| (Point::of(Cell::from(layout.from_axial_pos(c.pos()))), cost))
+            .collect();
+        let got: Vec<(Point, i32)> = cells[..n as usize]
+            .iter()
+            .copied()
+            .zip(costs[..n as usize].iter().copied())
+            .collect();
+        assert_eq!(got, expected);
+        assert!(got.len() > 7, "three hexes of sound reach far");
+        assert!(got.contains(&(Point::new(2, 3, 0), 0)), "the source cell");
+        // A square handle refuses a hex navigator.
+        let square = handle(GRID_SQUARE, None);
+        let r = unsafe { sx_perception_flood(square, nav, &s, c, null_mut(), 64, null_mut()) };
+        assert_eq!(r, ERROR_ARGUMENT);
+        unsafe {
+            sx_nav_free(nav);
+            sx_knowledge_free(k);
+            sx_perception_free(square);
+            sx_perception_free(p);
+        }
+    }
+
+    #[test]
+    fn ffi_null_and_small_cap() {
+        let world = World::square(CELL);
+        let p = handle(GRID_SQUARE, None);
+        let profile = SxSenseProfile::of(&profile());
+        let eye = c_eye(&profile, centre(&world, 2, 2), 0);
+        let tgt = target(7, centre(&world, 5, 2), WEAPON);
+        let mut aware = Awareness::default();
+        let mut total = 99;
+        // cap 0: nothing written, but the check ran and counted 4.
+        let a = &mut aware as *mut Awareness;
+        let n = unsafe { sx_perception_observe(p, 1, &eye, &tgt, a, null_mut(), 0, &mut total) };
+        assert_eq!((n, total), (0, 4));
+        unsafe {
+            assert_eq!(sx_awareness_stage(a), 2);
+            assert_eq!(sx_awareness_in_view(a), 1);
+            assert_eq!(sx_awareness_last_seen(a), 1);
+            assert_eq!(sx_awareness_counter(a), i32::from((*a).counter()));
+            assert_eq!(sx_awareness_seen_through(a), 0);
+            assert_eq!(sx_awareness_reset(a), 0);
+            assert_eq!(*a, Awareness::default());
+        }
+
+        let mut buf = [SxPercept::default(); 4];
+        let e = ERROR_ARGUMENT;
+        let out = buf.as_mut_ptr();
+        let none = null_mut::<u32>();
+        unsafe {
+            let n = null_mut::<SxPerception>();
+            assert_eq!(sx_perception_observe(n, 1, &eye, &tgt, a, out, 4, none), e);
+            assert_eq!(
+                sx_perception_observe(p, 1, null(), &tgt, a, out, 4, none),
+                e
+            );
+            assert_eq!(
+                sx_perception_observe(p, 1, &eye, null(), a, out, 4, none),
+                e
+            );
+            let no_aware = null_mut();
+            assert_eq!(
+                sx_perception_observe(p, 1, &eye, &tgt, no_aware, out, 4, none),
+                e
+            );
+            let no_out = null_mut();
+            assert_eq!(
+                sx_perception_observe(p, 1, &eye, &tgt, a, no_out, 4, none),
+                e
+            );
+            let no_profile = SxEye {
+                profile: null(),
+                ..eye
+            };
+            assert_eq!(
+                sx_perception_observe(p, 1, &no_profile, &tgt, a, out, 4, none),
+                e
+            );
+
+            let mut att = Attention::default();
+            let att = &mut att as *mut Attention;
+            let budget = Budget::default();
+            let look = |targets: *const Target, aware: *mut Awareness, count, total| {
+                sx_perception_look(
+                    p, 1, &eye, targets, aware, count, att, &budget, out, 4, total,
+                )
+            };
+            assert_eq!(look(null(), a, 1, none), e);
+            assert_eq!(look(&tgt, null_mut(), 1, none), e);
+            let mut total = 9;
+            assert_eq!(look(null(), null_mut(), 0, &mut total), 0);
+            assert_eq!(total, 0);
+            let no_att = null_mut();
+            let r = sx_perception_look(p, 1, &eye, &tgt, a, 1, no_att, &budget, out, 4, none);
+            assert_eq!(r, e);
+
+            let s = Stimulus::default();
+            let hear = |ear: *const SxEye, s: *const Stimulus, total| {
+                sx_perception_hear(p, 1, ear, s, 0, 0, null_mut(), out, 4, total, 0)
+            };
+            assert_eq!(hear(&eye, null(), none), e);
+            assert_eq!(hear(null(), &s, none), e);
+            // Stateless hearing: only the HEARD percept.
+            let shot = Stimulus {
+                point: centre(&world, 3, 3),
+                loudness: 10 * CELL,
+                ..s
+            };
+            let mut total = 0;
+            assert_eq!(hear(&eye, &shot, &mut total), 1);
+            let heard = (buf[0].event, buf[0].sense, total);
+            assert_eq!(heard, (PERCEPT_HEARD, SENSE_HEARING, 1));
+
+            let mut line = SxLine::default();
+            let at = [0; 3];
+            assert_eq!(sx_perception_line(p, null(), at.as_ptr(), &mut line), e);
+            assert_eq!(
+                sx_perception_line(p, at.as_ptr(), at.as_ptr(), null_mut()),
+                e
+            );
+            assert_eq!(sx_perception_in_sight(p, &eye, null()), e);
+            assert_eq!(sx_perception_in_sight(p, &eye, tgt.point.as_ptr()), 1);
+            assert_eq!(sx_perception_in_sight(p, null(), tgt.point.as_ptr()), e);
+            let mut cell = Point::default();
+            assert_eq!(sx_perception_cell_centre(p, cell, null_mut()), e);
+            assert_eq!(sx_perception_cell_of(p, null(), &mut cell), e);
+            assert_eq!(sx_perception_set_map(null_mut(), null()), e);
+            assert_eq!(sx_perception_set_map(p, null()), 0);
+            assert_eq!(sx_perception_set_trace(null_mut(), None, null_mut()), e);
+            assert_eq!(sx_awareness_stage(null()), e);
+            assert_eq!(sx_awareness_last_seen(null()), i64::from(e));
+            assert_eq!(sx_awareness_reset(null_mut()), e);
+            assert_eq!(sx_attention_cursor(null()), i64::from(e));
+            assert_eq!(sx_percept_alert(null(), null()), 0);
+            let mut fact = SxFact::default();
+            assert_eq!(sx_percept_fact(&buf[0], null(), &mut fact), e);
+            let bad = SxPercept {
+                event: 99,
+                ..buf[0]
+            };
+            let kinds = SxFactKinds::default();
+            assert_eq!(sx_percept_fact(&bad, &kinds, &mut fact), e);
+            let mut map = SxSenseMap::default();
+            assert_eq!(sx_sense_map_from_grid(null(), &mut map), e);
+            assert_eq!(sx_sense_map_from_map(null(), &mut map), e);
+            let mut prof = SxSenseProfile::default();
+            assert_eq!(sx_sense_profile_preset(0, CELL, &mut prof), e);
+            let watcher = SENSE_PRESET_WATCHER;
+            assert_eq!(sx_sense_profile_preset(watcher, CELL, null_mut()), e);
+            assert_eq!(sx_sense_profile_preset(watcher, CELL, &mut prof), 0);
+            assert_eq!(prof.profile(), SenseProfile::watcher(CELL));
+
+            let mut cfg = SxPerceptionConfig::default();
+            assert_eq!(sx_perception_config_default(9, CELL, &mut cfg), e);
+            assert_eq!(sx_perception_config_default(GRID_SQUARE, 1, &mut cfg), e);
+            assert!(sx_perception_new(null(), null()).is_null());
+            assert!(sx_perception_new(&cfg, null()).is_null(), "cell size 0");
+            assert_eq!(sx_perception_config_default(GRID_SQUARE, CELL, &mut cfg), 0);
+            cfg.channels[2].spread = 7;
+            assert!(sx_perception_new(&cfg, null()).is_null(), "unknown spread");
+            sx_perception_free(null_mut());
+
+            let crowd = [tgt, tgt, target(8, [0, 0, 0], 0)];
+            let mut counts = [9u8; 3];
+            let (t, c) = (crowd.as_ptr(), counts.as_mut_ptr());
+            let same = [1, 1, 1];
+            assert_eq!(sx_count_crowds(t, 3, CELL, same.as_ptr(), c), 0);
+            assert_eq!(counts, [1, 1, 0]);
+            let apart = [1, 2, 1];
+            let c = counts.as_mut_ptr();
+            assert_eq!(sx_count_crowds(t, 3, CELL, apart.as_ptr(), c), 0);
+            assert_eq!(counts, [0, 0, 0]);
+            let c = counts.as_mut_ptr();
+            assert_eq!(sx_count_crowds(t, 3, CELL, null(), c), 0);
+            assert_eq!(counts, [1, 1, 0]);
+            assert_eq!(sx_count_crowds(null(), 3, CELL, null(), c), e);
+            assert_eq!(sx_count_crowds(null(), 0, CELL, null(), null_mut()), 0);
+            assert_eq!(sx_hex_heading(7), 43);
+            sx_perception_free(p);
+        }
+    }
+
+    unsafe extern "C" fn collect(ctx: *mut c_void, record: *const SxPerceptionTrace) {
+        let v = unsafe { &mut *ctx.cast::<Vec<SxPerceptionTrace>>() };
+        v.push(unsafe { *record });
+    }
+
+    #[test]
+    fn ffi_trace_callback() {
+        let world = World::hex(CELL);
+        let layout = Some(HexLayout::OddR);
+        let p = handle(GRID_HEX_ODD_R, None);
+        let mut records: Vec<SxPerceptionTrace> = vec![];
+        let ctx = (&mut records as *mut Vec<SxPerceptionTrace>).cast();
+        assert_eq!(unsafe { sx_perception_set_trace(p, Some(collect), ctx) }, 0);
+        let profile = profile();
+        let c_profile = SxSenseProfile::of(&profile);
+        let eye_at = centre(&world, 0, 0);
+        let targets = [
+            target(10, centre(&world, 3, 0), 0),
+            target(11, centre(&world, 4, 1), 0),
+        ];
+        let budget = Budget {
+            checks: 1,
+            keep: 0,
+            instant_cap: 0,
+        };
+        let mut aware = [Awareness::default(); 2];
+        let mut att = Attention::default();
+        let eye = c_eye(&c_profile, eye_at, 0);
+        let mut buf = [SxPercept::default(); 8];
+        let out = buf.as_mut_ptr();
+        let (t, a) = (targets.as_ptr(), aware.as_mut_ptr());
+        unsafe { sx_perception_look(p, 1, &eye, t, a, 2, &mut att, &budget, out, 8, null_mut()) };
+        let shot = Stimulus {
+            id: 4,
+            source: 99,
+            point: centre(&world, 2, 3),
+            loudness: 10 * CELL,
+            ..Stimulus::default()
+        };
+        let quiet = Stimulus {
+            id: 5,
+            loudness: 1,
+            ..shot
+        };
+        let hear = |s: &Stimulus| unsafe {
+            sx_perception_hear(p, 1, &eye, s, 0, 0, null_mut(), out, 8, null_mut(), 3)
+        };
+        hear(&shot);
+        hear(&quiet);
+        let kinds: Vec<u32> = records.iter().map(|r| r.kind).collect();
+        let expected = [
+            PERCEPTION_TRACE_PICKED,
+            PERCEPTION_TRACE_LINE,
+            PERCEPTION_TRACE_GAIN,
+            PERCEPTION_TRACE_SKIPPED,
+            PERCEPTION_TRACE_HEARD,
+            PERCEPTION_TRACE_UNHEARD,
+        ];
+        assert_eq!(kinds, expected);
+        assert_eq!((records[0].target, records[0].why), (10, LOOK_ROUND_ROBIN));
+        assert_eq!(records[3].target, 11);
+        let heard = (records[4].target, records[4].has_cost, records[4].has_cell);
+        assert_eq!(heard, (4, 1, 1));
+        assert_eq!(records[5].has_cell, 0);
+
+        // The same records as the Rust trace, cells offset.
+        let mut rs_records = vec![];
+        let mut sink =
+            CallbackSink(|e: PerceptionTrace| rs_records.push(SxPerceptionTrace::of(e, layout)));
+        let mut rs_aware = [Awareness::default(); 2];
+        let mut rs_att = Attention::default();
+        let mut found = vec![];
+        let ear = rs_eye(&profile, eye_at, 0);
+        let mut air = rs::OpenAir;
+        rs::look_traced(
+            &world,
+            &mut air,
+            1,
+            &ear,
+            &targets,
+            &mut rs_aware,
+            &mut rs_att,
+            budget,
+            &mut found,
+            &mut sink,
+        );
+        for s in [shot, quiet] {
+            rs::hear_traced(
+                &world, &mut air, 1, &ear, &s, None, None, &mut found, 3, &mut sink,
+            );
+        }
+        assert_eq!(records, rs_records);
+        let source = rs::cell_of(&world, shot.point).pos();
+        assert_eq!(
+            rs_records[4].cell,
+            HexLayout::OddR.from_axial_pos(source),
+            "an unfuzzed heard cell is the source's, offset"
+        );
+
+        // Off: nothing more arrives.
+        assert_eq!(unsafe { sx_perception_set_trace(p, None, null_mut()) }, 0);
+        hear(&shot);
+        assert_eq!(records.len(), 6);
+        unsafe { sx_perception_free(p) };
+    }
+
+    /// The layout of `Awareness` (private fields) that `sx_awareness`
+    /// mirrors.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct AwarenessMirror {
+        counter: u16,
+        doubt: u16,
+        stage: u8,
+        pending: u8,
+        flags: u8,
+        _pad: u8,
+        last: u32,
+        pending_since: u32,
+        last_seen: u32,
+        cues: u32,
+    }
+
+    #[test]
+    fn awareness_layout_matches_header() {
+        assert_eq!(size_of::<Awareness>(), size_of::<AwarenessMirror>());
+        let world = World::square(CELL);
+        let profile = profile();
+        let tgt = target(7, centre(&world, 5, 2), WEAPON);
+        let mut a = Awareness::default();
+        let eye = rs_eye(&profile, centre(&world, 2, 2), 0);
+        rs::observe(&world, &mut rs::OpenAir, 9, &eye, &tgt, &mut a, &mut vec![]);
+        // SAFETY: both are plain `repr(C)` integers of the same size.
+        let m: AwarenessMirror = unsafe { std::mem::transmute(a) };
+        assert_eq!(m.counter, a.counter());
+        assert_eq!(m.stage, a.stage());
+        assert_eq!(m.flags & 1, u8::from(a.in_view()));
+        assert_eq!((m.last, m.last_seen, m.cues), (9, 9, WEAPON));
+        assert_eq!((m.pending, m.doubt, m.pending_since, m._pad), (2, 0, 9, 0));
+        let offsets = [
+            offset_of!(AwarenessMirror, doubt),
+            offset_of!(AwarenessMirror, stage),
+            offset_of!(AwarenessMirror, pending),
+            offset_of!(AwarenessMirror, flags),
+            offset_of!(AwarenessMirror, last),
+            offset_of!(AwarenessMirror, pending_since),
+            offset_of!(AwarenessMirror, last_seen),
+            offset_of!(AwarenessMirror, cues),
+        ];
+        assert_eq!(offsets, [2, 4, 5, 6, 8, 12, 16, 20]);
+    }
+
+    #[test]
+    fn perception_numbers_match_header() {
+        assert_eq!(define("SX_API_VERSION"), 13);
+        let numbers = [
+            ("SX_MAX_CHANNELS", rs::MAX_CHANNELS as i64),
+            ("SX_MAX_CUES", rs::MAX_CUES as i64),
+            (
+                "SX_MAX_PERCEPTS_PER_CHECK",
+                rs::MAX_PERCEPTS_PER_CHECK as i64,
+            ),
+            ("SX_SENSES_SIGHT", i64::from(rs::SIGHT)),
+            ("SX_SENSES_NIGHT", i64::from(rs::NIGHT)),
+            ("SX_SENSES_THERMAL", i64::from(rs::THERMAL)),
+            ("SX_SENSES_SCANNER", i64::from(rs::SCANNER)),
+            ("SX_SPREAD_CIRCLE", i64::from(SPREAD_CIRCLE)),
+            ("SX_SPREAD_STRAIGHT", i64::from(SPREAD_STRAIGHT)),
+            ("SX_SENSE_SIGHT", i64::from(SENSE_SIGHT)),
+            ("SX_SENSE_THERMAL", i64::from(SENSE_THERMAL)),
+            ("SX_SENSE_SCANNER", i64::from(SENSE_SCANNER)),
+            ("SX_SENSE_HEARING", i64::from(SENSE_HEARING)),
+            ("SX_PERCEPT_NOTICED", i64::from(PERCEPT_NOTICED)),
+            ("SX_PERCEPT_RECOGNIZED", i64::from(PERCEPT_RECOGNIZED)),
+            ("SX_PERCEPT_SEEN", i64::from(PERCEPT_SEEN)),
+            ("SX_PERCEPT_CUES", i64::from(PERCEPT_CUES)),
+            ("SX_PERCEPT_LOST", i64::from(PERCEPT_LOST)),
+            ("SX_PERCEPT_FORGOTTEN", i64::from(PERCEPT_FORGOTTEN)),
+            ("SX_PERCEPT_SEEN_THROUGH", i64::from(PERCEPT_SEEN_THROUGH)),
+            ("SX_PERCEPT_HEARD", i64::from(PERCEPT_HEARD)),
+            ("SX_LOOK_INSTANT", i64::from(LOOK_INSTANT)),
+            ("SX_LOOK_KEPT", i64::from(LOOK_KEPT)),
+            ("SX_LOOK_ROUND_ROBIN", i64::from(LOOK_ROUND_ROBIN)),
+            ("SX_SENSE_PRESET_HUMAN", i64::from(SENSE_PRESET_HUMAN)),
+            ("SX_SENSE_PRESET_GUARD", i64::from(SENSE_PRESET_GUARD)),
+            ("SX_SENSE_PRESET_WATCHER", i64::from(SENSE_PRESET_WATCHER)),
+            (
+                "SX_PERCEPTION_TRACE_PICKED",
+                i64::from(PERCEPTION_TRACE_PICKED),
+            ),
+            (
+                "SX_PERCEPTION_TRACE_SKIPPED",
+                i64::from(PERCEPTION_TRACE_SKIPPED),
+            ),
+            ("SX_PERCEPTION_TRACE_LINE", i64::from(PERCEPTION_TRACE_LINE)),
+            ("SX_PERCEPTION_TRACE_GAIN", i64::from(PERCEPTION_TRACE_GAIN)),
+            (
+                "SX_PERCEPTION_TRACE_INSTANT",
+                i64::from(PERCEPTION_TRACE_INSTANT),
+            ),
+            (
+                "SX_PERCEPTION_TRACE_STAGE",
+                i64::from(PERCEPTION_TRACE_STAGE),
+            ),
+            (
+                "SX_PERCEPTION_TRACE_DOUBT",
+                i64::from(PERCEPTION_TRACE_DOUBT),
+            ),
+            (
+                "SX_PERCEPTION_TRACE_HEARD",
+                i64::from(PERCEPTION_TRACE_HEARD),
+            ),
+            (
+                "SX_PERCEPTION_TRACE_UNHEARD",
+                i64::from(PERCEPTION_TRACE_UNHEARD),
+            ),
+        ];
+        for (name, value) in numbers {
+            assert_eq!(define(name), value, "{name}");
         }
     }
 }

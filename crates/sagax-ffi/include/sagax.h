@@ -47,7 +47,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 12
+#define SX_API_VERSION 13
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -2753,6 +2753,499 @@ typedef struct sx_mission_trace {
 typedef void (*sx_mission_trace_fn)(void *context, const sx_mission_trace *trace);
 int32_t sx_mission_set_trace(sx_mission *mission, sx_mission_trace_fn trace, void *context);
 
+/* ---- perception (since version 13) --------------------------------------- */
+
+/* What a character perceives: view cones, exact integer sight lines with
+ * fog, smoke and light, attention, and hearing, on square and hex grids.
+ * Everything is integer only and deterministic.
+ *
+ * One handle (sx_perception) holds the world: the grid (SX_GRID_*), the cell
+ * size S in fine units (at least 2, e.g. 256), the hearing channels, the
+ * game's sense map and the trace. Everything per character is a value struct
+ * the game keeps (zero to start): sx_sense_profile, sx_awareness (one per
+ * observer-target pair), sx_attention (one per observer).
+ *
+ * Positions at the C edge:
+ *   - Fine points are int32_t[3] [x, y, level] in fine units: sx_eye.point,
+ *     sx_target.point, sx_stimulus.point, sx_percept.point and the from / to
+ *     of sx_perception_line. On a hex grid they are AXIAL (q, r scaled by S;
+ *     the centre of hex (q, r) is (q * S, r * S)) and are never
+ *     offset-converted. A square cell (x, y) spans [x * S, (x + 1) * S); its
+ *     centre is (x * S + S / 2, y * S + S / 2).
+ *   - Whole cells are [x, y, level]: sx_percept.cell, the facts that
+ *     sx_percept_fact and sx_learn_percepts write, the flood cells, the cell
+ *     helpers, sx_line.blocked_at, the trace cells and the cells the sense map
+ *     callbacks get. On a hex grid they are OFFSET cells of the handle's
+ *     layout, converted as whole cells by the handle (as the mission does).
+ *   - A game that has only cells passes sx_perception_cell_centre(cell) as
+ *     the fine point.
+ *
+ * Callbacks run on the calling thread and must not call any function on the
+ * same sx_perception (the handle holds its map while it calls them). */
+
+typedef struct sx_perception sx_perception;
+
+#define SX_MAX_CHANNELS            4   /* hearing channels of a world */
+#define SX_MAX_CUES                8   /* cue rules of a sense profile */
+#define SX_MAX_PERCEPTS_PER_CHECK  4   /* percepts one check of one target makes */
+
+/* ---- the game's sense map ---- */
+
+/* What a sight line meets inside one cell. density: fog or smoke, optical
+ * depth per full cell length (256 halves the clarity per cell; it adds up
+ * along the line by length); heat_density: the same for thermal sight. */
+typedef struct sx_medium {
+	uint8_t opaque;             /* 1: stops sight (a wall, a closed door) */
+	uint8_t _pad;
+	uint16_t density;
+	uint16_t heat_density;
+	uint16_t _pad2;
+} sx_medium;
+
+/* Inside cell x, y, level: write the medium to *out (it holds clear air when
+ * called). The return value is ignored (return 0). */
+typedef int32_t (*sx_sight_fn)(void *context, int32_t x, int32_t y, int32_t level, sx_medium *out);
+/* Crossing from cell x, y into its neighbour to_x, to_y on the same level
+ * (thin walls, windows, doors): return 1 if sight passes, 0 if not. */
+typedef int32_t (*sx_sight_edge_fn)(void *context, int32_t x, int32_t y, int32_t level,
+	int32_t to_x, int32_t to_y);
+/* A line between two levels, from and to the fine points (3 integers each):
+ * return 1 and write the medium over the whole length to *out (it holds
+ * clear air), or 0: blocked. */
+typedef int32_t (*sx_cross_level_fn)(void *context, const int32_t *from, const int32_t *to,
+	sx_medium *out);
+/* Light at a cell, 0 (dark) .. 255 (daylight); values outside are clamped. */
+typedef int32_t (*sx_light_fn)(void *context, int32_t x, int32_t y, int32_t level);
+/* Sound damping inside a cell, fine units per cell length (negative: 0). */
+typedef int32_t (*sx_sound_fn)(void *context, int32_t x, int32_t y, int32_t level);
+/* Sound damping crossing into a neighbour, fine units; -1 (any negative):
+ * the sound does not pass at all. */
+typedef int32_t (*sx_sound_edge_fn)(void *context, int32_t x, int32_t y, int32_t level,
+	int32_t to_x, int32_t to_y);
+
+/* One optional callback per question (0: the default) and one context, the
+ * same shape as sx_map. Sight is separate from movement. */
+typedef struct sx_sense_map {
+	sx_sight_fn sight;             /* 0: clear air */
+	sx_sight_edge_fn sight_edge;   /* 0: open */
+	sx_cross_level_fn cross_level; /* 0: blocked */
+	sx_light_fn light;             /* 0: 255 */
+	sx_sound_fn sound;             /* 0: no damping */
+	sx_sound_edge_fn sound_edge;   /* 0: no damping */
+	void *context;                 /* passed to all callbacks */
+} sx_sense_map;
+
+/* Ready sense maps. From a grid: blocked cells and cells off the grid are
+ * opaque, nothing else (no fog, no thin walls). From a map: sight is blocked
+ * where movement is (crossing into a neighbour is open exactly when step
+ * allows it on the same level), for games that share one blocker. Both are
+ * valid while the given grid or struct lives; on a hex grid they read it in
+ * offset cells, like every callback. Return 0, or SX_ERROR_ARGUMENT for a
+ * null pointer or a map without step. */
+int32_t sx_sense_map_from_grid(const sx_grid *grid, sx_sense_map *out);
+int32_t sx_sense_map_from_map(const sx_map *map, sx_sense_map *out);
+
+/* ---- the world ---- */
+
+#define SX_SPREAD_CIRCLE   0  /* straight distance only, walls do not matter */
+#define SX_SPREAD_STRAIGHT 1  /* distance plus the map's damping along one line */
+
+/* One hearing channel (sound, smell, smoke, ...). */
+typedef struct sx_channel {
+	uint16_t damping;           /* how much the map's sound damping counts, per 256 */
+	uint16_t fuzz;              /* position error in cells per cell of cost, per 256 */
+	int32_t speed;              /* fine units per tick (0: arrives at once) */
+	uint32_t spread;            /* SX_SPREAD_* */
+} sx_channel;
+
+typedef struct sx_perception_config {
+	uint32_t grid;              /* SX_GRID_SQUARE, SX_GRID_HEX_* */
+	int32_t cell_size;          /* fine units per cell or hex, >= 2 */
+	sx_channel channels[SX_MAX_CHANNELS];
+} sx_perception_config;
+
+/* Fills out for grid and cell_size, every channel with damping 256, fuzz 0,
+ * speed 0, SX_SPREAD_CIRCLE. Returns 0, or SX_ERROR_ARGUMENT for an unknown
+ * grid, a cell size below 2 or a null out. */
+int32_t sx_perception_config_default(uint32_t grid, int32_t cell_size, sx_perception_config *out);
+
+/* Null for a null or invalid config (unknown grid or spread, cell size
+ * below 2). map 0: no map (clear, lit, silent). The map struct is copied;
+ * its callbacks and context must stay valid while it is set. */
+sx_perception *sx_perception_new(const sx_perception_config *cfg, const sx_sense_map *map);
+void sx_perception_free(sx_perception *p);
+/* Replaces the sense map (0: no map). Returns 0. */
+int32_t sx_perception_set_map(sx_perception *p, const sx_sense_map *map);
+
+/* ---- sense profiles, stats, targets ---- */
+
+/* Bits of sx_sense_profile.senses. */
+#define SX_SENSES_SIGHT    1  /* normal sight (light, density, bands) */
+#define SX_SENSES_NIGHT    2  /* light counts as at least bright */
+#define SX_SENSES_THERMAL  4  /* a second pass by heat (heat_density, target heat) */
+#define SX_SENSES_SCANNER  8  /* within scanner_range, no walls, bands or light; only noticed */
+
+/* One view band: a half-angle around the facing (headings 0 .. 255 are a full
+ * turn; 43 is a 120 degree cone). The first band that holds the target
+ * counts; outside all it is unseen. */
+typedef struct sx_band {
+	uint8_t half_angle;         /* 0 .. 128 */
+	uint16_t gain;              /* per 256; 0: unused */
+	uint8_t instant;            /* 1: instant cues fire in this band */
+} sx_band;
+
+/* What a cue bit of a target (the game's bits: drawn weapon, attacking, a
+ * body) does for this observer. */
+typedef struct sx_cue_rule {
+	uint32_t bits;              /* any of them matches; 0: unused rule */
+	uint16_t gain;              /* conspicuity factor per 256 while shown (0: none) */
+	uint8_t instant;            /* 0 no, 1 to noticed, 2 to recognised at once */
+	uint16_t min_clarity;       /* instant only with at least this clarity (per 256) */
+	int32_t range;              /* acts only within this distance (0: sight range) */
+} sx_cue_rule;
+
+/* What an observer can sense and how fast it notices (plain data; copy and
+ * change it per observer or tick). Distances in fine units, factors per 256.
+ * Stages: 0 unseen, 1 noticed (counter >= notice_at), 2 recognised
+ * (>= recognize_at). Start from sx_sense_profile_preset. */
+typedef struct sx_sense_profile {
+	uint8_t senses;             /* SX_SENSES_* */
+	int32_t range;              /* sight range (before stats.sight_scale) */
+	int32_t near;               /* full gain up to here */
+	uint16_t far_gain;          /* gain at range, linear from near */
+	sx_band bands[3];           /* ascending half-angles */
+	uint16_t base_gain;         /* counter gain per tick at best conditions */
+	uint8_t dark;               /* light at or below: dark_gain */
+	uint8_t bright;             /* light at or above: full gain */
+	uint16_t dark_gain;
+	uint16_t notice_at;
+	uint16_t recognize_at;
+	uint16_t max;               /* highest counter */
+	uint16_t decay_per_tick;    /* lost per credited tick once hold is over */
+	uint16_t hold;              /* ticks after the last sighting without decay */
+	uint16_t hysteresis;        /* how far below a threshold a stage falls */
+	uint16_t check_interval;    /* most ticks one check credits (0 counts as 1) */
+	uint16_t crowd_gain[8];     /* by target crowd, index min(crowd, 7) */
+	int32_t scanner_range;      /* with SX_SENSES_SCANNER; 0: off */
+	uint16_t scanner_gain;      /* counter gain per tick of the scanner */
+	uint16_t hearing[SX_MAX_CHANNELS]; /* range scale per channel (0: deaf on it) */
+	uint16_t hear_gain;         /* counter gain per heard stimulus at full margin */
+	sx_cue_rule cues[SX_MAX_CUES]; /* in index order; unused ones have bits 0 */
+} sx_sense_profile;
+
+#define SX_SENSE_PRESET_HUMAN   1u  /* range 12 cells, focus 43, periphery 71 */
+#define SX_SENSE_PRESET_GUARD   2u  /* human with range 14 cells, quicker */
+#define SX_SENSE_PRESET_WATCHER 3u  /* human with a wide periphery, slower recognition */
+
+/* Fills out with preset (SX_SENSE_PRESET_*) for cell_size fine units per
+ * cell: SIGHT only, no cue rules, hears channel 0 at full range. Returns 0,
+ * or SX_ERROR_ARGUMENT for an unknown preset or a null out. Add senses, cue
+ * rules and hearing by setting the fields. */
+int32_t sx_sense_profile_preset(uint32_t preset, int32_t cell_size, sx_sense_profile *out);
+
+/* The observer's stats, passed on every call (a game stat or a boost acts
+ * without touching the profile). Everything at 256 and 0 is normal. */
+typedef struct sx_stats {
+	uint16_t sight_scale;       /* range x / 256 */
+	uint16_t notice_scale;      /* gain x / 256 */
+	uint16_t hearing_scale;     /* hearing range x / 256 */
+	uint16_t reaction_ticks;    /* ticks before a new stage counts, read on every call */
+} sx_stats;
+
+/* How an observer sees through a disguise (only when has_see_through). */
+typedef struct sx_see_through {
+	uint16_t rate;              /* doubt per credited tick at disguise 0, full closeness */
+	int32_t near;               /* full closeness up to here, 0 at the sight range */
+	uint16_t at;                /* doubt at which the disguise no longer holds */
+} sx_see_through;
+
+/* A target with disguise > 0 is perceived, flagged disguised, and the cue
+ * bits in hides are never reported. Without see-through that never changes. */
+typedef struct sx_disguise_rule {
+	uint32_t hides;
+	sx_see_through see_through;
+	uint8_t has_see_through;    /* 0: a disguise always holds */
+} sx_disguise_rule;
+
+/* One observer (or listener) for one call. */
+typedef struct sx_eye {
+	uint32_t id;                /* becomes sx_percept.observer */
+	int32_t point[3];           /* fine point (axial on hex) */
+	int32_t facing;             /* heading, taken modulo 256 (0 = +x, 64 = +y) */
+	const sx_sense_profile *profile; /* required */
+	sx_stats stats;
+	sx_disguise_rule disguise;
+} sx_eye;
+
+/* Something that could be perceived, from the game's own candidate list. */
+typedef struct sx_target {
+	uint32_t id;                /* becomes sx_percept.subject */
+	int32_t point[3];           /* the point the eye aims at, fine (axial on hex) */
+	uint16_t size;              /* per 256: a person 256, crouching 128 */
+	uint16_t conspicuity;       /* per 256: still 128, walking 256, firing 2048 */
+	uint32_t cues;              /* the game's bits it shows now */
+	uint8_t disguise;           /* 0 none, 1 .. 255 strength */
+	uint8_t heat;               /* for thermal sight (0: cold) */
+	uint8_t glow;               /* own light: light = max(cell light, glow) */
+	uint8_t crowd;              /* how many others it blends with */
+} sx_target;
+
+/* What one observer knows of one target. Keep one per pair, start it zeroed
+ * (= {0}); the fields are private (do not touch, read them through the
+ * sx_awareness_* functions). */
+typedef struct sx_awareness {
+	uint16_t counter;           /* private */
+	uint16_t doubt;             /* private */
+	uint8_t stage;              /* private */
+	uint8_t pending;            /* private */
+	uint8_t flags;              /* private */
+	uint8_t _pad;               /* private */
+	uint32_t last;              /* private */
+	uint32_t pending_since;     /* private */
+	uint32_t last_seen;         /* private */
+	uint32_t cues;              /* private */
+} sx_awareness;
+
+/* Stage 0 unseen, 1 noticed, 2 recognised; the counter; 1 if in view at the
+ * last check; the last tick seen by sight or thermal (int64_t); 1 if the
+ * disguise was seen through; reset to zero. Null: SX_ERROR_ARGUMENT. */
+int32_t sx_awareness_stage(const sx_awareness *a);
+int32_t sx_awareness_counter(const sx_awareness *a);
+int32_t sx_awareness_in_view(const sx_awareness *a);
+int64_t sx_awareness_last_seen(const sx_awareness *a);
+int32_t sx_awareness_seen_through(const sx_awareness *a);
+int32_t sx_awareness_reset(sx_awareness *a);
+
+/* Where one observer's round robin goes on. Start it zeroed; the field is
+ * private. */
+typedef struct sx_attention {
+	uint32_t cursor;            /* private */
+} sx_attention;
+
+/* The index the next round robin starts from (int64_t), or SX_ERROR_ARGUMENT. */
+int64_t sx_attention_cursor(const sx_attention *a);
+
+/* How many targets one sx_perception_look checks. */
+typedef struct sx_budget {
+	uint16_t checks;            /* kept and round-robin targets together */
+	uint16_t keep;              /* of checks, at most this many already noticed */
+	uint16_t instant_cap;       /* targets with an instant cue, on top of checks */
+} sx_budget;
+
+/* Something that can be heard (or smelt): a sound, a shout, a shot, smoke. */
+typedef struct sx_stimulus {
+	uint32_t id;                /* the game's number (an input of the fuzz) */
+	uint32_t source;            /* who made it (becomes sx_percept.subject) */
+	uint32_t kind;              /* the game's kind */
+	int32_t point[3];           /* fine point (axial on hex) */
+	int32_t loudness;           /* audible range in fine units for a normal listener */
+	uint8_t channel;            /* 0 .. SX_MAX_CHANNELS - 1 */
+	uint32_t at;                /* when it was made */
+} sx_stimulus;
+
+/* ---- outputs ---- */
+
+#define SX_SENSE_SIGHT    0  /* also for LOST and FORGOTTEN */
+#define SX_SENSE_THERMAL  1
+#define SX_SENSE_SCANNER  2
+#define SX_SENSE_HEARING  3  /* sx_percept.channel is the channel */
+
+#define SX_PERCEPT_NOTICED       0  /* the stage rose from unseen */
+#define SX_PERCEPT_RECOGNIZED    1  /* the stage rose to recognised */
+#define SX_PERCEPT_SEEN          2  /* noticed or higher and in view: its place now */
+#define SX_PERCEPT_CUES          3  /* new_cues: recognised cue bits not reported before */
+#define SX_PERCEPT_LOST          4  /* in view at the last check, not now */
+#define SX_PERCEPT_FORGOTTEN     5  /* the stage fell to unseen */
+#define SX_PERCEPT_SEEN_THROUGH  6  /* the observer saw through the disguise */
+#define SX_PERCEPT_HEARD         7  /* a stimulus was heard */
+
+/* One perceived event. point and cell are a real position from this call
+ * only when placed is 1; otherwise both are [0, 0, 0] and clarity is 0. */
+typedef struct sx_percept {
+	uint32_t observer;
+	uint32_t subject;           /* the target, or the stimulus source */
+	uint32_t sense;             /* SX_SENSE_* */
+	uint32_t channel;           /* SX_SENSE_HEARING: the channel */
+	uint32_t event;             /* SX_PERCEPT_* */
+	uint32_t new_cues;          /* SX_PERCEPT_CUES: the new bits */
+	int32_t point[3];           /* fine point (axial on hex) */
+	int32_t cell[3];            /* whole cell (offset on hex) */
+	uint32_t cues;              /* cue bits seen (stage recognised; masked ones never) */
+	int32_t margin;             /* hearing: how clearly heard */
+	uint32_t arrive_at;         /* hearing: when it arrives */
+	uint32_t at;                /* the time of the check */
+	uint16_t clarity;           /* 0 .. 256 */
+	uint8_t stage;              /* the counted stage after the check */
+	uint8_t placed;
+	uint8_t disguised;          /* 1: the target is disguised for this observer */
+} sx_percept;
+
+/* ---- geometry ---- */
+
+/* Whole cell <-> fine point. On hex grids the cell is in OFFSET coordinates
+ * here (the handle converts the whole cell with its layout); the fine point
+ * is always axial and is never offset-converted. out: 3 integers. Return 0,
+ * or SX_ERROR_ARGUMENT for a null pointer. */
+int32_t sx_perception_cell_centre(sx_perception *p, sx_point cell, int32_t *out);
+int32_t sx_perception_cell_of(sx_perception *p, const int32_t *point, sx_point *out);
+/* The heading (0 .. 255) of hex direction dir (modulo 6; 0 = +q, 1 = +r):
+ * 0, 43, 85, 128, 171, 213. */
+int32_t sx_hex_heading(uint32_t dir);
+
+/* The answer of a sight line. */
+typedef struct sx_line {
+	uint8_t clear;              /* 1: sight gets through */
+	uint8_t has_blocked_at;     /* 1: blocked_at is set */
+	uint16_t clarity;           /* 0 .. 256 (256: clear air; 0 when not clear) */
+	int32_t blocked_at[3];      /* the opaque cell, or the cell behind a closed edge */
+} sx_line;
+
+/* Whether sight gets from the fine point from to to and how clearly: an
+ * exact walk over every cell between them, fog by length, the same from both
+ * ends. The eye's cell never blocks; the target's only through its edge.
+ * Returns 0, or SX_ERROR_ARGUMENT for a null pointer. */
+int32_t sx_perception_line(sx_perception *p, const int32_t *from, const int32_t *to, sx_line *out);
+/* 1 if eye could see the fine point pos now (range with the stats, band,
+ * line; no awareness, no time, no light), else 0; SX_ERROR_ARGUMENT for a
+ * null pointer. For rule slots. */
+int32_t sx_perception_in_sight(sx_perception *p, const sx_eye *eye, const int32_t *pos);
+
+/* ---- checks ---- */
+
+/* Each returns the number of percepts written (<= cap; out may be 0 when cap
+ * is 0), *total (may be 0) how many there were; SX_ERROR_ARGUMENT for a null
+ * pointer. One check writes at most SX_MAX_PERCEPTS_PER_CHECK (4): give
+ * observe cap >= 4, look cap >= 4 * (checks + instant_cap), hear cap >= 3
+ * (HEARD, NOTICED, a due RECOGNIZED or FORGOTTEN). Percepts beyond cap are
+ * lost; the check has run. */
+
+/* One check of one observer-target pair; aware is the pair's value. */
+int32_t sx_perception_observe(sx_perception *p, uint32_t now, const sx_eye *eye,
+	const sx_target *target, sx_awareness *aware, sx_percept *out, uint32_t cap, uint32_t *total);
+/* One observer looks at count targets (aware parallel to targets): first
+ * targets with an instant cue (up to instant_cap), then kept ones (noticed,
+ * up to keep), then round robin from the cursor; at most checks of the last
+ * two. Unchecked targets are not touched. count 0: returns 0 and writes no
+ * percept; count > 0 with targets or aware 0: SX_ERROR_ARGUMENT. */
+int32_t sx_perception_look(sx_perception *p, uint32_t now, const sx_eye *eye,
+	const sx_target *targets, sx_awareness *aware, uint32_t count,
+	sx_attention *attention, const sx_budget *budget,
+	sx_percept *out, uint32_t cap, uint32_t *total);
+/* One hearing check. has_cost 0: the channel's spread; 1: cost is given
+ * (from sx_perception_flood). aware 0: stateless (only the HEARD percept);
+ * else the pair of this listener and s->source, raised at most to noticed.
+ * *total 0: not heard. The heard cell is fuzzed in whole cells by seed. */
+int32_t sx_perception_hear(sx_perception *p, uint32_t now, const sx_eye *ear,
+	const sx_stimulus *s, uint8_t has_cost, int32_t cost, sx_awareness *aware,
+	sx_percept *out, uint32_t cap, uint32_t *total, uint64_t seed);
+/* Every cell s reaches around corners with its cost in fine units, by one
+ * search of nav over the sense map's sound (step cost plus damping), bounded
+ * by the loudness and nav's capacity; then each listener calls
+ * sx_perception_hear with has_cost 1 and the cost of its cell. Writes at most
+ * cap cells (offset on hex) and costs (costs may be 0). nav's grid must be
+ * the handle's (else SX_ERROR_ARGUMENT) and its cost_straight the cell size.
+ * Replaces nav's last search. */
+int32_t sx_perception_flood(sx_perception *p, sx_nav *nav, const sx_stimulus *s,
+	sx_point *cells, int32_t *costs, uint32_t cap, uint32_t *total);
+
+/* For each of count targets, how many others of the same group (groups[i];
+ * groups 0: all one group) stand within radius fine units on the same level,
+ * into out[i] (at most 255): the target's crowd. Returns 0. */
+int32_t sx_count_crowds(const sx_target *targets, uint32_t count, int32_t radius,
+	const uint32_t *groups, uint8_t *out);
+
+/* ---- into knowledge and alertness ---- */
+
+/* The game's fact kinds. A disguised percept uses disguised_kind for both
+ * noticed and seen kinds, or is skipped without one. */
+typedef struct sx_fact_kinds {
+	uint32_t noticed_kind;
+	uint32_t seen_kind;
+	uint32_t heard_kind;
+	uint32_t disguised_kind;
+	uint8_t has_disguised_kind;
+} sx_fact_kinds;
+
+/* The alertness stimulus per percept kind (0: none); for CUES the sum of
+ * every cue_amount[i] whose cue_bits[i] share a bit with new_cues. */
+typedef struct sx_alert_amounts {
+	uint32_t noticed;
+	uint32_t recognized;
+	uint32_t seen;
+	uint32_t heard;
+	uint32_t cue_bits[8];
+	uint32_t cue_amount[8];
+} sx_alert_amounts;
+
+/* The fact a percept stands for: NOTICED and SEEN at stage 1 give
+ * noticed_kind, RECOGNIZED, SEEN at stage 2 and CUES seen_kind, HEARD
+ * heard_kind; pos is the percept's cell (offset on hex), strength the
+ * clarity (hearing: the margin). Returns 1 (written), 0 (none: LOST,
+ * FORGOTTEN, SEEN_THROUGH, not placed, disguised without a kind), or
+ * SX_ERROR_ARGUMENT for a null pointer or an unknown sense or event. */
+int32_t sx_percept_fact(const sx_percept *pc, const sx_fact_kinds *k, sx_fact *out);
+/* The common use of count percepts, in order: NOTICED / SEEN at stage 1 learn
+ * the noticed kind; RECOGNIZED / SEEN at stage 2 remove the noticed and learn
+ * the seen kind; CUES set the seen fact's data; HEARD merges the heard kind;
+ * LOST, FORGOTTEN, SEEN_THROUGH remove nothing (facts age out). Each amount
+ * above 0 goes to sx_alertness_stimulus. known's trace sees each learn,
+ * remove and merge.
+ * Returns 0, or SX_ERROR_ARGUMENT (then nothing is changed). */
+int32_t sx_learn_percepts(sx_knowledge *known, sx_alertness *alert, const sx_alert_config *cfg,
+	uint32_t now, const sx_percept *pc, uint32_t count, const sx_fact_kinds *k,
+	const sx_alert_amounts *a);
+/* The alertness stimulus of one percept (0 for none or a null pointer). */
+uint32_t sx_percept_alert(const sx_percept *pc, const sx_alert_amounts *a);
+
+/* ---- trace ---- */
+
+#define SX_PERCEPTION_TRACE_PICKED   1  /* look chose to check target (why) */
+#define SX_PERCEPTION_TRACE_SKIPPED  2  /* the budget ran out before target */
+#define SX_PERCEPTION_TRACE_LINE     3  /* a sight line: clear, clarity, cell (if blocked at one) */
+#define SX_PERCEPTION_TRACE_GAIN     4  /* the factors of one pass of a check */
+#define SX_PERCEPTION_TRACE_INSTANT  5  /* an instant cue fired: rule */
+#define SX_PERCEPTION_TRACE_STAGE    6  /* from, to; pending 1: a rise waits */
+#define SX_PERCEPTION_TRACE_DOUBT    7  /* see-through progress: doubt */
+#define SX_PERCEPTION_TRACE_HEARD    8  /* target is the stimulus: cost, range, cell */
+#define SX_PERCEPTION_TRACE_UNHEARD  9  /* target is the stimulus: cost (if any), range */
+
+/* Why look checked a target (sx_perception_trace.why). */
+#define SX_LOOK_INSTANT      0
+#define SX_LOOK_KEPT         1
+#define SX_LOOK_ROUND_ROBIN  2
+
+/* One record; fields that do not apply to kind are 0. */
+typedef struct sx_perception_trace {
+	uint32_t kind;              /* SX_PERCEPTION_TRACE_* */
+	uint32_t target;            /* the target id; HEARD, UNHEARD: the stimulus id */
+	uint32_t why;               /* PICKED: SX_LOOK_* */
+	uint32_t sense;             /* GAIN: SX_SENSE_* of the pass */
+	uint32_t channel;           /* GAIN: the channel if hearing */
+	uint32_t gain;              /* GAIN: the gain of the check */
+	int32_t cost;               /* HEARD, UNHEARD; valid if has_cost */
+	int32_t range;              /* HEARD, UNHEARD: the listener's range */
+	int32_t cell[3];            /* LINE, HEARD; valid if has_cell (offset on hex) */
+	uint16_t clarity;           /* LINE, GAIN */
+	uint16_t distance;          /* GAIN: per 256 */
+	uint16_t light;             /* GAIN: per 256 (thermal: heat) */
+	uint16_t crowd;             /* GAIN: per 256 */
+	uint16_t doubt;             /* DOUBT */
+	uint8_t band;               /* GAIN: the band index (255: scanner) */
+	uint8_t rule;               /* INSTANT: the cue rule index */
+	uint8_t from;               /* STAGE */
+	uint8_t to;                 /* STAGE */
+	uint8_t clear;              /* LINE */
+	uint8_t pending;            /* STAGE */
+	uint8_t has_cell;
+	uint8_t has_cost;
+} sx_perception_trace;
+
+/* trace gets every record of the following observe, look and hear calls,
+ * with context; NULL turns it off (the default). trace must not call any
+ * function on the same perception handle. Returns 0. */
+typedef void (*sx_perception_trace_fn)(void *context, const sx_perception_trace *trace);
+int32_t sx_perception_set_trace(sx_perception *p, sx_perception_trace_fn trace, void *context);
+
 #ifdef __cplusplus
 }
 #endif
@@ -2760,7 +3253,8 @@ int32_t sx_mission_set_trace(sx_mission *mission, sx_mission_trace_fn trace, voi
 /* Layout checks (C11 and later): the sizes and field offsets below are the ones
  * the Rust library uses, so a header and a library that disagree fail to compile.
  * Every value struct is listed except those that hold a pointer, whose size
- * depends on the platform: sx_map and sx_areas_cost_ctx. */
+ * depends on the platform: sx_map, sx_areas_cost_ctx, sx_row_ctx, sx_squad_rules,
+ * sx_mission_rules, sx_sense_map and sx_eye. */
 #if !defined(__cplusplus) && defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #include <stddef.h>
 _Static_assert(sizeof(sx_point) == 12, "sx_point layout");
@@ -3058,6 +3552,138 @@ _Static_assert(offsetof(sx_mission_plan_ctx, first) == 20, "sx_mission_plan_ctx.
 _Static_assert(offsetof(sx_mission_plan_ctx, motive) == 32, "sx_mission_plan_ctx.motive layout");
 _Static_assert(offsetof(sx_mission_plan_ctx, widening) == 64, "sx_mission_plan_ctx.widening layout");
 _Static_assert(offsetof(sx_mission_plan_ctx, has_first) == 66, "sx_mission_plan_ctx.has_first layout");
+_Static_assert(sizeof(sx_medium) == 8, "sx_medium layout");
+_Static_assert(offsetof(sx_medium, density) == 2, "sx_medium.density layout");
+_Static_assert(offsetof(sx_medium, heat_density) == 4, "sx_medium.heat_density layout");
+_Static_assert(sizeof(sx_channel) == 12, "sx_channel layout");
+_Static_assert(offsetof(sx_channel, fuzz) == 2, "sx_channel.fuzz layout");
+_Static_assert(offsetof(sx_channel, speed) == 4, "sx_channel.speed layout");
+_Static_assert(offsetof(sx_channel, spread) == 8, "sx_channel.spread layout");
+_Static_assert(sizeof(sx_perception_config) == 56, "sx_perception_config layout");
+_Static_assert(offsetof(sx_perception_config, cell_size) == 4, "sx_perception_config.cell_size layout");
+_Static_assert(offsetof(sx_perception_config, channels) == 8, "sx_perception_config.channels layout");
+_Static_assert(sizeof(sx_band) == 6, "sx_band layout");
+_Static_assert(offsetof(sx_band, gain) == 2, "sx_band.gain layout");
+_Static_assert(offsetof(sx_band, instant) == 4, "sx_band.instant layout");
+_Static_assert(sizeof(sx_cue_rule) == 16, "sx_cue_rule layout");
+_Static_assert(offsetof(sx_cue_rule, gain) == 4, "sx_cue_rule.gain layout");
+_Static_assert(offsetof(sx_cue_rule, instant) == 6, "sx_cue_rule.instant layout");
+_Static_assert(offsetof(sx_cue_rule, min_clarity) == 8, "sx_cue_rule.min_clarity layout");
+_Static_assert(offsetof(sx_cue_rule, range) == 12, "sx_cue_rule.range layout");
+_Static_assert(sizeof(sx_sense_profile) == 212, "sx_sense_profile layout");
+_Static_assert(offsetof(sx_sense_profile, range) == 4, "sx_sense_profile.range layout");
+_Static_assert(offsetof(sx_sense_profile, near) == 8, "sx_sense_profile.near layout");
+_Static_assert(offsetof(sx_sense_profile, far_gain) == 12, "sx_sense_profile.far_gain layout");
+_Static_assert(offsetof(sx_sense_profile, bands) == 14, "sx_sense_profile.bands layout");
+_Static_assert(offsetof(sx_sense_profile, base_gain) == 32, "sx_sense_profile.base_gain layout");
+_Static_assert(offsetof(sx_sense_profile, dark) == 34, "sx_sense_profile.dark layout");
+_Static_assert(offsetof(sx_sense_profile, bright) == 35, "sx_sense_profile.bright layout");
+_Static_assert(offsetof(sx_sense_profile, dark_gain) == 36, "sx_sense_profile.dark_gain layout");
+_Static_assert(offsetof(sx_sense_profile, notice_at) == 38, "sx_sense_profile.notice_at layout");
+_Static_assert(offsetof(sx_sense_profile, recognize_at) == 40, "sx_sense_profile.recognize_at layout");
+_Static_assert(offsetof(sx_sense_profile, max) == 42, "sx_sense_profile.max layout");
+_Static_assert(offsetof(sx_sense_profile, decay_per_tick) == 44, "sx_sense_profile.decay_per_tick layout");
+_Static_assert(offsetof(sx_sense_profile, hold) == 46, "sx_sense_profile.hold layout");
+_Static_assert(offsetof(sx_sense_profile, hysteresis) == 48, "sx_sense_profile.hysteresis layout");
+_Static_assert(offsetof(sx_sense_profile, check_interval) == 50, "sx_sense_profile.check_interval layout");
+_Static_assert(offsetof(sx_sense_profile, crowd_gain) == 52, "sx_sense_profile.crowd_gain layout");
+_Static_assert(offsetof(sx_sense_profile, scanner_range) == 68, "sx_sense_profile.scanner_range layout");
+_Static_assert(offsetof(sx_sense_profile, scanner_gain) == 72, "sx_sense_profile.scanner_gain layout");
+_Static_assert(offsetof(sx_sense_profile, hearing) == 74, "sx_sense_profile.hearing layout");
+_Static_assert(offsetof(sx_sense_profile, hear_gain) == 82, "sx_sense_profile.hear_gain layout");
+_Static_assert(offsetof(sx_sense_profile, cues) == 84, "sx_sense_profile.cues layout");
+_Static_assert(sizeof(sx_stats) == 8, "sx_stats layout");
+_Static_assert(offsetof(sx_stats, notice_scale) == 2, "sx_stats.notice_scale layout");
+_Static_assert(offsetof(sx_stats, hearing_scale) == 4, "sx_stats.hearing_scale layout");
+_Static_assert(offsetof(sx_stats, reaction_ticks) == 6, "sx_stats.reaction_ticks layout");
+_Static_assert(sizeof(sx_see_through) == 12, "sx_see_through layout");
+_Static_assert(offsetof(sx_see_through, near) == 4, "sx_see_through.near layout");
+_Static_assert(offsetof(sx_see_through, at) == 8, "sx_see_through.at layout");
+_Static_assert(sizeof(sx_disguise_rule) == 20, "sx_disguise_rule layout");
+_Static_assert(offsetof(sx_disguise_rule, see_through) == 4, "sx_disguise_rule.see_through layout");
+_Static_assert(offsetof(sx_disguise_rule, has_see_through) == 16, "sx_disguise_rule.has_see_through layout");
+_Static_assert(sizeof(sx_target) == 28, "sx_target layout");
+_Static_assert(offsetof(sx_target, point) == 4, "sx_target.point layout");
+_Static_assert(offsetof(sx_target, size) == 16, "sx_target.size layout");
+_Static_assert(offsetof(sx_target, conspicuity) == 18, "sx_target.conspicuity layout");
+_Static_assert(offsetof(sx_target, cues) == 20, "sx_target.cues layout");
+_Static_assert(offsetof(sx_target, disguise) == 24, "sx_target.disguise layout");
+_Static_assert(offsetof(sx_target, heat) == 25, "sx_target.heat layout");
+_Static_assert(offsetof(sx_target, glow) == 26, "sx_target.glow layout");
+_Static_assert(offsetof(sx_target, crowd) == 27, "sx_target.crowd layout");
+_Static_assert(sizeof(sx_awareness) == 24, "sx_awareness layout");
+_Static_assert(offsetof(sx_awareness, doubt) == 2, "sx_awareness.doubt layout");
+_Static_assert(offsetof(sx_awareness, stage) == 4, "sx_awareness.stage layout");
+_Static_assert(offsetof(sx_awareness, pending) == 5, "sx_awareness.pending layout");
+_Static_assert(offsetof(sx_awareness, flags) == 6, "sx_awareness.flags layout");
+_Static_assert(offsetof(sx_awareness, last) == 8, "sx_awareness.last layout");
+_Static_assert(offsetof(sx_awareness, pending_since) == 12, "sx_awareness.pending_since layout");
+_Static_assert(offsetof(sx_awareness, last_seen) == 16, "sx_awareness.last_seen layout");
+_Static_assert(offsetof(sx_awareness, cues) == 20, "sx_awareness.cues layout");
+_Static_assert(sizeof(sx_attention) == 4, "sx_attention layout");
+_Static_assert(sizeof(sx_budget) == 6, "sx_budget layout");
+_Static_assert(offsetof(sx_budget, keep) == 2, "sx_budget.keep layout");
+_Static_assert(offsetof(sx_budget, instant_cap) == 4, "sx_budget.instant_cap layout");
+_Static_assert(sizeof(sx_stimulus) == 36, "sx_stimulus layout");
+_Static_assert(offsetof(sx_stimulus, source) == 4, "sx_stimulus.source layout");
+_Static_assert(offsetof(sx_stimulus, kind) == 8, "sx_stimulus.kind layout");
+_Static_assert(offsetof(sx_stimulus, point) == 12, "sx_stimulus.point layout");
+_Static_assert(offsetof(sx_stimulus, loudness) == 24, "sx_stimulus.loudness layout");
+_Static_assert(offsetof(sx_stimulus, channel) == 28, "sx_stimulus.channel layout");
+_Static_assert(offsetof(sx_stimulus, at) == 32, "sx_stimulus.at layout");
+_Static_assert(sizeof(sx_percept) == 72, "sx_percept layout");
+_Static_assert(offsetof(sx_percept, subject) == 4, "sx_percept.subject layout");
+_Static_assert(offsetof(sx_percept, sense) == 8, "sx_percept.sense layout");
+_Static_assert(offsetof(sx_percept, channel) == 12, "sx_percept.channel layout");
+_Static_assert(offsetof(sx_percept, event) == 16, "sx_percept.event layout");
+_Static_assert(offsetof(sx_percept, new_cues) == 20, "sx_percept.new_cues layout");
+_Static_assert(offsetof(sx_percept, point) == 24, "sx_percept.point layout");
+_Static_assert(offsetof(sx_percept, cell) == 36, "sx_percept.cell layout");
+_Static_assert(offsetof(sx_percept, cues) == 48, "sx_percept.cues layout");
+_Static_assert(offsetof(sx_percept, margin) == 52, "sx_percept.margin layout");
+_Static_assert(offsetof(sx_percept, arrive_at) == 56, "sx_percept.arrive_at layout");
+_Static_assert(offsetof(sx_percept, at) == 60, "sx_percept.at layout");
+_Static_assert(offsetof(sx_percept, clarity) == 64, "sx_percept.clarity layout");
+_Static_assert(offsetof(sx_percept, stage) == 66, "sx_percept.stage layout");
+_Static_assert(offsetof(sx_percept, placed) == 67, "sx_percept.placed layout");
+_Static_assert(offsetof(sx_percept, disguised) == 68, "sx_percept.disguised layout");
+_Static_assert(sizeof(sx_line) == 16, "sx_line layout");
+_Static_assert(offsetof(sx_line, has_blocked_at) == 1, "sx_line.has_blocked_at layout");
+_Static_assert(offsetof(sx_line, clarity) == 2, "sx_line.clarity layout");
+_Static_assert(offsetof(sx_line, blocked_at) == 4, "sx_line.blocked_at layout");
+_Static_assert(sizeof(sx_fact_kinds) == 20, "sx_fact_kinds layout");
+_Static_assert(offsetof(sx_fact_kinds, seen_kind) == 4, "sx_fact_kinds.seen_kind layout");
+_Static_assert(offsetof(sx_fact_kinds, heard_kind) == 8, "sx_fact_kinds.heard_kind layout");
+_Static_assert(offsetof(sx_fact_kinds, disguised_kind) == 12, "sx_fact_kinds.disguised_kind layout");
+_Static_assert(offsetof(sx_fact_kinds, has_disguised_kind) == 16, "sx_fact_kinds.has_disguised_kind layout");
+_Static_assert(sizeof(sx_alert_amounts) == 80, "sx_alert_amounts layout");
+_Static_assert(offsetof(sx_alert_amounts, recognized) == 4, "sx_alert_amounts.recognized layout");
+_Static_assert(offsetof(sx_alert_amounts, seen) == 8, "sx_alert_amounts.seen layout");
+_Static_assert(offsetof(sx_alert_amounts, heard) == 12, "sx_alert_amounts.heard layout");
+_Static_assert(offsetof(sx_alert_amounts, cue_bits) == 16, "sx_alert_amounts.cue_bits layout");
+_Static_assert(offsetof(sx_alert_amounts, cue_amount) == 48, "sx_alert_amounts.cue_amount layout");
+_Static_assert(sizeof(sx_perception_trace) == 64, "sx_perception_trace layout");
+_Static_assert(offsetof(sx_perception_trace, target) == 4, "sx_perception_trace.target layout");
+_Static_assert(offsetof(sx_perception_trace, why) == 8, "sx_perception_trace.why layout");
+_Static_assert(offsetof(sx_perception_trace, sense) == 12, "sx_perception_trace.sense layout");
+_Static_assert(offsetof(sx_perception_trace, channel) == 16, "sx_perception_trace.channel layout");
+_Static_assert(offsetof(sx_perception_trace, gain) == 20, "sx_perception_trace.gain layout");
+_Static_assert(offsetof(sx_perception_trace, cost) == 24, "sx_perception_trace.cost layout");
+_Static_assert(offsetof(sx_perception_trace, range) == 28, "sx_perception_trace.range layout");
+_Static_assert(offsetof(sx_perception_trace, cell) == 32, "sx_perception_trace.cell layout");
+_Static_assert(offsetof(sx_perception_trace, clarity) == 44, "sx_perception_trace.clarity layout");
+_Static_assert(offsetof(sx_perception_trace, distance) == 46, "sx_perception_trace.distance layout");
+_Static_assert(offsetof(sx_perception_trace, light) == 48, "sx_perception_trace.light layout");
+_Static_assert(offsetof(sx_perception_trace, crowd) == 50, "sx_perception_trace.crowd layout");
+_Static_assert(offsetof(sx_perception_trace, doubt) == 52, "sx_perception_trace.doubt layout");
+_Static_assert(offsetof(sx_perception_trace, band) == 54, "sx_perception_trace.band layout");
+_Static_assert(offsetof(sx_perception_trace, rule) == 55, "sx_perception_trace.rule layout");
+_Static_assert(offsetof(sx_perception_trace, from) == 56, "sx_perception_trace.from layout");
+_Static_assert(offsetof(sx_perception_trace, to) == 57, "sx_perception_trace.to layout");
+_Static_assert(offsetof(sx_perception_trace, clear) == 58, "sx_perception_trace.clear layout");
+_Static_assert(offsetof(sx_perception_trace, pending) == 59, "sx_perception_trace.pending layout");
+_Static_assert(offsetof(sx_perception_trace, has_cell) == 60, "sx_perception_trace.has_cell layout");
+_Static_assert(offsetof(sx_perception_trace, has_cost) == 61, "sx_perception_trace.has_cost layout");
 #endif
 
 #endif

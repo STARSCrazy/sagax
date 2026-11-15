@@ -87,6 +87,16 @@ use crate::codes::{
     SEARCH_TRACE_PAUSED, SEARCH_TRACE_STARTED,
 };
 
+use crate::codes::{
+    LOOK_INSTANT, LOOK_KEPT, LOOK_ROUND_ROBIN, PERCEPT_CUES, PERCEPT_FORGOTTEN, PERCEPT_HEARD,
+    PERCEPT_LOST, PERCEPT_NOTICED, PERCEPT_RECOGNIZED, PERCEPT_SEEN, PERCEPT_SEEN_THROUGH,
+    PERCEPTION_TRACE_DOUBT, PERCEPTION_TRACE_GAIN, PERCEPTION_TRACE_HEARD,
+    PERCEPTION_TRACE_INSTANT, PERCEPTION_TRACE_LINE, PERCEPTION_TRACE_PICKED,
+    PERCEPTION_TRACE_SKIPPED, PERCEPTION_TRACE_STAGE, PERCEPTION_TRACE_UNHEARD, SENSE_HEARING,
+    SENSE_PRESET_GUARD, SENSE_PRESET_HUMAN, SENSE_PRESET_WATCHER, SENSE_SCANNER, SENSE_SIGHT,
+    SENSE_THERMAL, SPREAD_CIRCLE, SPREAD_STRAIGHT,
+};
+
 // ---- numbers ------------------------------------------------------------------
 
 /// `value` as `i32`, `i32::MAX` if it does not fit.
@@ -1993,6 +2003,254 @@ pub fn mission_trace(event: MissionTrace) -> MissionTraceCode {
             index: u32::try_from(index).unwrap_or(u32::MAX),
             at,
             ..of(MISSION_TRACE_BEGIN, None)
+        },
+    }
+}
+
+// ---- perception ---------------------------------------------------------------
+
+/// The spread of an `SX_SPREAD_*` code; `None` if unknown.
+pub const fn spread(code: u32) -> Option<sagax_perception::Spread> {
+    use sagax_perception::Spread;
+    match code {
+        SPREAD_CIRCLE => Some(Spread::Circle),
+        SPREAD_STRAIGHT => Some(Spread::Straight),
+        _ => None,
+    }
+}
+
+/// The `SX_SPREAD_*` code of a spread.
+pub const fn spread_code(spread: sagax_perception::Spread) -> u32 {
+    use sagax_perception::Spread;
+    match spread {
+        Spread::Circle => SPREAD_CIRCLE,
+        Spread::Straight => SPREAD_STRAIGHT,
+    }
+}
+
+/// The sense of an `SX_SENSE_*` code and, for `SX_SENSE_HEARING`, its
+/// channel (0..=255; ignored otherwise); `None` if unknown.
+pub fn sense(code: u32, channel: u32) -> Option<sagax_perception::Sense> {
+    use sagax_perception::Sense;
+    match code {
+        SENSE_SIGHT => Some(Sense::Sight),
+        SENSE_THERMAL => Some(Sense::Thermal),
+        SENSE_SCANNER => Some(Sense::Scanner),
+        SENSE_HEARING => u8::try_from(channel).ok().map(Sense::Hearing),
+        _ => None,
+    }
+}
+
+/// The `SX_SENSE_*` code of a sense and its channel (0 unless hearing).
+pub const fn sense_code(sense: sagax_perception::Sense) -> (u32, u32) {
+    use sagax_perception::Sense;
+    match sense {
+        Sense::Sight => (SENSE_SIGHT, 0),
+        Sense::Thermal => (SENSE_THERMAL, 0),
+        Sense::Scanner => (SENSE_SCANNER, 0),
+        Sense::Hearing(channel) => (SENSE_HEARING, channel as u32),
+    }
+}
+
+/// The percept kind of an `SX_PERCEPT_*` code; `new` is the new cue bits
+/// of `SX_PERCEPT_CUES` (ignored otherwise). `None` if unknown.
+pub const fn percept_kind(code: u32, new: u32) -> Option<sagax_perception::PerceptKind> {
+    use sagax_perception::PerceptKind;
+    Some(match code {
+        PERCEPT_NOTICED => PerceptKind::Noticed,
+        PERCEPT_RECOGNIZED => PerceptKind::Recognized,
+        PERCEPT_SEEN => PerceptKind::Seen,
+        PERCEPT_CUES => PerceptKind::Cues { new },
+        PERCEPT_LOST => PerceptKind::Lost,
+        PERCEPT_FORGOTTEN => PerceptKind::Forgotten,
+        PERCEPT_SEEN_THROUGH => PerceptKind::SeenThrough,
+        PERCEPT_HEARD => PerceptKind::Heard,
+        _ => return None,
+    })
+}
+
+/// The `SX_PERCEPT_*` code of a percept kind and its new cue bits (0
+/// unless `Cues`).
+pub const fn percept_kind_code(kind: sagax_perception::PerceptKind) -> (u32, u32) {
+    use sagax_perception::PerceptKind;
+    match kind {
+        PerceptKind::Noticed => (PERCEPT_NOTICED, 0),
+        PerceptKind::Recognized => (PERCEPT_RECOGNIZED, 0),
+        PerceptKind::Seen => (PERCEPT_SEEN, 0),
+        PerceptKind::Cues { new } => (PERCEPT_CUES, new),
+        PerceptKind::Lost => (PERCEPT_LOST, 0),
+        PerceptKind::Forgotten => (PERCEPT_FORGOTTEN, 0),
+        PerceptKind::SeenThrough => (PERCEPT_SEEN_THROUGH, 0),
+        PerceptKind::Heard => (PERCEPT_HEARD, 0),
+    }
+}
+
+/// Why `look` checked a target, of an `SX_LOOK_*` code; `None` if unknown.
+pub const fn look_pick(code: u32) -> Option<sagax_perception::Pick> {
+    use sagax_perception::Pick;
+    match code {
+        LOOK_INSTANT => Some(Pick::Instant),
+        LOOK_KEPT => Some(Pick::Kept),
+        LOOK_ROUND_ROBIN => Some(Pick::RoundRobin),
+        _ => None,
+    }
+}
+
+/// The `SX_LOOK_*` code of why `look` checked a target.
+pub const fn look_pick_code(pick: sagax_perception::Pick) -> u32 {
+    use sagax_perception::Pick;
+    match pick {
+        Pick::Instant => LOOK_INSTANT,
+        Pick::Kept => LOOK_KEPT,
+        Pick::RoundRobin => LOOK_ROUND_ROBIN,
+    }
+}
+
+/// The sense profile preset `SX_SENSE_PRESET_*` for `cell` fine units per
+/// cell; `None` for 0 or unknown.
+pub fn sense_preset(preset: u32, cell: i32) -> Option<sagax_perception::SenseProfile> {
+    use sagax_perception::SenseProfile;
+    match preset {
+        SENSE_PRESET_HUMAN => Some(SenseProfile::human(cell)),
+        SENSE_PRESET_GUARD => Some(SenseProfile::guard(cell)),
+        SENSE_PRESET_WATCHER => Some(SenseProfile::watcher(cell)),
+        _ => None,
+    }
+}
+
+/// The numbers of a perception trace record (`sx_perception_trace`).
+/// Fields that do not apply to `kind` are 0 (`None`, `false`). Cells are
+/// as the library gives them (axial on hex); the C layer converts them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PerceptionTraceCode {
+    /// `SX_PERCEPTION_TRACE_*`.
+    pub kind: u32,
+    /// The target's id; `HEARD`, `UNHEARD`: the stimulus id.
+    pub target: u32,
+    /// `PICKED`: `SX_LOOK_*`.
+    pub why: u32,
+    /// `GAIN`: `SX_SENSE_*` of the pass.
+    pub sense: u32,
+    /// `GAIN`: the channel if the sense is hearing.
+    pub channel: u32,
+    /// `GAIN`: the gain of the check.
+    pub gain: u32,
+    /// `HEARD`, `UNHEARD`: the cost (`None`: it does not get through).
+    pub cost: Option<i32>,
+    /// `HEARD`, `UNHEARD`: the listener's range.
+    pub range: i32,
+    /// `LINE`: where it stopped; `HEARD`: the (fuzzed) cell.
+    pub cell: Option<Pos>,
+    /// `LINE`, `GAIN`: the clarity.
+    pub clarity: u16,
+    /// `GAIN`: the distance factor.
+    pub distance: u16,
+    /// `GAIN`: the light (thermal: heat) factor.
+    pub light: u16,
+    /// `GAIN`: the crowd factor.
+    pub crowd: u16,
+    /// `DOUBT`: the doubt now.
+    pub doubt: u16,
+    /// `GAIN`: the band index (255 for the scanner).
+    pub band: u8,
+    /// `INSTANT`: the cue rule index.
+    pub rule: u8,
+    /// `STAGE`: the counted stage before.
+    pub from: u8,
+    /// `STAGE`: the new (or waiting) stage.
+    pub to: u8,
+    /// `LINE`: sight got through.
+    pub clear: bool,
+    /// `STAGE`: the rise waits for the reaction time.
+    pub pending: bool,
+}
+
+/// The numbers of a perception trace record.
+pub fn perception_trace(event: sagax_perception::PerceptionTrace) -> PerceptionTraceCode {
+    use sagax_perception::PerceptionTrace as T;
+    let of = |kind, target| PerceptionTraceCode {
+        kind,
+        target,
+        ..PerceptionTraceCode::default()
+    };
+    match event {
+        T::Picked { target, why } => PerceptionTraceCode {
+            why: look_pick_code(why),
+            ..of(PERCEPTION_TRACE_PICKED, target)
+        },
+        T::Skipped { target } => of(PERCEPTION_TRACE_SKIPPED, target),
+        T::Line {
+            target,
+            clear,
+            clarity,
+            blocked_at,
+        } => PerceptionTraceCode {
+            clear,
+            clarity,
+            cell: blocked_at.map(Cell::pos),
+            ..of(PERCEPTION_TRACE_LINE, target)
+        },
+        T::Gain {
+            target,
+            band,
+            distance,
+            light,
+            clarity,
+            crowd,
+            gain,
+            sense,
+        } => {
+            let (sense, channel) = sense_code(sense);
+            PerceptionTraceCode {
+                band,
+                distance,
+                light,
+                clarity,
+                crowd,
+                gain,
+                sense,
+                channel,
+                ..of(PERCEPTION_TRACE_GAIN, target)
+            }
+        }
+        T::Instant { target, rule } => PerceptionTraceCode {
+            rule,
+            ..of(PERCEPTION_TRACE_INSTANT, target)
+        },
+        T::Stage {
+            target,
+            from,
+            to,
+            pending,
+        } => PerceptionTraceCode {
+            from,
+            to,
+            pending,
+            ..of(PERCEPTION_TRACE_STAGE, target)
+        },
+        T::Doubt { target, doubt } => PerceptionTraceCode {
+            doubt,
+            ..of(PERCEPTION_TRACE_DOUBT, target)
+        },
+        T::Heard {
+            stimulus,
+            cost,
+            range,
+            cell,
+        } => PerceptionTraceCode {
+            cost: Some(cost),
+            range,
+            cell: Some(cell),
+            ..of(PERCEPTION_TRACE_HEARD, stimulus)
+        },
+        T::Unheard {
+            stimulus,
+            cost,
+            range,
+        } => PerceptionTraceCode {
+            cost,
+            range,
+            ..of(PERCEPTION_TRACE_UNHEARD, stimulus)
         },
     }
 }
