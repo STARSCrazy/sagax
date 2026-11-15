@@ -1,6 +1,7 @@
 # Perception (0.13.0, C API 13) — design
 
-Status: draft for the owner. The owner asked to "just start": every point
+Status: revised after the builder check; the owner's two answers are in
+"Decisions (owner)". The owner asked to "just start": every point
 the owner did not settle is a call made here and listed under "Calls made
 without the owner". Target version 0.13.0, C API 13. JavaScript is not part
 of this round.
@@ -137,8 +138,10 @@ Dependencies and moves:
   crate stays pure, and the helpers that join two crates live where both are
   visible.
 - `sagax-ffi` and `sagax-abi` gain the C layer and the number codes.
-- `stealth_guard` (an example of `sagax-decide`) gets `sagax-perception` as a
-  dev-dependency (no cycle: perception does not depend on decide).
+- `stealth_guard` moves from `sagax-decide` to the facade crate `sagax`
+  (`crates/sagax/examples/stealth_guard.rs`, its test to `crates/sagax/tests`),
+  so it can use the `sagax::perception` helpers; `sagax-decide` gains no
+  dependency.
 
 ### Headings and the cone test
 
@@ -157,18 +160,49 @@ This is `sin(h − θ) ≥ 0` without a square root or an angle; it is exact for
 the table values, symmetric left and right, and works for cones wider than
 90°. A band is a half-angle in headings; a 120° cone is half-angle 43.
 
-### Distances and the hex embedding
+### Units: fine points inside, whole cells at every edge
 
-Positions are `Pos = [x, y, z]` in the game's **fine units**; the world
-config gives `cell_size` (units per cell or hex, any positive integer, for
-example 256), and `z` is the level, as everywhere in the library.
+Inside the block, positions are **fine points** `Pos = [x, y, z]`: `x`, `y`
+in fine units, `z` the level (as everywhere in the library, never scaled).
+The world config gives `S = cell_size` (fine units per cell or hex, any
+integer ≥ 2, for example 256).
 
-- **Square**: range is Euclidean, compared squared (exact); the distance
-  factor uses the integer square root (`u128::isqrt`, deterministic).
-- **Hex**: positions are axial `(q, r)` scaled by `cell_size` (a hex game
-  converts with `to_axial_pos` at the edge, as the mission and the crew do).
-  Range is the hex distance (rings: "within 10 hexes" is what hex games
-  mean). Angles use the embedding `X = 2q + r`, `Y = r·√3`, with `√3` as the
+| | Square | Hex |
+|---|---|---|
+| plane | the cell grid `(x, y)` | axial `(q, r)`, the same axes as `Metric::Hex` and the walker |
+| cell `(cx, cy)` covers | `[cx·S, (cx+1)·S) × [cy·S, (cy+1)·S)` | the Voronoi cell (in cube coordinates) around its centre |
+| centre of the cell | `(cx·S + S/2, cy·S + S/2)` (`S/2` truncating) | `(cq·S, cr·S)`: hex centres sit on the scaled lattice points, which is what the walker's borders `(p − c)·d = S` assume |
+| fine point → cell | floor division by `S` on each axis | integer cube rounding of `(q/S, r/S, s/S)`: round each to nearest (halves toward +∞), fix the axis with the largest error; equal errors fix `s`, then `r` (exact, in `i64`) |
+
+Helpers (Rust and C): `cell_centre(world, cell) -> Pos` and
+`cell_of(world, point) -> Cell`. `cell_of(cell_centre(c)) == c` on both
+grids (tested). On hex, points on a border go to the cell the rounding
+rule names; the walker never asks for the cell of a border point (it moves
+by its exit directions).
+
+**Edges to the rest of the library are whole cells.** `Fact.pos`, the
+crew, the squad, the mission, `route`, the C offset↔axial helpers: all take
+and give cells `[x, y, level]` (on hex axial in Rust, offset in C as the
+mission does). So:
+
+- The game passes the eye, the targets and the stimuli as fine points; a game
+  that only has cells passes `cell_centre(cell)`.
+- `Percept` carries both `point` (fine) and `cell`; `percept_fact` writes
+  `Fact.pos = cell`.
+- Hearing fuzz is applied in whole cells (see 6).
+- **Hex offset conversion happens only on whole cells.** A fine hex point is
+  always axial; the C layer converts an offset cell to axial and then calls
+  `sx_perception_cell_centre`, and converts the result cells of a percept
+  back to offset. No fine point is ever offset-converted, and `sagax.h`
+  says so next to the functions.
+
+Distances:
+
+- **Square**: range is Euclidean on fine points, compared squared (exact);
+  the distance factor uses the integer square root (`u128::isqrt`,
+  deterministic).
+- **Hex**: range is the hex distance of the fine axial points (rings:
+  "within 10 hexes" is what hex games mean), compared in fine units. Angles use the embedding `X = 2q + r`, `Y = r·√3`, with `√3` as the
   fixed constant `113512 / 65536` (error below 1e-5, far below one heading).
   This is an approximation of an irrational number but integer and the same
   on every machine. Hex direction `k` (as in `heading` of the spots, 0 = +q,
@@ -196,7 +230,8 @@ needs sub-cell endpoints, per-cell segment lengths for fog, and no float.
 - **Corners and vertices** (the line passes exactly through a point where
   cells meet): the cells it only grazes have zero length. A grazed pair
   blocks only together: sight slips past one opaque corner, not between two
-  (my call; the movement test `line_clear` is stricter on purpose, a walker
+  (owner's decision: a real line of sight passes; the movement tests
+  `line_clear` and `hex_line_clear` stay strict and untouched, a walker
   has a body). Both directions of the walk meet the same corners, so
   `A → B` and `B → A` give the same answer.
 - **End cells**: the eye's cell never blocks; the target's cell blocks only
@@ -287,9 +322,11 @@ pub struct SenseProfile {
     pub dark_gain: u16,             // per 256
     pub notice_at: u16, pub recognize_at: u16, pub max: u16,
     pub decay_per_tick: u16, pub hold: u16, pub hysteresis: u16,
-    pub max_step: u16,              // most ticks credited per check
+    pub check_interval: u16,        // the observer's check interval: most ticks credited per check (≥ 1)
+    pub crowd_gain: [u16; 8],       // per 256, index min(target.crowd, 7)
     pub scanner_range: i32, pub scanner_gain: u16,
     pub hearing: [u16; MAX_CHANNELS], // range scale per channel, per 256 (0: deaf)
+    pub hear_gain: u16,             // counter gain per heard stimulus at full margin (see 6)
     pub cues: [CueRule; MAX_CUES],
 }
 pub struct Band { pub half_angle: u8, pub gain: u16, pub instant: bool }
@@ -348,7 +385,7 @@ uses.
 #[repr(C)]
 pub struct Target {
     pub id: u32,          // the game's subject id (becomes Fact.subject)
-    pub pos: Pos,         // eye-to-target point, fine units
+    pub point: Pos,       // the point the eye aims at, fine units
     pub size: u16,        // per 256 (a person 256, a crouching one 128, a crate 384)
     pub conspicuity: u16, // per 256: still 128, walking 256, running 512, firing 2048
     pub cues: u32,        // what it shows now (the game's bits)
@@ -414,49 +451,95 @@ array). Getters: `stage()`, `counter()`, `in_view()`, `last_seen()`,
 
 ### One check
 
-`observe(world, map, eye, target, aware, now)` with
-`eye = Eye { id, pos, facing, profile: &SenseProfile, stats: Stats,
-disguise: DisguiseRule }`:
+`observe(world, map, now, eye, target, aware, out)` with
+`eye = Eye { id, point, facing, profile: &SenseProfile, stats: Stats,
+disguise: DisguiseRule }` (`point` is a fine point). Every per-pair call in
+this design has the same order: world, map, `now`, observer, what is
+perceived, the pair's `Awareness`, the output `Vec`, then `seed` where one
+is needed, then the sink in `_traced`. A direct `observe` never touches an
+`Attention`.
 
-1. `credit = min(now − aware.last, profile.max_step)` (wrapping time).
+1. **Credit**: `credit = min(now − aware.last, profile.check_interval)`
+   (wrapping time), then `aware.last = now`. Gain *and* decay use this same
+   capped credit. A pair that was not checked for a while (skipped by the
+   budget, or the game did not call) gets credit for one interval only, never
+   for the skipped time: that is what makes attention limited.
 2. **Geometry**: effective range `range × sight_scale / 256`; outside it, or
    outside every band, the gain is 0. The band gives its `gain` and whether
    `instant` is allowed.
-3. **Line**: `sight_line` gives `clear` and `clarity` (0..=256, from the summed
-   optical depth: 256 halves per 256 depth, between halvings linear).
+3. **Line**: `sight_line` gives `clear` and `clarity` (0..=256, from the
+   summed optical depth: 256 halves per 256 depth, linear between halvings).
    Opaque: gain 0.
 4. **Light**: `max(light(target cell), glow)`, `NIGHT` lifts it to `bright`;
    below `dark` → `dark_gain`, above `bright` → 256, linear between.
-5. **Gain** (all factors per 256, product in `u64`, divided once at the end,
-   truncating):
-   `base_gain × band × distance × light × clarity × size × conspicuity ×
-   cue gains × crowd × notice_scale × credit`.
-   `THERMAL` computes a second gain with `heat_density` and `heat` instead of
-   `density` and light; the larger counts. `SCANNER` (within its range)
-   gives `scanner_gain × credit`, capped at `notice_at`.
+5. **Gain**, step by step: start with `g = base_gain` as `u64`; for each
+   factor `f` in the order below, `g = g.saturating_mul(f) >> 8`; at the end
+   `g = g.saturating_mul(credit)`. The order is fixed so baselines are
+   defined:
+
+   | # | Factor (per 256) | Note |
+   |---|---|---|
+   | 1 | band `gain` | |
+   | 2 | distance | 256 up to `near`, linear to `far_gain` at the range |
+   | 3 | light | thermal pass: target `heat` (0..=255 mapped ×256/255, truncating) |
+   | 4 | clarity | thermal pass: from `heat_density` |
+   | 5 | target `size` | |
+   | 6 | target `conspicuity` | |
+   | 7 | cue gains | each matching `CueRule` in rule index order, one step each |
+   | 8 | `crowd_gain[min(crowd, 7)]` | |
+   | 9 | `stats.notice_scale` | |
+
+   Credit is the last multiplier and has no `>> 8`, so a check with credit 4
+   adds exactly four times the gain of a check with credit 1. The counter
+   adds `g` saturating at `max`. `THERMAL` runs the same chain with its two
+   replaced factors; the larger result counts. `SCANNER` (within its range):
+   `g = scanner_gain × credit`, and it raises the counter at most to
+   `notice_at`.
 6. **Instant**: if a cue rule with `instant` matches visible, not masked cue
    bits, the band allows instant, and `clarity ≥ min_clarity`, the counter is
    raised to at least `notice_at` (1) or `recognize_at` (2).
-7. **Decay** when gain is 0: after `hold` ticks since `last_seen`, lose
-   `decay_per_tick × credit`.
+7. **Decay** when the gain is 0: once `now − last_seen ≥ hold`, lose
+   `decay_per_tick × credit` (the same capped credit).
 8. **Stages**: `pending` is the highest threshold reached (falling with
-   `hysteresis`, as `Alertness` does). A rise waits: the new stage counts
-   once `now − pending_since ≥ reaction_ticks`. A fall counts at once.
-   Sight and thermal reach *recognised*; scanner and hearing only *noticed*.
-9. **Events** (returned, game-facing): `Noticed`, `Recognized`,
-   `Cues { new }` (recognised cue bits that were not reported before:
-   "now I see the weapon"), `Lost` (in view last check, not now),
-   `Forgotten` (stage fell to unseen), `SeenThrough`.
+   `hysteresis`, as `Alertness` does). A rise waits for the reaction time,
+   which the library applies itself (owner's decision): `pending_since` is
+   the tick the counter reached the new stage, and the rise counts on the
+   first check (or hearing call) with
+   `now − pending_since ≥ stats.reaction_ticks`, read **from the stats of
+   that call**. The game passes `reaction_ticks` on every call and may change
+   it from call to call (a drug wears off, an implant switches on): a pending
+   rise is always due at `pending_since + the current reaction_ticks`, so a
+   faster reaction takes effect at once (a rise already past the new, shorter
+   time counts in this very call) and a slower one postpones it. `0` reports
+   at once, in the same call that reached the stage. `pending_since` is
+   never moved by a change of `reaction_ticks`; it is set again only when the
+   pending stage itself changes (a further rise while waiting keeps the
+   earlier `pending_since` for the first step, my call: the observer already
+   started reacting; a fall below the counted stage clears the pending rise).
+   A fall counts at once. Sight and
+   thermal reach *recognised*; scanner and hearing only *noticed* (they raise
+   the counter at most to `notice_at`, never past it).
+9. **Percepts** (game-facing), in this order within one check:
+   `Noticed`, `Recognized`, `Lost` (in view last check, not now),
+   `Forgotten` (stage fell to unseen), `SeenThrough`, `Cues { new }`
+   (recognised cue bits not reported before: "now I see the weapon"), and
+   **`Seen`** last: on *every* check where the counted stage is ≥ noticed and
+   the target is in view, with its point and cell, so the knowledge position
+   stays current while the target moves. At most
+   `MAX_PERCEPTS_PER_CHECK = 4` percepts per check (a rise and a fall never
+   happen in one check; `Lost` and `Seen` exclude each other).
 
 Deterministic: same inputs, same counter; no hidden state outside the value.
-A game that checks every 4 ticks gets the same evidence per second as one
-that checks every tick, as long as `max_step ≥ 4`.
+Tests: a pair checked every 4 ticks (`check_interval ≥ 4`, no budget
+skipping) has the same counter at every 4th tick as one checked every tick
+(the credit is the last multiplier, so this is exact); and a target in a
+crowd with a small budget is noticed later than alone.
 
 The game's example from its improved mode reads: profile `range = max(10
-cells, weapon range · 9/10)` set per tick, focus band 43, no periphery, check
-every 4 ticks with `max_step` 4, and a cue rule "drawn weapon or attacking:
-instant 2" so guards react only to those cues (the game reads the `Cues`
-event). Its classic mode does not call the block at all.
+cells, weapon range · 9/10)` set per tick, focus band 43, no periphery,
+checked every 4 ticks with `check_interval` 4, and a cue rule "drawn weapon
+or attacking: instant 2" so guards react only to those cues (the game reads
+the `Cues` percept). Its classic mode does not call the block at all.
 
 ### Disguise
 
@@ -490,11 +573,11 @@ pub struct SeeThrough { pub rate: u16, pub near: i32, pub at: u16 }
 ```rust
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(C)]
-pub struct Attention { cursor: u32, last: u32 }
+pub struct Attention { cursor: u32 }   // where round robin goes on
 pub struct Budget { pub checks: u16, pub keep: u16, pub instant_cap: u16 }
 ```
 
-`look(world, map, eye, targets, aware, attention, budget, now, out)` checks
+`look(world, map, now, eye, targets, aware, attention, budget, out)` checks
 at most `checks` targets of `targets` (parallel to `aware`), in this order:
 
 1. **Instant**: targets with a cue that has an instant rule for this
@@ -505,13 +588,14 @@ at most `checks` targets of `targets` (parallel to `aware`), in this order:
 3. **Round robin**: the rest from `cursor`, wrapping; `cursor` moves past
    the last one checked.
 
-Unchecked targets are not touched (their decay is applied at their next
-check, from `last`). The credit per check is the observer's own interval
-(`now − attention.last`, capped by `max_step`), not the gap since that
-target's last check, so in a crowd of 20 with 4 checks a figure gains only
-every fifth round: attention is really limited. `look` pushes its percepts
-to the game's `Vec` (the game reserves it; the library allocates nothing of
-its own). A game with its own loop uses `observe` per pair.
+Unchecked targets are not touched. When a target is checked again, its
+credit is `min(now − aware.last, check_interval)` as in every check (see
+"One check", step 1): the skipped time is lost, not paid back. So in a crowd
+of 20 with 4 checks a figure gains one interval's evidence only every fifth
+round: attention is really limited. `look` pushes its percepts to the
+game's `Vec` (the game reserves it; at most `MAX_PERCEPTS_PER_CHECK` per
+checked target; the library allocates nothing of its own). A game with its
+own loop uses `observe` per pair.
 
 ## 6. Hearing
 
@@ -522,18 +606,18 @@ pub struct Stimulus {
     pub id: u32,       // the game's number for this sound (seed input)
     pub source: u32,   // who or what made it (Fact.subject)
     pub kind: u32,     // the game's kind (gunshot, step, voice, smoke)
-    pub pos: Pos,
+    pub point: Pos,    // fine point
     pub loudness: i32, // audible range in fine units for a normal listener
     pub channel: u8,   // 0 ..< MAX_CHANNELS
     pub at: u32,       // when it was made
 }
 pub struct Channel {
     pub damping: u16,  // how much the map's sound damping counts, per 256 (0: walls do not matter)
-    pub fuzz: u16,     // position error per unit of distance, per 256
+    pub fuzz: u16,     // position error in cells per cell of cost, per 256
     pub speed: i32,    // fine units per tick (0: arrives at once)
-    pub mode: Spread,
+    pub spread: Spread,
 }
-pub enum Spread { Circle, Straight, Given }
+pub enum Spread { Circle, Straight }
 ```
 
 The world config holds the `Channel` table (`[Channel; MAX_CHANNELS]`). A
@@ -541,35 +625,62 @@ game defines channel 0 as sound and may define channel 1 as smell or smoke:
 `speed` low, `loudness` large, `fuzz` large (no precise direction), `damping`
 small. That is the whole smell feature (my call: no own sense).
 
-`hear(world, map, ear, stimulus, how, seed) -> Option<Heard>`:
+One function, the same in Rust and C:
 
-| Mode | Cost | What counts |
+```rust
+pub fn hear(world: &World, map: &mut impl SenseMap, now: u32, ear: &Eye,
+            stimulus: &Stimulus, cost: Option<i32>,
+            aware: Option<&mut Awareness>, out: &mut Vec<Percept>, seed: u64) -> bool;
+pub fn hear_traced(.., seed: u64, sink: &mut impl Sink<PerceptionTrace>) -> bool;
+```
+
+`cost: None` uses the channel's `spread`; `Some(c)` is a cost the game
+computed (the flood below). Returns whether it was heard.
+
+| Spread | Cost | What counts |
 |---|---|---|
 | `Circle` | O(1) | straight distance only, no walls (the plain "radius 8–16 cells" model) |
 | `Straight` | one ray walk | distance + `damping × (sound per cell by length + sound_edge per border)`; `None` from an edge stops it |
-| `Given(cost)` | O(1) | a cost the game computed, for example by flood fill around corners |
+| given cost | O(1) | the cost passed in |
 
 **Flood around corners** lives in the facade: `sagax::perception::flood_sound(nav,
 map, stimulus, budget, out)` runs `Navigator::reachable` once per stimulus
 over a `SoundCost<H: SenseMap>` adapter (step cost = cell size, extra =
 damping), bounded by the loudness, and writes `(cell, cost)` pairs; each
-listener then calls `hear` with `Given(cost of its cell)`. One search per
+listener then calls `hear` with `Some(cost of its cell)`. One search per
 stimulus, shared by every listener, bounded by the navigator's capacity.
 
-Heard when `cost ≤ loudness × hearing[channel] × hearing_scale / 65536`.
-`Heard { stimulus, margin, pos, arrive_at }`:
+Heard when `cost ≤ loudness × hearing[channel] × hearing_scale / 65536`
+(`range` below). Then:
 
-- `margin` = range − cost (how clearly; becomes `Fact.strength`).
-- `pos`: the source position moved by a deterministic offset of radius
-  `cost × fuzz / 256`, direction and length from `mix(seed, ear id,
-  stimulus id)`, snapped to fine units; on hex in axial units. Same seed,
-  same answer.
-- `arrive_at = at + cost / speed` (or `at` with speed 0); the game acts on
-  it at that time (or pushes it into the listener's `Inbox`).
+- **A `Heard` percept is always pushed** (with or without an `Awareness`):
+  `subject = stimulus.source`, `sense = Hearing(channel)`, `margin = range −
+  cost` (how clearly; becomes `Fact.strength`), `arrive_at = at + cost /
+  speed` (or `at` with speed 0; the game acts on it then, or pushes it into
+  the listener's `Inbox`), and the fuzzed `cell` (below). This is the
+  stateless use: a stimulus with no tracked target (a shot from an unknown
+  shooter, an explosion, a smell) needs no `Awareness`.
+- **With an `Awareness`** (the pair of this listener and `stimulus.source`,
+  the same value that sight uses): the counter gains
+  `hear_gain × (margin × 256 / range) >> 8` (one step, saturating), but at
+  most up to `notice_at`; a counter already at or above `notice_at` is not
+  changed. `last_seen` is not touched (hearing is not seeing), `aware.last`
+  is not touched either (credit is a sight matter). The usual stage rule
+  (reaction delay) then applies, so a sound can make a target *noticed*,
+  never *recognised*. A `Noticed` percept follows the `Heard` one when the
+  stage rose.
+- **Fuzz in whole cells**: the source's cell (`cell_of(point)`) moves by a
+  deterministic offset of at most `radius = cost × fuzz / (256 × S)` cells,
+  truncating: `h = mix(seed ^ ear.id << 32 ^ stimulus.id)`; on square
+  `dx = h % (2r + 1) − r`, `dy = (h >> 16) % (2r + 1) − r`; on hex the same
+  for `dq`, `dr`, then `ds = −dq − dr` and the pair is redrawn from the next
+  `mix` (at most 4 times, else 0, 0) while the hex distance exceeds `r`. The
+  percept's `point` is the centre of that cell. Same seed, same answer; radius
+  0 gives the true cell.
 
-Hearing never has a cone and reaches only *noticed*. A "heard" becomes a
-`SOURCE_HEARD` fact. Radio relays stay `Outbox`/`Inbox` messages as today;
-a shout can be a stimulus *and* a message.
+Hearing never has a cone. A heard percept becomes a `SOURCE_HEARD` fact.
+Radio relays stay `Outbox`/`Inbox` messages as today; a shout can be a
+stimulus *and* a message.
 
 ## 7. Outputs and use in rules
 
@@ -577,30 +688,48 @@ a shout can be a stimulus *and* a message.
 pub struct Percept {
     pub observer: u32, pub subject: u32,
     pub sense: Sense,        // Sight, Thermal, Scanner, Hearing(channel)
-    pub event: SightEvent,   // Noticed, Recognized, Cues{..}, Lost, ...
-    pub stage: u8, pub pos: Pos, pub cues: u32,
-    pub disguised: bool, pub clarity: u16, pub at: u32,
+    pub event: PerceptKind,  // Noticed, Recognized, Seen, Cues{..}, Lost, Forgotten, SeenThrough, Heard
+    pub stage: u8,           // the counted stage after this check
+    pub point: Pos,          // fine point
+    pub cell: Pos,           // whole cell [x, y, level] (axial on hex)
+    pub cues: u32,
+    pub disguised: bool, pub clarity: u16,
+    pub margin: i32, pub arrive_at: u32, // hearing only (0 otherwise)
+    pub at: u32,
 }
 ```
 
-Helpers in `sagax::perception` (and C):
+Helpers in `sagax::perception` (and C). Every position they write is a
+**whole cell** (`Percept.cell`), never a fine point.
 
-- `percept_fact(&Percept, &FactKinds) -> Option<Fact>`: kind by stage
-  (`noticed_kind`, `seen_kind`, `heard_kind`, `disguised_kind:
-  Option<u32>`), `source` `SOURCE_OWN` (sight, thermal, scanner) or
-  `SOURCE_HEARD`, `strength` = clarity or margin, `data` = cues. `None` for
-  a disguised percept without a disguised kind.
-- `heard_fact(&Heard, &FactKinds) -> Fact`.
+- `percept_fact(&Percept, &FactKinds) -> Option<Fact>`: the fact a percept
+  stands for. Kinds: `noticed_kind`, `seen_kind`, `heard_kind`,
+  `disguised_kind: Option<u32>`. `source` `SOURCE_OWN` (sight, thermal,
+  scanner) or `SOURCE_HEARD`; `strength` = clarity or margin; `data` = cues;
+  `seen_at = at`. `None` for `Lost`, `Forgotten`, `SeenThrough`, and for a
+  disguised percept without a disguised kind.
 - `alert_amount(&Percept, &AlertAmounts) -> u32`: the stimulus for
-  `Alertness::stimulus` per event and per cue (a table, 0 = none).
-- `learn_percepts(known, alert, alert_cfg, percepts, kinds, amounts, now)`:
-  does both for a slice, the common case in one line.
+  `Alertness::stimulus` per percept kind and per cue (a table, 0 = none).
+- `learn_percepts(known, alert, alert_cfg, now, percepts, kinds, amounts)`:
+  the common case in one call, with these rules:
+
+  | Percept | Knowledge |
+  |---|---|
+  | `Noticed`, or `Seen` at stage noticed | `learn` `noticed_kind` at the cell |
+  | `Recognized`, or `Seen` at stage recognised | `remove(subject, noticed_kind)`, `learn` `seen_kind` (recognition replaces the vaguer fact) |
+  | `Cues` | `set_data` of the `seen_kind` fact |
+  | `Heard` | `merge` `heard_kind` (a newer own sighting is not overwritten) |
+  | `Lost`, `Forgotten`, `SeenThrough` | nothing removed: the facts age out under the game's `Knowledge` rules (`expire*`); the character keeps its own memory |
+
+  and `alert.stimulus(alert_amount(p))` for each percept with an amount > 0.
+  A disguised percept uses `disguised_kind` in place of the noticed and seen
+  kinds, or is skipped.
 
 For squad and mission rule slots (which must stay blind themselves):
 
 - `sight_line(world, map, from, to) -> Line { clear, clarity, blocked_at }`:
   pure, the drop-in replacement for a game's Bresenham `sees`.
-- `in_sight(world, map, eye, pos) -> bool`: cone, range and line, no
+- `in_sight(world, map, eye, point) -> bool`: cone, range and line, no
   awareness, no time; for slot questions like "can the intruder see this
   spot?" (`spot_score`) or "can the receiver see the hand sign?"
   (`channel_delay`).
@@ -640,7 +769,7 @@ reports each line it walked).
 | `Instant { target, rule: u8 }` | an instant cue fired |
 | `Stage { target, from: u8, to: u8, pending: bool }` | a stage change, or one waiting for reaction |
 | `Doubt { target, doubt: u16 }` | see-through progress (only when on) |
-| `Heard { stimulus: u32, cost: i32, range: i32, pos: Pos }`, `Unheard { stimulus, cost: Option<i32>, range }` | a hearing check |
+| `Heard { stimulus: u32, cost: i32, range: i32, cell: Pos }`, `Unheard { stimulus, cost: Option<i32>, range }` | a hearing check |
 
 C: `sx_perception_trace` (flat, `kind` first, codes
 `SX_PERCEPTION_TRACE_*` from 1), `sx_perception_trace_fn`,
@@ -685,36 +814,56 @@ int32_t sx_perception_set_trace(sx_perception *p, sx_perception_trace_fn fn, voi
 
 /* value structs, zero to start: sx_sense_profile, sx_band, sx_cue_rule, sx_stats,
  * sx_disguise_rule, sx_target, sx_awareness, sx_attention, sx_budget,
- * sx_stimulus, sx_channel, sx_percept, sx_heard, sx_fact_kinds, sx_alert_amounts */
+ * sx_stimulus, sx_channel, sx_percept, sx_fact_kinds, sx_alert_amounts */
 int32_t sx_sense_profile_preset(uint32_t preset, int32_t cell_size, sx_sense_profile *out);
+
+/* Whole cell <-> fine point. On hex grids the cell is in OFFSET coordinates
+ * here (the handle converts the whole cell with its layout); the fine point
+ * is always axial and is never offset-converted. out: 3 integers. */
+int32_t sx_perception_cell_centre(sx_perception *p, sx_point cell, int32_t *out);
+int32_t sx_perception_cell_of(sx_perception *p, const int32_t *point, sx_point *out);
 
 int32_t sx_perception_line(sx_perception *p, const int32_t *from, const int32_t *to, sx_line *out);
 int32_t sx_perception_in_sight(sx_perception *p, const sx_eye *eye, const int32_t *pos);
-/* returns the number of percepts written (<= cap), *total how many there were */
+/* Each returns the number of percepts written (<= cap), *total how many there
+ * were. One check writes at most SX_MAX_PERCEPTS_PER_CHECK (4): give observe
+ * cap >= 4, look cap >= 4 * (checks + instant_cap), hear cap >= 2. */
 int32_t sx_perception_observe(sx_perception *p, uint32_t now, const sx_eye *eye,
 	const sx_target *target, sx_awareness *aware, sx_percept *out, uint32_t cap, uint32_t *total);
 int32_t sx_perception_look(sx_perception *p, uint32_t now, const sx_eye *eye,
 	const sx_target *targets, sx_awareness *aware, uint32_t count,
 	sx_attention *attention, const sx_budget *budget,
 	sx_percept *out, uint32_t cap, uint32_t *total);
+/* has_cost 0: the channel's spread; 1: cost is given (from sx_perception_flood).
+ * aware NULL: stateless (only the HEARD percept); else the pair of this
+ * listener and s->source, raised at most to noticed. */
 int32_t sx_perception_hear(sx_perception *p, uint32_t now, const sx_eye *ear,
-	const sx_stimulus *s, uint32_t mode, int32_t given_cost, sx_heard *out, uint64_t seed);
+	const sx_stimulus *s, uint8_t has_cost, int32_t cost, sx_awareness *aware,
+	sx_percept *out, uint32_t cap, uint32_t *total, uint64_t seed);
 int32_t sx_perception_flood(sx_perception *p, sx_nav *nav, const sx_stimulus *s,
 	sx_point *cells, int32_t *costs, uint32_t cap, uint32_t *total);
 
 int32_t sx_percept_fact(const sx_percept *pc, const sx_fact_kinds *k, sx_fact *out); /* 1 written, 0 skipped */
-int32_t sx_heard_fact(const sx_heard *h, const sx_fact_kinds *k, sx_fact *out);
+/* the learn_percepts rules of the guide, for count percepts */
+int32_t sx_learn_percepts(sx_knowledge *known, sx_alertness *alert, const sx_alert_config *cfg,
+	uint32_t now, const sx_percept *pc, uint32_t count, const sx_fact_kinds *k,
+	const sx_alert_amounts *a);
 uint32_t sx_percept_alert(const sx_percept *pc, const sx_alert_amounts *a);
 int32_t sx_awareness_stage(const sx_awareness *a);  /* plus _counter, _in_view, _last_seen, _seen_through, _reset */
 ```
 
-- `sx_eye` = `{ uint32_t id; int32_t pos[3]; int32_t facing; const
+- `sx_eye` = `{ uint32_t id; int32_t point[3]; int32_t facing; const
   sx_sense_profile *profile; sx_stats stats; sx_disguise_rule disguise; }`.
 - Conventions as in `sagax.h`: `now` after the handle, payload after, `seed`
   last; lists to caller arrays with `cap` and `*total`; errors negative;
-  every struct with `_Static_assert` size and offsets; hex positions in
-  offset coordinates at the C edge (the handle converts with its layout),
-  as the mission does.
+  every struct with `_Static_assert` size and offsets.
+- **Positions at the C edge**: fine points (`sx_eye.point`,
+  `sx_target.point`, `sx_stimulus.point`, `sx_percept.point`) are axial on
+  hex and are never offset-converted. Whole cells (`sx_percept.cell`, the
+  facts written by `sx_percept_fact` / `sx_learn_percepts`, flood cells, the
+  cell helpers) are offset cells on hex, converted as whole cells by the
+  handle's layout, as the mission does. `sagax.h` states this above the
+  perception functions.
 - A callback must not call the same `sx_perception`.
 - `SX_API_VERSION` 13. Codes (`SX_SENSE_*`, `SX_PERCEPT_*`, `SX_SPREAD_*`,
   `SX_PERCEPTION_TRACE_*`) in `sagax-abi`.
@@ -733,7 +882,8 @@ Every chunk ends green: `cargo test --workspace`, `cargo clippy --workspace
 `CC=gcc sh examples/c/run.sh` (a C compiler on `PATH`). One commit per chunk.
 
 1. **Geometry.** Move `sine`, `Sine`, `mix` to `sagax-core` (decide
-   re-exports). New crate `sagax-perception`: `SenseMap` and `Medium`,
+   re-exports). New crate `sagax-perception`: `World`, `cell_centre`,
+   `cell_of` (round trip tested on both grids), `SenseMap` and `Medium`,
    `OpenAir`, `GridSight`, `MoveBlocks`, `Lit`; the cone test; exact square
    and hex walkers; `sight_line`. Tests: symmetry (A→B = B→A), a rational
    brute-force reference (dense sampling with exact fractions) on random
@@ -743,22 +893,31 @@ Every chunk ends green: `cargo test --workspace`, `cargo clippy --workspace
    `CueRule`, `Stats`, `Target`, `Eye`, `DisguiseRule`, `Awareness`,
    `observe` / `observe_traced`, `in_sight`; then `Attention`, `Budget`,
    `look` / `look_traced`. Tests per factor, instant cues, reaction delay,
-   decay and hysteresis, check-every-4 equals every-1, crowd slows,
+   decay and hysteresis, reaction time changed while pending (shorter:
+   due at once; longer: later; 0: at once), check-every-4 equals every-1
+   (no budget skipping), crowd slows, skipped time is not credited,
+   `observe` leaves `Attention` alone, the gain chain in its fixed order (a
+   baseline table),
    attention order, disguise holds (unit plus randomised call sequences),
    see-through when on, trace equals plain.
 3. **Hearing and outputs.** `Stimulus`, `Channel`, `Spread`, `hear` /
    `hear_traced`, fuzz; in `sagax`: `sagax::perception` (re-export),
-   `flood_sound`, `percept_fact`, `heard_fact`, `alert_amount`,
-   `learn_percepts`; `sagax::debug` exports `PerceptionTrace`; prelude
-   entries. Tests: circle equals the old `route(InRange)` result, damping,
-   second channel slower and vaguer, flood around a corner, same seed same
-   fuzz.
+   `flood_sound`, `percept_fact`, `alert_amount`, `learn_percepts`;
+   `sagax::debug` exports `PerceptionTrace`; prelude entries. Tests: circle
+   equals the old `route(InRange)` result, damping, second channel slower
+   and vaguer, flood around a corner, same seed same fuzz (in whole cells),
+   hearing never lifts past noticed, stateless `hear` without an
+   `Awareness`, `Seen` keeps `Fact.pos` current while a target walks,
+   recognition replaces the noticed fact, `Lost` removes nothing, facts are
+   whole cells.
 4. **C.** `sagax-abi` codes and `perception_trace`; `sagax-ffi` handle,
    value structs, callbacks, adapters, `set_trace`; header with asserts;
    `SX_API_VERSION` 13; `examples/c/perception.c` (a guard, smoke, a crowd,
    a shot) in `run.sh`, its trace diffed against a Rust twin.
 5. **Examples and docs.** Rewrite `ambush_rules` (Rust and C, traces still
-   equal) and `stealth_guard` on the block; USAGE: new section "Perception"
+   equal); move `stealth_guard` with its test to the facade crate
+   (`crates/sagax/examples/stealth_guard.rs`, `crates/sagax/tests/`) and
+   rewrite it on the block and the `sagax::perception` helpers; USAGE: new section "Perception"
    (between memory and group tactics), the "game decides what is
    perceived" sentence of section 7 updated, section 10 table row; ROADMAP
    (Perception done, indirect coordination stays as the next item on it);
@@ -772,17 +931,20 @@ Every chunk ends green: `cargo test --workspace`, `cargo clippy --workspace
 3. Exact integer line walkers of its own (square Amanatides–Woo, hex
    Voronoi walk in cube coordinates); `√3` as a fixed integer fraction for
    hex angles only. The movement tests in `smooth.rs` stay unchanged.
-4. Corner rule: sight slips past one opaque corner, not between two.
+4. (Owner's decision, see below.) Corner rule: sight slips past one opaque
+   corner, not between two.
 5. Light is read at the target's cell (plus its glow) only.
 6. View falloff is a table of up to three bands, not a smooth curve.
 7. Smell is not a sense: hearing has channels, smell is a channel.
-8. The reaction delay is applied by the block (a rise in stage counts only
-   after `reaction_ticks`); see open question 1.
-9. Disguise always holds by default; see-through is optional and off. The
-   disguised percept is flagged and its hidden cues masked; the Knowledge
-   helper skips it unless the game names a kind for it.
+8. (Owner's decision, see below.) The reaction delay is applied by the
+   block.
+9. Disguise always holds by default; see-through is optional and off
+   (coordinator's call). The disguised percept is flagged and its hidden
+   cues masked; the Knowledge helper skips it unless the game names a kind
+   for it (my call).
 10. Special senses (night, thermal, scanner) are optional flags; no preset
-    bundles them; eye upgrades of a game go through `Stats.sight_scale`.
+    bundles them; eye upgrades of a game go through `Stats.sight_scale`
+    (coordinator's call).
 11. Crowd size is the game's count (with an optional helper); crowds dilute
     attention but never block sight.
 12. Instant cues bypass the attention budget (bounded by `instant_cap`).
@@ -790,15 +952,43 @@ Every chunk ends green: `cargo test --workspace`, `cargo clippy --workspace
 14. Flood hearing reuses `Navigator::reachable` instead of a second
     Dijkstra.
 
-## Open questions for the owner
+From the builder check (coordinator's calls):
 
-1. **Who waits the reaction time?** Proposed: the block delays the stage
-   change by `reaction_ticks` (one place, traced as `pending`). Alternative:
-   the block reports at once with a `ready_at`, and the game waits.
-   *Recommendation: the block waits* — every game needs it and it is easy to
-   get wrong by hand; a game that wants the raw stage passes 0.
-2. **Corner rule for sight.** Proposed: permissive (one open side lets sight
-   through an exact corner). Alternative: strict like `line_clear` (both
-   sides must be open). *Recommendation: permissive*, because sight has no
-   body and a strict rule makes diagonal gaps between wall cells look solid;
-   a game that wants strict can mark the corner cells in its hook.
+15. **Units**: fine points inside (`cell_size` S); square cell `x` spans
+    `[x·S, (x+1)·S)` with centre `x·S + S/2`; hex fine points are axial with
+    the centre on `(q·S, r·S)` (the walker's convention); `cell_centre` /
+    `cell_of` helpers. Every edge to the rest of the library takes and gives
+    whole cells; the facts are cells; hearing fuzz is in cells; hex offset
+    conversion only on whole cells, stated at the C edge.
+16. **Hearing feeds the same per-pair `Awareness`**, at most up to noticed;
+    a stateless `hear` (no `Awareness`) still yields a `Heard` percept. One
+    signature in Rust and C (`aware` optional / nullable).
+17. **`Seen` percept** on every in-view check at stage >= noticed, so
+    `learn_percepts` keeps `Fact.pos` current; at most 4 percepts per check
+    and the C caps sized from it. Recognition replaces the noticed fact;
+    `Lost` and `Forgotten` remove nothing, facts age out by the `Knowledge`
+    rules.
+18. **Credit** = `min(now − aware.last, check_interval)` for gain and decay
+    alike; skipped time is never paid back (that is what slows crowds); a
+    direct `observe` does not touch `Attention`, which keeps only its
+    cursor.
+19. **Gain math** step by step with saturating `u64` and `>> 8` after each
+    factor, in a fixed order, credit last.
+20. **`stealth_guard`** and its test move to the facade crate `sagax`.
+
+## Decisions (owner)
+
+1. **The library waits the reaction time.** The game passes the delay as
+   `Stats.reaction_ticks` on every call; it may change from call to call. A
+   pending stage change is due at `pending_since + the current
+   reaction_ticks` (see "One check", step 8), so a faster reaction takes
+   effect at once; `0` reports at once. Deterministic, and tested: a pending
+   rise with the delay shortened below the elapsed time counts in that call,
+   lengthened counts later, and the same call sequence gives the same
+   percepts.
+2. **Corner rule: real line of sight.** Sight passes an exact corner or
+   vertex when one side is open (only two opaque sides block it). The
+   movement tests (`line_clear`, `hex_line_clear`) stay strict and
+   untouched.
+
+There are no open questions left in this design.
