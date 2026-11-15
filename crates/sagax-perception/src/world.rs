@@ -164,7 +164,6 @@ pub fn hex_heading(dir: u8) -> u8 {
 /// The straight distance in fine units from `a` to `b` (levels ignored):
 /// Euclidean (integer square root, truncating) on square, the hex distance
 /// of the fine axial points on hex.
-#[cfg_attr(not(test), allow(dead_code))] // used by `sound_cost`
 pub(crate) fn distance(world: &World, a: Pos, b: Pos) -> i64 {
     let dx = i64::from(b[0]) - i64::from(a[0]);
     let dy = i64::from(b[1]) - i64::from(a[1]);
