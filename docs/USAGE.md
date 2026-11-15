@@ -552,7 +552,7 @@ assert!(matches!(choice, Some(Choice { candidate: 1, .. })));
 
 `choose` takes the rows as they are and returns `Err(DecideError::RowLengths)`
 for rows of different or wrong length, `Ok(None)` if every score is 0. Under
-it, `decide` / `decide_traced` (any `sagax_core::Sink<DecideEvent>`) take one
+it, `decide` / `decide_traced` (any `sagax_core::Sink<DecideTrace>`) take one
 flat slice of inputs and a stride, and write the scores.
 
 C:
@@ -567,7 +567,7 @@ int32_t inputs[2] = {6, 2};                 /* one row of stride 1 per candidate
 sx_choice choice;
 if (sx_decider_decide(d, cands, 2, inputs, 1, SX_PICK_BEST, 0, seed, NULL, &choice) == 1)
 	/* cands[choice.candidate] */;
-sx_decider_set_trace(d, on_event, ctx);     /* SX_DECIDE_FACTOR / SCORED / CHOSEN */
+sx_decider_set_trace(d, on_trace, ctx);     /* SX_DECIDE_TRACE_FACTOR / SCORED / RANKED / CHOSEN */
 sx_decider_free(d);
 ```
 
@@ -1909,26 +1909,26 @@ plan). `PlanCtx` and `FailCtx` are in the prelude, the mission's
 
 ### Why did it take that plan?
 
-`Mission::tick_traced` is `tick_with` with a `sagax_core::Sink` of
-`MissionTraceEvent`s, the same pattern as `Decider::decide_traced`. Each
-replan scoring sends, per candidate in option order, its row
-(`Column { option, column, value }`, after your `columns` slot), the
-decider's considerations (`Factor { option, consideration, input, value }`)
-and its score (`Scored { option, product, built_in, score }`: `built_in` is
-the decider's, `score` what your `score` slot made of it), then the winner
-(`Picked { option, score }`, `None` when all scored 0 and the fallback
-applies). A tick that does not replan sends nothing; a character holding
-after a fallback may score twice in one tick. The actions and events are the
-same with or without a sink, and `NoopSink` (what `tick` and `tick_with`
-use) costs nothing.
+`Mission::tick_traced` is `tick_with` with a `Sink` of `MissionTrace`
+records, the same pattern as `Decider::decide_traced`. Each replan scoring
+sends, per candidate in option order, its row (`Column { option, column,
+value }`, after your `columns` slot), the decider's own records of it
+(`Decide { option, event }` with a `DecideTrace`: its factors and its
+score), and its score after your `score` slot (`Rescored { option,
+built_in, score }`: `built_in` is the decider's), then the winner (`Picked {
+option, score }`, `None` when all scored 0 and the fallback applies). Each
+step that begins sends `Begin { index, at }` with the place its `Where`
+stands for. A character holding after a fallback may score twice in one
+tick. The actions and events are the same with or without a sink, and
+`NoopSink` (what `tick` and `tick_with` use) costs nothing.
 
 ```rust
-use sagax::debug::{Collector, Overflow};
+use sagax::debug::{Collector, MissionTrace, Overflow};
 
 let mut log = Collector::new(512, Overflow::DropOldest);
 let out = mission.tick_traced(now, pos, &knowledge, flags, &mut MissionBuiltInRules, &mut log);
 for r in log.records() {
-    if let MissionTraceEvent::Scored { option, built_in, score, .. } = r.event {
+    if let MissionTrace::Rescored { option, built_in, score } = r.event {
         println!("plan {option}: decider {built_in}, final {score}");
     }
 }
@@ -1977,14 +1977,15 @@ if (sx_mission_plan(m, &info, steps, 16) == 1)       /* 0: no plan yet */
     show_plan(steps, info.step_count < 16 ? info.step_count : 16, info.repeat);
 ```
 
-`sx_mission_set_trace(m, on_trace, ctx)` sends every replan scoring to a
-callback, one `sx_mission_trace_event` at a time (`kind` is
-`SX_MISSION_TRACE_COLUMN`, `_FACTOR`, `_SCORED` or `_PICKED`; `NULL` turns it
-off), as `sx_decider_set_trace` does for a decider:
+`sx_mission_set_trace(m, on_trace, ctx)` sends every record of a tick to a
+callback, one `sx_mission_trace` at a time (`kind` is
+`SX_MISSION_TRACE_COLUMN`, `_DECIDE` with the decider's record in `decide`,
+`_RESCORED`, `_PICKED` or `_BEGIN`; `NULL` turns it off), as
+`sx_decider_set_trace` does for a decider:
 
 ```c
-static void on_trace(void *ctx, const sx_mission_trace_event *e) {
-	if (e->kind == SX_MISSION_TRACE_SCORED)
+static void on_trace(void *ctx, const sx_mission_trace *e) {
+	if (e->kind == SX_MISSION_TRACE_RESCORED)
 		log_plan(ctx, e->option, e->built_in, e->score);
 }
 sx_mission_set_trace(m, on_trace, my_log);
