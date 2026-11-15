@@ -1,5 +1,5 @@
 use super::{Pos, ZeroCapacity};
-use sagax_core::Cell;
+use sagax_core::{Cell, NoopSink, Sink};
 
 /// A remembered or announced area: a centre and radius, how long it lasts,
 /// whether it can be walked through, and a little data.
@@ -26,6 +26,31 @@ pub struct Area {
     pub blocking: u8,
     /// 1 if `source` is set, else 0.
     pub has_source: u8,
+}
+
+/// What an [`Areas`] call did, for debugging: the record of
+/// [`Areas::add_traced`] and [`Areas::expire_traced`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AreasTrace {
+    /// The area was appended at `index` (after an
+    /// [`Evicted`](Self::Evicted) when the set was full).
+    Added {
+        /// Its slot.
+        index: usize,
+        /// The area as stored.
+        area: Area,
+    },
+    /// An area of the same kind near the new centre was replaced.
+    Renewed {
+        /// Its slot.
+        index: usize,
+        /// The area as stored now.
+        area: Area,
+    },
+    /// The oldest area, removed because the set was full.
+    Evicted(Area),
+    /// An area whose lifetime ran out.
+    Expired(Area),
 }
 
 /// Bounded set of [`Area`]s.
@@ -65,7 +90,19 @@ impl Areas {
     /// the new centre is renewed: all fields are replaced. Otherwise the
     /// area is appended; when full, the oldest is removed first (on a tie
     /// the earlier slot), the rest keep their order. Returns the index.
-    pub fn add(&mut self, now: u32, mut area: Area) -> usize {
+    pub fn add(&mut self, now: u32, area: Area) -> usize {
+        self.add_traced(now, area, &mut NoopSink)
+    }
+
+    /// [`Areas::add`] with a trace: [`AreasTrace::Renewed`], or
+    /// [`AreasTrace::Evicted`] (when full) and [`AreasTrace::Added`]. The
+    /// records carry the area as stored (with `since`).
+    pub fn add_traced<S: Sink<AreasTrace>>(
+        &mut self,
+        now: u32,
+        mut area: Area,
+        sink: &mut S,
+    ) -> usize {
         area.since = now;
         if let Some(i) = self
             .items
@@ -73,6 +110,9 @@ impl Areas {
             .position(|a| a.kind == area.kind && inside(a.pos, a.radius, area.pos))
         {
             self.items[i] = area;
+            if sink.enabled() {
+                sink.emit(AreasTrace::Renewed { index: i, area });
+            }
             return i;
         }
         if self.items.len() >= self.capacity {
@@ -85,18 +125,36 @@ impl Areas {
                     oldest_age = age;
                 }
             }
-            self.items.remove(oldest);
+            let gone = self.items.remove(oldest);
+            if sink.enabled() {
+                sink.emit(AreasTrace::Evicted(gone));
+            }
         }
         self.items.push(area);
-        self.items.len() - 1
+        let index = self.items.len() - 1;
+        if sink.enabled() {
+            sink.emit(AreasTrace::Added { index, area });
+        }
+        index
     }
 
     /// Removes areas whose age is at least their own lifetime, keeping the
     /// order of the rest. Returns how many were removed.
     pub fn expire(&mut self, now: u32) -> usize {
+        self.expire_traced(now, &mut NoopSink)
+    }
+
+    /// [`Areas::expire`] with a trace: [`AreasTrace::Expired`] for each
+    /// removed area, in slot order.
+    pub fn expire_traced<S: Sink<AreasTrace>>(&mut self, now: u32, sink: &mut S) -> usize {
         let before = self.items.len();
-        self.items
-            .retain(|a| now.wrapping_sub(a.since) < a.lifetime);
+        self.items.retain(|a| {
+            let keep = now.wrapping_sub(a.since) < a.lifetime;
+            if !keep && sink.enabled() {
+                sink.emit(AreasTrace::Expired(*a));
+            }
+            keep
+        });
         before - self.items.len()
     }
 

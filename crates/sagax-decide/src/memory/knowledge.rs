@@ -1,3 +1,5 @@
+use sagax_core::{NoopSink, Sink};
+
 use super::{Pos, ZeroCapacity};
 
 /// Source of a fact: observed by the character itself.
@@ -41,6 +43,24 @@ pub struct Fact {
     /// Where it comes from: [`SOURCE_OWN`], [`SOURCE_HEARD`], [`SOURCE_TOLD`]
     /// or a number of the game.
     pub source: u8,
+}
+
+/// What a [`Knowledge`] call did, for debugging: the record of the
+/// `*_traced` calls. Every record carries the fact concerned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KnowledgeTrace {
+    /// A new key was stored (after an [`Evicted`](Self::Evicted) when the
+    /// table was full).
+    Added(Fact),
+    /// A known key was overwritten with this fact.
+    Updated(Fact),
+    /// [`Knowledge::merge`] kept the stored fact: this is the refused one,
+    /// seen earlier than the stored one.
+    Stale(Fact),
+    /// Dropped by the [`Evict`] rule to make room for a new key.
+    Evicted(Fact),
+    /// Dropped by an `expire*` call.
+    Expired(Fact),
 }
 
 /// A bounded table of [`Fact`]s in insertion order, keyed by
@@ -94,13 +114,25 @@ impl Knowledge {
         at
     }
 
-    fn insert(&mut self, fact: Fact, now: u32) -> Option<Fact> {
+    fn insert<S: Sink<KnowledgeTrace>>(
+        &mut self,
+        fact: Fact,
+        now: u32,
+        sink: &mut S,
+    ) -> Option<Fact> {
         let mut evicted = None;
         if self.items.len() >= self.capacity {
             let v = self.victim(now);
-            evicted = Some(self.items.remove(v));
+            let gone = self.items.remove(v);
+            if sink.enabled() {
+                sink.emit(KnowledgeTrace::Evicted(gone));
+            }
+            evicted = Some(gone);
         }
         self.items.push(fact);
+        if sink.enabled() {
+            sink.emit(KnowledgeTrace::Added(fact));
+        }
         evicted
     }
 
@@ -108,12 +140,27 @@ impl Knowledge {
     /// new key is added, and if the table is full the fact chosen by the
     /// [`Evict`] rule is dropped and returned.
     pub fn learn(&mut self, now: u32, fact: Fact) -> Option<Fact> {
+        self.learn_traced(now, fact, &mut NoopSink)
+    }
+
+    /// [`Knowledge::learn`] with a trace: [`KnowledgeTrace::Updated`] for a
+    /// known key, else [`KnowledgeTrace::Evicted`] (when full) and
+    /// [`KnowledgeTrace::Added`].
+    pub fn learn_traced<S: Sink<KnowledgeTrace>>(
+        &mut self,
+        now: u32,
+        fact: Fact,
+        sink: &mut S,
+    ) -> Option<Fact> {
         match self.find(fact.subject, fact.kind) {
             Some(i) => {
                 self.items[i] = fact;
+                if sink.enabled() {
+                    sink.emit(KnowledgeTrace::Updated(fact));
+                }
                 None
             }
-            None => self.insert(fact, now),
+            None => self.insert(fact, now, sink),
         }
     }
 
@@ -121,14 +168,34 @@ impl Knowledge {
     /// new `seen_at` is not older than the stored one (ages relative to
     /// `now`, so a wrapped clock works); otherwise the stored fact stays.
     pub fn merge(&mut self, now: u32, fact: Fact) -> Option<Fact> {
+        self.merge_traced(now, fact, &mut NoopSink)
+    }
+
+    /// [`Knowledge::merge`] with a trace: as [`Knowledge::learn_traced`],
+    /// and [`KnowledgeTrace::Stale`] with `fact` when the stored one stays.
+    pub fn merge_traced<S: Sink<KnowledgeTrace>>(
+        &mut self,
+        now: u32,
+        fact: Fact,
+        sink: &mut S,
+    ) -> Option<Fact> {
         match self.find(fact.subject, fact.kind) {
             Some(i) => {
-                if now.wrapping_sub(fact.seen_at) <= now.wrapping_sub(self.items[i].seen_at) {
+                let newer =
+                    now.wrapping_sub(fact.seen_at) <= now.wrapping_sub(self.items[i].seen_at);
+                if newer {
                     self.items[i] = fact;
+                }
+                if sink.enabled() {
+                    sink.emit(if newer {
+                        KnowledgeTrace::Updated(fact)
+                    } else {
+                        KnowledgeTrace::Stale(fact)
+                    });
                 }
                 None
             }
-            None => self.insert(fact, now),
+            None => self.insert(fact, now, sink),
         }
     }
 
@@ -227,25 +294,42 @@ impl Knowledge {
     /// Forgets every fact whose age (`now - seen_at`) is at least `max_age`.
     /// `removed` is called with each dropped fact, in slot order.
     pub fn expire(&mut self, now: u32, max_age: u32, removed: impl FnMut(Fact)) {
-        self.expire_with(now, |_| max_age, removed);
+        self.expire_traced(now, max_age, removed, &mut NoopSink);
+    }
+
+    /// [`Knowledge::expire`] with a trace: [`KnowledgeTrace::Expired`] for
+    /// each dropped fact, in slot order.
+    pub fn expire_traced<S: Sink<KnowledgeTrace>>(
+        &mut self,
+        now: u32,
+        max_age: u32,
+        removed: impl FnMut(Fact),
+        sink: &mut S,
+    ) {
+        self.expire_where(|f| now.wrapping_sub(f.seen_at) >= max_age, removed, sink);
     }
 
     /// Like [`expire`](Self::expire) for facts of one `kind` only; other
     /// kinds stay. `removed` gets the facts in slot order.
-    pub fn expire_kind(
+    pub fn expire_kind(&mut self, now: u32, kind: u32, max_age: u32, removed: impl FnMut(Fact)) {
+        self.expire_kind_traced(now, kind, max_age, removed, &mut NoopSink);
+    }
+
+    /// [`Knowledge::expire_kind`] with a trace: [`KnowledgeTrace::Expired`]
+    /// for each dropped fact, in slot order.
+    pub fn expire_kind_traced<S: Sink<KnowledgeTrace>>(
         &mut self,
         now: u32,
         kind: u32,
         max_age: u32,
-        mut removed: impl FnMut(Fact),
+        removed: impl FnMut(Fact),
+        sink: &mut S,
     ) {
-        self.items.retain(|f| {
-            let gone = f.kind == kind && now.wrapping_sub(f.seen_at) >= max_age;
-            if gone {
-                removed(*f);
-            }
-            !gone
-        });
+        self.expire_where(
+            |f| f.kind == kind && now.wrapping_sub(f.seen_at) >= max_age,
+            removed,
+            sink,
+        );
     }
 
     /// Like [`Knowledge::expire`], but `max_age` is chosen per fact (for
@@ -254,12 +338,37 @@ impl Knowledge {
         &mut self,
         now: u32,
         max_age: impl Fn(&Fact) -> u32,
+        removed: impl FnMut(Fact),
+    ) {
+        self.expire_with_traced(now, max_age, removed, &mut NoopSink);
+    }
+
+    /// [`Knowledge::expire_with`] with a trace: [`KnowledgeTrace::Expired`]
+    /// for each dropped fact, in slot order.
+    pub fn expire_with_traced<S: Sink<KnowledgeTrace>>(
+        &mut self,
+        now: u32,
+        max_age: impl Fn(&Fact) -> u32,
+        removed: impl FnMut(Fact),
+        sink: &mut S,
+    ) {
+        self.expire_where(|f| now.wrapping_sub(f.seen_at) >= max_age(f), removed, sink);
+    }
+
+    /// Drops every fact `gone` says yes to, keeping the order of the rest.
+    fn expire_where<S: Sink<KnowledgeTrace>>(
+        &mut self,
+        gone: impl Fn(&Fact) -> bool,
         mut removed: impl FnMut(Fact),
+        sink: &mut S,
     ) {
         self.items.retain(|f| {
-            let gone = now.wrapping_sub(f.seen_at) >= max_age(f);
+            let gone = gone(f);
             if gone {
                 removed(*f);
+                if sink.enabled() {
+                    sink.emit(KnowledgeTrace::Expired(*f));
+                }
             }
             !gone
         });
@@ -270,8 +379,32 @@ impl Knowledge {
         self.learn(now, msg.to_fact(source))
     }
 
+    /// [`Knowledge::learn_message`] with a trace (see
+    /// [`Knowledge::learn_traced`]).
+    pub fn learn_message_traced<S: Sink<KnowledgeTrace>>(
+        &mut self,
+        now: u32,
+        msg: &super::Message,
+        source: u8,
+        sink: &mut S,
+    ) -> Option<Fact> {
+        self.learn_traced(now, msg.to_fact(source), sink)
+    }
+
     /// [`Knowledge::merge`] for the fact a message tells (`source` as given).
     pub fn merge_message(&mut self, now: u32, msg: &super::Message, source: u8) -> Option<Fact> {
         self.merge(now, msg.to_fact(source))
+    }
+
+    /// [`Knowledge::merge_message`] with a trace (see
+    /// [`Knowledge::merge_traced`]).
+    pub fn merge_message_traced<S: Sink<KnowledgeTrace>>(
+        &mut self,
+        now: u32,
+        msg: &super::Message,
+        source: u8,
+        sink: &mut S,
+    ) -> Option<Fact> {
+        self.merge_traced(now, msg.to_fact(source), sink)
     }
 }

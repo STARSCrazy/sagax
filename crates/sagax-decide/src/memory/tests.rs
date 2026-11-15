@@ -1253,3 +1253,370 @@ fn cell_cost_matches_move_cost() {
     z.add(0, wall);
     assert_eq!(z.cell_cost(Cell::new(5, 5, 0), start, goal), None);
 }
+
+// ---- traces -------------------------------------------------------------------
+
+use sagax_debug::{Collector, Overflow};
+
+fn log<E>() -> Collector<E> {
+    Collector::new(64, Overflow::DropNewest)
+}
+
+/// A collector that is off: it takes nothing.
+fn off<E>() -> Collector<E> {
+    Collector::new(0, Overflow::DropNewest)
+}
+
+fn events<E: Copy>(c: &Collector<E>) -> Vec<E> {
+    c.records().map(|r| r.event).collect()
+}
+
+#[test]
+fn knowledge_trace_tells_each_change() {
+    use KnowledgeTrace::*;
+    let mut k = Knowledge::new(2, Evict::Oldest).unwrap();
+    let mut t = log();
+    let (a, b, c) = (fact(1, 0, 5), fact(2, 0, 6), fact(3, 0, 7));
+    assert_eq!(k.learn_traced(7, a, &mut t), None);
+    assert_eq!(k.learn_traced(7, b, &mut t), None);
+    // full: the oldest goes first, then the new one is added
+    assert_eq!(k.learn_traced(7, c, &mut t), Some(a));
+    let newer = fact(2, 0, 9);
+    assert_eq!(k.learn_traced(9, newer, &mut t), None);
+    assert_eq!(
+        events(&t),
+        [Added(a), Added(b), Evicted(a), Added(c), Updated(newer)]
+    );
+    t.clear();
+    // merge refuses an older sighting and says so
+    let older = fact(2, 0, 3);
+    assert_eq!(k.merge_traced(9, older, &mut t), None);
+    let told = msg(3, 0).to_fact(SOURCE_TOLD);
+    assert_eq!(
+        k.merge_message_traced(9, &msg(3, 0), SOURCE_TOLD, &mut t),
+        None
+    );
+    let own = msg(3, 0).to_fact(SOURCE_OWN);
+    assert_eq!(
+        k.learn_message_traced(9, &msg(3, 0), SOURCE_OWN, &mut t),
+        None
+    );
+    // the message was seen at 7, as c: merge takes it (not older)
+    assert_eq!(events(&t), [Stale(older), Updated(told), Updated(own)]);
+    t.clear();
+    // expire: the game's callback and the trace both see the dropped fact
+    let mut gone = Vec::new();
+    k.expire_traced(20, 12, |f| gone.push(f), &mut t);
+    assert_eq!(gone, [own]);
+    assert_eq!(events(&t), [Expired(own)]);
+    t.clear();
+    k.expire_kind_traced(30, 1, 0, |_| {}, &mut t);
+    assert_eq!(events(&t), []);
+    k.expire_with_traced(30, |_| 0, |_| {}, &mut t);
+    assert_eq!(events(&t), [Expired(newer)]);
+    assert!(k.is_empty());
+}
+
+#[test]
+fn knowledge_traced_calls_match_the_plain_ones() {
+    let steps: Vec<(u32, Fact)> = (0..40)
+        .map(|i| (i * 3, fact(i % 7, i % 2, (i * 5) % 17)))
+        .collect();
+    for evict in [Evict::Oldest, Evict::Weakest] {
+        let mut plain = Knowledge::new(4, evict).unwrap();
+        let mut traced = plain.clone();
+        let mut silent = plain.clone();
+        let (mut t, mut o) = (log(), off());
+        for (i, &(now, f)) in steps.iter().enumerate() {
+            if i % 3 == 0 {
+                let p = plain.merge(now, f);
+                assert_eq!(p, traced.merge_traced(now, f, &mut t));
+                assert_eq!(p, silent.merge_traced(now, f, &mut o));
+            } else {
+                let p = plain.learn(now, f);
+                assert_eq!(p, traced.learn_traced(now, f, &mut t));
+                assert_eq!(p, silent.learn_traced(now, f, &mut o));
+            }
+            if i % 10 == 9 {
+                let (mut a, mut b, mut c) = (Vec::new(), Vec::new(), Vec::new());
+                plain.expire_kind(now, 1, 8, |f| a.push(f));
+                traced.expire_kind_traced(now, 1, 8, |f| b.push(f), &mut t);
+                silent.expire_kind_traced(now, 1, 8, |f| c.push(f), &mut o);
+                assert_eq!((&a, &a), (&b, &c));
+            }
+            assert!(plain.iter().eq(traced.iter()) && plain.iter().eq(silent.iter()));
+        }
+        assert!(t.offered() > 0);
+        assert_eq!(o.offered(), 0);
+    }
+}
+
+#[test]
+fn areas_trace_tells_each_change() {
+    use AreasTrace::*;
+    let at = |a: Area, since| Area { since, ..a };
+    let mut z = Areas::new(2).unwrap();
+    let mut t = log();
+    let (a, b, c) = (area(1, 0, 3), area(1, 10, 3), area(1, 20, 3));
+    assert_eq!(z.add_traced(1, a, &mut t), 0);
+    assert_eq!(z.add_traced(2, b, &mut t), 1);
+    let renewed = at(area(1, 1, 5), 3);
+    assert_eq!(z.add_traced(3, area(1, 1, 5), &mut t), 0);
+    // full: the oldest (b, since 2) goes, the new one is appended
+    assert_eq!(z.add_traced(4, c, &mut t), 1);
+    assert_eq!(
+        events(&t),
+        [
+            Added {
+                index: 0,
+                area: at(a, 1)
+            },
+            Added {
+                index: 1,
+                area: at(b, 2)
+            },
+            Renewed {
+                index: 0,
+                area: renewed
+            },
+            Evicted(at(b, 2)),
+            Added {
+                index: 1,
+                area: at(c, 4)
+            },
+        ]
+    );
+    t.clear();
+    assert_eq!(z.expire_traced(300, &mut t), 2);
+    assert_eq!(events(&t), [Expired(renewed), Expired(at(c, 4))]);
+}
+
+#[test]
+fn areas_traced_calls_match_the_plain_ones() {
+    let mut plain = Areas::new(3).unwrap();
+    let mut traced = plain.clone();
+    let mut silent = plain.clone();
+    let (mut t, mut o) = (log(), off());
+    for i in 0..30u32 {
+        let mut a = area(i % 2, (i as i32 * 7) % 23, 3);
+        a.lifetime = 10 + i % 5;
+        let p = plain.add(i, a);
+        assert_eq!(p, traced.add_traced(i, a, &mut t));
+        assert_eq!(p, silent.add_traced(i, a, &mut o));
+        if i % 4 == 3 {
+            let p = plain.expire(i + 9);
+            assert_eq!(p, traced.expire_traced(i + 9, &mut t));
+            assert_eq!(p, silent.expire_traced(i + 9, &mut o));
+        }
+        assert!(plain.iter().eq(traced.iter()) && plain.iter().eq(silent.iter()));
+    }
+    assert!(t.offered() > 0);
+    assert_eq!(o.offered(), 0);
+}
+
+#[test]
+fn timers_trace_tells_each_set() {
+    use TimersTrace::*;
+    let mut s = Timers::new(2).unwrap();
+    let mut t = log();
+    s.set_traced(1, 0, 10, &mut t);
+    s.set_traced(2, 0, 20, &mut t);
+    s.set_traced(1, 5, 30, &mut t);
+    // full: id 2 has 20 - 8 = 12 left, id 1 has 30 - 3 = 27
+    s.set_traced(3, 8, 4, &mut t);
+    assert_eq!(
+        events(&t),
+        [
+            Started {
+                id: 1,
+                duration: 10
+            },
+            Started {
+                id: 2,
+                duration: 20
+            },
+            Renewed {
+                id: 1,
+                duration: 30
+            },
+            Replaced {
+                id: 3,
+                duration: 4,
+                old: 2,
+                old_left: 12
+            },
+        ]
+    );
+    assert!(s.active(3, 8) && !s.active(2, 8));
+}
+
+#[test]
+fn timers_traced_calls_match_the_plain_ones() {
+    let mut plain = Timers::new(3).unwrap();
+    let mut traced = plain.clone();
+    let mut silent = plain.clone();
+    let (mut t, mut o) = (log(), off());
+    for i in 0..40u32 {
+        let (id, now, duration) = (i % 6, i * 2, 5 + (i * 7) % 11);
+        plain.set(id, now, duration);
+        traced.set_traced(id, now, duration, &mut t);
+        silent.set_traced(id, now, duration, &mut o);
+        for id in 0..6 {
+            let left = plain.left(id, now);
+            assert_eq!(left, traced.left(id, now));
+            assert_eq!(left, silent.left(id, now));
+        }
+        assert_eq!(plain.len(), traced.len());
+    }
+    assert_eq!(t.offered(), 40);
+    assert_eq!(o.offered(), 0);
+}
+
+#[test]
+fn outbox_trace_tells_posts_deliveries_and_losses() {
+    use MessageTrace::*;
+    let mut b = Outbox::new(2).unwrap();
+    let mut t = log();
+    let (m1, m3) = (msg(1, 0), msg(3, 0));
+    let mut kept = msg(2, 0);
+    kept.keep_if_sender_gone = 1;
+    assert_eq!(b.post_traced(10, m1, 5, 3, &mut t), Ok(()));
+    assert_eq!(
+        b.post_traced(11, m3, 0, 3, &mut t),
+        Err(crate::memory::Refused::Cooldown)
+    );
+    assert_eq!(b.post_traced(13, kept, 0, 3, &mut t), Ok(()));
+    assert_eq!(
+        b.post_traced(20, m3, 0, 3, &mut t),
+        Err(crate::memory::Refused::Full)
+    );
+    let mut out = Vec::new();
+    b.due_traced(13, &mut out, &mut t);
+    assert_eq!(out, [kept]);
+    b.post_traced(20, m3, 0, 3, &mut t).unwrap();
+    b.sender_gone_traced(&mut t);
+    assert_eq!(
+        events(&t),
+        [
+            Posted {
+                msg: m1,
+                due_at: 15
+            },
+            MessageTrace::Refused {
+                msg: m3,
+                why: crate::memory::Refused::Cooldown
+            },
+            Posted {
+                msg: kept,
+                due_at: 13
+            },
+            MessageTrace::Refused {
+                msg: m3,
+                why: crate::memory::Refused::Full
+            },
+            Delivered { msg: kept },
+            Posted {
+                msg: m3,
+                due_at: 20
+            },
+            Dropped { msg: m1 },
+            Dropped { msg: m3 },
+        ]
+    );
+    assert_eq!(b.pending(), 0);
+}
+
+#[test]
+fn inbox_trace_tells_queue_drops_and_deliveries() {
+    use MessageTrace::*;
+    let mut b = Inbox::new(2).unwrap();
+    let mut t = log();
+    let (m1, m2, m3, m4) = (msg(1, 0), msg(2, 0), msg(3, 0), msg(4, 0));
+    assert!(b.push_traced(m1, 10, &mut t));
+    assert!(b.push_traced(m2, 30, &mut t));
+    // full, earlier than the latest (m2): m2 gives way
+    assert!(b.push_traced(m3, 20, &mut t));
+    // full, not earlier than the latest: refused
+    assert!(!b.push_traced(m4, 25, &mut t));
+    let mut out = Vec::new();
+    b.take_due_max_traced(20, 1, &mut out, &mut t);
+    b.take_due_traced(20, &mut out, &mut t);
+    assert_eq!(out, [m1, m3]);
+    assert_eq!(
+        events(&t),
+        [
+            Queued {
+                msg: m1,
+                arrive_at: 10
+            },
+            Queued {
+                msg: m2,
+                arrive_at: 30
+            },
+            Dropped { msg: m2 },
+            Queued {
+                msg: m3,
+                arrive_at: 20
+            },
+            Dropped { msg: m4 },
+            Delivered { msg: m1 },
+            Delivered { msg: m3 },
+        ]
+    );
+}
+
+#[test]
+fn message_traced_calls_match_the_plain_ones() {
+    let mut plain_out = Outbox::new(3).unwrap();
+    let mut plain_in = Inbox::new(3).unwrap();
+    let (mut out_t, mut in_t) = (plain_out.clone(), plain_in.clone());
+    let (mut out_o, mut in_o) = (plain_out.clone(), plain_in.clone());
+    let (mut t, mut o) = (log(), off());
+    let (mut a, mut b, mut c) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..60u32 {
+        let mut m = msg(i, i % 3);
+        m.keep_if_sender_gone = u8::from(i % 2 == 0);
+        let (delay, cooldown) = (i % 4, i % 3);
+        let p = plain_out.post(i, m, delay, cooldown);
+        assert_eq!(p, out_t.post_traced(i, m, delay, cooldown, &mut t));
+        assert_eq!(p, out_o.post_traced(i, m, delay, cooldown, &mut o));
+        let at = i + (i * 13) % 9;
+        let p = plain_in.push(m, at);
+        assert_eq!(p, in_t.push_traced(m, at, &mut t));
+        assert_eq!(p, in_o.push_traced(m, at, &mut o));
+        match i % 5 {
+            0 => {
+                plain_out.due_max(i, 1, &mut a);
+                out_t.due_max_traced(i, 1, &mut b, &mut t);
+                out_o.due_max_traced(i, 1, &mut c, &mut o);
+            }
+            1 => {
+                plain_in.take_due(i, &mut a);
+                in_t.take_due_traced(i, &mut b, &mut t);
+                in_o.take_due_traced(i, &mut c, &mut o);
+            }
+            2 => {
+                plain_out.due(i, &mut a);
+                out_t.due_traced(i, &mut b, &mut t);
+                out_o.due_traced(i, &mut c, &mut o);
+            }
+            3 => {
+                plain_in.take_due_max(i, 2, &mut a);
+                in_t.take_due_max_traced(i, 2, &mut b, &mut t);
+                in_o.take_due_max_traced(i, 2, &mut c, &mut o);
+            }
+            _ => {
+                plain_out.sender_gone();
+                out_t.sender_gone_traced(&mut t);
+                out_o.sender_gone_traced(&mut o);
+            }
+        }
+        assert_eq!((&a, &a), (&b, &c));
+        assert_eq!(plain_out.pending(), out_t.pending());
+        assert_eq!(plain_out.pending(), out_o.pending());
+        assert_eq!(plain_in.len(), in_t.len());
+        assert_eq!(plain_in.len(), in_o.len());
+    }
+    assert!(t.offered() > 0);
+    assert_eq!(o.offered(), 0);
+}

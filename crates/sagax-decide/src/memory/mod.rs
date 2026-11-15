@@ -15,6 +15,12 @@
 //! - [`points_around`] and [`sweep_heading`]: spread points around a place
 //!   and turn the view while looking around.
 //!
+//! The tables that store, drop or hand out something ([`Knowledge`],
+//! [`Areas`], [`Timers`], [`Outbox`], [`Inbox`]) have a `*_traced` form of
+//! each such call that tells what happened ([`KnowledgeTrace`],
+//! [`AreasTrace`], [`TimersTrace`], [`MessageTrace`]); the rest are plain
+//! values whose results already say everything.
+//!
 //! Time is the game's own count (u32); ages are computed with wrapping
 //! subtraction, so a wrapped clock still works. Everything is integer only
 //! and deterministic.
@@ -33,14 +39,16 @@ mod timers;
 mod tests;
 
 pub use alertness::{AlertConfig, Alertness};
-pub use areas::{Area, Areas};
+pub use areas::{Area, Areas, AreasTrace};
 pub use geometry::{LOOK_OFFSETS, PointPattern, Sine, points_around, sine, sweep_heading};
 pub use interval::Interval;
-pub use knowledge::{Evict, Fact, Knowledge, SOURCE_HEARD, SOURCE_OWN, SOURCE_TOLD};
-pub use messages::{Inbox, Message, Outbox, Refused, arrival};
+pub use knowledge::{
+    Evict, Fact, Knowledge, KnowledgeTrace, SOURCE_HEARD, SOURCE_OWN, SOURCE_TOLD,
+};
+pub use messages::{Inbox, Message, MessageTrace, Outbox, Refused, arrival};
 pub use progress::Progress;
 pub use route::{Metric, Route, distance, route};
-pub use timers::Timers;
+pub use timers::{Timers, TimersTrace};
 
 pub use sagax_core::Pos;
 

@@ -1,3 +1,5 @@
+use sagax_core::{NoopSink, Sink};
+
 use super::{Fact, Pos, ZeroCapacity};
 
 /// One message: a fact on its way from a sender to receivers.
@@ -51,6 +53,44 @@ pub enum Refused {
     Cooldown,
 }
 
+/// What an [`Outbox`] or [`Inbox`] call did, for debugging: the record of
+/// their `*_traced` calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MessageTrace {
+    /// [`Outbox::post`] accepted the message.
+    Posted {
+        /// The message.
+        msg: Message,
+        /// When it becomes due (`now + delay`, wrapping).
+        due_at: u32,
+    },
+    /// [`Outbox::post`] refused the message.
+    Refused {
+        /// The message.
+        msg: Message,
+        /// Why.
+        why: Refused,
+    },
+    /// [`Inbox::push`] took the message.
+    Queued {
+        /// The message.
+        msg: Message,
+        /// When it may be taken.
+        arrive_at: u32,
+    },
+    /// A message was lost: a full inbox dropped it (the one arriving latest,
+    /// or the new one), or [`Outbox::sender_gone`] did.
+    Dropped {
+        /// The message.
+        msg: Message,
+    },
+    /// The message was handed out (`due*`, `take_due*`).
+    Delivered {
+        /// The message.
+        msg: Message,
+    },
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Posted {
     msg: Message,
@@ -91,13 +131,33 @@ impl Outbox {
         delay: u32,
         cooldown: u32,
     ) -> Result<(), Refused> {
-        if self.items.len() >= self.capacity {
-            return Err(Refused::Full);
-        }
-        if let Some(last) = self.last_post
+        self.post_traced(now, msg, delay, cooldown, &mut NoopSink)
+    }
+
+    /// [`Outbox::post`] with a trace: [`MessageTrace::Posted`] or
+    /// [`MessageTrace::Refused`].
+    pub fn post_traced<S: Sink<MessageTrace>>(
+        &mut self,
+        now: u32,
+        msg: Message,
+        delay: u32,
+        cooldown: u32,
+        sink: &mut S,
+    ) -> Result<(), Refused> {
+        let refused = if self.items.len() >= self.capacity {
+            Some(Refused::Full)
+        } else if let Some(last) = self.last_post
             && now.wrapping_sub(last) < cooldown
         {
-            return Err(Refused::Cooldown);
+            Some(Refused::Cooldown)
+        } else {
+            None
+        };
+        if let Some(why) = refused {
+            if sink.enabled() {
+                sink.emit(MessageTrace::Refused { msg, why });
+            }
+            return Err(why);
         }
         self.items.push(Posted {
             msg,
@@ -105,24 +165,56 @@ impl Outbox {
             delay,
         });
         self.last_post = Some(now);
+        if sink.enabled() {
+            sink.emit(MessageTrace::Posted {
+                msg,
+                due_at: now.wrapping_add(delay),
+            });
+        }
         Ok(())
     }
 
     /// Moves every message whose age is at least its own delay to the end of
     /// `out`, in post order.
     pub fn due(&mut self, now: u32, out: &mut Vec<Message>) {
-        self.due_max(now, usize::MAX, out);
+        self.due_traced(now, out, &mut NoopSink);
+    }
+
+    /// [`Outbox::due`] with a trace: [`MessageTrace::Delivered`] for each
+    /// message moved.
+    pub fn due_traced<S: Sink<MessageTrace>>(
+        &mut self,
+        now: u32,
+        out: &mut Vec<Message>,
+        sink: &mut S,
+    ) {
+        self.due_max_traced(now, usize::MAX, out, sink);
     }
 
     /// Like [`Outbox::due`], but moves at most `max` messages (the first in
     /// post order); the rest stay pending, due or not.
     pub fn due_max(&mut self, now: u32, max: usize, out: &mut Vec<Message>) {
+        self.due_max_traced(now, max, out, &mut NoopSink);
+    }
+
+    /// [`Outbox::due_max`] with a trace: [`MessageTrace::Delivered`] for
+    /// each message moved.
+    pub fn due_max_traced<S: Sink<MessageTrace>>(
+        &mut self,
+        now: u32,
+        max: usize,
+        out: &mut Vec<Message>,
+        sink: &mut S,
+    ) {
         let mut moved = 0;
         self.items.retain(|p| {
             let due = moved < max && now.wrapping_sub(p.at) >= p.delay;
             if due {
                 out.push(p.msg);
                 moved += 1;
+                if sink.enabled() {
+                    sink.emit(MessageTrace::Delivered { msg: p.msg });
+                }
             }
             !due
         });
@@ -131,7 +223,19 @@ impl Outbox {
     /// The sender is gone: drops every message not marked
     /// `keep_if_sender_gone`. The cooldown keeps running.
     pub fn sender_gone(&mut self) {
-        self.items.retain(|p| p.msg.keep_if_sender_gone != 0);
+        self.sender_gone_traced(&mut NoopSink);
+    }
+
+    /// [`Outbox::sender_gone`] with a trace: [`MessageTrace::Dropped`] for
+    /// each message dropped, in post order.
+    pub fn sender_gone_traced<S: Sink<MessageTrace>>(&mut self, sink: &mut S) {
+        self.items.retain(|p| {
+            let keep = p.msg.keep_if_sender_gone != 0;
+            if !keep && sink.enabled() {
+                sink.emit(MessageTrace::Dropped { msg: p.msg });
+            }
+            keep
+        });
     }
 
     /// Number of messages waiting.
@@ -181,6 +285,19 @@ impl Inbox {
     /// 2^31 (the same assumption as [`Inbox::take_due`]).
     #[must_use]
     pub fn push(&mut self, msg: Message, arrive_at: u32) -> bool {
+        self.push_traced(msg, arrive_at, &mut NoopSink)
+    }
+
+    /// [`Inbox::push`] with a trace: [`MessageTrace::Queued`] (after a
+    /// [`MessageTrace::Dropped`] of the message arriving latest when full),
+    /// or [`MessageTrace::Dropped`] of `msg` when it is refused.
+    #[must_use]
+    pub fn push_traced<S: Sink<MessageTrace>>(
+        &mut self,
+        msg: Message,
+        arrive_at: u32,
+        sink: &mut S,
+    ) -> bool {
         // True if `a` arrives strictly before `b`.
         fn before(a: u32, b: u32) -> bool {
             (a.wrapping_sub(b) as i32) < 0
@@ -193,11 +310,20 @@ impl Inbox {
                 }
             }
             if !before(arrive_at, self.items[latest].1) {
+                if sink.enabled() {
+                    sink.emit(MessageTrace::Dropped { msg });
+                }
                 return false;
             }
-            self.items.remove(latest);
+            let (gone, _) = self.items.remove(latest);
+            if sink.enabled() {
+                sink.emit(MessageTrace::Dropped { msg: gone });
+            }
         }
         self.items.push((msg, arrive_at));
+        if sink.enabled() {
+            sink.emit(MessageTrace::Queued { msg, arrive_at });
+        }
         true
     }
 
@@ -205,18 +331,44 @@ impl Inbox {
     /// (`now.wrapping_sub(arrive_at) < 2^31`) to the end of `out`, in push
     /// order.
     pub fn take_due(&mut self, now: u32, out: &mut Vec<Message>) {
-        self.take_due_max(now, usize::MAX, out);
+        self.take_due_traced(now, out, &mut NoopSink);
+    }
+
+    /// [`Inbox::take_due`] with a trace: [`MessageTrace::Delivered`] for
+    /// each message moved.
+    pub fn take_due_traced<S: Sink<MessageTrace>>(
+        &mut self,
+        now: u32,
+        out: &mut Vec<Message>,
+        sink: &mut S,
+    ) {
+        self.take_due_max_traced(now, usize::MAX, out, sink);
     }
 
     /// Like [`Inbox::take_due`], but moves at most `max` messages (the first
     /// in push order); the rest stay, due or not.
     pub fn take_due_max(&mut self, now: u32, max: usize, out: &mut Vec<Message>) {
+        self.take_due_max_traced(now, max, out, &mut NoopSink);
+    }
+
+    /// [`Inbox::take_due_max`] with a trace: [`MessageTrace::Delivered`]
+    /// for each message moved.
+    pub fn take_due_max_traced<S: Sink<MessageTrace>>(
+        &mut self,
+        now: u32,
+        max: usize,
+        out: &mut Vec<Message>,
+        sink: &mut S,
+    ) {
         let mut moved = 0;
         self.items.retain(|(m, at)| {
             let due = moved < max && now.wrapping_sub(*at) < 1 << 31;
             if due {
                 out.push(*m);
                 moved += 1;
+                if sink.enabled() {
+                    sink.emit(MessageTrace::Delivered { msg: *m });
+                }
             }
             !due
         });

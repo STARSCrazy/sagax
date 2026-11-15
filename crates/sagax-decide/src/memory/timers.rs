@@ -1,4 +1,37 @@
+use sagax_core::{NoopSink, Sink};
+
 use super::ZeroCapacity;
+
+/// What [`Timers::set_traced`] did, for debugging.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TimersTrace {
+    /// A new id was added.
+    Started {
+        /// The id.
+        id: u32,
+        /// Its ticks.
+        duration: u32,
+    },
+    /// A present id was started again.
+    Renewed {
+        /// The id.
+        id: u32,
+        /// Its new ticks.
+        duration: u32,
+    },
+    /// The set was full: the timer with the least time left gave way to the
+    /// new id.
+    Replaced {
+        /// The new id.
+        id: u32,
+        /// Its ticks.
+        duration: u32,
+        /// The id that gave way.
+        old: u32,
+        /// The ticks it had left.
+        old_left: u32,
+    },
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Timer {
@@ -36,6 +69,18 @@ impl Timers {
     /// (new start and duration, same slot); when full the entry with the
     /// least time left is replaced.
     pub fn set(&mut self, id: u32, now: u32, duration: u32) {
+        self.set_traced(id, now, duration, &mut NoopSink);
+    }
+
+    /// [`Timers::set`] with a trace: one [`TimersTrace`] record, `Renewed`,
+    /// `Started` or (when full) `Replaced`.
+    pub fn set_traced<S: Sink<TimersTrace>>(
+        &mut self,
+        id: u32,
+        now: u32,
+        duration: u32,
+        sink: &mut S,
+    ) {
         let timer = Timer {
             id,
             since: now,
@@ -43,10 +88,16 @@ impl Timers {
         };
         if let Some(t) = self.items.iter_mut().find(|t| t.id == id) {
             *t = timer;
+            if sink.enabled() {
+                sink.emit(TimersTrace::Renewed { id, duration });
+            }
             return;
         }
         if self.items.len() < self.capacity {
             self.items.push(timer);
+            if sink.enabled() {
+                sink.emit(TimersTrace::Started { id, duration });
+            }
             return;
         }
         let mut weakest = 0;
@@ -58,7 +109,16 @@ impl Timers {
                 least = left;
             }
         }
+        let old = self.items[weakest].id;
         self.items[weakest] = timer;
+        if sink.enabled() {
+            sink.emit(TimersTrace::Replaced {
+                id,
+                duration,
+                old,
+                old_left: least,
+            });
+        }
     }
 
     /// True if `id` was set less than its duration ago.

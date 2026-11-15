@@ -37,6 +37,7 @@ pub mod debug {
 
     pub use sagax_core::{CallbackSink, MapSink, NoopSink, Sink};
     pub use sagax_debug::{Collector, Overflow, Record};
+    pub use sagax_decide::memory::{AreasTrace, KnowledgeTrace, MessageTrace, TimersTrace};
     pub use sagax_decide::{DecideTrace, mission::MissionTrace, state::StateTrace};
     pub use sagax_nav::{
         formation::FormationTrace, nav::NavTrace, search::SearchTrace, smooth::SmoothTrace,
