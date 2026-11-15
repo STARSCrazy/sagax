@@ -82,6 +82,39 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   `_SHORTCUT`, `_PLACED`, `_UNPLACED`, `_FLEE_BEST`. The nav trace covers
   every `sx_nav_*` call and `sx_path_cost`. A null handle to a
   `sx_*_set_trace` answers `SX_ERROR_ARGUMENT`.
+- **Memory traces:** each call of the world memory that stores, drops or
+  hands out something has a `_traced` form, and it reports what the return
+  value leaves out (a refused merge, an evicted area, a timer that gave
+  way). `Knowledge::learn_traced`, `merge_traced`, `learn_message_traced`,
+  `merge_message_traced`, `expire_traced`, `expire_kind_traced`,
+  `expire_with_traced` report `KnowledgeTrace` (`Added`, `Updated`,
+  `Stale`, `Evicted`, `Expired`, each with the fact; a full table sends
+  `Evicted` before `Added`; the `removed` callback of `expire*` stays).
+  `Areas::add_traced`, `expire_traced` report `AreasTrace` (`Added { index,
+  area }`, `Renewed { index, area }`, `Evicted`, `Expired`).
+  `Timers::set_traced` reports one `TimersTrace` per call (`Started`,
+  `Renewed`, `Replaced { id, duration, old, old_left }`).
+  `Outbox::post_traced`, `due_traced`, `due_max_traced`,
+  `sender_gone_traced` and `Inbox::push_traced`, `take_due_traced`,
+  `take_due_max_traced` report `MessageTrace` (`Posted { msg, due_at }`,
+  `Refused { msg, why }`, `Queued { msg, arrive_at }`, `Dropped { msg }`,
+  `Delivered { msg }`). All four are in `sagax::debug`. `Alertness`,
+  `Progress`, `Interval` and the pure functions stay untraced: their
+  results already say everything.
+- `sagax-abi`: `knowledge_trace`, `areas_trace`, `timers_trace`,
+  `message_trace` (with `KnowledgeTraceCode`, `AreasTraceCode`,
+  `TimersTraceCode`, `MessageTraceCode`), `refused`, and the codes
+  `KNOWLEDGE_TRACE_*`, `AREAS_TRACE_*`, `TIMERS_TRACE_*`,
+  `MESSAGE_TRACE_*`, `POSTED`, `REFUSED_FULL`, `REFUSED_COOLDOWN`.
+- **C:** `sx_knowledge_set_trace` (`sx_knowledge_trace`: `kind`, the
+  `sx_fact`), `sx_areas_set_trace` (`sx_areas_trace`: `kind`, `index`, the
+  `sx_area`), `sx_timers_set_trace` (`sx_timers_trace`: `kind`, `id`,
+  `duration`, `old`, `old_left`), `sx_outbox_set_trace` and
+  `sx_inbox_set_trace` (both `sx_message_trace`: `kind`, the `sx_message`,
+  `at`, `refused`), with the codes `SX_KNOWLEDGE_TRACE_*`,
+  `SX_AREAS_TRACE_*`, `SX_TIMERS_TRACE_*`, `SX_MESSAGE_TRACE_*` (each from
+  1). The handles of `sx_squad_knowledge` and `sx_squad_areas` take a trace
+  too; it sees only the calls made through them.
 
 ### Changed
 
@@ -120,6 +153,11 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   number) and `first`, `kind` is `uint32_t`, `found` a `uint8_t`; the kind
   numbers stay 1 to 5. The nav trace now also reports the smoothing, the
   formation and the flee's choice and the threats' search of a flee.
+- **C:** `sx_squad_knowledge` and `sx_squad_areas` lend one handle each
+  per squad (made on the first call, freed with the squad) instead of a
+  pointer into the squad; `sx_knowledge_free` and `sx_areas_free` do
+  nothing to them (before, freeing them was not allowed). Every call on
+  them works as before.
 - WebAssembly / JavaScript: unchanged (`grid.setTrace`, `grid.takeTrace`
   give the search steps as before).
 
@@ -142,6 +180,9 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
 | C `sx_decide_event` | `sx_decide_trace` (`product` separate from `value`, unused fields 0) |
 | C `SX_DECIDE_FACTOR`, `_SCORED`, `_CHOSEN` | `SX_DECIDE_TRACE_FACTOR`, `_SCORED`, `_CHOSEN` (same numbers; new `_RANKED`) |
 | — | C `sx_machine_set_trace`, `sx_machine_trace` |
+| — | `Knowledge`, `Areas`, `Timers`, `Outbox`, `Inbox`: `*_traced` with `KnowledgeTrace`, `AreasTrace`, `TimersTrace`, `MessageTrace` |
+| — | C `sx_knowledge_`, `sx_areas_`, `sx_timers_`, `sx_outbox_`, `sx_inbox_set_trace` with `sx_knowledge_trace`, `sx_areas_trace`, `sx_timers_trace`, `sx_message_trace` |
+| C `sx_squad_knowledge`, `sx_squad_areas`: a pointer into the squad, never freed | a lent handle per squad; `sx_knowledge_free` / `sx_areas_free` do nothing to it |
 
 ## 0.11.0
 
