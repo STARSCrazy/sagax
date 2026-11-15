@@ -182,6 +182,7 @@ There are two groups of exceptions, on purpose:
 | Patrol, chase, search: behaviour over time | State machine | `sx_machine_*` | `lib.machine()` |
 | Who did I see, where, how long ago; where is it dangerous | Memory of the world | `sx_knowledge_*`, `sx_areas_*`, ... | `lib.knowledge()`, `lib.areas()` |
 | What can this character see and hear, and how soon does it notice? | Perception | `sx_perception_*` | not yet |
+| Join in on what allies are seen doing (charge, flee), without an order | Contagion | `sx_contagion_*` | not yet |
 | Several characters act together: flank, ambush, advance in line | Group tactics | `sx_crew_*` (the loop), `sx_squad_*`, `sx_keeper_*`, `sx_gather` | `lib.crew()` (the loop), `lib.squad()`, `lib.tactics`, `lib.keeper()` |
 | What one character does over time: patrol, guard, chase, and what when the plan breaks | Missions | `sx_mission_*` | not yet |
 
@@ -1204,6 +1205,75 @@ game's `expire*`. A disguised percept uses `disguised_kind`, or is skipped
 without one. For one percept at a time: `percept_fact` and `alert_amount`.
 The stealth guard (`cargo run -p sagax --example stealth_guard`) runs this
 loop on a hex grid in daylight and at night.
+
+### Joining in: contagion
+
+Groups coordinate by orders (section 9), but also without any: a guard sees
+two comrades charge and charges too, a civilian sees others run and runs as
+well. `Contagion` is one character's memory of the *deeds* it saw its allies
+do, read as Decider columns. It reads only that character's own percepts,
+so every gate above (cone, light, walls, attention, recognition, disguise)
+applies unchanged: an ally it could not see never counts.
+
+A deed is a set of the game's cue bits with a window in ticks
+(`DeedRule { bits, window }`, up to `MAX_DEEDS`, 8). The game sets the cue
+bits on the `Target`s of the characters that do something (`ATTACKING`
+while firing, `FLEEING` while running away); the observers see them like
+any other cue. `ContagionConfig` carries the grid for the distances (on
+hex the fine points are axial, as everywhere in perception).
+
+```rust
+const ATTACKING: u32 = 1;
+let config = ContagionConfig::new(Grid::Square)
+    .with_deed(DeedRule { bits: ATTACKING, window: 6 });
+let mut memory = Contagion::new(config, 4);          // remembers up to 4 allies
+// every tick, after this character's own look:
+memory.learn(&percepts, now, |subject, disguised| is_friend(subject, disguised));
+let mut row = [0; 2 + DEED_COLUMNS];
+memory.write_columns(0, eye.point, now, &mut row[2..]);  // doing, seen, share, nearest, since
+```
+
+- Only a **recognised sighting** counts: sense `Sight` or `Thermal`, stage
+  2 and `placed`. Noticed-only, scanner, heard, `Lost` and `Forgotten`
+  percepts change nothing, so what was seen a moment ago still counts until
+  its window ends.
+- An entry keeps the cue bits of the **latest** sighting: an ally seen to
+  stop is no longer doing it at once. A deed shown that the entry did not
+  show (or that had run out) is an **onset**.
+- `is_ally(subject, disguised)` is the game's **belief**: an enemy disguised
+  as a guard may be taken for one, and its staged fleeing can trick the
+  guards. That is fair, it is what they saw. A sighting the game no longer
+  takes for an ally removes the entry.
+- `inputs(deed, observer, now)` gives `DeedInputs { doing, seen, share,
+  nearest, since }`: allies seen doing it within the window, allies seen at
+  all, `doing * 256 / seen`, the fine distance to the nearest one doing it
+  (`i32::MAX`: none) and the ticks since the latest onset (`u32::MAX`:
+  none). `write_columns` writes them as five `i32` columns, so "join the
+  charge" is a plain consideration on the `share` column, with no new
+  Decider code. `nearest_point` says where that ally was.
+- Cascades come by themselves: A flees, the game sets A's `FLEEING` cue, B
+  sees it and flees, C sees B.
+- Fixed slots from `new`; when full, the ally seen longest ago makes room.
+  No allocation afterwards, integer, deterministic. Records:
+  `learn_traced`, `inputs_traced`, `write_columns_traced` with
+  `ContagionTrace` (`Onset`, `Refresh`, `Expired`, `Replaced`, `Dropped`,
+  `Inputs`).
+
+Joining in is an individual decision: the squad and the crew do not change.
+A game that wants the leader to know sends a game report through
+`Crew::report_with`. The guard post example (`cargo run -p sagax --example
+contagion_scene`, `examples/c/contagion.c`, square and hex) has one guard
+see the intruder and attack, two comrades who see him join, one behind a
+wall who does not, then a grenade whose panic spreads to the guard who sees
+the flight and not to the one facing away.
+
+In C: `sx_contagion_new(&cfg, capacity)` with an `sx_contagion_config`
+(`grid` an `SX_GRID_*` code, `count`, `deeds[SX_MAX_DEEDS]`),
+`sx_contagion_learn(c, now, percepts, n, is_ally, ctx)` with the callback
+`int32_t (*)(void *ctx, uint32_t subject, int32_t disguised)`,
+`sx_contagion_inputs`, `_write_columns` (`SX_DEED_COLUMNS` integers),
+`_nearest_point`, `_forget`, `_clear`, `_len`, `_set_trace`, since API
+version 14.
 
 ### C
 
@@ -2273,6 +2343,7 @@ Everything lives in `sagax::debug` (`use sagax::debug::*;`): the sink pieces
 | `Crew` | `CrewTrace` | `tick_traced`, `observe_traced`, `report_traced`, `reinstate_traced` |
 | `Mission` | `MissionTrace` | `tick_traced` |
 | perception | `PerceptionTrace` | `observe_traced`, `look_traced`, `hear_traced` (and `learn_percepts_traced` with `KnowledgeTrace`) |
+| `Contagion` | `ContagionTrace` | `learn_traced`, `inputs_traced`, `write_columns_traced` |
 
 Where an operation has a `_with(.., rules)` form, `op_traced` takes the rules
 too (pass the built-in rules for none); there is never an `op_with_traced`.

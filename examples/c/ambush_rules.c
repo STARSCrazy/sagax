@@ -31,7 +31,9 @@
  * Scene A: the intruder walks into the kill zone and the guards strike
  * together. Scene B: the intruder stops at the wall, steps to the gap and
  * sees guard 3; the ambush is dropped and the squad rushes. Guard 2, at
- * (12, 1) with the leader behind it, never sees the sign and stays.
+ * (12, 1) with the leader behind it, never sees the sign and stays. (A game
+ * that wants it to join anyway once it sees the others rush gives it an
+ * sx_contagion memory, as in examples/c/contagion.c.)
  *
  * The same scenes are in crates/sagax/examples/ambush_rules.rs; both print
  * the same lines. Build and run: sh examples/c/run.sh */

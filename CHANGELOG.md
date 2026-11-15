@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.14.0
+
+Indirect coordination. A character now joins in on what it *saw* its
+allies do, without any order: it sees two comrades charge and charges too,
+sees others flee and flees as well, and panic spreads from one figure to
+the next. The new `Contagion` memory reads only that character's own
+percepts, so every gate of perception (cone, light, walls, attention,
+recognition, disguise) applies unchanged and an ally it could not see never
+counts. Its inputs are plain Decider columns. Purely additive; the squad,
+the crew and the existing examples are unchanged (their output is
+byte-identical). **C API version 14.** `SX_API_VERSION` is 14, so a game
+built with the new header refuses an older library.
+
+### New
+
+- **`Contagion`** (in `sagax-perception`, re-exported as
+  `sagax::perception`): `DeedRule { bits, window }` (a deed is a set of
+  the game's cue bits; a sighting counts up to and including `t + window`),
+  `ContagionConfig` (`new(grid)`, `with_deed`, up to `MAX_DEEDS` = 8; the
+  grid gives the distances: Euclid on square, the hex distance of the
+  axial fine points on hex), and `Contagion`:
+  - `new(config, capacity)`: fixed slots, nothing allocates afterwards;
+  - `learn(percepts, now, is_ally)` / `learn_traced`: only recognised
+    sightings count (sense `Sight` or `Thermal`, stage 2, `placed`); an
+    entry keeps the cue bits of the latest sighting, a deed shown that the
+    entry did not show (or that had run out) is an onset; `Lost`,
+    `Forgotten`, heard, scanner and noticed-only percepts change nothing.
+    `is_ally(subject, disguised)` is the game's belief, so a disguise
+    fools the guards; a sighting no longer taken for an ally drops the
+    entry. When full, the ally seen longest ago makes room (ties: the
+    lower slot);
+  - `inputs(deed, observer, now)` / `inputs_traced` give
+    `DeedInputs { doing, seen, share, nearest, since }` (`share` per 256,
+    `nearest` `i32::MAX` and `since` `u32::MAX` for none;
+    `DeedInputs::NONE`, `columns`), filtered by the window on every read;
+  - `write_columns` / `write_columns_traced`: the inputs as
+    `DEED_COLUMNS` (5) `i32` columns of a Decider row;
+  - `nearest_point`, `forget`, `clear`, `len`, `capacity`;
+  - `ContagionTrace` (`Onset`, `Refresh`, `Expired`, `Replaced`,
+    `Dropped`, `Inputs`), also in `sagax::debug`.
+
+  The prelude gains `Contagion`, `ContagionConfig`, `DeedRule` and
+  `DeedInputs`.
+- **C:** the handle `sx_contagion` (`sx_contagion_new`, `_free`,
+  `_set_trace`, `_learn`, `_inputs`, `_write_columns`, `_nearest_point`,
+  `_forget`, `_clear`, `_len`) with `sx_deed_rule`, `sx_contagion_config`
+  (`grid` an `SX_GRID_*` code; every hex layout means hex),
+  `sx_deed_inputs`, the callback `sx_is_ally_fn` and `sx_contagion_trace`
+  with `SX_CONTAGION_TRACE_*`; `SX_MAX_DEEDS`, `SX_DEED_COLUMNS`. Layout
+  asserts for every struct. An unknown sense or event in the percepts or a
+  null `is_ally` is `SX_ERROR_ARGUMENT` and changes nothing.
+- `sagax-abi`: the contagion trace codes and the `contagion_trace` codec.
+- Examples: `contagion_scene` (Rust) and `examples/c/contagion.c`, a guard
+  post on square and hex: one guard sees the intruder and attacks, two
+  comrades who see him join, one behind a wall does not; a grenade makes
+  one guard flee, the guard who sees it follows, the one facing away keeps
+  firing. Both print the same lines and `run.sh` diffs them; the golden
+  test checks every onset against a clear sight line.
+
+### Changed
+
+- The guide's perception section has a new part "Joining in: contagion";
+  the building block table and the trace table list it.
+
 ## 0.13.0
 
 Perception. A character can now see and hear for itself: view cones,

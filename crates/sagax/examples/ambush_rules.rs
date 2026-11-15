@@ -31,7 +31,10 @@
 //! Scene A: the intruder walks into the kill zone and the guards strike
 //! together. Scene B: the intruder stops at the wall, steps to the gap and sees
 //! guard 3; the ambush is dropped and the squad rushes. Guard 2, at (12, 1)
-//! with the leader behind it, never sees the sign and stays.
+//! with the leader behind it, never sees the sign and stays. (A game that
+//! wants it to join anyway once it sees the others rush gives it a
+//! [`Contagion`](sagax::perception::Contagion) memory, as in the
+//! `contagion_scene` example.)
 //!
 //! The same scenes are in `examples/c/ambush_rules.c`; both print the same lines.
 
