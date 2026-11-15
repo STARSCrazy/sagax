@@ -3229,7 +3229,7 @@ fn squad_story(
         "{:?}",
         sq.observe_traced(0, enemy(10, 20, 0), sink)
     ));
-    assert!(sq.report(Message::enemy(3, enemy(11, 24, 1)), 2));
+    assert!(sq.report_traced(Message::enemy(3, enemy(11, 24, 1)), 2, sink));
     assert!(sq.report_danger(2, [5, 5, 0], Some([9, 9, 0]), 3));
     for now in 0..40 {
         if now == 12 {
@@ -3287,6 +3287,11 @@ fn squad_traced_calls_change_nothing() {
         assert!(has(
             &|e| matches!(e, SquadTrace::Report { msg } if msg.subject == 11)
         ));
+        assert!(has(&|e| matches!(
+            e,
+            SquadTrace::Inbox(crate::memory::MessageTrace::Queued { msg, arrive_at: 2 })
+                if msg.subject == 11
+        )));
         assert!(has(&|e| matches!(
             e,
             SquadTrace::Areas(crate::memory::AreasTrace::Added { .. })

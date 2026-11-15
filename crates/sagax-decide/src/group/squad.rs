@@ -8,8 +8,8 @@ use super::skill::{MAX_SKILL_ROWS, SkillTable};
 use super::spots::{Spot, SpotPick, SpotTrace, heading, wish_point};
 use super::tactic::{Abort, GoalKind, Place, Slot, Start, Tactic};
 use crate::memory::{
-    Area, Areas, AreasTrace, Evict, Fact, Inbox, Knowledge, KnowledgeTrace, Message, Metric, Pos,
-    ZeroCapacity, distance,
+    Area, Areas, AreasTrace, Evict, Fact, Inbox, Knowledge, KnowledgeTrace, Message, MessageTrace,
+    Metric, Pos, ZeroCapacity, distance,
 };
 use crate::{Candidate, DecideTrace, Decider, INPUT_SINCE_OPTION, choose, mix};
 use sagax_core::{MapSink, Sink};
@@ -247,8 +247,8 @@ pub(super) fn plain_dist(metric: Metric, a: Pos, b: Pos) -> i32 {
 /// The trace record of a [`Squad`]: what its `*_traced` calls decided, in
 /// the order they decided it ([`Squad::plan_traced`],
 /// [`Squad::check_traced`], [`Squad::observe_traced`],
-/// [`Squad::signal_traced`], [`Squad::reinstate_traced`],
-/// [`Squad::orders_due_traced`]). The rule slots are not traced themselves:
+/// [`Squad::report_traced`], [`Squad::signal_traced`],
+/// [`Squad::reinstate_traced`], [`Squad::orders_due_traced`]). The rule slots are not traced themselves:
 /// what a slot answered shows in the decision it fed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SquadTrace {
@@ -348,6 +348,10 @@ pub enum SquadTrace {
     /// The leader's danger areas changed (danger reports, report actions,
     /// expiry).
     Areas(AreasTrace),
+    /// The leader's inbox took a report ([`MessageTrace::Queued`]) or a
+    /// full one lost one ([`MessageTrace::Dropped`]: the report arriving
+    /// last, or the new one), from [`Squad::report_traced`].
+    Inbox(MessageTrace),
 }
 
 impl SquadTrace {
@@ -378,6 +382,24 @@ impl SquadTrace {
                     ..msg
                 },
             },
+            Self::Inbox(m) => {
+                let msg = |x: Message| Message { pos: f(x.pos), ..x };
+                Self::Inbox(match m {
+                    MessageTrace::Posted { msg: x, due_at } => MessageTrace::Posted {
+                        msg: msg(x),
+                        due_at,
+                    },
+                    MessageTrace::Refused { msg: x, why } => {
+                        MessageTrace::Refused { msg: msg(x), why }
+                    }
+                    MessageTrace::Queued { msg: x, arrive_at } => MessageTrace::Queued {
+                        msg: msg(x),
+                        arrive_at,
+                    },
+                    MessageTrace::Dropped { msg: x } => MessageTrace::Dropped { msg: msg(x) },
+                    MessageTrace::Delivered { msg: x } => MessageTrace::Delivered { msg: msg(x) },
+                })
+            }
             Self::Knowledge(k) => Self::Knowledge(match k {
                 KnowledgeTrace::Added(x) => KnowledgeTrace::Added(fact(x)),
                 KnowledgeTrace::Updated(x) => KnowledgeTrace::Updated(fact(x)),

@@ -64,9 +64,9 @@ use crate::codes::{
 use crate::codes::{
     CREW_TRACE_KEEPER, CREW_TRACE_SENT, CREW_TRACE_SQUAD, KEEPER_TRACE_CHECKED, SQUAD_TRACE_ABORT,
     SQUAD_TRACE_AREAS, SQUAD_TRACE_ASSIGNED, SQUAD_TRACE_DECIDE, SQUAD_TRACE_DELAY,
-    SQUAD_TRACE_KNOWLEDGE, SQUAD_TRACE_NO_PICK, SQUAD_TRACE_PICKED, SQUAD_TRACE_REPORT,
-    SQUAD_TRACE_SPOT_PICKED, SQUAD_TRACE_SPOT_RANKED, SQUAD_TRACE_TARGET, SQUAD_TRACE_THINKING,
-    SQUAD_TRACE_TRIGGER,
+    SQUAD_TRACE_INBOX, SQUAD_TRACE_KNOWLEDGE, SQUAD_TRACE_NO_PICK, SQUAD_TRACE_PICKED,
+    SQUAD_TRACE_REPORT, SQUAD_TRACE_SPOT_PICKED, SQUAD_TRACE_SPOT_RANKED, SQUAD_TRACE_TARGET,
+    SQUAD_TRACE_THINKING, SQUAD_TRACE_TRIGGER,
 };
 use crate::codes::{
     DECIDE_TRACE_CHOSEN, DECIDE_TRACE_FACTOR, DECIDE_TRACE_RANKED, DECIDE_TRACE_SCORED,
@@ -684,6 +684,8 @@ pub struct SquadTraceCode {
     pub knowledge: KnowledgeTraceCode,
     /// `AREAS`: the areas record.
     pub areas: AreasTraceCode,
+    /// `INBOX`: the inbox record.
+    pub inbox: MessageTraceCode,
 }
 
 /// The numbers of a squad trace record.
@@ -792,6 +794,10 @@ pub fn squad_trace(event: SquadTrace) -> SquadTraceCode {
         SquadTrace::Areas(a) => SquadTraceCode {
             areas: areas_trace(a),
             ..of(SQUAD_TRACE_AREAS)
+        },
+        SquadTrace::Inbox(m) => SquadTraceCode {
+            inbox: message_trace(m),
+            ..of(SQUAD_TRACE_INBOX)
         },
     }
 }

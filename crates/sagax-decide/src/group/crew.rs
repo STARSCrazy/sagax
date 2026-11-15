@@ -407,7 +407,9 @@ impl Crew {
         self.report_traced(now, msg, rules, &mut NoopSink)
     }
 
-    /// [`Crew::report_with`] with a trace: one [`CrewTrace::Sent`].
+    /// [`Crew::report_with`] with a trace: what the inbox did
+    /// ([`SquadTrace::Inbox`] in [`CrewTrace::Squad`], when the report is on
+    /// its way), then one [`CrewTrace::Sent`].
     #[must_use]
     pub fn report_traced<S: Sink<CrewTrace>>(
         &mut self,
@@ -793,7 +795,10 @@ impl Crew {
             }
             None => self.squad.report_arrives_at_with(id, now, rules),
         };
-        let queued = at.is_some_and(|at| self.squad.report(msg, at));
+        let queued = at.is_some_and(|at| {
+            let mut squad = MapSink::new(&mut *sink, wrap(self.hex));
+            self.squad.report_traced(msg, at, &mut squad)
+        });
         if sink.enabled() {
             sink.emit(CrewTrace::Sent {
                 msg: Message {

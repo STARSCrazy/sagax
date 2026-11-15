@@ -168,7 +168,24 @@ impl Squad {
     /// False when the inbox refused it (see [`Inbox::push`](crate::memory::Inbox::push)).
     #[must_use]
     pub fn report(&mut self, msg: Message, arrive_at: u32) -> bool {
-        self.inbox.push(msg, arrive_at)
+        self.report_traced(msg, arrive_at, &mut NoopSink)
+    }
+
+    /// [`Squad::report`] with a trace: what the inbox did, as
+    /// [`SquadTrace::Inbox`] (a full inbox sends the [`Dropped`] report
+    /// before the [`Queued`] new one, or only the new one's `Dropped`).
+    ///
+    /// [`Dropped`]: crate::memory::MessageTrace::Dropped
+    /// [`Queued`]: crate::memory::MessageTrace::Queued
+    #[must_use]
+    pub fn report_traced<S: Sink<SquadTrace>>(
+        &mut self,
+        msg: Message,
+        arrive_at: u32,
+        sink: &mut S,
+    ) -> bool {
+        self.inbox
+            .push_traced(msg, arrive_at, &mut MapSink::new(sink, SquadTrace::Inbox))
     }
 
     /// A danger report on its way to the leader: member `sender` was shot at

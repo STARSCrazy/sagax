@@ -1436,6 +1436,7 @@ int32_t sx_squad_skill_table(sx_squad *squad, sx_skill_table *out);
 sx_decider *sx_squad_decider(sx_squad *squad);
 
 /* What the squad's calls did (since version 12): sx_squad_observe,
+ * sx_squad_report (INBOX: what the leader's inbox did, as sx_inbox_push),
  * sx_squad_plan, sx_squad_check, sx_squad_orders_due, sx_squad_signal,
  * sx_squad_reinstate and their _with forms. A plan or check sends, in order:
  * the orders that go out (DELAY), the reports it reads (REPORT, then what
@@ -1464,6 +1465,8 @@ sx_decider *sx_squad_decider(sx_squad *squad);
                                         * delay ticks (has_delay 0: never) */
 #define SX_SQUAD_TRACE_KNOWLEDGE   13  /* knowledge: what it did to the leader's knowledge */
 #define SX_SQUAD_TRACE_AREAS       14  /* areas: what it did to the danger areas */
+#define SX_SQUAD_TRACE_INBOX       15  /* inbox: the leader's inbox took (QUEUED) or lost
+                                        * (DROPPED) a report */
 
 typedef struct sx_squad_trace {
 	uint32_t kind;              /* SX_SQUAD_TRACE_* */
@@ -1491,6 +1494,7 @@ typedef struct sx_squad_trace {
 	sx_decide_trace decide;     /* DECIDE */
 	sx_knowledge_trace knowledge; /* KNOWLEDGE */
 	sx_areas_trace areas;       /* AREAS */
+	sx_message_trace inbox;     /* INBOX */
 } sx_squad_trace;
 
 /* trace gets every record of the calls above on squad, with context; NULL
@@ -2171,8 +2175,8 @@ sx_keeper *sx_crew_keeper(sx_crew *crew, uint32_t id);
  * sx_crew_tick, sx_crew_reinstate, sx_crew_report and their _with forms.
  * The squad's records come wrapped in SQUAD (with hex_grid in offset
  * coordinates), each keeper check of a tick in KEEPER, each report the crew
- * sends (its own and the game's) in SENT. Fields that do not apply to kind
- * are 0. */
+ * sends (its own and the game's) in SENT, after the squad's INBOX records of
+ * it (none when it never arrives). Fields that do not apply to kind are 0. */
 #define SX_CREW_TRACE_SQUAD  1     /* squad: a record of the crew's squad */
 #define SX_CREW_TRACE_KEEPER 2     /* keeper: the check of member's keeper */
 #define SX_CREW_TRACE_SENT   3     /* member (msg.sender) sent msg; it arrives in delay
@@ -2844,7 +2848,7 @@ _Static_assert(offsetof(sx_slot, gather_dist) == 72, "sx_slot.gather_dist layout
 _Static_assert(sizeof(sx_skill_table) == 204, "sx_skill_table layout");
 _Static_assert(offsetof(sx_skill_table, hold_bonus) == 132, "sx_skill_table.hold_bonus layout");
 _Static_assert(offsetof(sx_skill_table, spot_rank_error) == 196, "sx_skill_table.spot_rank_error layout");
-_Static_assert(sizeof(sx_squad_trace) == 296, "sx_squad_trace layout");
+_Static_assert(sizeof(sx_squad_trace) == 344, "sx_squad_trace layout");
 _Static_assert(offsetof(sx_squad_trace, tactic) == 4, "sx_squad_trace.tactic layout");
 _Static_assert(offsetof(sx_squad_trace, target) == 8, "sx_squad_trace.target layout");
 _Static_assert(offsetof(sx_squad_trace, member) == 12, "sx_squad_trace.member layout");
@@ -2869,6 +2873,7 @@ _Static_assert(offsetof(sx_squad_trace, msg) == 116, "sx_squad_trace.msg layout"
 _Static_assert(offsetof(sx_squad_trace, decide) == 156, "sx_squad_trace.decide layout");
 _Static_assert(offsetof(sx_squad_trace, knowledge) == 192, "sx_squad_trace.knowledge layout");
 _Static_assert(offsetof(sx_squad_trace, areas) == 232, "sx_squad_trace.areas layout");
+_Static_assert(offsetof(sx_squad_trace, inbox) == 292, "sx_squad_trace.inbox layout");
 _Static_assert(sizeof(sx_keeper_trace) == 16, "sx_keeper_trace layout");
 _Static_assert(offsetof(sx_keeper_trace, waited) == 4, "sx_keeper_trace.waited layout");
 _Static_assert(offsetof(sx_keeper_trace, limit) == 8, "sx_keeper_trace.limit layout");
@@ -2903,7 +2908,7 @@ _Static_assert(sizeof(sx_crew_event) == 88, "sx_crew_event layout");
 _Static_assert(offsetof(sx_crew_event, start_at) == 12, "sx_crew_event.start_at layout");
 _Static_assert(offsetof(sx_crew_event, goal) == 16, "sx_crew_event.goal layout");
 _Static_assert(offsetof(sx_crew_event, has_start_at) == 84, "sx_crew_event.has_start_at layout");
-_Static_assert(sizeof(sx_crew_trace) == 368, "sx_crew_trace layout");
+_Static_assert(sizeof(sx_crew_trace) == 416, "sx_crew_trace layout");
 _Static_assert(offsetof(sx_crew_trace, member) == 4, "sx_crew_trace.member layout");
 _Static_assert(offsetof(sx_crew_trace, delay) == 8, "sx_crew_trace.delay layout");
 _Static_assert(offsetof(sx_crew_trace, has_delay) == 12, "sx_crew_trace.has_delay layout");

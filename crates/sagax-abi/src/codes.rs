@@ -147,6 +147,8 @@ pub const SQUAD_TRACE_DELAY: u32 = 12;
 pub const SQUAD_TRACE_KNOWLEDGE: u32 = 13;
 /// `SX_SQUAD_TRACE_AREAS`: the leader's danger areas changed.
 pub const SQUAD_TRACE_AREAS: u32 = 14;
+/// `SX_SQUAD_TRACE_INBOX`: the leader's inbox took or lost a report.
+pub const SQUAD_TRACE_INBOX: u32 = 15;
 
 /// `SX_KEEPER_TRACE_CHECKED`: a keeper was checked for giving up.
 pub const KEEPER_TRACE_CHECKED: u32 = 1;

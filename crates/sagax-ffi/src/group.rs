@@ -13,7 +13,8 @@ use std::ffi::c_void;
 use super::crew::SxCrew;
 use super::decide::{SxConsideration, SxDecideTrace, SxDecider};
 use super::memory::{
-    SxArea, SxAreas, SxAreasTrace, SxFact, SxKnowledge, SxKnowledgeTrace, SxMessage, pos3, put,
+    SxArea, SxAreas, SxAreasTrace, SxFact, SxKnowledge, SxKnowledgeTrace, SxMessage,
+    SxMessageTrace, pos3, put,
 };
 use super::rules::{CRules, SxSquadRules};
 use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, guarded, set_trace, slice_of, to_i32};
@@ -1286,6 +1287,8 @@ pub struct SxSquadTrace {
     pub knowledge: SxKnowledgeTrace,
     /// `AREAS`: the areas record.
     pub areas: SxAreasTrace,
+    /// `INBOX`: the inbox record.
+    pub inbox: SxMessageTrace,
 }
 
 impl SxSquadTrace {
@@ -1323,6 +1326,7 @@ impl SxSquadTrace {
                 index: c.areas.index,
                 area: c.areas.area,
             },
+            inbox: SxMessageTrace::of_code(c.inbox),
         }
     }
 
@@ -1561,8 +1565,12 @@ pub unsafe extern "C" fn sx_squad_report(
     msg: *const SxMessage,
     arrive_at: u32,
 ) -> i32 {
-    let s = &mut squad!(squad);
-    i32::from(s.report(*input!(msg), arrive_at))
+    let h = get!(squad);
+    let trace = h.trace;
+    let s = &mut *h.squad;
+    let msg = *input!(msg);
+    i32::from(traced!(trace, SxSquadTrace::of, |sink| s
+        .report_traced(msg, arrive_at, sink)))
 }
 
 /// `sx_squad_report_danger`: `centre` is 3 values; `shooter` is 3 values or

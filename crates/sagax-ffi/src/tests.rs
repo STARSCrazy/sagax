@@ -1352,6 +1352,7 @@ mod squad {
             ("SX_SQUAD_TRACE_DELAY", SQUAD_TRACE_DELAY),
             ("SX_SQUAD_TRACE_KNOWLEDGE", SQUAD_TRACE_KNOWLEDGE),
             ("SX_SQUAD_TRACE_AREAS", SQUAD_TRACE_AREAS),
+            ("SX_SQUAD_TRACE_INBOX", SQUAD_TRACE_INBOX),
             ("SX_KEEPER_TRACE_CHECKED", KEEPER_TRACE_CHECKED),
             ("SX_CREW_TRACE_SQUAD", CREW_TRACE_SQUAD),
             ("SX_CREW_TRACE_KEEPER", CREW_TRACE_KEEPER),
@@ -2492,6 +2493,21 @@ mod squad {
             let learned = log.iter().filter(|e| e.kind == SQUAD_TRACE_KNOWLEDGE);
             assert_eq!(learned.count(), 2);
             log.clear();
+            // A report: what the inbox did.
+            let report = SxMessage {
+                kind: 99,
+                sender: 2,
+                ..SxMessage::default()
+            };
+            assert_eq!(sx_squad_report(sq, &report, 1), 1);
+            assert_eq!(log.len(), 1);
+            assert_eq!(log[0].kind, SQUAD_TRACE_INBOX);
+            assert_eq!(
+                (log[0].inbox.kind, log[0].inbox.msg, log[0].inbox.at),
+                (sagax_abi::codes::MESSAGE_TRACE_QUEUED, report, 1)
+            );
+            assert_eq!((log[0].member, log[0].msg), (0, SxMessage::default()));
+            log.clear();
             let mut id = 0;
             assert_eq!(sx_squad_plan(sq, 1, null(), 0, null(), 0, 0, &mut id), 1);
             // Every pair of tactic and target is scored.
@@ -3277,7 +3293,8 @@ mod conventions {
                 msg,
                 decide,
                 knowledge,
-                areas
+                areas,
+                inbox
             ),
             layout!("sx_keeper_trace", SxKeeperTrace, waited, limit, broken),
             layout!(
@@ -4097,23 +4114,30 @@ mod crew {
             assert_eq!(keeper.len(), 1);
             assert_eq!(keeper[0].kind, KEEPER_TRACE_CHECKED);
             assert_eq!(traces.len(), n);
-            // A report through the crew: one SENT record.
+            // A report through the crew: what the squad's inbox did, then
+            // one SENT record; the squad's own trace sees nothing.
             let msg = Message::enemy(MEMBERS[2].0, sighting(13, 31, 0));
             assert_eq!(sx_crew_report(c, 82, &msg), 1);
             let sent = &traces[n..];
-            assert_eq!(sent.len(), 1);
+            assert_eq!(sent.len(), 2);
+            assert_eq!(
+                (sent[0].kind, sent[0].squad.kind, sent[0].squad.inbox.kind),
+                (CREW_TRACE_SQUAD, SQUAD_TRACE_INBOX, MESSAGE_TRACE_QUEUED)
+            );
+            assert_eq!(sent[0].squad.inbox.msg, sent[1].msg);
             assert_eq!(
                 (
-                    sent[0].kind,
-                    sent[0].member,
-                    sent[0].has_delay,
-                    sent[0].queued
+                    sent[1].kind,
+                    sent[1].member,
+                    sent[1].has_delay,
+                    sent[1].queued
                 ),
                 (CREW_TRACE_SENT, MEMBERS[2].0, 1, 1)
             );
+            assert_eq!(squad.len(), 1);
             assert_eq!(sx_crew_set_trace(c, None, null_mut()), 0);
             assert_eq!(sx_crew_report(c, 83, &msg), 1);
-            assert_eq!(traces.len(), n + 1, "off is off");
+            assert_eq!(traces.len(), n + 2, "off is off");
             assert_eq!(
                 sx_crew_set_trace(null_mut(), None, null_mut()),
                 ERROR_ARGUMENT

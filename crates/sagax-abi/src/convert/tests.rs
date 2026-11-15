@@ -982,6 +982,17 @@ fn group_trace_codes() {
         squad_trace(SquadTrace::Areas(AreasTrace::Expired(Area::default()))).kind,
         SQUAD_TRACE_AREAS
     );
+    let queued = MessageTrace::Queued { msg, arrive_at: 9 };
+    assert_eq!(
+        squad_trace(SquadTrace::Inbox(queued)),
+        SquadTraceCode {
+            inbox: message_trace(queued),
+            ..SquadTraceCode {
+                kind: SQUAD_TRACE_INBOX,
+                ..SquadTraceCode::default()
+            }
+        }
+    );
 
     let checked = KeeperTrace::Checked {
         waited: 3,

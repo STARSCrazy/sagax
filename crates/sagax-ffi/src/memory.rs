@@ -614,15 +614,18 @@ pub struct SxMessageTrace {
 }
 
 impl SxMessageTrace {
-    /// The record of a message trace.
-    pub fn of(event: MessageTrace) -> Self {
-        let c = convert::message_trace(event);
+    pub(crate) fn of_code(c: convert::MessageTraceCode) -> Self {
         Self {
             kind: c.kind,
             msg: c.msg,
             at: c.at,
             refused: c.refused,
         }
+    }
+
+    /// The record of a message trace.
+    pub fn of(event: MessageTrace) -> Self {
+        Self::of_code(convert::message_trace(event))
     }
 }
 
