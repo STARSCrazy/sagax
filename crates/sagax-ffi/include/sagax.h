@@ -1489,7 +1489,7 @@ int32_t sx_squad_active_plan(sx_squad *squad, sx_plan *out, sx_order *goals, uin
  * no rules). The squad never keeps the table or its pointers. Each callback
  * pointer may be NULL: then that slot does what the squad does without rules
  * (a zeroed sx_squad_rules is all built-in). A callback must not call any
- * function on the same squad or crew; it reads the squad through the view
+ * function on the same squad or crew or on its decider (sx_squad_decider); it reads the squad through the view
  * (sx_view_*), valid only inside that callback. Costs and scores are
  * int64_t, lower is better; ties go to the lower member or spot index. The
  * built-in value a context carries (built_in) saturates to int64_t.
@@ -2276,7 +2276,8 @@ int32_t sx_mission_tick(sx_mission *mission, uint32_t now, const int32_t *pos,
  * (sx_mission_tick_with; rules NULL is the plain tick). Each callback may be
  * NULL: that slot does what the mission does without rules (a zeroed
  * sx_mission_rules is all built-in). user is passed to every callback. A
- * callback must not call any function on the same mission. With a hex grid
+ * callback must not call any function on the same mission or on its decider
+ * (sx_mission_decider). With a hex grid
  * every position in a context is in offset coordinates.
  *   fail     1: the game's condition id (SX_FAIL_CUSTOM) holds now and breaks
  *            the step (has_step) or plan. Built-in: never.
@@ -2345,11 +2346,11 @@ int32_t sx_mission_end_detour(sx_mission *mission);
 int32_t sx_mission_finish_step(sx_mission *mission);
 /* 1 and the index of the running step to *index while a plan runs, 0 during
  * a detour, the walk back or without a plan. */
-int32_t sx_mission_step_index(sx_mission *mission, uint32_t *index);
+int32_t sx_mission_step_index(const sx_mission *mission, uint32_t *index);
 /* 1 while a detour runs, else 0. */
-int32_t sx_mission_in_detour(sx_mission *mission);
+int32_t sx_mission_in_detour(const sx_mission *mission);
 /* 1 while the character walks back to its anchor after a detour, else 0. */
-int32_t sx_mission_returning(sx_mission *mission);
+int32_t sx_mission_returning(const sx_mission *mission);
 
 /* The decider that scores the candidate plans of a replan, lent until
  * sx_mission_free (sx_decider_free does nothing to it; one handle per

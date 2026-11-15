@@ -148,11 +148,12 @@ pub extern "C" fn sx_decider_new() -> *mut SxDecider {
     })
 }
 
-/// `sx_decider_free`: does nothing for a decider lent by `sx_squad_decider`.
+/// `sx_decider_free`: does nothing for a decider lent by `sx_squad_decider`
+/// or `sx_mission_decider`.
 ///
 /// # Safety
 /// `decider` is null, from [`sx_decider_new`] and not used again, or lent
-/// by `sx_squad_decider`.
+/// by `sx_squad_decider` or `sx_mission_decider`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_decider_free(decider: *mut SxDecider) {
     // SAFETY: null or valid (see above).

@@ -4673,6 +4673,44 @@ mod mission {
             assert_eq!(sx_decider_add_consideration(d, 8, &cons), 0, "still lent");
             assert!(sx_mission_decider(null_mut()).is_null());
             sx_mission_free(c);
+
+            // The lent handle reaches the mission's own decider: without a
+            // plan the first tick replans; the default plan (option 8)
+            // beats a playbook plan of lower preference, unless a
+            // consideration through the handle rules the default out.
+            let never = SxConsideration {
+                input: IN_FEASIBLE as u32,
+                curve: 4, // SX_CURVE_STEP: 1 if input >= 2, never
+                min: 2,
+                max: 2,
+            };
+            let east = [c_go(EAST)];
+            let mut winners = Vec::new();
+            for veto in [false, true] {
+                let c = sx_mission_new(&c_config(), &guard_motive());
+                let k = sx_knowledge_new(4, 0);
+                let low = ONE / 4;
+                assert_eq!(
+                    sx_mission_add_playbook(c, east.as_ptr(), 1, 0, null(), 0, low, 0),
+                    0
+                );
+                if veto {
+                    let d = sx_mission_decider(c);
+                    assert_eq!(sx_decider_add_consideration(d, 8, &never), 0);
+                }
+                let mut out = SxMissionOut::default();
+                let pos = [3, 2, 0];
+                assert!(sx_mission_tick(c, 0, pos.as_ptr(), k, 0, &mut out) > 0);
+                let replanned: Vec<u32> = out.events[..out.event_count as usize]
+                    .iter()
+                    .filter(|e| e.kind == MISSION_EVENT_REPLANNED)
+                    .map(|e| e.a)
+                    .collect();
+                winners.push(replanned);
+                sx_mission_free(c);
+                sx_knowledge_free(k);
+            }
+            assert_eq!(winners, [vec![8], vec![0]]);
         }
     }
 

@@ -3,6 +3,7 @@
 
 use std::ffi::c_void;
 
+use sagax_abi::codes::GRID_SQUARE;
 use sagax_abi::convert::{self, FailCode};
 use sagax_decide::mission::{
     Fail, FailCtx, Leash, Leeway, MAX_EVENTS, MAX_FAILS, Mission, MissionConfig, MissionRules,
@@ -283,7 +284,7 @@ impl SxMissionConfig {
             metric: convert::metric(self.metric)?,
             search: self.search.pattern()?,
             hex_layout: match self.grid {
-                0 => None,
+                GRID_SQUARE => None,
                 grid => Some(convert::hex_layout(grid)?),
             },
             extra_columns: self.extra_columns as usize,
@@ -530,6 +531,16 @@ macro_rules! mission {
         // SAFETY: the caller passes null or a valid mission (sagax.h).
         match unsafe { $m.as_mut() } {
             Some(m) => &mut m.mission,
+            None => return ERROR_ARGUMENT,
+        }
+    };
+}
+
+macro_rules! mission_ref {
+    ($m:expr) => {
+        // SAFETY: the caller passes null or a valid mission (sagax.h).
+        match unsafe { $m.as_ref() } {
+            Some(m) => &m.mission,
             None => return ERROR_ARGUMENT,
         }
     };
@@ -887,8 +898,8 @@ pub unsafe extern "C" fn sx_mission_finish_step(mission: *mut SxMission) -> i32 
 /// # Safety
 /// `mission` is null or valid; `index` is null or writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_mission_step_index(mission: *mut SxMission, index: *mut u32) -> i32 {
-    let m = mission!(mission);
+pub unsafe extern "C" fn sx_mission_step_index(mission: *const SxMission, index: *mut u32) -> i32 {
+    let m = mission_ref!(mission);
     if index.is_null() {
         return ERROR_ARGUMENT;
     }
@@ -907,8 +918,8 @@ pub unsafe extern "C" fn sx_mission_step_index(mission: *mut SxMission, index: *
 /// # Safety
 /// `mission` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_mission_in_detour(mission: *mut SxMission) -> i32 {
-    i32::from(mission!(mission).in_detour())
+pub unsafe extern "C" fn sx_mission_in_detour(mission: *const SxMission) -> i32 {
+    i32::from(mission_ref!(mission).in_detour())
 }
 
 /// `sx_mission_returning`.
@@ -916,8 +927,8 @@ pub unsafe extern "C" fn sx_mission_in_detour(mission: *mut SxMission) -> i32 {
 /// # Safety
 /// `mission` is null or valid.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sx_mission_returning(mission: *mut SxMission) -> i32 {
-    i32::from(mission!(mission).returning())
+pub unsafe extern "C" fn sx_mission_returning(mission: *const SxMission) -> i32 {
+    i32::from(mission_ref!(mission).returning())
 }
 
 /// `sx_mission_decider`: the mission's decider, lent until
