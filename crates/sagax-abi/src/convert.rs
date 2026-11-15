@@ -65,6 +65,10 @@ use crate::codes::{
     START_ON_SIGNAL, UNREACHABLE,
 };
 use crate::codes::{
+    CONTAGION_TRACE_DROPPED, CONTAGION_TRACE_EXPIRED, CONTAGION_TRACE_INPUTS,
+    CONTAGION_TRACE_ONSET, CONTAGION_TRACE_REFRESH, CONTAGION_TRACE_REPLACED,
+};
+use crate::codes::{
     CREW_TRACE_KEEPER, CREW_TRACE_SENT, CREW_TRACE_SQUAD, KEEPER_TRACE_CHECKED, SQUAD_TRACE_ABORT,
     SQUAD_TRACE_AREAS, SQUAD_TRACE_ASSIGNED, SQUAD_TRACE_DECIDE, SQUAD_TRACE_DELAY,
     SQUAD_TRACE_INBOX, SQUAD_TRACE_KNOWLEDGE, SQUAD_TRACE_NO_PICK, SQUAD_TRACE_PICKED,
@@ -2251,6 +2255,65 @@ pub fn perception_trace(event: sagax_perception::PerceptionTrace) -> PerceptionT
             cost,
             range,
             ..of(PERCEPTION_TRACE_UNHEARD, stimulus)
+        },
+    }
+}
+
+// ---- contagion ----------------------------------------------------------------
+
+/// The numbers of a contagion trace record (`sx_contagion_trace`). Fields
+/// that do not apply to `kind` are 0; `inputs` is
+/// [`DeedInputs::NONE`](sagax_perception::DeedInputs::NONE) except for
+/// `INPUTS`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContagionTraceCode {
+    /// `SX_CONTAGION_TRACE_*`.
+    pub kind: u32,
+    /// The ally (`REPLACED`: the one that came).
+    pub ally: u32,
+    /// `REPLACED`: the ally that went.
+    pub old: u32,
+    /// `REFRESH`: the cue bits seen.
+    pub bits: u32,
+    /// `ONSET`, `EXPIRED`, `INPUTS`: the deed index.
+    pub deed: u32,
+    /// `INPUTS`: what was read.
+    pub inputs: sagax_perception::DeedInputs,
+}
+
+/// The numbers of a contagion trace record.
+pub fn contagion_trace(event: sagax_perception::ContagionTrace) -> ContagionTraceCode {
+    use sagax_perception::ContagionTrace as T;
+    let of = |kind, ally| ContagionTraceCode {
+        kind,
+        ally,
+        old: 0,
+        bits: 0,
+        deed: 0,
+        inputs: sagax_perception::DeedInputs::NONE,
+    };
+    match event {
+        T::Onset { ally, deed } => ContagionTraceCode {
+            deed: u32::from(deed),
+            ..of(CONTAGION_TRACE_ONSET, ally)
+        },
+        T::Refresh { ally, bits } => ContagionTraceCode {
+            bits,
+            ..of(CONTAGION_TRACE_REFRESH, ally)
+        },
+        T::Expired { ally, deed } => ContagionTraceCode {
+            deed: u32::from(deed),
+            ..of(CONTAGION_TRACE_EXPIRED, ally)
+        },
+        T::Replaced { old, ally } => ContagionTraceCode {
+            old,
+            ..of(CONTAGION_TRACE_REPLACED, ally)
+        },
+        T::Dropped { ally } => of(CONTAGION_TRACE_DROPPED, ally),
+        T::Inputs { deed, inputs } => ContagionTraceCode {
+            deed: u32::from(deed),
+            inputs,
+            ..of(CONTAGION_TRACE_INPUTS, 0)
         },
     }
 }

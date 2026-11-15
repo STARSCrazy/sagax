@@ -1127,7 +1127,7 @@ mod squad {
         assert_eq!(size_of::<SxOrder>(), 72);
         assert_eq!(size_of::<SxPlan>(), 28);
         assert_eq!(size_of::<SxSkillTable>(), 204);
-        assert_eq!(define("SX_API_VERSION"), 13);
+        assert_eq!(define("SX_API_VERSION"), 14);
         assert_eq!(define("SX_ERROR_PLAN"), i64::from(ERROR_PLAN));
         assert_eq!(define("SX_IDLE"), i64::from(IDLE));
         let core = [
@@ -3108,9 +3108,10 @@ mod conventions {
     use std::ptr::null_mut;
 
     const HEADER: &str = include_str!("../include/sagax.h");
-    const SOURCES: [&str; 10] = [
+    const SOURCES: [&str; 11] = [
         include_str!("lib.rs"),
         include_str!("perception.rs"),
+        include_str!("contagion.rs"),
         include_str!("grid.rs"),
         include_str!("memory.rs"),
         include_str!("mission.rs"),
@@ -3183,6 +3184,7 @@ mod conventions {
     type Layout = (&'static str, usize, Vec<(&'static str, usize)>);
 
     fn rust_layouts() -> Vec<Layout> {
+        use crate::contagion::{SxContagionConfig, SxContagionTrace, SxDeedInputs, SxDeedRule};
         use crate::crew::{SxCrewConfig, SxCrewEvent, SxCrewTrace, SxMemberInputs};
         use crate::decide::{SxCandidate, SxChoice, SxConsideration, SxDecideTrace};
         use crate::group::{
@@ -3218,6 +3220,18 @@ mod conventions {
             };
         }
         vec![
+            layout!("sx_deed_rule", SxDeedRule, window),
+            layout!("sx_contagion_config", SxContagionConfig, count, deeds),
+            layout!("sx_deed_inputs", SxDeedInputs, seen, share, nearest, since),
+            layout!(
+                "sx_contagion_trace",
+                SxContagionTrace,
+                ally,
+                old,
+                bits,
+                deed,
+                inputs
+            ),
             layout!("sx_point", Point, level),
             layout!("sx_rules", SxRules, cost_straight, smooth_max_extra),
             layout!("sx_result", SxResult, node_limit_hit),
@@ -6889,7 +6903,7 @@ mod perception {
 
     #[test]
     fn perception_numbers_match_header() {
-        assert_eq!(define("SX_API_VERSION"), 13);
+        assert_eq!(define("SX_API_VERSION"), 14);
         let numbers = [
             ("SX_MAX_CHANNELS", rs::MAX_CHANNELS as i64),
             ("SX_MAX_CUES", rs::MAX_CUES as i64),
@@ -6950,6 +6964,414 @@ mod perception {
             (
                 "SX_PERCEPTION_TRACE_UNHEARD",
                 i64::from(PERCEPTION_TRACE_UNHEARD),
+            ),
+        ];
+        for (name, value) in numbers {
+            assert_eq!(define(name), value, "{name}");
+        }
+    }
+}
+
+mod contagion {
+    //! C API 14: contagion through C equals contagion in Rust, and neither
+    //! allocates after `new`.
+
+    use super::squad::define;
+    use crate::ERROR_ARGUMENT;
+    use crate::contagion::*;
+    use crate::perception::SxPercept;
+    use sagax_abi::codes::*;
+    use sagax_core::{CallbackSink, Cell, HexLayout, Pos};
+    use sagax_facade::perception as rs;
+    use sagax_facade::perception::{
+        Attention, Awareness, Budget, Contagion, ContagionConfig, ContagionTrace, DeedInputs,
+        DeedRule, Eye, Grid, Percept, SenseProfile, Stats, Target, World,
+    };
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::ffi::c_void;
+    use std::ptr::{null, null_mut};
+
+    /// Counts the allocations of the current thread (tests run in
+    /// parallel, so a global count would mix them).
+    struct Counting;
+
+    thread_local! {
+        static ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn count() {
+        let _ = ALLOCATIONS.try_with(|c| c.set(c.get() + 1));
+    }
+
+    // SAFETY: forwards to `System`; the counter does not allocate.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            count();
+            // SAFETY: the caller's contract, passed on.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: the caller's contract, passed on.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            count();
+            // SAFETY: the caller's contract, passed on.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Counting = Counting;
+
+    /// Allocations of this thread while `f` runs.
+    fn allocations(f: impl FnOnce()) -> usize {
+        let before = ALLOCATIONS.with(|c| c.get());
+        f();
+        ALLOCATIONS.with(|c| c.get()) - before
+    }
+
+    const CELL: i32 = 256;
+    const ATTACK: u32 = 1;
+    const FLEE: u32 = 2;
+
+    fn rs_config(grid: Grid) -> ContagionConfig {
+        ContagionConfig::new(grid)
+            .with_deed(DeedRule {
+                bits: ATTACK,
+                window: 4,
+            })
+            .with_deed(DeedRule {
+                bits: FLEE,
+                window: 9,
+            })
+    }
+
+    fn c_config(grid: u32) -> SxContagionConfig {
+        let r = rs_config(Grid::Square);
+        SxContagionConfig {
+            grid,
+            count: u32::from(r.count),
+            deeds: r.deeds,
+        }
+    }
+
+    /// A scene seen by one observer at the origin facing +x: per tick the
+    /// percepts of a real `look` at five allies that come and go, attack
+    /// and flee (ids 10 to 14, the odd ones disguised).
+    fn scene(world: &World) -> Vec<(u32, Vec<Percept>)> {
+        let profile = SenseProfile {
+            base_gain: 400,
+            ..SenseProfile::guard(CELL)
+        };
+        let at = |q: i32, r: i32| rs::cell_centre(world, Cell::new(q, r, 0));
+        let eye = Eye {
+            id: 1,
+            point: at(0, 0),
+            facing: 0,
+            profile: &profile,
+            stats: Stats::NORMAL,
+            disguise: Default::default(),
+        };
+        let mut aware = [Awareness::default(); 5];
+        let mut attention = Attention::default();
+        let mut ticks = Vec::new();
+        for now in 1..=40u32 {
+            let targets: Vec<Target> = (0..5u32)
+                .map(|k| {
+                    let phase = (now / (3 + k)) % 4;
+                    let cues = [0, ATTACK, FLEE, ATTACK | FLEE][phase as usize];
+                    // Mostly in view, now and then behind the observer.
+                    let x = if (now + k) % 7 < 5 { 2 + k as i32 } else { -3 };
+                    Target {
+                        id: 10 + k,
+                        point: at(x, k as i32 - 2),
+                        size: 256,
+                        conspicuity: 256,
+                        cues,
+                        disguise: (k % 2) as u8 * 50,
+                        ..Target::default()
+                    }
+                })
+                .collect();
+            let mut out = Vec::new();
+            let budget = Budget {
+                checks: 3,
+                keep: 2,
+                instant_cap: 0,
+            };
+            rs::look(
+                world,
+                &mut rs::OpenAir,
+                now,
+                &eye,
+                &targets,
+                &mut aware,
+                &mut attention,
+                budget,
+                &mut out,
+            );
+            ticks.push((now, out));
+        }
+        ticks
+    }
+
+    /// The belief of the game: everyone but 13, and 11 only while disguised.
+    fn belief(subject: u32, disguised: bool) -> bool {
+        subject != 13 && (subject != 11 || disguised)
+    }
+
+    unsafe extern "C" fn c_belief(_: *mut c_void, subject: u32, disguised: i32) -> i32 {
+        i32::from(belief(subject, disguised != 0))
+    }
+
+    unsafe extern "C" fn collect(ctx: *mut c_void, record: *const SxContagionTrace) {
+        // SAFETY: the test passes a `Vec` and a valid record.
+        unsafe { (*(ctx as *mut Vec<SxContagionTrace>)).push(*record) };
+    }
+
+    /// The scene through Rust and through C give the same inputs, columns,
+    /// nearest points and trace, every tick and for every deed.
+    fn same_in_c(grid: u32, world: World, layout: Option<HexLayout>) {
+        let ticks = scene(&world);
+        let mut rs_memory = Contagion::new(rs_config(world.grid), 3);
+        let c = unsafe { sx_contagion_new(&c_config(grid), 3) };
+        assert!(!c.is_null());
+        let mut c_records: Vec<SxContagionTrace> = Vec::new();
+        let ctx = (&raw mut c_records).cast::<c_void>();
+        assert_eq!(unsafe { sx_contagion_set_trace(c, Some(collect), ctx) }, 0);
+        let mut rs_records = Vec::new();
+        let observer: Pos = [0, 0, 0];
+        let mut counted = [0u32; 2];
+        for (now, out) in &ticks {
+            let now = *now;
+            let mut sink =
+                CallbackSink(|e: ContagionTrace| rs_records.push(SxContagionTrace::of(e)));
+            rs_memory.learn_traced(out, now, belief, &mut sink);
+            let pc: Vec<SxPercept> = out.iter().map(|p| SxPercept::of(p, layout)).collect();
+            let r = unsafe {
+                sx_contagion_learn(
+                    c,
+                    now,
+                    pc.as_ptr(),
+                    pc.len() as u32,
+                    Some(c_belief),
+                    null_mut(),
+                )
+            };
+            assert_eq!(r, 0);
+            for deed in 0..3u32 {
+                let want = rs_memory.inputs_traced(deed as usize, observer, now, &mut sink);
+                let mut got = DeedInputs::NONE;
+                let r = unsafe { sx_contagion_inputs(c, deed, observer.as_ptr(), now, &mut got) };
+                assert_eq!((r, got), (0, want), "tick {now} deed {deed}");
+                let mut cols = [0; 5];
+                rs_memory.write_columns_traced(deed as usize, observer, now, &mut cols, &mut sink);
+                let mut c_cols = [7; 5];
+                let r = unsafe {
+                    sx_contagion_write_columns(c, deed, observer.as_ptr(), now, c_cols.as_mut_ptr())
+                };
+                assert_eq!((r, c_cols), (0, cols));
+                let mut point = [-9; 3];
+                let r = unsafe {
+                    sx_contagion_nearest_point(c, deed, observer.as_ptr(), now, point.as_mut_ptr())
+                };
+                match rs_memory.nearest_point(deed as usize, observer, now) {
+                    Some(p) => assert_eq!((r, point), (1, p)),
+                    None => assert_eq!((r, point), (0, [-9; 3])),
+                }
+                if deed < 2 {
+                    counted[deed as usize] += want.doing;
+                }
+            }
+            assert_eq!(
+                unsafe { sx_contagion_len(c) },
+                rs_memory.len() as i32,
+                "tick {now}"
+            );
+        }
+        assert!(
+            counted[0] > 0 && counted[1] > 0,
+            "the scene shows both deeds"
+        );
+        // Rust learns the percepts of a tick at once, C one at a time: the
+        // same records.
+        assert_eq!(c_records, rs_records);
+        let kinds: std::collections::BTreeSet<u32> = c_records.iter().map(|r| r.kind).collect();
+        for kind in [
+            CONTAGION_TRACE_ONSET,
+            CONTAGION_TRACE_REFRESH,
+            CONTAGION_TRACE_EXPIRED,
+            CONTAGION_TRACE_REPLACED,
+            CONTAGION_TRACE_DROPPED,
+            CONTAGION_TRACE_INPUTS,
+        ] {
+            assert!(kinds.contains(&kind), "kind {kind} never seen");
+        }
+        unsafe { sx_contagion_free(c) };
+    }
+
+    #[test]
+    fn square_through_c_equals_rust() {
+        same_in_c(GRID_SQUARE, World::square(CELL), None);
+    }
+
+    #[test]
+    fn hex_through_c_equals_rust() {
+        // Percept cells become offset at the C edge; the fine points stay
+        // axial and the memory never needs a cell.
+        same_in_c(GRID_HEX_ODD_R, World::hex(CELL), Some(HexLayout::OddR));
+    }
+
+    #[test]
+    fn no_allocation_after_new() {
+        let ticks = scene(&World::square(CELL));
+        let mut memory = Contagion::new(rs_config(Grid::Square), 3);
+        let c = unsafe { sx_contagion_new(&c_config(GRID_SQUARE), 3) };
+        let pcs: Vec<Vec<SxPercept>> = ticks
+            .iter()
+            .map(|(_, out)| out.iter().map(|p| SxPercept::of(p, None)).collect())
+            .collect();
+        let o = [0i32; 3];
+        let n = allocations(|| {
+            for ((now, out), pc) in ticks.iter().zip(&pcs) {
+                memory.learn(out, *now, belief);
+                let mut row = [0; 10];
+                memory.write_columns(0, o, *now, &mut row[..5]);
+                memory.write_columns(1, o, *now, &mut row[5..]);
+                let _ = memory.nearest_point(1, o, *now);
+                let mut got = DeedInputs::NONE;
+                let n = pc.len() as u32;
+                unsafe {
+                    sx_contagion_learn(c, *now, pc.as_ptr(), n, Some(c_belief), null_mut());
+                    sx_contagion_inputs(c, 1, o.as_ptr(), *now, &mut got);
+                    sx_contagion_write_columns(c, 0, o.as_ptr(), *now, row.as_mut_ptr());
+                }
+            }
+            memory.forget(10);
+            memory.clear();
+        });
+        assert_eq!(n, 0);
+        unsafe { sx_contagion_free(c) };
+    }
+
+    #[test]
+    fn errors() {
+        unsafe {
+            assert!(sx_contagion_new(null(), 4).is_null());
+            let too_many = SxContagionConfig {
+                count: 9,
+                ..c_config(GRID_SQUARE)
+            };
+            assert!(sx_contagion_new(&too_many, 4).is_null());
+            let odd_grid = SxContagionConfig {
+                grid: 99,
+                ..c_config(GRID_SQUARE)
+            };
+            assert!(sx_contagion_new(&odd_grid, 4).is_null());
+            let c = sx_contagion_new(&c_config(GRID_HEX_EVEN_Q), 0);
+            assert!(!c.is_null());
+            let o = [0i32; 3];
+            let mut inputs = DeedInputs::NONE;
+            let mut point = [0; 3];
+            let mut row = [0; 5];
+            let ally = Some(c_belief as IsAllyFn);
+            assert_eq!(
+                sx_contagion_learn(null_mut(), 1, null(), 0, ally, null_mut()),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_contagion_learn(c, 1, null(), 0, None, null_mut()),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_contagion_learn(c, 1, null(), 1, ally, null_mut()),
+                ERROR_ARGUMENT
+            );
+            let bad = SxPercept {
+                sense: 99,
+                ..SxPercept::default()
+            };
+            assert_eq!(
+                sx_contagion_learn(c, 1, &bad, 1, ally, null_mut()),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(sx_contagion_learn(c, 1, null(), 0, ally, null_mut()), 0);
+            assert_eq!(
+                sx_contagion_inputs(null(), 0, o.as_ptr(), 1, &mut inputs),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_contagion_inputs(c, 0, null(), 1, &mut inputs),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_contagion_inputs(c, 0, o.as_ptr(), 1, null_mut()),
+                ERROR_ARGUMENT
+            );
+            // A deed out of range reads empty.
+            assert_eq!(sx_contagion_inputs(c, 77, o.as_ptr(), 1, &mut inputs), 0);
+            assert_eq!(inputs, DeedInputs::NONE);
+            assert_eq!(
+                sx_contagion_write_columns(c, 0, o.as_ptr(), 1, null_mut()),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_contagion_write_columns(c, 0, o.as_ptr(), 1, row.as_mut_ptr()),
+                0
+            );
+            assert_eq!(row, [0, 0, 0, i32::MAX, i32::MAX]);
+            assert_eq!(
+                sx_contagion_nearest_point(c, 0, o.as_ptr(), 1, null_mut()),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_contagion_nearest_point(c, 0, o.as_ptr(), 1, point.as_mut_ptr()),
+                0
+            );
+            assert_eq!(sx_contagion_forget(null_mut(), 1), ERROR_ARGUMENT);
+            assert_eq!(sx_contagion_clear(null_mut()), ERROR_ARGUMENT);
+            assert_eq!(sx_contagion_len(null()), ERROR_ARGUMENT);
+            assert_eq!(
+                sx_contagion_set_trace(null_mut(), None, null_mut()),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(sx_contagion_forget(c, 1), 0);
+            assert_eq!(sx_contagion_clear(c), 0);
+            assert_eq!(sx_contagion_len(c), 0);
+            sx_contagion_free(c);
+            sx_contagion_free(null_mut());
+        }
+    }
+
+    #[test]
+    fn contagion_numbers_match_header() {
+        assert_eq!(define("SX_API_VERSION"), 14);
+        let numbers = [
+            ("SX_MAX_DEEDS", rs::MAX_DEEDS as i64),
+            ("SX_DEED_COLUMNS", rs::DEED_COLUMNS as i64),
+            ("SX_CONTAGION_TRACE_ONSET", i64::from(CONTAGION_TRACE_ONSET)),
+            (
+                "SX_CONTAGION_TRACE_REFRESH",
+                i64::from(CONTAGION_TRACE_REFRESH),
+            ),
+            (
+                "SX_CONTAGION_TRACE_EXPIRED",
+                i64::from(CONTAGION_TRACE_EXPIRED),
+            ),
+            (
+                "SX_CONTAGION_TRACE_REPLACED",
+                i64::from(CONTAGION_TRACE_REPLACED),
+            ),
+            (
+                "SX_CONTAGION_TRACE_DROPPED",
+                i64::from(CONTAGION_TRACE_DROPPED),
+            ),
+            (
+                "SX_CONTAGION_TRACE_INPUTS",
+                i64::from(CONTAGION_TRACE_INPUTS),
             ),
         ];
         for (name, value) in numbers {

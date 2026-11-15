@@ -1435,3 +1435,44 @@ fn perception_trace_all_records() {
     // Fields of other records stay 0.
     assert_eq!((heard.why, heard.gain, heard.clarity), (0, 0, 0));
 }
+
+#[test]
+fn contagion_trace_all_records() {
+    use sagax_perception::{ContagionTrace as T, DeedInputs};
+    let none = DeedInputs::NONE;
+    let onset = contagion_trace(T::Onset { ally: 7, deed: 2 });
+    assert_eq!(
+        (onset.kind, onset.ally, onset.deed, onset.old, onset.bits),
+        (CONTAGION_TRACE_ONSET, 7, 2, 0, 0)
+    );
+    assert_eq!(onset.inputs, none);
+    let refresh = contagion_trace(T::Refresh { ally: 8, bits: 5 });
+    assert_eq!(
+        (refresh.kind, refresh.ally, refresh.bits, refresh.deed),
+        (CONTAGION_TRACE_REFRESH, 8, 5, 0)
+    );
+    let expired = contagion_trace(T::Expired { ally: 9, deed: 1 });
+    assert_eq!(
+        (expired.kind, expired.ally, expired.deed),
+        (CONTAGION_TRACE_EXPIRED, 9, 1)
+    );
+    let replaced = contagion_trace(T::Replaced { old: 3, ally: 4 });
+    assert_eq!(
+        (replaced.kind, replaced.ally, replaced.old),
+        (CONTAGION_TRACE_REPLACED, 4, 3)
+    );
+    let dropped = contagion_trace(T::Dropped { ally: 6 });
+    assert_eq!((dropped.kind, dropped.ally), (CONTAGION_TRACE_DROPPED, 6));
+    let inputs = DeedInputs {
+        doing: 2,
+        seen: 3,
+        share: 170,
+        nearest: 512,
+        since: 4,
+    };
+    let read = contagion_trace(T::Inputs { deed: 1, inputs });
+    assert_eq!(
+        (read.kind, read.ally, read.deed, read.inputs),
+        (CONTAGION_TRACE_INPUTS, 0, 1, inputs)
+    );
+}

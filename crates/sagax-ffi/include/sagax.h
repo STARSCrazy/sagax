@@ -47,7 +47,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 13
+#define SX_API_VERSION 14
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -3264,6 +3264,122 @@ typedef struct sx_perception_trace {
 typedef void (*sx_perception_trace_fn)(void *context, const sx_perception_trace *trace);
 int32_t sx_perception_set_trace(sx_perception *p, sx_perception_trace_fn trace, void *context);
 
+/* ---- contagion (since version 14) ---------------------------------------- */
+
+/* Indirect coordination: a character joins in on what it saw its allies do
+ * (sees two comrades charge and charges, sees others flee and flees). One
+ * handle per character remembers, for each ally, the cue bits of its latest
+ * recognised sighting, when and where that was, and when each deed started.
+ * A deed is a set of the game's cue bits with a window in ticks.
+ *
+ * No cheating: the handle reads only the sx_percepts the game passes from
+ * that character's own look (or observe). Only a percept with sense
+ * SX_SENSE_SIGHT or SX_SENSE_THERMAL, stage 2 (recognised) and placed 1
+ * counts; noticed-only, scanner, heard, LOST and FORGOTTEN percepts change
+ * nothing (a deed seen a moment ago counts until its window ends). So
+ * walls, darkness, the view cone, attention and disguise apply unchanged.
+ *
+ * Fine points (the observer, the percept points, nearest_point) are axial on
+ * hex and never offset-converted; the handle needs no cells. Fixed slots
+ * from sx_contagion_new; nothing allocates afterwards. */
+
+typedef struct sx_contagion sx_contagion;
+
+#define SX_MAX_DEEDS     8  /* deeds of one contagion config */
+#define SX_DEED_COLUMNS  5  /* integers sx_contagion_write_columns writes */
+
+/* One deed: any of bits shows it; an ally seen at t counts up to and
+ * including t + window. bits 0: an unused deed. */
+typedef struct sx_deed_rule {
+	uint32_t bits;
+	uint32_t window;
+} sx_deed_rule;
+
+typedef struct sx_contagion_config {
+	uint32_t grid;              /* SX_GRID_* (every hex layout means hex) */
+	uint32_t count;             /* deeds in use, at most SX_MAX_DEEDS */
+	sx_deed_rule deeds[SX_MAX_DEEDS];
+} sx_contagion_config;
+
+/* The Decider inputs of one deed. Empty (nobody seen, or a deed not in use):
+ * 0, 0, 0, INT32_MAX, UINT32_MAX. */
+typedef struct sx_deed_inputs {
+	uint32_t doing;             /* distinct allies seen showing it within the window */
+	uint32_t seen;              /* distinct allies seen at all within the window */
+	uint32_t share;             /* doing * 256 / seen (0 when seen is 0) */
+	int32_t nearest;            /* fine distance to the nearest one doing it (INT32_MAX: none) */
+	uint32_t since;             /* ticks since the most recent onset among them (UINT32_MAX: none) */
+} sx_deed_inputs;
+
+/* The game's belief "do I take this one for an ally?", given the percept's
+ * disguised flag (an enemy in a guard's uniform may be taken for one: that
+ * is what the character saw). Nonzero: an ally. */
+typedef int32_t (*sx_is_ally_fn)(void *context, uint32_t subject, int32_t disguised);
+
+/* Null for a null or invalid config (unknown grid, count above
+ * SX_MAX_DEEDS). capacity: allies remembered (0 remembers nothing). */
+sx_contagion *sx_contagion_new(const sx_contagion_config *cfg, uint32_t capacity);
+void sx_contagion_free(sx_contagion *c);
+
+/* Learns count percepts of tick now (the sighting time is now). First every
+ * deed past its window expires and an entry past every window frees its
+ * slot. Then per counted percept: is_ally false removes that subject's entry;
+ * an ally not yet remembered takes a free slot or the slot of the ally seen
+ * longest ago (ties: the lower slot); the entry keeps the percept's cues,
+ * point and now; a deed shown now that the entry did not show (or that had
+ * run out) is an onset. count 0 only expires. Returns 0, or
+ * SX_ERROR_ARGUMENT for a null handle or is_ally, a null pc with count > 0
+ * or a percept with an unknown sense or event (then nothing is changed). */
+int32_t sx_contagion_learn(sx_contagion *c, uint32_t now, const sx_percept *pc, uint32_t count,
+                           sx_is_ally_fn is_ally, void *context);
+
+/* The inputs of deed for an observer at the fine point observer (3 integers)
+ * at now. Reads filter by the window, so they are right whether or not
+ * learn ran this tick. Returns 0, or SX_ERROR_ARGUMENT for a null pointer. */
+int32_t sx_contagion_inputs(const sx_contagion *c, uint32_t deed, const int32_t *observer,
+                            uint32_t now, sx_deed_inputs *out);
+
+/* The same inputs as SX_DEED_COLUMNS integers doing, seen, share, nearest,
+ * since (each at most INT32_MAX) to row, for a Decider row (pass the address
+ * of the first of the five columns). Returns 0, or SX_ERROR_ARGUMENT. */
+int32_t sx_contagion_write_columns(const sx_contagion *c, uint32_t deed, const int32_t *observer,
+                                   uint32_t now, int32_t *row);
+
+/* Where the nearest ally doing deed was last seen (fine point, 3 integers to
+ * out; ties: the lower slot). Returns 1, 0 when none (out unchanged), or
+ * SX_ERROR_ARGUMENT. */
+int32_t sx_contagion_nearest_point(const sx_contagion *c, uint32_t deed, const int32_t *observer,
+                                   uint32_t now, int32_t *out);
+
+/* Forgets one ally / everyone. Return 0, or SX_ERROR_ARGUMENT. */
+int32_t sx_contagion_forget(sx_contagion *c, uint32_t ally);
+int32_t sx_contagion_clear(sx_contagion *c);
+/* How many allies it remembers, or SX_ERROR_ARGUMENT. */
+int32_t sx_contagion_len(const sx_contagion *c);
+
+#define SX_CONTAGION_TRACE_ONSET     1  /* ally, deed: seen starting a deed */
+#define SX_CONTAGION_TRACE_REFRESH   2  /* ally, bits: a sighting changed its entry */
+#define SX_CONTAGION_TRACE_EXPIRED   3  /* ally, deed: ran out of its window */
+#define SX_CONTAGION_TRACE_REPLACED  4  /* old made room for ally (memory full) */
+#define SX_CONTAGION_TRACE_DROPPED   5  /* ally: no longer taken for an ally */
+#define SX_CONTAGION_TRACE_INPUTS    6  /* deed, inputs: the inputs were read */
+
+/* One record; fields that do not apply to kind are 0, inputs is empty. */
+typedef struct sx_contagion_trace {
+	uint32_t kind;              /* SX_CONTAGION_TRACE_* */
+	uint32_t ally;              /* REPLACED: the one that came; INPUTS: 0 */
+	uint32_t old;               /* REPLACED: the one that went */
+	uint32_t bits;              /* REFRESH: the cue bits seen */
+	uint32_t deed;              /* ONSET, EXPIRED, INPUTS */
+	sx_deed_inputs inputs;      /* INPUTS */
+} sx_contagion_trace;
+
+/* trace gets every record of the following learn, inputs and write_columns
+ * calls, with context; NULL turns it off (the default). trace must not call
+ * any function on the same handle. Returns 0. */
+typedef void (*sx_contagion_trace_fn)(void *context, const sx_contagion_trace *trace);
+int32_t sx_contagion_set_trace(sx_contagion *c, sx_contagion_trace_fn trace, void *context);
+
 #ifdef __cplusplus
 }
 #endif
@@ -3703,6 +3819,22 @@ _Static_assert(offsetof(sx_perception_trace, clear) == 58, "sx_perception_trace.
 _Static_assert(offsetof(sx_perception_trace, pending) == 59, "sx_perception_trace.pending layout");
 _Static_assert(offsetof(sx_perception_trace, has_cell) == 60, "sx_perception_trace.has_cell layout");
 _Static_assert(offsetof(sx_perception_trace, has_cost) == 61, "sx_perception_trace.has_cost layout");
+_Static_assert(sizeof(sx_deed_rule) == 8, "sx_deed_rule layout");
+_Static_assert(offsetof(sx_deed_rule, window) == 4, "sx_deed_rule.window layout");
+_Static_assert(sizeof(sx_contagion_config) == 72, "sx_contagion_config layout");
+_Static_assert(offsetof(sx_contagion_config, count) == 4, "sx_contagion_config.count layout");
+_Static_assert(offsetof(sx_contagion_config, deeds) == 8, "sx_contagion_config.deeds layout");
+_Static_assert(sizeof(sx_deed_inputs) == 20, "sx_deed_inputs layout");
+_Static_assert(offsetof(sx_deed_inputs, seen) == 4, "sx_deed_inputs.seen layout");
+_Static_assert(offsetof(sx_deed_inputs, share) == 8, "sx_deed_inputs.share layout");
+_Static_assert(offsetof(sx_deed_inputs, nearest) == 12, "sx_deed_inputs.nearest layout");
+_Static_assert(offsetof(sx_deed_inputs, since) == 16, "sx_deed_inputs.since layout");
+_Static_assert(sizeof(sx_contagion_trace) == 40, "sx_contagion_trace layout");
+_Static_assert(offsetof(sx_contagion_trace, ally) == 4, "sx_contagion_trace.ally layout");
+_Static_assert(offsetof(sx_contagion_trace, old) == 8, "sx_contagion_trace.old layout");
+_Static_assert(offsetof(sx_contagion_trace, bits) == 12, "sx_contagion_trace.bits layout");
+_Static_assert(offsetof(sx_contagion_trace, deed) == 16, "sx_contagion_trace.deed layout");
+_Static_assert(offsetof(sx_contagion_trace, inputs) == 20, "sx_contagion_trace.inputs layout");
 #endif
 
 #endif

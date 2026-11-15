@@ -526,3 +526,16 @@ pub const PERCEPTION_TRACE_DOUBT: u32 = 7;
 pub const PERCEPTION_TRACE_HEARD: u32 = 8;
 /// `SX_PERCEPTION_TRACE_UNHEARD`: a stimulus was not heard.
 pub const PERCEPTION_TRACE_UNHEARD: u32 = 9;
+
+/// `SX_CONTAGION_TRACE_ONSET`: an ally was seen starting a deed.
+pub const CONTAGION_TRACE_ONSET: u32 = 1;
+/// `SX_CONTAGION_TRACE_REFRESH`: a recognised sighting changed an entry.
+pub const CONTAGION_TRACE_REFRESH: u32 = 2;
+/// `SX_CONTAGION_TRACE_EXPIRED`: a deed ran out of its window.
+pub const CONTAGION_TRACE_EXPIRED: u32 = 3;
+/// `SX_CONTAGION_TRACE_REPLACED`: a full memory made room.
+pub const CONTAGION_TRACE_REPLACED: u32 = 4;
+/// `SX_CONTAGION_TRACE_DROPPED`: a subject is no longer taken for an ally.
+pub const CONTAGION_TRACE_DROPPED: u32 = 5;
+/// `SX_CONTAGION_TRACE_INPUTS`: the inputs of a deed were read.
+pub const CONTAGION_TRACE_INPUTS: u32 = 6;
