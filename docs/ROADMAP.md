@@ -19,10 +19,6 @@
   scores from a playbook, and a mission would run them unchanged. A
   **JavaScript binding** of the mission follows on demand. *Perception*
   (below) is the natural knowledge source for the characters' `Knowledge`.
-- **Next slim item:** the remaining per-layer duplicates in C and WASM (the
-  tactic builder, the add-abort and slot codecs, `sine_of`, the route rule
-  decoders) move to `sagax-abi`. `sx_spot_ctx` may gain separate miss and
-  distance fields so C wrappers can keep the exact built-in order.
 - **Walking distance for the squad:** the squad measures distances in
   a straight-line metric (Euclid, Manhattan, Chebyshev or hex). Using the
   real walking distance instead (for `IN_TARGET_DIST`, the keeper's

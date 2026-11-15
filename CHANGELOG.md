@@ -235,6 +235,16 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   the score lost the built-in order among those spots; with the parts it
   keeps it. `distance` follows `built_in`, `miss` follows `has_target`; the
   struct grows from 96 to 104 bytes.
+- Internal: the last codecs both bindings had their own copy of moved to
+  `sagax-abi` (`convert`): the tactic builder (`tactic`), the slot record
+  (`slot`, `SlotCodes`, `PlaceCodes`), `abort_at_least`, `abort_when`,
+  `consideration`, the grid rules (`topology`, `grid_layout`), the route
+  rule (`route_rule`, codes `ROUTE_*`), the sine table (`sine`,
+  `sine_code`, codes `SINE_*`), the point pattern (`point_pattern`,
+  `pattern_codes`, `PatternCodes`), the squad config (`squad_config`,
+  `squad_codes`, `SquadCodes`), `evict` (codes `EVICT_*`),
+  `dstar_status` and `spot_radius`. The C and the WebAssembly layer call
+  them; no behaviour changes.
 
 ### Migration table, 0.11 to 0.12
 
