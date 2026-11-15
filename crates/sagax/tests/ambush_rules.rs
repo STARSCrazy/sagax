@@ -7,6 +7,7 @@
 mod ambush_rules;
 
 use ambush_rules::*;
+use sagax::perception::PerceptKind;
 use sagax::prelude::*;
 
 /// Every line `cargo run -p sagax --example ambush_rules` prints.
@@ -41,8 +42,6 @@ t= 30 activated plan 2
 t= 30 order member 1
 t= 30 start member 1
 t= 31 order member 3
-t= 31 order member 2
-t= 31 start member 2
 t= 31 start member 3
 ";
 
@@ -103,9 +102,9 @@ fn ambush_waits_hidden_then_strikes_together() {
     // Hand signs travel only in sight: guard 4 stands behind the short wall
     // and never gets an order, a start or a signal; the others do.
     let leader = guard_start(1);
-    assert!(!sees(&walls, leader, guard_start(4)));
+    assert!(!sees_sign(&walls, leader, guard_start(4)));
     for id in 2..=3 {
-        assert!(sees(&walls, leader, guard_start(id)));
+        assert!(sees_sign(&walls, leader, guard_start(id)));
     }
     assert!(
         !events.iter().any(|(_, e)| matches!(
@@ -165,6 +164,54 @@ fn ambush_aborts_when_a_guard_is_seen() {
     // the pending plan on the tick it was made.
     let at_replan = run_scene(true, sent + 1);
     assert_eq!(at_replan.crew.squad().pending_plan().unwrap().tactic, 1);
+
+    // Hand signs need the receiver's facing: guard 2 stands at (12, 1)
+    // facing west with the leader at (16, 3) behind it. The line is clear,
+    // but it never sees the rush order.
+    let walls = scene_walls();
+    let stood = scene.stood[(sent + 6) as usize];
+    assert_eq!((stood[0], stood[1]), ([16, 3, 0], [12, 1, 0]));
+    assert!(sees(&walls, stood[0], stood[1]));
+    assert!(!sees_sign(&walls, stood[0], stood[1]));
+    assert!(
+        !scene
+            .events
+            .iter()
+            .any(|&(t, e)| t > sent && matches!(e, CrewEvent::Order { member: 2, .. })),
+        "{:?}",
+        scene.events
+    );
+}
+
+#[test]
+fn the_crew_knows_only_what_was_seen() {
+    // The lookout notices the torch on tick 0 (an instant cue), so the
+    // crew plans at once.
+    let scene = run_scene(false, END);
+    let first = scene.percepts[0];
+    assert_eq!(
+        (first.at, first.observer, first.event, first.cell),
+        (0, 5, PerceptKind::Noticed, [2, 10, 0])
+    );
+    assert!(
+        scene
+            .events
+            .iter()
+            .any(|&(t, e)| t == 0 && matches!(e, CrewEvent::Planned(_)))
+    );
+    // Behind the wall at the kill zone the lookout loses it; that percept
+    // has no position and gives no fact.
+    let lost = scene
+        .percepts
+        .iter()
+        .find(|p| p.observer == 5 && p.event == PerceptKind::Lost)
+        .unwrap();
+    assert_eq!(lost.at, 18);
+    assert!(!lost.placed);
+    // Every placed sighting is the intruder's real cell at that tick.
+    for p in scene.percepts.iter().filter(|p| p.placed) {
+        assert_eq!(p.cell, intruder_at(false, p.at), "{p:?}");
+    }
 }
 
 #[test]

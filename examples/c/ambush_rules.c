@@ -4,22 +4,34 @@
  * A 20 x 12 map with a wall at x = 10 (rows 0 to 8, a gap below) and a
  * short one at x = 17 (rows 0 to 4). Intruder 99 walks east through the
  * gap. The guards are on the east side and walk to the spot of their order
- * (a cell per 2 ticks), so what is hidden is where they really stand. The
- * library does not change: the game hands the squad a rules object
- * (sx_squad_rules) with five callbacks of its own, all built on a small
- * sight test (Bresenham over the walls, game code):
+ * (a cell per 2 ticks), so what is hidden is where they really stand.
  *
- *  - spot_score: a spot the intruder can see scores far worse, so the
- *    guards hide (sneaking, cover against this one enemy);
- *  - channel_delay: hand signs arrive one tick later, only in sight (guard
- *    4 stands behind the short wall: the leader never reaches it);
+ * Sight is the library's: sx_perception_line over sx_sense_map_from_grid
+ * (the walls of the map) in a perception world of 256 fine units per cell,
+ * from cell centre to cell centre. The intruder carries a lit torch (a cue
+ * bit) and is an sx_target: every tick a lookout (5, not in the crew, on a
+ * tower at (6, 1) facing south) and the four guards (facing west, toward
+ * the wall) look at it (sx_perception_look), and each percept goes to
+ * sx_crew_observe through sx_percept_fact. A cue rule "a torch is noticed at
+ * once" (gain 0: it is only instant) lets the lookout notice it on tick 0.
+ * The crew knows only what they saw. The game hands the squad a rules
+ * object (sx_squad_rules) with five callbacks of its own:
+ *
+ *  - spot_score: a spot the intruder can see (sx_perception_line) scores
+ *    far worse, so the guards hide (sneaking, cover against this one
+ *    enemy);
+ *  - channel_delay: hand signs arrive one tick later, only when the
+ *    receiver sees the sender (sx_perception_in_sight with the receiver's
+ *    facing and a wide periphery; guard 4 stands behind the short wall: the
+ *    leader never reaches it);
  *  - trigger: the intruder steps into the kill zone, the signal goes;
  *  - report: a guard that was seen says so (a kind of the game);
  *  - abort: that report ends the ambush; the squad plans a rush.
  *
  * Scene A: the intruder walks into the kill zone and the guards strike
  * together. Scene B: the intruder stops at the wall, steps to the gap and
- * sees guard 3; the ambush is dropped.
+ * sees guard 3; the ambush is dropped and the squad rushes. Guard 2, at
+ * (12, 1) with the leader behind it, never sees the sign and stays.
  *
  * The same scenes are in crates/sagax/examples/ambush_rules.rs; both print
  * the same lines. Build and run: sh examples/c/run.sh */
@@ -27,7 +39,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
+#include <string.h>
 #include "sagax.h"
 
 #define CHECK(cond) \
@@ -60,10 +72,20 @@
 #define REPORT_SEEN  SX_REPORT_GAME_FIRST
 /* Added to the score of a spot the intruder can see. */
 #define SEEN_PENALTY 10000
+#define CELL         256   /* fine units per cell of the perception world */
+#define LOOKOUT      5u    /* the lookout's id; it is not in the crew */
+#define LOOKOUT_X    6
+#define LOOKOUT_Y    1
+#define SOUTH        64    /* headings: the lookout faces south, the guards west */
+#define WEST         128
+#define TORCH        1u    /* the intruder's cue bit: a lit torch */
+#define WATCHERS     5     /* the lookout, then the guards */
+#define PERCEPTS     8     /* 4 * (checks + instant_cap) of one look */
 
 /* The game's pieces, behind the user pointer of the rules table. */
 struct ambush_rules {
-	unsigned char wall[HEIGHT][WIDTH];  /* 1 stops sight */
+	sx_perception *sight;               /* the world over the walls */
+	const sx_sense_profile *signs;      /* the eye for hand signs */
 	int32_t intruder[3];                /* where the intruder is now */
 	int seen;                           /* a guard reported being seen */
 };
@@ -80,32 +102,54 @@ static int32_t sign(int32_t v)
 	return v < 0 ? -1 : (v > 0 ? 1 : 0);
 }
 
-/* Sight test: Bresenham from from to to over the walls; the two end cells
- * do not block. */
-static int sees(const struct ambush_rules *r, const int32_t *from, const int32_t *to)
+/* The fine point at the centre of cell c. */
+static void centre(sx_perception *p, const int32_t *c, int32_t *out)
 {
-	int32_t x = from[0], y = from[1];
-	int32_t dx = abs(to[0] - x), dy = -abs(to[1] - y);
-	int32_t stepx = sign(to[0] - x), stepy = sign(to[1] - y);
-	int32_t err = dx + dy;
+	sx_point cell;
 
-	for (;;) {
-		int32_t e2;
+	cell.x = c[0];
+	cell.y = c[1];
+	cell.level = c[2];
+	(void)sx_perception_cell_centre(p, cell, out);
+}
 
-		if (x == to[0] && y == to[1])
-			return 1;
-		if ((x != from[0] || y != from[1]) && r->wall[y][x])
-			return 0;
-		e2 = 2 * err;
-		if (e2 >= dy) {
-			err += dy;
-			x += stepx;
-		}
-		if (e2 <= dx) {
-			err += dx;
-			y += stepy;
-		}
-	}
+/* Whether sight gets from cell from to cell to over the walls: the exact
+ * sight line between the two centres. */
+static int sees(sx_perception *p, const int32_t *from, const int32_t *to)
+{
+	int32_t a[3], b[3];
+	sx_line line;
+
+	centre(p, from, a);
+	centre(p, to, b);
+	return sx_perception_line(p, a, b, &line) == 0 && line.clear;
+}
+
+/* The eye of id at cell at. */
+static void make_eye(sx_perception *p, uint32_t id, const int32_t *at, int32_t facing,
+                     const sx_sense_profile *profile, sx_eye *eye)
+{
+	memset(eye, 0, sizeof *eye);
+	eye->id = id;
+	centre(p, at, eye->point);
+	eye->facing = facing;
+	eye->profile = profile;
+	eye->stats.sight_scale = 256;
+	eye->stats.notice_scale = 256;
+	eye->stats.hearing_scale = 256;
+}
+
+/* Whether a guard at cell receiver, facing west, sees a hand sign made at
+ * cell sender: range, cone and line, with the watcher preset, whose wide
+ * periphery (half-angle 100) catches a sign from the corner of the eye. */
+static int sees_sign(const struct ambush_rules *r, const int32_t *sender, const int32_t *receiver)
+{
+	sx_eye eye;
+	int32_t at[3];
+
+	make_eye(r->sight, 0, receiver, WEST, r->signs, &eye);
+	centre(r->sight, sender, at);
+	return sx_perception_in_sight(r->sight, &eye, at) == 1;
 }
 
 /* The kill zone: x 11 to 14, y 9 to 11. */
@@ -136,7 +180,7 @@ static void intruder_at(int scene_b, uint32_t t, int32_t *out)
 static int32_t cb_spot_score(void *user, const sx_spot_ctx *ctx, int64_t *score)
 {
 	const struct ambush_rules *r = user;
-	int64_t penalty = sees(r, r->intruder, ctx->spot.pos) ? SEEN_PENALTY : 0;
+	int64_t penalty = sees(r->sight, r->intruder, ctx->spot.pos) ? SEEN_PENALTY : 0;
 
 	/* saturating add: built_in is INT64_MAX when the miss part is huge */
 	*score = ctx->built_in > INT64_MAX - penalty ? INT64_MAX : ctx->built_in + penalty;
@@ -149,7 +193,7 @@ static int32_t cb_channel_delay(void *user, uint32_t id, const sx_channel_ctx *c
 {
 	const struct ambush_rules *r = user;
 
-	if (id == HAND_SIGNS && sees(r, ctx->from, ctx->to)) {
+	if (id == HAND_SIGNS && sees_sign(r, ctx->from, ctx->to)) {
 		*delay = 1;
 		return 1;
 	}
@@ -286,8 +330,9 @@ static sx_crew *scene_crew(const int32_t guards[GUARDS][3])
 	return crew;
 }
 
-/* Runs scene A (0) or B (1) for ticks 0 ..= END and prints its events. */
-static int run_scene(int scene_b)
+/* Runs scene A (0) or B (1) for ticks 0 ..= END over the perception world
+ * sight and prints its events. */
+static int run_scene(int scene_b, sx_perception *sight)
 {
 	static const int32_t guards[GUARDS][3] = {
 		{1, 15, 3}, {2, 14, 4}, {3, 16, 4}, {4, 19, 2}  /* id, x, y */
@@ -308,7 +353,14 @@ static int run_scene(int scene_b)
 	uint32_t spot_count = scene_b ? 8u : 6u;
 	int sent = 0;
 	uint32_t t;
-	int32_t i, x, y;
+	int32_t i;
+	static const int32_t lookout[3] = {LOOKOUT_X, LOOKOUT_Y, 0};
+	static const sx_fact_kinds kinds = {ENEMY, ENEMY, ENEMY, 0, 0};
+	sx_sense_profile watch, signs;
+	sx_awareness aware[WATCHERS];   /* the lookout first, then the guards */
+	sx_attention attention[WATCHERS];
+	sx_budget budget;
+	sx_percept percepts[PERCEPTS];
 
 	printf("scene %c\n", scene_b ? 'B' : 'A');
 	crew = scene_crew(guards);
@@ -321,10 +373,21 @@ static int run_scene(int scene_b)
 		at_guard[i][2] = 0;
 	}
 
-	for (y = 0; y < HEIGHT; y++)
-		for (x = 0; x < WIDTH; x++)
-			rules.wall[y][x] = (unsigned char)((x == WALL_X && y <= WALL_TOP) ||
-			                                   (x == SHIELD_X && y <= SHIELD_TOP));
+	/* The eyes of the lookout and the guards: the guard preset plus "a
+	 * torch is noticed at once in the focus" (gain 0: the rule is only
+	 * instant). */
+	CHECK(sx_sense_profile_preset(SX_SENSE_PRESET_GUARD, CELL, &watch) == 0);
+	watch.cues[0].bits = TORCH;
+	watch.cues[0].gain = 0;
+	watch.cues[0].instant = 1;
+	CHECK(sx_sense_profile_preset(SX_SENSE_PRESET_WATCHER, CELL, &signs) == 0);
+	memset(aware, 0, sizeof aware);
+	memset(attention, 0, sizeof attention);
+	budget.checks = 1;
+	budget.keep = 1;
+	budget.instant_cap = 1;
+	rules.sight = sight;
+	rules.signs = &signs;
 	intruder_at(scene_b, 0, rules.intruder);
 	rules.seen = 0;
 	CHECK(sx_squad_rules_default(&table) == 0);
@@ -337,8 +400,8 @@ static int run_scene(int scene_b)
 
 	for (t = 0; t <= END; t++) {
 		uint32_t total = 0;
-		sx_fact fact = {0};
-		int32_t n;
+		sx_target target;
+		int32_t n, k;
 
 		/* 1. The guards walk to the goal of their last order, a cell per
 		 * STEP ticks after it arrived. */
@@ -352,17 +415,37 @@ static int run_scene(int scene_b)
 			}
 		}
 
-		/* 2. The intruder moves and is seen by the leader. */
+		/* 2. The intruder moves; the lookout and the guards look at it, and
+		 * what they perceive goes to the crew. */
 		intruder_at(scene_b, t, rules.intruder);
-		fact.subject = INTRUDER;
-		fact.kind = ENEMY;
-		fact.pos[0] = rules.intruder[0];
-		fact.pos[1] = rules.intruder[1];
-		fact.seen_at = t;
-		CHECK(sx_crew_observe(crew, t, &fact, NULL) >= 0);
+		memset(&target, 0, sizeof target);
+		target.id = INTRUDER;
+		centre(sight, rules.intruder, target.point);
+		target.size = 256;
+		target.conspicuity = 256;
+		target.cues = TORCH;
+		for (k = 0; k < WATCHERS; k++) {
+			sx_eye eye;
+			int32_t m;
+
+			if (k == 0)
+				make_eye(sight, LOOKOUT, lookout, SOUTH, &watch, &eye);
+			else
+				make_eye(sight, (uint32_t)guards[k - 1][0], at_guard[k - 1], WEST, &watch,
+				         &eye);
+			n = sx_perception_look(sight, t, &eye, &target, &aware[k], 1, &attention[k],
+			                       &budget, percepts, PERCEPTS, NULL);
+			CHECK(n >= 0);
+			for (m = 0; m < n; m++) {
+				sx_fact fact;
+
+				if (sx_percept_fact(&percepts[m], &kinds, &fact) == 1)
+					CHECK(sx_crew_observe(crew, t, &fact, NULL) >= 0);
+			}
+		}
 
 		/* 3. Scene B: guard 3 is seen and tells the leader. */
-		if (scene_b && !sent && sees(&rules, rules.intruder, at_guard[2])) {
+		if (scene_b && !sent && sees(sight, rules.intruder, at_guard[2])) {
 			sx_message msg = {0};
 
 			msg.kind = REPORT_SEEN;
@@ -415,11 +498,38 @@ static int run_scene(int scene_b)
 
 int main(void)
 {
+	sx_perception_config cfg;
+	sx_sense_map map;
+	sx_perception *sight;
+	sx_grid *walls;
+	int32_t y;
+	int result;
+
 	if (sx_api_version() < SX_API_VERSION) {
 		fprintf(stderr, "sagax library too old\n");
 		return 1;
 	}
-	if (run_scene(0) != 0)
-		return 1;
-	return run_scene(1);
+	/* The walls: a grid whose blocked cells stop sight. */
+	walls = sx_grid_new(WIDTH, HEIGHT, 1);
+	CHECK(walls != NULL);
+	for (y = 0; y < HEIGHT; y++) {
+		sx_point cell;
+
+		cell.y = y;
+		cell.level = 0;
+		cell.x = WALL_X;
+		if (y <= WALL_TOP)
+			CHECK(sx_grid_set(walls, cell, -1) == 0);
+		cell.x = SHIELD_X;
+		if (y <= SHIELD_TOP)
+			CHECK(sx_grid_set(walls, cell, -1) == 0);
+	}
+	CHECK(sx_sense_map_from_grid(walls, &map) == 0);
+	CHECK(sx_perception_config_default(SX_GRID_SQUARE, CELL, &cfg) == 0);
+	sight = sx_perception_new(&cfg, &map);
+	CHECK(sight != NULL);
+	result = run_scene(0, sight) != 0 || run_scene(1, sight) != 0;
+	sx_perception_free(sight);
+	sx_grid_free(walls);
+	return result;
 }

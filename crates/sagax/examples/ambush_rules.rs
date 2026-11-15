@@ -4,28 +4,44 @@
 //! A 20 x 12 map with a wall at x = 10 (rows 0 to 8, a gap below) and a
 //! short one at x = 17 (rows 0 to 4). Intruder 99 walks east through the
 //! gap. The guards are on the east side and walk to the spot of their order
-//! (a cell per 2 ticks), so what is hidden is where they really stand. Nothing
-//! of the library changes: the game hands the squad a rules object with
-//! five pieces of its own, all built on a small sight test (Bresenham over
-//! the walls, game code):
+//! (a cell per 2 ticks), so what is hidden is where they really stand.
 //!
-//! - **spot score:** a spot the intruder can see scores far worse, so the
-//!   guards hide (sneaking, cover against this one enemy);
-//! - **channel:** hand signs arrive one tick later, only in sight (guard 4
-//!   stands behind the short wall: the leader never reaches it);
+//! Sight is the library's: [`sight_line`] over [`GridSight`] (the walls of
+//! the map) in a perception world of 256 fine units per cell, from cell
+//! centre to cell centre. The intruder carries a lit torch (a cue bit) and
+//! is a [`Target`]: every tick a lookout (5, not in the crew, on a tower at
+//! (6, 1) facing south) and the four guards (facing west, toward the wall)
+//! [`look`] at it, and each percept goes to the crew's `observe` through
+//! [`percept_fact`]. A cue rule "a torch is noticed at once" (gain 0: it is
+//! only instant) lets the lookout notice it on tick 0. The crew knows only
+//! what they saw. The game hands the squad a rules object with five pieces
+//! of its own:
+//!
+//! - **spot score:** a spot the intruder can see ([`sight_line`]) scores
+//!   far worse, so the guards hide (sneaking, cover against this one
+//!   enemy);
+//! - **channel:** hand signs arrive one tick later, only when the receiver
+//!   sees the sender ([`in_sight`] with the receiver's facing and a wide
+//!   periphery; guard 4 stands behind the short wall: the leader never
+//!   reaches it);
 //! - **trigger:** the intruder steps into the kill zone, the signal goes;
 //! - **report:** a guard that was seen says so (a kind of the game);
 //! - **abort:** that report ends the ambush; the squad plans a rush.
 //!
 //! Scene A: the intruder walks into the kill zone and the guards strike
 //! together. Scene B: the intruder stops at the wall, steps to the gap and sees
-//! guard 3; the ambush is dropped.
+//! guard 3; the ambush is dropped and the squad rushes. Guard 2, at (12, 1)
+//! with the leader behind it, never sees the sign and stays.
 //!
 //! The same scenes are in `examples/c/ambush_rules.c`; both print the same lines.
 
 use sagax::decide::group::{
     Abort, Channel, ChannelCtx, IN_TARGET_DIST, REPORT_GAME_FIRST, ReportActions, RowCtx, SpotCtx,
     SquadRules, SquadView, TAG_HIDDEN, Trigger,
+};
+use sagax::perception::{
+    Attention, Budget as SightBudget, CueRule, FactKinds, GridSight, World, cell_centre, in_sight,
+    percept_fact,
 };
 use sagax::prelude::*;
 
@@ -58,6 +74,23 @@ const REPORT_SEEN: u32 = REPORT_GAME_FIRST;
 const SEEN_PENALTY: i128 = 10_000;
 /// Ticks per cell of the intruder's and the guards' walk.
 const STEP: u32 = 2;
+/// Fine units per cell of the perception world.
+const CELL: i32 = 256;
+/// The lookout: id, x, y. It watches the road; it is not in the crew.
+const LOOKOUT: (u32, i32, i32) = (5, 6, 1);
+/// Headings: the lookout faces south, the guards west.
+const SOUTH: u8 = 64;
+const WEST: u8 = 128;
+/// Cue bit of the intruder: a lit torch.
+const TORCH: u32 = 1;
+/// The fact kinds of the percepts: noticed and recognised are both the
+/// crew's target kind.
+const KINDS: FactKinds = FactKinds {
+    noticed_kind: ENEMY,
+    seen_kind: ENEMY,
+    heard_kind: ENEMY,
+    disguised_kind: None,
+};
 
 /// The walls: a grid where `BLOCKED` stops sight.
 pub fn scene_walls() -> DenseGrid {
@@ -71,30 +104,65 @@ pub fn scene_walls() -> DenseGrid {
     map
 }
 
-/// Game-side sight test: Bresenham from `from` to `to` over the walls; the
-/// two end cells do not block.
+/// The perception world: square, [`CELL`] fine units per cell.
+pub fn world() -> World {
+    World::square(CELL)
+}
+
+/// The fine point at the centre of cell `p`.
+pub fn centre(p: Pos) -> Pos {
+    cell_centre(&world(), Cell::new(p[0], p[1], p[2]))
+}
+
+/// Whether sight gets from cell `from` to cell `to` over the walls: the
+/// exact [`sight_line`] between the two centres.
 pub fn sees(walls: &DenseGrid, from: Pos, to: Pos) -> bool {
-    let (mut x, mut y) = (from[0], from[1]);
-    let (dx, dy) = ((to[0] - x).abs(), -(to[1] - y).abs());
-    let (sx, sy) = ((to[0] - x).signum(), (to[1] - y).signum());
-    let mut err = dx + dy;
-    loop {
-        if (x, y) == (to[0], to[1]) {
-            return true;
-        }
-        if (x, y) != (from[0], from[1]) && !walls.open(x, y) {
-            return false;
-        }
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y += sy;
-        }
+    sight_line(
+        &world(),
+        &mut GridSight::square(walls),
+        centre(from),
+        centre(to),
+    )
+    .clear
+}
+
+/// The eyes of the lookout and the guards: the guard preset plus "a torch
+/// is noticed at once in the focus" (gain 0: the rule is only instant).
+pub fn watch_profile() -> SenseProfile {
+    SenseProfile::guard(CELL).with_cue(CueRule {
+        bits: TORCH,
+        gain: 0,
+        instant: 1,
+        min_clarity: 0,
+        range: 0,
+    })
+}
+
+/// The eye of `id` at cell `at`.
+pub fn eye(id: u32, at: Pos, facing: u8, profile: &SenseProfile) -> Eye<'_> {
+    Eye {
+        id,
+        point: centre(at),
+        facing,
+        profile,
+        stats: Stats::NORMAL,
+        disguise: Default::default(),
     }
+}
+
+/// Whether a guard at cell `receiver`, facing west, sees a hand sign made
+/// at cell `sender`: [`in_sight`] (range, cone and line) with the watcher
+/// preset, whose wide periphery (half-angle 100) catches a sign from the
+/// corner of the eye.
+pub fn sees_sign(walls: &DenseGrid, sender: Pos, receiver: Pos) -> bool {
+    let profile = SenseProfile::watcher(CELL);
+    let eye = eye(0, receiver, WEST, &profile);
+    in_sight(
+        &world(),
+        &mut GridSight::square(walls),
+        &eye,
+        centre(sender),
+    )
 }
 
 /// The kill zone: x 11 to 14, y 9 to 11.
@@ -130,7 +198,7 @@ impl SquadRules for AmbushRules {
     }
 
     fn channel_delay(&mut self, id: u32, ctx: &ChannelCtx) -> Option<u32> {
-        (id == HAND_SIGNS && sees(&self.walls, ctx.from, ctx.to)).then_some(1)
+        (id == HAND_SIGNS && sees_sign(&self.walls, ctx.from, ctx.to)).then_some(1)
     }
 
     fn trigger(&mut self, id: u32, _view: &SquadView<'_>, _now: u32) -> bool {
@@ -164,6 +232,8 @@ pub struct Scene {
     pub stood: Vec<[Pos; 4]>,
     /// The crew at the end.
     pub crew: Crew,
+    /// What the lookout and the guards perceived, in tick order.
+    pub percepts: Vec<Percept>,
 }
 
 /// One guard's walk: a cell per `STEP` ticks towards its goal.
@@ -254,7 +324,20 @@ pub fn run_scene(scene_b: bool, end: u32) -> Scene {
         sent_at: None,
         stood: Vec::new(),
         crew: crew.clone(),
+        percepts: Vec::new(),
     };
+    let world = world();
+    let watch = watch_profile();
+    // The lookout first, then the guards: an awareness and an attention
+    // each (one target).
+    let mut aware = [Awareness::default(); 5];
+    let mut attention = [Attention::default(); 5];
+    let budget = SightBudget {
+        checks: 1,
+        keep: 1,
+        instant_cap: 1,
+    };
+    let mut percepts = Vec::new();
     let mut events = Vec::new();
     let mut walks = [Walk::default(); 4];
     let mut at_guard = GUARDS.map(|(_, x, y)| [x, y, 0]);
@@ -277,16 +360,38 @@ pub fn run_scene(scene_b: bool, end: u32) -> Scene {
         scene.stood.push(at_guard);
         let at = intruder_at(scene_b, t);
         rules.intruder = at;
-        crew.observe(
-            t,
-            Fact {
-                subject: INTRUDER,
-                kind: ENEMY,
-                pos: at,
-                seen_at: t,
-                ..Fact::default()
-            },
-        );
+        // The lookout and the guards look at the intruder; what they
+        // perceive goes to the crew.
+        let target = Target {
+            id: INTRUDER,
+            point: centre(at),
+            size: 256,
+            conspicuity: 256,
+            cues: TORCH,
+            ..Target::default()
+        };
+        percepts.clear();
+        let lookout = (LOOKOUT.0, [LOOKOUT.1, LOOKOUT.2, 0], SOUTH);
+        let guards = (0..4).map(|i| (GUARDS[i].0, at_guard[i], WEST));
+        for (k, (id, cell, facing)) in std::iter::once(lookout).chain(guards).enumerate() {
+            look(
+                &world,
+                &mut GridSight::square(&walls),
+                t,
+                &eye(id, cell, facing, &watch),
+                &[target],
+                &mut aware[k..=k],
+                &mut attention[k],
+                budget,
+                &mut percepts,
+            );
+        }
+        for p in &percepts {
+            if let Some(fact) = percept_fact(p, &KINDS) {
+                crew.observe(t, fact);
+            }
+        }
+        scene.percepts.extend_from_slice(&percepts);
         // Scene B: guard 3 is seen and tells the leader.
         if scene_b && scene.sent_at.is_none() && sees(&walls, at, at_guard[2]) {
             let msg = Message {
