@@ -15,6 +15,7 @@ fn sound(point: Pos, loudness: i32) -> Stimulus {
         point,
         loudness,
         channel: 0,
+        disguise: 0,
         at: 0,
     }
 }
@@ -401,4 +402,64 @@ fn hear_trace() {
             range: 8 * S,
         }]
     );
+}
+
+#[test]
+fn disguised_noise_stays_disguised() {
+    let p = SenseProfile {
+        hear_gain: 4096,
+        ..SenseProfile::human(S)
+    };
+    let e = eye(&p);
+    let s = Stimulus {
+        disguise: 100,
+        ..sound(at(2, 0), 12 * S)
+    };
+    // Stateless and with an awareness: every percept is disguised.
+    let (_, out) = listen(&square(), &e, &s);
+    assert_eq!(out.len(), 1);
+    assert!(out[0].disguised);
+    let mut a = Awareness::default();
+    let (_, out) = listen_on(&square(), &mut OpenAir, 1, &e, &s, None, Some(&mut a), 0);
+    let kinds: Vec<_> = out.iter().map(|p| p.event).collect();
+    assert_eq!(kinds, [PerceptKind::Heard, PerceptKind::Noticed]);
+    assert!(out.iter().all(|p| p.disguised));
+    // Hearing never sees through.
+    assert!(!a.seen_through() && a.doubt == 0);
+    // Seen through already: not disguised.
+    let mut b = Awareness {
+        flags: crate::awareness::SEEN_THROUGH,
+        ..Awareness::default()
+    };
+    let (_, out) = listen_on(&square(), &mut OpenAir, 1, &e, &s, None, Some(&mut b), 0);
+    assert!(out.iter().all(|p| !p.disguised));
+    // No disguise: never disguised.
+    let (_, out) = listen(&square(), &e, &sound(at(2, 0), 12 * S));
+    assert!(!out[0].disguised);
+}
+
+#[test]
+fn recognition_due_while_hearing_is_unplaced() {
+    let p = SenseProfile::human(S);
+    let mut e = eye(&p);
+    e.stats.reaction_ticks = 3;
+    // Recognised by sight at tick 1, still waiting for the reaction time.
+    let mut a = Awareness {
+        counter: p.recognize_at,
+        stage: 1,
+        pending: 2,
+        pending_since: 1,
+        last: 1,
+        last_seen: 1,
+        ..Awareness::default()
+    };
+    let s = sound(at(4, 3), 12 * S);
+    let (_, out) = listen_on(&square(), &mut OpenAir, 4, &e, &s, None, Some(&mut a), 0);
+    assert_eq!(a.stage(), 2);
+    let kinds: Vec<_> = out.iter().map(|p| p.event).collect();
+    assert_eq!(kinds, [PerceptKind::Heard, PerceptKind::Recognized]);
+    assert!(out[0].placed);
+    let r = out[1];
+    assert!(!r.placed);
+    assert_eq!((r.point, r.cell), ([0; 3], [0; 3]));
 }

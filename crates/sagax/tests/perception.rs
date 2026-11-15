@@ -193,6 +193,7 @@ fn stimulus(point: Pos, loudness: i32) -> Stimulus {
         point,
         loudness,
         channel: 0,
+        disguise: 0,
         at: 0,
     }
 }
@@ -669,5 +670,57 @@ fn alert_from_percepts() {
     assert_eq!(alert_amount(&heard[0], &amounts), 5);
     learn_percepts(&mut known, &mut alert, &cfg, 2, &heard, &kinds(), &amounts);
     assert_eq!(alert.value(), 43);
+    assert_eq!(known.get(9, HEARD).unwrap().pos, [2, 0, 0]);
+}
+
+#[test]
+fn disguised_noise_learns_no_threat() {
+    let world = World::square(S);
+    let at = |x, y| cell_centre(&world, Cell::new(x, y, 0));
+    let p = SenseProfile {
+        hear_gain: 4096,
+        ..SenseProfile::human(S)
+    };
+    let e = ear(&p, at(0, 0));
+    let s = Stimulus {
+        disguise: 100,
+        ..stimulus(at(2, 0), 8 * S)
+    };
+    let mut aware = Awareness::default();
+    let mut out = Vec::new();
+    hear(
+        &world,
+        &mut OpenAir,
+        1,
+        &e,
+        &s,
+        None,
+        Some(&mut aware),
+        &mut out,
+        0,
+    );
+    let events: Vec<_> = out.iter().map(|p| p.event).collect();
+    assert_eq!(events, [PerceptKind::Heard, PerceptKind::Noticed]);
+    assert!(out.iter().all(|p| p.disguised));
+    let amounts = AlertAmounts {
+        noticed: 10,
+        heard: 5,
+        ..quiet()
+    };
+    // No disguised kind: no fact at all, no alert.
+    let (mut known, mut alert, cfg) = memory();
+    learn_percepts(&mut known, &mut alert, &cfg, 1, &out, &kinds(), &amounts);
+    for kind in [NOTICED, SEEN, HEARD, DISGUISED] {
+        assert!(known.get(9, kind).is_none(), "kind {kind}");
+    }
+    assert_eq!(alert.value(), 0);
+    // With one: the noticed fact goes there, the noise stays a noise.
+    let with = FactKinds {
+        disguised_kind: Some(DISGUISED),
+        ..kinds()
+    };
+    learn_percepts(&mut known, &mut alert, &cfg, 1, &out, &with, &amounts);
+    assert!(known.get(9, NOTICED).is_none());
+    assert_eq!(known.get(9, DISGUISED).unwrap().pos, [2, 0, 0]);
     assert_eq!(known.get(9, HEARD).unwrap().pos, [2, 0, 0]);
 }

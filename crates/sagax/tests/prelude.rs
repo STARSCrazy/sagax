@@ -205,6 +205,7 @@ fn perception_with_the_prelude() {
         point: target.point,
         loudness: 8 * 256,
         channel: 0,
+        disguise: 0,
         at: 2,
     };
     assert!(hear(&world, &mut map, 2, &eye, &s, None, None, &mut out, 0));

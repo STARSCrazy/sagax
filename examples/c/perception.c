@@ -231,6 +231,7 @@ int main(void)
 			CHECK(centre(p, 16, 9, shot.point) == 0);
 			shot.loudness = 16 * CELL;
 			shot.channel = 0;
+			shot.disguise = 0;
 			shot.at = t;
 			n = sx_perception_hear(p, t, &eye, &shot, 0, 0, NULL, out, 3, NULL, 7);
 			CHECK(n >= 0);

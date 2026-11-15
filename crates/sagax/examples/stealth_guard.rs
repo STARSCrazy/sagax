@@ -66,7 +66,7 @@ const F_LOST: u64 = 16;
 
 /// The sneaker's id.
 pub const SNEAKER: u32 = 99;
-/// Fact kinds.
+/// Fact kind: the noise heard.
 pub const NOISE: u32 = 1;
 /// Fact kind: the sneaker recognised (or told).
 pub const SEEN: u32 = 2;
@@ -370,6 +370,7 @@ pub(crate) fn run_scene(end: u32, ambient: u8) -> Scene {
                     point: centre(&world, at),
                     loudness: NOISE_LOUDNESS,
                     channel: 0,
+                    disguise: 0,
                     at: t,
                 };
                 if hear(

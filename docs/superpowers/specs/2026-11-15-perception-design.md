@@ -609,6 +609,7 @@ pub struct Stimulus {
     pub point: Pos,    // fine point
     pub loudness: i32, // audible range in fine units for a normal listener
     pub channel: u8,   // 0 ..< MAX_CHANNELS
+    pub disguise: u8,  // the source's disguise, as Target.disguise (0 none)
     pub at: u32,       // when it was made
 }
 pub struct Channel {

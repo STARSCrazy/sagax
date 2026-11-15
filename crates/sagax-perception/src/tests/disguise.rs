@@ -52,6 +52,7 @@ fn disguise_holds() {
 #[test]
 fn disguise_holds_random_sequences() {
     let mut rng = Rng(21);
+    let (mut recognised, mut cues, mut heard) = (0, 0, 0);
     for seq in 0..500 {
         let rule = CueRule {
             bits: 1 + rng.below(3) as u32,
@@ -85,7 +86,31 @@ fn disguise_holds_random_sequences() {
                 })
                 .collect();
             let mut out = Vec::new();
-            if rng.below(2) == 0 {
+            let pick = rng.below(3);
+            if pick == 2 {
+                // A noise of a disguised target, into the same awareness.
+                let i = rng.below(n as u64) as usize;
+                let noise = Stimulus {
+                    id: rng.below(1000) as u32,
+                    source: targets[i].id,
+                    point: targets[i].point,
+                    loudness: rng.range(0, 12) * S,
+                    disguise: targets[i].disguise,
+                    at: now,
+                    ..Stimulus::default()
+                };
+                heard += usize::from(hear(
+                    &square(),
+                    &mut OpenAir,
+                    now,
+                    &e,
+                    &noise,
+                    None,
+                    Some(&mut aware[i]),
+                    &mut out,
+                    seq,
+                ));
+            } else if pick == 0 {
                 let i = rng.below(n as u64) as usize;
                 observe(
                     &square(),
@@ -115,6 +140,8 @@ fn disguise_holds_random_sequences() {
                 );
             }
             for pc in &out {
+                recognised += usize::from(pc.stage == 2);
+                cues += usize::from(matches!(pc.event, PerceptKind::Cues { .. }));
                 assert!(pc.disguised, "seq {seq}");
                 assert_ne!(pc.event, PerceptKind::SeenThrough, "seq {seq}");
                 assert_eq!(bits(pc) & hides, 0, "seq {seq}");
@@ -124,6 +151,11 @@ fn disguise_holds_random_sequences() {
             assert!(!a.seen_through() && a.doubt == 0, "seq {seq}");
         }
     }
+    // Not vacuous: the runs reach recognition, report cues and hear (at
+    // seed 21: 3260 recognised, 293 cues, 3811 heard).
+    assert!(recognised > 1000, "{recognised} recognised");
+    assert!(cues > 100, "{cues} cues");
+    assert!(heard > 1000, "{heard} heard");
 }
 
 #[test]

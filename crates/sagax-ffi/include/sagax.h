@@ -2879,11 +2879,11 @@ int32_t sx_perception_set_map(sx_perception *p, const sx_sense_map *map);
 
 /* ---- sense profiles, stats, targets ---- */
 
-/* Bits of sx_sense_profile.senses. */
-#define SX_SENSES_SIGHT    1  /* normal sight (light, density, bands) */
-#define SX_SENSES_NIGHT    2  /* light counts as at least bright */
-#define SX_SENSES_THERMAL  4  /* a second pass by heat (heat_density, target heat) */
-#define SX_SENSES_SCANNER  8  /* within scanner_range, no walls, bands or light; only noticed */
+/* Bits of sx_sense_profile.senses (flags; not the SX_SENSE_* percept codes). */
+#define SX_SENSE_FLAG_SIGHT    1  /* normal sight (light, density, bands) */
+#define SX_SENSE_FLAG_NIGHT    2  /* light counts as at least bright */
+#define SX_SENSE_FLAG_THERMAL  4  /* a second pass by heat (heat_density, target heat) */
+#define SX_SENSE_FLAG_SCANNER  8  /* within scanner_range, no walls, bands or light; only noticed */
 
 /* One view band: a half-angle around the facing (headings 0 .. 255 are a full
  * turn; 43 is a 120 degree cone). The first band that holds the target
@@ -2909,7 +2909,7 @@ typedef struct sx_cue_rule {
  * Stages: 0 unseen, 1 noticed (counter >= notice_at), 2 recognised
  * (>= recognize_at). Start from sx_sense_profile_preset. */
 typedef struct sx_sense_profile {
-	uint8_t senses;             /* SX_SENSES_* */
+	uint8_t senses;             /* SX_SENSE_FLAG_* */
 	int32_t range;              /* sight range (before stats.sight_scale) */
 	int32_t near;               /* full gain up to here */
 	uint16_t far_gain;          /* gain at range, linear from near */
@@ -2926,7 +2926,7 @@ typedef struct sx_sense_profile {
 	uint16_t hysteresis;        /* how far below a threshold a stage falls */
 	uint16_t check_interval;    /* most ticks one check credits (0 counts as 1) */
 	uint16_t crowd_gain[8];     /* by target crowd, index min(crowd, 7) */
-	int32_t scanner_range;      /* with SX_SENSES_SCANNER; 0: off */
+	int32_t scanner_range;      /* with SX_SENSE_FLAG_SCANNER; 0: off */
 	uint16_t scanner_gain;      /* counter gain per tick of the scanner */
 	uint16_t hearing[SX_MAX_CHANNELS]; /* range scale per channel (0: deaf on it) */
 	uint16_t hear_gain;         /* counter gain per heard stimulus at full margin */
@@ -2992,7 +2992,8 @@ typedef struct sx_target {
 
 /* What one observer knows of one target. Keep one per pair, start it zeroed
  * (= {0}); the fields are private (do not touch, read them through the
- * sx_awareness_* functions). */
+ * sx_awareness_* functions). A zeroed one was last checked at tick 0: start
+ * your clock at 1, or the first check at tick 0 credits nothing. */
 typedef struct sx_awareness {
 	uint16_t counter;           /* private */
 	uint16_t doubt;             /* private */
@@ -3040,6 +3041,7 @@ typedef struct sx_stimulus {
 	int32_t point[3];           /* fine point (axial on hex) */
 	int32_t loudness;           /* audible range in fine units for a normal listener */
 	uint8_t channel;            /* 0 .. SX_MAX_CHANNELS - 1 */
+	uint8_t disguise;           /* the source's disguise (as sx_target.disguise); 0 none */
 	uint32_t at;                /* when it was made */
 } sx_stimulus;
 
@@ -3134,7 +3136,10 @@ int32_t sx_perception_look(sx_perception *p, uint32_t now, const sx_eye *eye,
 /* One hearing check. has_cost 0: the channel's spread; 1: cost is given
  * (from sx_perception_flood). aware 0: stateless (only the HEARD percept);
  * else the pair of this listener and s->source, raised at most to noticed.
- * *total 0: not heard. The heard cell is fuzzed in whole cells by seed. */
+ * *total 0: not heard. The heard cell is fuzzed in whole cells by seed.
+ * s->disguise > 0: every percept is disguised unless aware has seen through
+ * it (hearing never sees through). A RECOGNIZED that becomes due here is
+ * not placed. */
 int32_t sx_perception_hear(sx_perception *p, uint32_t now, const sx_eye *ear,
 	const sx_stimulus *s, uint8_t has_cost, int32_t cost, sx_awareness *aware,
 	sx_percept *out, uint32_t cap, uint32_t *total, uint64_t seed);
@@ -3142,15 +3147,20 @@ int32_t sx_perception_hear(sx_perception *p, uint32_t now, const sx_eye *ear,
  * search of nav over the sense map's sound (step cost plus damping), bounded
  * by the loudness and nav's capacity; then each listener calls
  * sx_perception_hear with has_cost 1 and the cost of its cell. Writes at most
- * cap cells (offset on hex) and costs (costs may be 0). nav's grid must be
- * the handle's (else SX_ERROR_ARGUMENT) and its cost_straight the cell size.
- * Replaces nav's last search. */
+ * cap cells (offset on hex) and costs (costs may be 0). nav's topology must
+ * match the handle's: square with square, hex with the same offset layout
+ * (else SX_ERROR_ARGUMENT); its size and walls are not compared. nav's
+ * straight step cost must be the cell size (not checked in a release
+ * build). The flood is bounded by the loudness: hearing or hearing_scale
+ * above 256 do not widen it. With 8 moves the sound_edge hook is also asked
+ * for diagonal pairs. Replaces nav's last search. */
 int32_t sx_perception_flood(sx_perception *p, sx_nav *nav, const sx_stimulus *s,
 	sx_point *cells, int32_t *costs, uint32_t cap, uint32_t *total);
 
 /* For each of count targets, how many others of the same group (groups[i];
- * groups 0: all one group) stand within radius fine units on the same level,
- * into out[i] (at most 255): the target's crowd. Returns 0. */
+ * groups 0: all one group) stand within radius fine units on the same level
+ * (Euclid on the point's x, y: axial Euclid on hex, approximate), into
+ * out[i] (at most 255): the target's crowd. Returns 0. */
 int32_t sx_count_crowds(const sx_target *targets, uint32_t count, int32_t radius,
 	const uint32_t *groups, uint8_t *out);
 
@@ -3630,6 +3640,7 @@ _Static_assert(offsetof(sx_stimulus, kind) == 8, "sx_stimulus.kind layout");
 _Static_assert(offsetof(sx_stimulus, point) == 12, "sx_stimulus.point layout");
 _Static_assert(offsetof(sx_stimulus, loudness) == 24, "sx_stimulus.loudness layout");
 _Static_assert(offsetof(sx_stimulus, channel) == 28, "sx_stimulus.channel layout");
+_Static_assert(offsetof(sx_stimulus, disguise) == 29, "sx_stimulus.disguise layout");
 _Static_assert(offsetof(sx_stimulus, at) == 32, "sx_stimulus.at layout");
 _Static_assert(sizeof(sx_percept) == 72, "sx_percept layout");
 _Static_assert(offsetof(sx_percept, subject) == 4, "sx_percept.subject layout");

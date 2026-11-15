@@ -3604,6 +3604,7 @@ mod conventions {
                 point,
                 loudness,
                 channel,
+                disguise,
                 at
             ),
             layout!("sx_line", SxLine, has_blocked_at, clarity, blocked_at),
@@ -6340,6 +6341,7 @@ mod perception {
             point: centre(&world, 9, 9),
             loudness: 20 * CELL,
             channel: 0,
+            disguise: 0,
             at: 12,
         };
         let cases = [
@@ -6878,10 +6880,10 @@ mod perception {
                 "SX_MAX_PERCEPTS_PER_CHECK",
                 rs::MAX_PERCEPTS_PER_CHECK as i64,
             ),
-            ("SX_SENSES_SIGHT", i64::from(rs::SIGHT)),
-            ("SX_SENSES_NIGHT", i64::from(rs::NIGHT)),
-            ("SX_SENSES_THERMAL", i64::from(rs::THERMAL)),
-            ("SX_SENSES_SCANNER", i64::from(rs::SCANNER)),
+            ("SX_SENSE_FLAG_SIGHT", i64::from(rs::SIGHT)),
+            ("SX_SENSE_FLAG_NIGHT", i64::from(rs::NIGHT)),
+            ("SX_SENSE_FLAG_THERMAL", i64::from(rs::THERMAL)),
+            ("SX_SENSE_FLAG_SCANNER", i64::from(rs::SCANNER)),
             ("SX_SPREAD_CIRCLE", i64::from(SPREAD_CIRCLE)),
             ("SX_SPREAD_STRAIGHT", i64::from(SPREAD_STRAIGHT)),
             ("SX_SENSE_SIGHT", i64::from(SENSE_SIGHT)),

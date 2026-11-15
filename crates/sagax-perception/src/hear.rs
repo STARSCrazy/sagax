@@ -28,6 +28,10 @@ pub struct Stimulus {
     /// The channel, `0 .. MAX_CHANNELS` (an index into
     /// [`World::channels`]).
     pub channel: u8,
+    /// The source's disguise, as [`Target::disguise`](crate::Target::disguise):
+    /// 0 none. Above 0 every percept of this sound is `disguised` for a
+    /// listener that has not seen through it (hearing never sees through).
+    pub disguise: u8,
     /// When it was made.
     pub at: u32,
 }
@@ -89,7 +93,11 @@ pub fn hear(
 ///   *recognised*. The stage percepts follow the `Heard` one, placed at
 ///   the heard cell: `Noticed` when the stage rose; also `Recognized` when
 ///   a recognition by sight, still waiting for the reaction time, becomes
-///   due in this call, and `Forgotten` on a fall to unseen (unplaced).
+///   due in this call (unplaced: the sound is not where the target was
+///   seen), and `Forgotten` on a fall to unseen (unplaced).
+/// * **Disguise**: with `stimulus.disguise > 0` every percept is
+///   `disguised`, unless the given `Awareness` has seen through it.
+///   Hearing never grows the doubt and never sees through.
 ///
 /// Hearing has no cone. Trace: `Heard` or `Unheard`, then the `Stage`
 /// records.
@@ -152,6 +160,7 @@ pub fn hear_traced(
     } else {
         stimulus.at
     };
+    let disguised = stimulus.disguise > 0 && !aware.as_deref().is_some_and(Awareness::seen_through);
     let (from, to) = match aware {
         Some(a) => {
             let stages = a.raise_heard(
@@ -182,7 +191,7 @@ pub fn hear_traced(
             cell: if placed { cell.pos() } else { [0; 3] },
             placed,
             cues: 0,
-            disguised: false,
+            disguised,
             clarity: 0,
             margin,
             arrive_at,
@@ -193,8 +202,9 @@ pub fn hear_traced(
     if from == 0 && to >= 1 {
         push(PerceptKind::Noticed, true);
     }
+    // A recognition by sight that became due: not where the sound was.
     if from < 2 && to == 2 {
-        push(PerceptKind::Recognized, true);
+        push(PerceptKind::Recognized, false);
     }
     if from > 0 && to == 0 {
         push(PerceptKind::Forgotten, false);

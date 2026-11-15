@@ -222,6 +222,7 @@ fn main() {
                 point: centre(&world, 16, 9),
                 loudness: 16 * CELL,
                 channel: 0,
+                disguise: 0,
                 at: t,
             };
             hear_traced(
