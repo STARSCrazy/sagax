@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "sagax"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "sagax-core",
  "sagax-debug",
@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "sagax-abi"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "sagax-core",
  "sagax-decide",
@@ -23,18 +23,18 @@ dependencies = [
 
 [[package]]
 name = "sagax-core"
-version = "0.11.0"
+version = "0.12.0"
 
 [[package]]
 name = "sagax-debug"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "sagax-core",
 ]
 
 [[package]]
 name = "sagax-decide"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "sagax-core",
  "sagax-debug",
@@ -42,7 +42,7 @@ dependencies = [
 
 [[package]]
 name = "sagax-ffi"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "sagax-abi",
  "sagax-core",
@@ -52,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "sagax-nav"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "sagax-core",
  "sagax-debug",
@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "sagax-wasm"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "sagax-abi",
  "sagax-core",

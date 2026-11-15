@@ -12,8 +12,9 @@
   (0.8.0: squad leader, orders, signal, skill), the 0.9.0 API round (one
   set of conventions, the `Crew`, the `sagax` crate with its prelude) and the
   0.10.0 slim round (a core with a kit, the rules object for a game's own
-  pieces) are done, and so is the mission planner (0.11.0: motive, plan,
-  leeway, detours, replanning; Rust and C).
+  pieces) are done, and so are the mission planner (0.11.0: motive, plan,
+  leeway, detours, replanning; Rust and C) and the trace round (0.12.0: one
+  debugging pattern for every module).
 - **Missions, next:** a *search planner* (GOAP or HTN) behind the same plan
   format: it would build the plans that the game now writes by hand or
   scores from a playbook, and a mission would run them unchanged. A

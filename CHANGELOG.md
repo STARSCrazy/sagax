@@ -1,12 +1,20 @@
 # Changelog
 
-## 0.12.0 (unreleased)
+## 0.12.0
 
-The mission's open small items. A call for help now names the caller's
-motive, a game can see why a replan took a plan, and the C interface reads
-back the motive, the leeway and the running plan. **C API version 12.**
-`SX_API_VERSION` is 12, so a game built with the new header refuses an
-older library; `sx_mission_event` and `sx_mission_out` grew (see below).
+One way to debug every module, the mission's open small items and the last
+slim item. Every operation that decides something has a `_traced` form
+that takes a `Sink` as its last argument; the plain form is the traced one
+with `NoopSink`, so tracing off costs nothing. Debug records are named
+`*Trace` (`SearchTrace`, `DecideTrace`, `SquadTrace`, ...), output the game
+acts on is named `*Event` (`CrewEvent`, `MissionEvent`). Facades wrap the
+records of the parts they drive, and everything for debugging lives in
+`sagax::debug`. In C every handle has `sx_<x>_set_trace(handle, fn,
+context)`. The missions gain C getters, a motive on calls for help and a
+traced replan; the C and WASM layers share their last codecs through
+`sagax-abi`. Breaking: old trace names and the squad's score log are gone
+(see the migration table). **C API version 12.** `SX_API_VERSION` is 12,
+so a game built with the new header refuses an older library.
 
 ### New
 
