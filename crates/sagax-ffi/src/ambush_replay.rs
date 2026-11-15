@@ -17,10 +17,13 @@ use sagax_decide::group::{
     IN_LOSSES, IN_OFF_PLAN, IN_TARGET_AGE, IN_TARGET_DIST, REPORT_GAME_FIRST, TAG_HIDDEN,
 };
 
+use crate::Point;
 use crate::crew::*;
 use crate::decide::SxConsideration;
+use crate::grid::{SxGrid, sx_grid_free, sx_grid_new, sx_grid_set};
 use crate::group::*;
 use crate::memory::{SxFact, SxMessage};
+use crate::perception::*;
 use crate::rules::*;
 
 const END: u32 = 80;
@@ -44,10 +47,22 @@ const REPORT_SEEN: u32 = REPORT_GAME_FIRST;
 const SEEN_PENALTY: i64 = 10000;
 /// `SX_ONE`.
 const SX_ONE: u32 = 65535;
+const CELL: i32 = 256;
+const LOOKOUT: u32 = 5;
+const LOOKOUT_X: i32 = 6;
+const LOOKOUT_Y: i32 = 1;
+const SOUTH: i32 = 64;
+const WEST: i32 = 128;
+const TORCH: u32 = 1;
+const WATCHERS: usize = 5;
+const PERCEPTS: u32 = 8;
+/// `SX_GRID_SQUARE`.
+const GRID_SQUARE: u32 = 0;
 
 /// The game's pieces, behind the user pointer of the rules table.
 struct AmbushRules {
-    wall: [[bool; WIDTH as usize]; HEIGHT as usize],
+    sight: *mut SxPerception,
+    signs: *const SxSenseProfile,
     intruder: [i32; 3],
     seen: bool,
 }
@@ -64,27 +79,57 @@ fn sign(v: i32) -> i32 {
     v.signum()
 }
 
-fn sees(r: &AmbushRules, from: [i32; 3], to: [i32; 3]) -> bool {
-    let (mut x, mut y) = (from[0], from[1]);
-    let (dx, dy) = ((to[0] - x).abs(), -(to[1] - y).abs());
-    let (stepx, stepy) = (sign(to[0] - x), sign(to[1] - y));
-    let mut err = dx + dy;
-    loop {
-        if x == to[0] && y == to[1] {
-            return true;
-        }
-        if (x != from[0] || y != from[1]) && r.wall[y as usize][x as usize] {
-            return false;
-        }
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x += stepx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y += stepy;
-        }
+/// `centre` of the C file: the fine point at the centre of cell `c`.
+unsafe fn centre(p: *mut SxPerception, c: [i32; 3]) -> [i32; 3] {
+    let mut out = [0i32; 3];
+    let cell = Point {
+        x: c[0],
+        y: c[1],
+        level: c[2],
+    };
+    unsafe { sx_perception_cell_centre(p, cell, out.as_mut_ptr()) };
+    out
+}
+
+/// `sees` of the C file: the exact sight line between two cell centres.
+unsafe fn sees(p: *mut SxPerception, from: [i32; 3], to: [i32; 3]) -> bool {
+    unsafe {
+        let (a, b) = (centre(p, from), centre(p, to));
+        let mut line = SxLine::default();
+        sx_perception_line(p, a.as_ptr(), b.as_ptr(), &mut line) == 0 && line.clear != 0
+    }
+}
+
+/// `make_eye` of the C file.
+unsafe fn make_eye(
+    p: *mut SxPerception,
+    id: u32,
+    at: [i32; 3],
+    facing: i32,
+    profile: *const SxSenseProfile,
+) -> SxEye {
+    SxEye {
+        id,
+        point: unsafe { centre(p, at) },
+        facing,
+        profile,
+        stats: SxStats {
+            sight_scale: 256,
+            notice_scale: 256,
+            hearing_scale: 256,
+            reaction_ticks: 0,
+        },
+        disguise: SxDisguiseRule::default(),
+    }
+}
+
+/// `sees_sign` of the C file: a guard at `receiver`, facing west, sees a
+/// hand sign at `sender` (range, cone and line).
+unsafe fn sees_sign(r: &AmbushRules, sender: [i32; 3], receiver: [i32; 3]) -> bool {
+    unsafe {
+        let eye = make_eye(r.sight, 0, receiver, WEST, r.signs);
+        let at = centre(r.sight, sender);
+        sx_perception_in_sight(r.sight, &eye, at.as_ptr()) == 1
     }
 }
 
@@ -113,7 +158,7 @@ unsafe extern "C" fn cb_spot_score(
     unsafe {
         let r = &*user.cast::<AmbushRules>();
         let ctx = &*ctx;
-        let penalty: i64 = if sees(r, r.intruder, ctx.spot.pos) {
+        let penalty: i64 = if sees(r.sight, r.intruder, ctx.spot.pos) {
             SEEN_PENALTY
         } else {
             0
@@ -137,7 +182,7 @@ unsafe extern "C" fn cb_channel_delay(
     unsafe {
         let r = &*user.cast::<AmbushRules>();
         let ctx = &*ctx;
-        if id == HAND_SIGNS && sees(r, ctx.from, ctx.to) {
+        if id == HAND_SIGNS && sees_sign(r, ctx.from, ctx.to) {
             *delay = 1;
             return 1;
         }
@@ -290,7 +335,11 @@ unsafe fn scene_crew(guards: &[[i32; 3]; GUARDS]) -> *mut SxCrew {
 }
 
 /// `run_scene` of the C file: what it prints, in `out`.
-unsafe fn run_scene(scene_b: bool, out: &mut String) -> Result<(), String> {
+unsafe fn run_scene(
+    scene_b: bool,
+    sight: *mut SxPerception,
+    out: &mut String,
+) -> Result<(), String> {
     unsafe {
         macro_rules! check {
             ($cond:expr) => {
@@ -312,8 +361,22 @@ unsafe fn run_scene(scene_b: bool, out: &mut String) -> Result<(), String> {
         ];
         let mut spots = [spot(0, 0); 8];
         let mut table = SxSquadRules::default();
+        let lookout = [LOOKOUT_X, LOOKOUT_Y, 0];
+        let kinds = SxFactKinds {
+            noticed_kind: ENEMY,
+            seen_kind: ENEMY,
+            heard_kind: ENEMY,
+            disguised_kind: 0,
+            has_disguised_kind: 0,
+        };
+        let mut watch = SxSenseProfile::default();
+        let mut signs = SxSenseProfile::default();
+        let mut aware = [SxAwareness::default(); WATCHERS];
+        let mut attention = [SxAttention::default(); WATCHERS];
+        let mut percepts = [SxPercept::default(); PERCEPTS as usize];
         let mut rules = AmbushRules {
-            wall: [[false; WIDTH as usize]; HEIGHT as usize],
+            sight: null_mut(),
+            signs: null(),
             intruder: [0; 3],
             seen: false,
         };
@@ -335,12 +398,20 @@ unsafe fn run_scene(scene_b: bool, out: &mut String) -> Result<(), String> {
             at_guard[i][2] = 0;
         }
 
-        for y in 0..HEIGHT {
-            for x in 0..WIDTH {
-                rules.wall[y as usize][x as usize] =
-                    (x == WALL_X && y <= WALL_TOP) || (x == SHIELD_X && y <= SHIELD_TOP);
-            }
-        }
+        // The eyes of the lookout and the guards: the guard preset plus "a
+        // torch is noticed at once in the focus" (gain 0: only instant).
+        check!(sx_sense_profile_preset(SENSE_PRESET_GUARD, CELL, &mut watch) == 0);
+        watch.cues[0].bits = TORCH;
+        watch.cues[0].gain = 0;
+        watch.cues[0].instant = 1;
+        check!(sx_sense_profile_preset(SENSE_PRESET_WATCHER, CELL, &mut signs) == 0);
+        let budget = SxBudget {
+            checks: 1,
+            keep: 1,
+            instant_cap: 1,
+        };
+        rules.sight = sight;
+        rules.signs = &signs;
         rules.intruder = intruder_at(scene_b, 0);
         rules.seen = false;
         check!(sx_squad_rules_default(&mut table) == 0);
@@ -353,7 +424,6 @@ unsafe fn run_scene(scene_b: bool, out: &mut String) -> Result<(), String> {
 
         for t in 0..=END {
             let mut total = 0u32;
-            let mut fact = SxFact::default();
 
             // 1. The guards walk.
             for i in 0..GUARDS {
@@ -365,20 +435,56 @@ unsafe fn run_scene(scene_b: bool, out: &mut String) -> Result<(), String> {
                 }
             }
 
-            // 2. The intruder moves and is seen by the leader. The C file
-            // writes it through the user pointer; so does this.
+            // 2. The intruder moves; the lookout and the guards look at it,
+            // and what they perceive goes to the crew. The C file writes
+            // the intruder through the user pointer; so does this.
             let rules_ptr = table.user.cast::<AmbushRules>();
             (*rules_ptr).intruder = intruder_at(scene_b, t);
             let at = (*rules_ptr).intruder;
-            fact.subject = INTRUDER;
-            fact.kind = ENEMY;
-            fact.pos[0] = at[0];
-            fact.pos[1] = at[1];
-            fact.seen_at = t;
-            check!(sx_crew_observe(crew, t, &fact, null_mut()) >= 0);
+            let target = SxTarget {
+                id: INTRUDER,
+                point: centre(sight, at),
+                size: 256,
+                conspicuity: 256,
+                cues: TORCH,
+                ..SxTarget::default()
+            };
+            for k in 0..WATCHERS {
+                let eye = if k == 0 {
+                    make_eye(sight, LOOKOUT, lookout, SOUTH, &watch)
+                } else {
+                    make_eye(
+                        sight,
+                        guards[k - 1][0] as u32,
+                        at_guard[k - 1],
+                        WEST,
+                        &watch,
+                    )
+                };
+                let n = sx_perception_look(
+                    sight,
+                    t,
+                    &eye,
+                    &target,
+                    &mut aware[k],
+                    1,
+                    &mut attention[k],
+                    &budget,
+                    percepts.as_mut_ptr(),
+                    PERCEPTS,
+                    null_mut(),
+                );
+                check!(n >= 0);
+                for pc in &percepts[..n as usize] {
+                    let mut fact = SxFact::default();
+                    if sx_percept_fact(pc, &kinds, &mut fact) == 1 {
+                        check!(sx_crew_observe(crew, t, &fact, null_mut()) >= 0);
+                    }
+                }
+            }
 
             // 3. Scene B: guard 3 is seen and tells the leader.
-            if scene_b && !sent && sees(&*rules_ptr, at, at_guard[2]) {
+            if scene_b && !sent && sees(sight, at, at_guard[2]) {
                 let msg = SxMessage {
                     kind: REPORT_SEEN,
                     sender: 3,
@@ -435,12 +541,47 @@ unsafe fn run_scene(scene_b: bool, out: &mut String) -> Result<(), String> {
     }
 }
 
-/// `main` of the C file: both scenes.
+/// `main` of the C file: the walls, the perception world, both scenes.
 fn replay() -> Result<String, String> {
     let mut out = String::new();
     unsafe {
-        run_scene(false, &mut out)?;
-        run_scene(true, &mut out)?;
+        // The walls: a grid whose blocked cells stop sight.
+        let walls: *mut SxGrid = sx_grid_new(WIDTH, HEIGHT, 1);
+        if walls.is_null() {
+            return Err("sx_grid_new".into());
+        }
+        for y in 0..HEIGHT {
+            for x in [WALL_X, SHIELD_X] {
+                let top = if x == WALL_X { WALL_TOP } else { SHIELD_TOP };
+                if y <= top && sx_grid_set(walls, Point { x, y, level: 0 }, -1) != 0 {
+                    return Err("sx_grid_set".into());
+                }
+            }
+        }
+        let mut map = SxSenseMap {
+            sight: None,
+            sight_edge: None,
+            cross_level: None,
+            light: None,
+            sound: None,
+            sound_edge: None,
+            context: null_mut(),
+        };
+        let mut cfg = SxPerceptionConfig::default();
+        if sx_sense_map_from_grid(walls, &mut map) != 0
+            || sx_perception_config_default(GRID_SQUARE, CELL, &mut cfg) != 0
+        {
+            return Err("sense map or config".into());
+        }
+        let sight = sx_perception_new(&cfg, &map);
+        if sight.is_null() {
+            return Err("sx_perception_new".into());
+        }
+        let result =
+            run_scene(false, sight, &mut out).and_then(|()| run_scene(true, sight, &mut out));
+        sx_perception_free(sight);
+        sx_grid_free(walls);
+        result?;
     }
     Ok(out)
 }
@@ -477,8 +618,6 @@ t= 30 activated plan 2
 t= 30 order member 1
 t= 30 start member 1
 t= 31 order member 3
-t= 31 order member 2
-t= 31 start member 2
 t= 31 start member 3
 ";
 
