@@ -1,6 +1,6 @@
 # Trace round — one debugging pattern for every module — design
 
-Status: draft for approval. Ships with the round in progress (0.12.0, C API
+Status: approved 2026-11-15. Ships with the round in progress (0.12.0, C API
 12); if it misses that release, it takes the next C API version.
 
 ## Intent
@@ -588,14 +588,11 @@ JS unchanged); short pointers from the module sections;
 `examples/c/trace.c` with the ring buffer, added to `examples/c/run.sh`;
 `docs/QUICKSTART.md` if it mentions tracing.
 
-## Open questions for the owner
+## Decisions
 
-1. **C collector.** This design has none (reasons above) and ships a ring
-   buffer as example code. *Recommendation: keep it so.* If C users ask for
-   it, a later `sx_<t>_ring` per record type can be added without touching
-   anything here.
-2. **Transparent blocks.** `Alertness`, `Progress`, `Interval` and the pure
-   functions stay untraced because their results already say everything.
-   If "every module" should mean literally every one, they would each need
-   a `_traced` form and, in C, an extra callback parameter on plain-struct
-   functions. *Recommendation: keep them transparent.*
+1. **C collector.** None; the ring buffer in `examples/c/trace.c` is the
+   answer for C. A later `sx_<t>_ring` per record type stays possible
+   without touching anything here.
+2. **Transparent blocks.** A block gets a trace only where it decides
+   something the result does not show. `Alertness`, `Progress`, `Interval`
+   and the pure functions stay untraced.
