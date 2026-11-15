@@ -115,6 +115,43 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   `SX_AREAS_TRACE_*`, `SX_TIMERS_TRACE_*`, `SX_MESSAGE_TRACE_*` (each from
   1). The handles of `sx_squad_knowledge` and `sx_squad_areas` take a trace
   too; it sees only the calls made through them.
+- **Group traces:** the squad's calls that decide something have a
+  `_traced` form with a `Sink<SquadTrace>`: `Squad::observe_traced`,
+  `plan_traced`, `check_traced`, `orders_due_traced`, `signal_traced`,
+  `reinstate_traced` (the `_with` forms are these with `NoopSink`).
+  `SquadTrace` records the targets slot's answer per target (`Target {
+  fact, kept }`), the decider's own records per candidate (`Decide {
+  tactic, target, event: DecideTrace }`: factors and score), each abort
+  rule checked (`Abort { tactic, target, abort, fired }`, the active row's
+  and each candidate's), the pick (`Picked { tactic, target, score }` or
+  `NoPick`), `Thinking { plan, until }`, each slot assignment (`Assigned {
+  slot, member, cost }`), the spot ranking per member (`Spot { member,
+  event: SpotTrace }`), the trigger (`Trigger { fired }`), each report read
+  (`Report { msg }`), each order's or report's delay (`Delay { member,
+  delay }`) and what reached the leader's knowledge and the danger areas
+  (`Knowledge(KnowledgeTrace)`, `Areas(AreasTrace)`, nested through
+  `MapSink`).
+- `pick_spot_traced` with `SpotTrace` (`Ranked { spot, fits, distance }`
+  best first, then `Picked(SpotPick)`); `GoalKeeper::broken_traced` with
+  `KeeperTrace::Checked { waited, limit, broken }`.
+- **Crew traces:** `Crew::tick_traced`, `observe_traced`, `report_traced`,
+  `reinstate_traced` with a `Sink<CrewTrace>`: `Squad(SquadTrace)` (with a
+  hex layout in offset coordinates), `Keeper { member, event: KeeperTrace }`
+  for each keeper check of a tick, and `Sent { msg, delay, queued }` for
+  each report the crew sends (its own and the game's). `CrewEvent` stays
+  the game's output. All four trace types are in `sagax::debug`.
+- `sagax-abi`: `squad_trace`, `keeper_trace`, `crew_trace` (with
+  `SquadTraceCode`, `KeeperTraceCode`, `CrewTraceCode`) and the codes
+  `SQUAD_TRACE_*`, `KEEPER_TRACE_CHECKED`, `CREW_TRACE_*`.
+- **C:** `sx_squad_set_trace` (`sx_squad_trace`, `SX_SQUAD_TRACE_TARGET` ..
+  `_AREAS`, 1 to 14; a spot record is `SPOT_RANKED` or `SPOT_PICKED`; the
+  decider, knowledge and areas records are embedded), `sx_keeper_set_trace`
+  (`sx_keeper_trace`, `SX_KEEPER_TRACE_CHECKED`) and `sx_crew_set_trace`
+  (`sx_crew_trace`, `SX_CREW_TRACE_SQUAD`, `_KEEPER`, `_SENT`, embedding the
+  keeper and squad records). The lent handles of `sx_crew_squad` and
+  `sx_crew_keeper` trace only the calls made through them; the crew's own
+  work goes to the crew's trace. Without rules, a squad or crew that needs
+  them refuses plan, check and tick as before and reinstates untraced.
 
 ### Changed
 
@@ -136,8 +173,7 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   `SX_DECIDE_TRACE_FACTOR`, `_SCORED`, `_CHOSEN` (the same numbers 1 to 3)
   and the new `_RANKED` (4); the product of `SCORED` moves from `value` to
   its own `product`; new `rank` and `cooled`; fields that do not apply are
-  0 (`consideration` was -1). The struct grows from 24 to 36 bytes, and
-  `sx_score_event`, which embeds it, from 36 to 48.
+  0 (`consideration` was -1). The struct grows from 24 to 36 bytes.
 - **The navigator stores no tracer any more**: `Navigator::set_tracer`, the
   module `sagax_nav::trace` (`TraceEvent`, `TraceKind`, `Tracer`,
   `TraceSink`) are removed; pass a sink to the `_traced` calls instead.
@@ -158,8 +194,20 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   pointer into the squad; `sx_knowledge_free` and `sx_areas_free` do
   nothing to them (before, freeing them was not allowed). Every call on
   them works as before.
-- WebAssembly / JavaScript: unchanged (`grid.setTrace`, `grid.takeTrace`
-  give the search steps as before).
+- **The squad's score log is removed:** `Squad::set_score_log`,
+  `score_log` and `ScoreEntry` are gone (with the internal `LogSink` and
+  the log in the squad's scratch). The `Decide` records of `plan_traced` /
+  `check_traced` carry the same tactic, target and decider record, and
+  the trace shows the rest of the decision too.
+- **C:** `sx_score_event`, `sx_squad_set_score_log` and
+  `sx_squad_score_log` are removed; use `sx_squad_set_trace` and the
+  `SX_SQUAD_TRACE_DECIDE` records (`tactic`, `target`, `has_target`,
+  `decide`).
+- WebAssembly / JavaScript: `grid.setTrace`, `grid.takeTrace` give the
+  search steps as before. `squad.setScoreLog` and `scoreLog` keep their
+  records, now taken from the squad trace; they cover the calls through
+  that squad handle, so a crew's ticks no longer fill the log of
+  `crew.squad()`.
 
 ### Migration table, 0.11 to 0.12
 
@@ -183,6 +231,11 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
 | — | `Knowledge`, `Areas`, `Timers`, `Outbox`, `Inbox`: `*_traced` with `KnowledgeTrace`, `AreasTrace`, `TimersTrace`, `MessageTrace` |
 | — | C `sx_knowledge_`, `sx_areas_`, `sx_timers_`, `sx_outbox_`, `sx_inbox_set_trace` with `sx_knowledge_trace`, `sx_areas_trace`, `sx_timers_trace`, `sx_message_trace` |
 | C `sx_squad_knowledge`, `sx_squad_areas`: a pointer into the squad, never freed | a lent handle per squad; `sx_knowledge_free` / `sx_areas_free` do nothing to it |
+| `squad.set_score_log(true)`, then `plan` / `check`, then `score_log()` | `plan_traced` / `check_traced` with a sink; the `SquadTrace::Decide { tactic, target, event }` records |
+| `ScoreEntry { tactic, target, event }` | `SquadTrace::Decide { tactic, target, event }` |
+| C `sx_squad_set_score_log`, `sx_squad_score_log`, `sx_score_event` | `sx_squad_set_trace` with `sx_squad_trace`; the `SX_SQUAD_TRACE_DECIDE` records |
+| — | `Squad::*_traced`, `Crew::*_traced`, `GoalKeeper::broken_traced`, `pick_spot_traced` with `SquadTrace`, `CrewTrace`, `KeeperTrace`, `SpotTrace` |
+| — | C `sx_squad_set_trace`, `sx_keeper_set_trace`, `sx_crew_set_trace` with `sx_squad_trace`, `sx_keeper_trace`, `sx_crew_trace` |
 
 ## 0.11.0
 

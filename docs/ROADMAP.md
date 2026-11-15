@@ -41,10 +41,9 @@
   have to know the layout. The AI blocks stay axial; the `Crew` converts
   (`CrewConfig::hex_layout`) and everything else converts at the edge with
   `to_axial` / `from_axial` (see "Hex" in the guide).
-- **Group tactics, deferred from the 0.8.0 design:** a trace sink (every
-  tactic score, the pick, each slot assignment and abort check, like the
-  `Decider`'s trace) and a skill-driven chance that a member ignores its
-  slot. Neither is built yet.
+- **Group tactics, deferred from the 0.8.0 design:** a skill-driven chance
+  that a member ignores its slot. Not built yet. (The trace sink of the
+  same design came in 0.12.0: `SquadTrace`, `CrewTrace`.)
 - **Perception** (sight lines, cover, flanks), on the same `sagax-core`, as a
   helper that a game's own rules call (like `path_cost` does for walking
   cost): the squad itself stays blind, the game's slots ask the helper.
