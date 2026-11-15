@@ -4,8 +4,8 @@
 use sagax_abi::convert::{KeeperTraceCode, SquadTraceCode};
 use sagax_decide::group::{
     Abort, BuiltInRules, Channel, Goal, GoalKeeper, KeeperTrace, Member, MemberState, Nearby,
-    Order, Place, Plan, PlanError, SkillTable, Slot, Spot, Squad, SquadConfig, SquadTrace, Tactic,
-    Trigger, gather, tactics,
+    Order, Place, Plan, PlanError, SkillTable, Slot, Spot, Squad, SquadConfig, SquadRules,
+    SquadTrace, Tactic, Trigger, gather, tactics,
 };
 use sagax_decide::{Consideration, Curve, Decider};
 use std::ffi::c_void;
@@ -926,19 +926,10 @@ pub unsafe extern "C" fn sx_squad_reinstate_with(
     // SAFETY: null or valid (see above).
     let mut rules = unsafe { CRules::of(rules) };
     guarded(|| {
-        let known = match rules.as_mut() {
-            Some(r) => traced!(trace, SxSquadTrace::of, |sink| s
-                .reinstate_traced(id, now, r, sink)),
-            // Without rules such a squad does not activate a due plan: the
-            // plain call, untraced.
-            None if s.needs_rules() => s.reinstate(id, now),
-            None => traced!(trace, SxSquadTrace::of, |sink| s.reinstate_traced(
-                id,
-                now,
-                &mut BuiltInRules,
-                sink
-            )),
-        };
+        // Without rules a squad that needs them does not activate a due plan.
+        let rules = rules.as_mut().map(|r| r as &mut dyn SquadRules);
+        let known = traced!(trace, SxSquadTrace::of, |sink| s
+            .reinstate_traced(id, now, rules, sink));
         i32::from(known)
     })
 }

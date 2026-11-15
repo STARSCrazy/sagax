@@ -399,29 +399,23 @@ impl Squad {
     /// gets nothing; nor does a member on a [`Channel::Custom`] (use
     /// [`Squad::reinstate_with`]). False when the id is unknown.
     pub fn reinstate(&mut self, id: u32, now: u32) -> bool {
-        self.reinstate_inner(id, now, None, &mut NoopSink)
+        self.reinstate_traced(id, now, None, &mut NoopSink)
     }
 
     /// [`Squad::reinstate`] with the game's rules (the order goes over a
     /// [`Channel::Custom`] too).
     pub fn reinstate_with(&mut self, id: u32, now: u32, rules: &mut dyn SquadRules) -> bool {
-        self.reinstate_traced(id, now, rules, &mut NoopSink)
+        self.reinstate_traced(id, now, Some(rules), &mut NoopSink)
     }
 
-    /// [`Squad::reinstate_with`] with a trace: the orders of a plan that
-    /// becomes active first, then the member's order
-    /// ([`SquadTrace::Delay`]).
+    /// [`Squad::reinstate_with`] (`rules` given) or [`Squad::reinstate`]
+    /// (`None`) with a trace: the orders of a plan that becomes active
+    /// first, then the member's order ([`SquadTrace::Delay`]). The rules are
+    /// optional here, unlike in the other `_traced` calls, because the call
+    /// without them differs: a squad that needs rules
+    /// ([`Squad::needs_rules`]) then does not activate a due plan, where
+    /// [`BuiltInRules`] would.
     pub fn reinstate_traced<S: Sink<SquadTrace>>(
-        &mut self,
-        id: u32,
-        now: u32,
-        rules: &mut dyn SquadRules,
-        sink: &mut S,
-    ) -> bool {
-        self.reinstate_inner(id, now, Some(rules), sink)
-    }
-
-    fn reinstate_inner<S: Sink<SquadTrace>>(
         &mut self,
         id: u32,
         now: u32,

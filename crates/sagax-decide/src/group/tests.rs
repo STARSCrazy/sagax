@@ -3238,7 +3238,7 @@ fn squad_story(
         if now == 20 {
             out.push(format!(
                 "{:?}",
-                sq.reinstate_traced(4, now, &mut BuiltInRules, sink)
+                sq.reinstate_traced(4, now, Some(&mut BuiltInRules), sink)
             ));
         }
         if now == 25 {

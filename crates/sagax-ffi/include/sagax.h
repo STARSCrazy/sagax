@@ -1501,7 +1501,7 @@ typedef struct sx_squad_trace {
  * turns it off (the default). For sx_crew_squad it covers the calls made
  * through that handle only; the crew's own work goes to sx_crew_set_trace.
  * Without rules a squad that needs them refuses plan and check (nothing is
- * traced) and reinstates untraced. Returns 0. */
+ * traced). Returns 0. */
 typedef void (*sx_squad_trace_fn)(void *context, const sx_squad_trace *trace);
 int32_t sx_squad_set_trace(sx_squad *squad, sx_squad_trace_fn trace, void *context);
 /* How orders (and reports) reach the member; the default is radio 0, 0: at
@@ -2197,8 +2197,7 @@ typedef struct sx_crew_trace {
 /* trace gets every record of the calls above on crew, with context; NULL
  * turns it off (the default). Calls through sx_crew_squad and sx_crew_keeper
  * go to their own traces, not to this one. Without rules a crew whose squad
- * needs them refuses the tick (nothing is traced) and reinstates untraced.
- * Returns 0. */
+ * needs them refuses the tick (nothing is traced). Returns 0. */
 typedef void (*sx_crew_trace_fn)(void *context, const sx_crew_trace *trace);
 int32_t sx_crew_set_trace(sx_crew *crew, sx_crew_trace_fn trace, void *context);
 

@@ -375,19 +375,10 @@ pub unsafe extern "C" fn sx_crew_reinstate_with(
     let trace = c.trace;
     let crew = &mut c.crew;
     guarded(|| {
-        let known = match rules.as_mut() {
-            Some(r) => traced!(trace, SxCrewTrace::of, |sink| crew
-                .reinstate_traced(id, now, r, sink)),
-            // Without rules such a squad does not activate a due plan: the
-            // plain call, untraced.
-            None if crew.squad().needs_rules() => crew.reinstate(id, now),
-            None => traced!(trace, SxCrewTrace::of, |sink| crew.reinstate_traced(
-                id,
-                now,
-                &mut BuiltInRules,
-                sink
-            )),
-        };
+        // Without rules a squad that needs them does not activate a due plan.
+        let rules = rules.as_mut().map(|r| r as &mut dyn SquadRules);
+        let known = traced!(trace, SxCrewTrace::of, |sink| crew
+            .reinstate_traced(id, now, rules, sink));
         i32::from(known)
     })
 }

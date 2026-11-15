@@ -290,33 +290,35 @@ impl Crew {
     /// made without it), its keeper is cleared: it has no goal until an
     /// order comes. False when the id is unknown.
     pub fn reinstate(&mut self, id: u32, now: u32) -> bool {
-        let known = self.squad.reinstate(id, now);
-        self.reinstated(id, now, known)
+        self.reinstate_traced(id, now, None, &mut NoopSink)
     }
 
     /// [`Crew::reinstate`] with the game's rules ([`Squad::reinstate_with`]:
     /// the goal goes over a [`Channel::Custom`](super::Channel::Custom) too;
     /// the slots see offset coordinates with a hex layout).
     pub fn reinstate_with(&mut self, id: u32, now: u32, rules: &mut dyn SquadRules) -> bool {
-        self.reinstate_traced(id, now, rules, &mut NoopSink)
+        self.reinstate_traced(id, now, Some(rules), &mut NoopSink)
     }
 
-    /// [`Crew::reinstate_with`] with a trace ([`Squad::reinstate_traced`],
-    /// wrapped in [`CrewTrace::Squad`]).
+    /// [`Crew::reinstate_with`] (`rules` given) or [`Crew::reinstate`]
+    /// (`None`) with a trace ([`Squad::reinstate_traced`], wrapped in
+    /// [`CrewTrace::Squad`]).
     pub fn reinstate_traced<S: Sink<CrewTrace>>(
         &mut self,
         id: u32,
         now: u32,
-        rules: &mut dyn SquadRules,
+        rules: Option<&mut dyn SquadRules>,
         sink: &mut S,
     ) -> bool {
         let mut squad = MapSink::new(sink, wrap(self.hex));
-        let known = match self.hex {
-            Some(layout) => {
-                self.squad
-                    .reinstate_traced(id, now, &mut HexRules::new(rules, layout), &mut squad)
-            }
-            None => self.squad.reinstate_traced(id, now, rules, &mut squad),
+        let known = match (rules, self.hex) {
+            (Some(rules), Some(layout)) => self.squad.reinstate_traced(
+                id,
+                now,
+                Some(&mut HexRules::new(rules, layout)),
+                &mut squad,
+            ),
+            (rules, _) => self.squad.reinstate_traced(id, now, rules, &mut squad),
         };
         self.reinstated(id, now, known)
     }

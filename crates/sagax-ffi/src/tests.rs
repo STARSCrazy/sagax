@@ -2193,6 +2193,25 @@ mod squad {
     }
 
     #[test]
+    fn reinstate_without_rules_is_traced_too() {
+        unsafe {
+            let (sq, _) = active_flank();
+            // Member 4 on a custom channel: the squad now needs rules.
+            assert_eq!(sx_squad_set_channel_custom(sq, 4, 7), 1);
+            let mut log: Vec<SxSquadTrace> = Vec::new();
+            assert_eq!(sx_squad_set_trace(sq, Some(keep), (&raw mut log).cast()), 0);
+            assert_eq!(sx_squad_suspend(sq, 3), 1);
+            assert_eq!(sx_squad_reinstate(sq, 3, 6), 1);
+            assert_eq!(log.len(), 1);
+            assert_eq!(
+                (log[0].kind, log[0].member, log[0].has_delay, log[0].delay),
+                (SQUAD_TRACE_DELAY, 3, 1, 0)
+            );
+            sx_squad_free(sq);
+        }
+    }
+
+    #[test]
     fn arrival_report_resume_and_spot_radius_through_c() {
         unsafe {
             // Arrival reports count once they are in.
