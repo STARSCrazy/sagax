@@ -451,7 +451,9 @@ pub unsafe extern "C" fn sx_knowledge_set_strength(
 /// `k` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_remove(k: *mut SxKnowledge, subject: u32, kind: u32) -> i32 {
-    flag(held!(k).0.remove(subject, kind))
+    let (k, trace) = held!(k);
+    flag(traced!(trace, SxKnowledgeTrace::of, |sink| k
+        .remove_traced(subject, kind, sink)))
 }
 
 /// `sx_knowledge_remove_subject`.
@@ -460,7 +462,9 @@ pub unsafe extern "C" fn sx_knowledge_remove(k: *mut SxKnowledge, subject: u32, 
 /// `k` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_remove_subject(k: *mut SxKnowledge, subject: u32) -> i32 {
-    to_i32(held!(k).0.remove_subject(subject))
+    let (k, trace) = held!(k);
+    to_i32(traced!(trace, SxKnowledgeTrace::of, |sink| k
+        .remove_subject_traced(subject, sink)))
 }
 
 /// `sx_knowledge_get`.
@@ -1995,7 +1999,7 @@ mod tests {
     fn knowledge_trace_through_c() {
         use sagax_abi::codes::{
             KNOWLEDGE_TRACE_ADDED, KNOWLEDGE_TRACE_EVICTED, KNOWLEDGE_TRACE_EXPIRED,
-            KNOWLEDGE_TRACE_STALE, KNOWLEDGE_TRACE_UPDATED,
+            KNOWLEDGE_TRACE_REMOVED, KNOWLEDGE_TRACE_STALE, KNOWLEDGE_TRACE_UPDATED,
         };
         let rec = |kind, fact| SxKnowledgeTrace { kind, fact };
         unsafe {
@@ -2043,10 +2047,29 @@ mod tests {
                     rec(KNOWLEDGE_TRACE_EXPIRED, own),
                 ]
             );
+            // Remove and remove_subject: one REMOVED per fact.
+            records.clear();
+            let (c1, c2) = (fact(5, 0, 1, 0), fact(5, 1, 1, 0));
+            assert_eq!(sx_knowledge_learn(k, 9, &c1, null_mut()), 0);
+            assert_eq!(sx_knowledge_learn(k, 9, &c2, null_mut()), 0);
+            assert_eq!(sx_knowledge_remove(k, 5, 0), 1);
+            assert_eq!(sx_knowledge_remove(k, 5, 0), 0);
+            assert_eq!(sx_knowledge_learn(k, 9, &c1, null_mut()), 0);
+            assert_eq!(sx_knowledge_remove_subject(k, 5), 2);
+            assert_eq!(
+                records[2..],
+                [
+                    rec(KNOWLEDGE_TRACE_REMOVED, c1),
+                    rec(KNOWLEDGE_TRACE_ADDED, c1),
+                    rec(KNOWLEDGE_TRACE_REMOVED, c2),
+                    rec(KNOWLEDGE_TRACE_REMOVED, c1),
+                ]
+            );
             // Off: nothing more arrives.
+            records.clear();
             assert_eq!(sx_knowledge_set_trace(k, None, null_mut()), 0);
             assert_eq!(sx_knowledge_learn(k, 9, &a, null_mut()), 0);
-            assert_eq!(records.len(), 10);
+            assert!(records.is_empty());
             sx_knowledge_free(k);
         }
     }

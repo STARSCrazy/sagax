@@ -1210,6 +1210,39 @@ fn report_actions_apply_after_all_reports() {
 }
 
 #[test]
+fn a_forget_action_is_traced_as_removed() {
+    use crate::memory::KnowledgeTrace;
+    let mut rules = Acts {
+        forget: Some(10),
+        ..Acts::default()
+    };
+    let mut sq = acts_squad(&mut rules);
+    let target = *sq.knowledge().get(10, ENEMY).unwrap();
+    assert!(sq.report(kind(KIND_B, 2), 10));
+    let mut trace = Collector::new(1 << 12, Overflow::DropNewest);
+    let _ = sq.check_traced(10, &[], &[], 0, &mut rules, &mut trace);
+    assert!(sq.knowledge().get(10, ENEMY).is_none());
+    let removed: Vec<_> = trace
+        .records()
+        .filter_map(|r| match r.event {
+            SquadTrace::Knowledge(KnowledgeTrace::Removed(f)) => Some(f),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(removed, [target]);
+    // A forget of an unknown target changes nothing and records nothing.
+    rules.forget = Some(77);
+    assert!(sq.report(kind(KIND_B, 2), 11));
+    let mut trace = Collector::new(1 << 12, Overflow::DropNewest);
+    let _ = sq.check_traced(11, &[], &[], 0, &mut rules, &mut trace);
+    assert!(
+        !trace
+            .records()
+            .any(|r| matches!(r.event, SquadTrace::Knowledge(KnowledgeTrace::Removed(_))))
+    );
+}
+
+#[test]
 fn report_actions_do_not_grow_after_warm_up() {
     let mut rules = Acts::default();
     let mut sq = acts_squad(&mut rules);

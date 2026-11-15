@@ -89,6 +89,8 @@ pub const KNOWLEDGE_TRACE_STALE: u32 = 3;
 pub const KNOWLEDGE_TRACE_EVICTED: u32 = 4;
 /// `SX_KNOWLEDGE_TRACE_EXPIRED`: dropped by an expire call.
 pub const KNOWLEDGE_TRACE_EXPIRED: u32 = 5;
+/// `SX_KNOWLEDGE_TRACE_REMOVED`: forgotten by a remove call.
+pub const KNOWLEDGE_TRACE_REMOVED: u32 = 6;
 
 /// `SX_AREAS_TRACE_ADDED`: an area was appended.
 pub const AREAS_TRACE_ADDED: u32 = 1;

@@ -61,6 +61,9 @@ pub enum KnowledgeTrace {
     Evicted(Fact),
     /// Dropped by an `expire*` call.
     Expired(Fact),
+    /// Forgotten by [`Knowledge::remove_traced`] or
+    /// [`Knowledge::remove_subject_traced`].
+    Removed(Fact),
 }
 
 /// A bounded table of [`Fact`]s in insertion order, keyed by
@@ -245,9 +248,23 @@ impl Knowledge {
 
     /// Forgets one fact. False if unknown.
     pub fn remove(&mut self, subject: u32, kind: u32) -> bool {
+        self.remove_traced(subject, kind, &mut NoopSink)
+    }
+
+    /// [`Knowledge::remove`] with a trace: [`KnowledgeTrace::Removed`] for
+    /// the fact forgotten.
+    pub fn remove_traced<S: Sink<KnowledgeTrace>>(
+        &mut self,
+        subject: u32,
+        kind: u32,
+        sink: &mut S,
+    ) -> bool {
         match self.find(subject, kind) {
             Some(i) => {
-                self.items.remove(i);
+                let gone = self.items.remove(i);
+                if sink.enabled() {
+                    sink.emit(KnowledgeTrace::Removed(gone));
+                }
                 true
             }
             None => false,
@@ -256,8 +273,25 @@ impl Knowledge {
 
     /// Forgets all facts about `subject` (every kind); returns how many.
     pub fn remove_subject(&mut self, subject: u32) -> usize {
+        self.remove_subject_traced(subject, &mut NoopSink)
+    }
+
+    /// [`Knowledge::remove_subject`] with a trace: one
+    /// [`KnowledgeTrace::Removed`] per fact forgotten, in slot order.
+    pub fn remove_subject_traced<S: Sink<KnowledgeTrace>>(
+        &mut self,
+        subject: u32,
+        sink: &mut S,
+    ) -> usize {
         let before = self.items.len();
-        self.items.retain(|f| f.subject != subject);
+        let on = sink.enabled();
+        self.items.retain(|f| {
+            let keep = f.subject != subject;
+            if !keep && on {
+                sink.emit(KnowledgeTrace::Removed(*f));
+            }
+            keep
+        });
         before - self.items.len()
     }
 

@@ -777,17 +777,19 @@ impl Squad {
             }
         }
         self.scratch.reports = due;
-        let mut areas = MapSink::new(sink, SquadTrace::Areas);
-        self.read_dangers(now, &mut areas);
+        self.read_dangers(now, &mut MapSink::new(&mut *sink, SquadTrace::Areas));
         let mut signal = false;
         for action in &actions {
             match *action {
                 ReportAction::AddArea(area) => {
+                    let mut areas = MapSink::new(&mut *sink, SquadTrace::Areas);
                     self.areas.add_traced(now, area, &mut areas);
                 }
                 ReportAction::Signal => signal = true,
                 ReportAction::Forget { subject } => {
-                    self.knowledge.remove(subject, self.target_kind);
+                    let mut knowledge = MapSink::new(&mut *sink, SquadTrace::Knowledge);
+                    self.knowledge
+                        .remove_traced(subject, self.target_kind, &mut knowledge);
                 }
             }
         }

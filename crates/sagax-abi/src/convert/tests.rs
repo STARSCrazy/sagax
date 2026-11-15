@@ -698,6 +698,7 @@ fn memory_trace_codes() {
         (KnowledgeTrace::Stale(f), KNOWLEDGE_TRACE_STALE),
         (KnowledgeTrace::Evicted(f), KNOWLEDGE_TRACE_EVICTED),
         (KnowledgeTrace::Expired(f), KNOWLEDGE_TRACE_EXPIRED),
+        (KnowledgeTrace::Removed(f), KNOWLEDGE_TRACE_REMOVED),
     ];
     for (event, kind) in kinds {
         assert_eq!(knowledge_trace(event), KnowledgeTraceCode { kind, fact: f });

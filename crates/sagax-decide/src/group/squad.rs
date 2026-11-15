@@ -342,7 +342,8 @@ pub enum SquadTrace {
         /// Ticks until it arrives; `None`: it does not reach the member.
         delay: Option<u32>,
     },
-    /// The leader's knowledge changed (an own sighting, an enemy report).
+    /// The leader's knowledge changed (an own sighting, an enemy report, a
+    /// [`ReportAction::Forget`](super::ReportAction::Forget)).
     Knowledge(KnowledgeTrace),
     /// The leader's danger areas changed (danger reports, report actions,
     /// expiry).
@@ -383,6 +384,7 @@ impl SquadTrace {
                 KnowledgeTrace::Stale(x) => KnowledgeTrace::Stale(fact(x)),
                 KnowledgeTrace::Evicted(x) => KnowledgeTrace::Evicted(fact(x)),
                 KnowledgeTrace::Expired(x) => KnowledgeTrace::Expired(fact(x)),
+                KnowledgeTrace::Removed(x) => KnowledgeTrace::Removed(fact(x)),
             }),
             Self::Areas(a) => Self::Areas(match a {
                 AreasTrace::Added { index, area: x } => AreasTrace::Added {

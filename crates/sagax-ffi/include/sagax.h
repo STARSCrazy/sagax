@@ -781,14 +781,16 @@ int32_t sx_knowledge_expire_kind(sx_knowledge *k, uint32_t now, uint32_t kind,
 /* Forget everything. Returns 0. */
 int32_t sx_knowledge_clear(sx_knowledge *k);
 
-/* What learn, merge, their _message forms and the expire calls did (since
- * version 12): one record per fact concerned. A full table sends EVICTED
- * before the ADDED of the new fact. */
+/* What learn, merge, their _message forms, the expire calls and the remove
+ * calls did (since version 12): one record per fact concerned. A full table
+ * sends EVICTED before the ADDED of the new fact. */
 #define SX_KNOWLEDGE_TRACE_ADDED   1   /* a new subject and kind was stored */
 #define SX_KNOWLEDGE_TRACE_UPDATED 2   /* a known one was replaced by fact */
 #define SX_KNOWLEDGE_TRACE_STALE   3   /* merge kept the stored one; fact is the refused one */
 #define SX_KNOWLEDGE_TRACE_EVICTED 4   /* dropped by the eviction rule to make room */
 #define SX_KNOWLEDGE_TRACE_EXPIRED 5   /* dropped by an expire call */
+#define SX_KNOWLEDGE_TRACE_REMOVED 6   /* forgotten by a remove call (or a squad's forget
+                                        * report action) */
 
 typedef struct sx_knowledge_trace {
 	uint32_t kind;              /* SX_KNOWLEDGE_TRACE_* */
