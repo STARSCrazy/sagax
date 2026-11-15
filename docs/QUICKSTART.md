@@ -287,4 +287,4 @@ Members 2 to 4 get their orders by radio (2 ticks plus 1 per cell from the
 leader), so they arrive at different ticks; the signal lines their attacks up.
 
 Where next: [USAGE.md](USAGE.md) says which building block fits which case,
-section 8 shows the crew step by step and the blocks underneath it.
+section 9 shows the crew step by step and the blocks underneath it.

@@ -5,7 +5,8 @@ here? [QUICKSTART.md](QUICKSTART.md) does a path, a decision and a squad in
 five minutes. The exact contracts are in `crates/sagax-ffi/include/sagax.h`
 (C), `js/sagax.mjs` (JavaScript) and the Rust docs (`cargo doc -p sagax
 --open`; the `sagax` crate and its `prelude` bring the common names, the
-parts are `sagax::nav`, `sagax::decide` and `sagax::debug`).
+parts are `sagax::nav`, `sagax::decide`, `sagax::perception` and
+`sagax::debug`).
 
 ## Conventions
 
@@ -180,6 +181,7 @@ There are two groups of exceptions, on purpose:
 | What should I do, and to whom? | Decisions (utility AI) | `sx_decider_*` | `lib.decider()` |
 | Patrol, chase, search: behaviour over time | State machine | `sx_machine_*` | `lib.machine()` |
 | Who did I see, where, how long ago; where is it dangerous | Memory of the world | `sx_knowledge_*`, `sx_areas_*`, ... | `lib.knowledge()`, `lib.areas()` |
+| What can this character see and hear, and how soon does it notice? | Perception | `sx_perception_*` | not yet |
 | Several characters act together: flank, ambush, advance in line | Group tactics | `sx_crew_*` (the loop), `sx_squad_*`, `sx_keeper_*`, `sx_gather` | `lib.crew()` (the loop), `lib.squad()`, `lib.tactics`, `lib.keeper()` |
 | What one character does over time: patrol, guard, chase, and what when the plan breaks | Missions | `sx_mission_*` | not yet |
 
@@ -288,7 +290,7 @@ Build `cargo build --release -p sagax-ffi`; link `target/release/sagax.dll`
 ### Basics
 
 To see why a search did what it did: `sx_nav_set_trace`, or in Rust `find_path_traced` (see
-[Debugging and logging](#10-debugging-and-logging)).
+[Debugging and logging](#11-debugging-and-logging)).
 
 ```c
 sx_rules rules;
@@ -503,7 +505,7 @@ Game AI often weighs options by ways, not by straight-line distance:
   way out at all.
 - **Danger:** zones to avoid as extra `move_cost`; then the cost already
   counts the risk. Remembered danger areas feed the search with
-  `Areas::cell_cost` (section 8, "Areas to path costs").
+  `Areas::cell_cost` (section 9, "Areas to path costs").
 - **Movement budget with zones:** with a leave cost, `cost` mixes walking
   and penalty. JavaScript ways also give `steps` (walking and terrain only)
   and `zonesLeft` (zones left, e.g. attacks of opportunity provoked), so
@@ -555,7 +557,7 @@ assert!(matches!(choice, Some(Choice { candidate: 1, .. })));
 
 `choose` takes the rows as they are and returns `Err(DecideError::RowLengths)`
 for rows of different or wrong length, `Ok(None)` if every score is 0. Under
-it, `decide` / `decide_traced` (any `Sink<DecideTrace>`, see [Debugging and logging](#10-debugging-and-logging)) take one
+it, `decide` / `decide_traced` (any `Sink<DecideTrace>`, see [Debugging and logging](#11-debugging-and-logging)) take one
 flat slice of inputs and a stride, and write the scores.
 
 C:
@@ -729,16 +731,18 @@ Time may wrap around. C: `sx_machine_*` with condition bits in a
 
 Every block here can say what it did (a fact evicted, a message refused, a
 timer replaced): `*_traced` in Rust, `sx_*_set_trace` in C, see
-[Debugging and logging](#10-debugging-and-logging).
+[Debugging and logging](#11-debugging-and-logging).
 
 Characters should remember things for a while: what they saw and heard,
 where and when, what a colleague told them, which places are dangerous or
 lit, how alert they are. The blocks of `sagax_decide::memory` do that, each
 usable alone, and with the state machine and the decider they make up a
 whole behaviour for turn-based tactics, real-time strategy, stealth or
-action games. **The game decides what is perceived** (no sight lines or
-hearing in here): it says "seen", "heard", and gives positions. The blocks
-keep it, pass it on and let it fade. Positions are integers `[x, y, z]` (on
+action games. **The game decides what reaches them**: it says "seen",
+"heard", and gives positions, either from its own tests or from the
+percepts of the perception block (section 8, `learn_percepts`); these blocks
+have no sight lines or hearing of their own. They keep it, pass it on and
+let it fade. Positions are integers `[x, y, z]` (on
 a hex grid use axial `(q, r)` in `x`, `y`; see Hex in the Conventions), time is the game's own `u32`
 count (frames or rounds; ages use wrapping subtraction), no random numbers,
 and sizes are fixed at creation. **Every time and limit is a parameter:** try
@@ -939,8 +943,10 @@ A noise is a message nobody sends on purpose: build a `Message` with
 guards whatever they do, `Inbox::push` it with `arrival` (base 0 and
 `per_unit` 0 for "heard at once"), and let each receiver
 `learn_message(now, &m, SOURCE_HEARD)` and raise its `Alertness`. A louder
-noise reaches further because `r` is the loudness. The stealth guard example
-does this in round 2.
+noise reaches further because `r` is the loudness. With the perception block
+a noise is a `Stimulus` instead and every guard checks it with `hear`
+(walls damp it, the heard place is fuzzed); the stealth guard example does
+that in round 2.
 
 ### Recipe: the officer
 
@@ -958,16 +964,19 @@ second: `cargo run -p sagax-decide --example officer`
 
 ### Recipe: stealth guard
 
-Alertness levels drive the state machine on a hex grid: a noise is a
-`SOURCE_HEARD` fact and raises `Alertness` to "suspicious", the guard goes to
-look, sees the player (a `SOURCE_OWN` fact, level "alert"), shouts to the
-guards in range (`Route::InRange` with `Metric::Hex`, `arrival` with one round
-per cell), loses the player (the age of the fact), searches the points
-around the last place (`Sine::Fine`) and calms down as the value decays.
+Alertness levels drive the state machine on a hex grid: a noise (a
+`Stimulus`, heard with `hear`) is a `SOURCE_HEARD` fact and raises
+`Alertness`, the guard goes to look, its `look` notices and then recognises
+the sneaker (`SOURCE_OWN` facts through `learn_percepts`, level "alert"),
+it shouts to the guards in range (`Route::InRange` with `Metric::Hex`,
+`arrival` with one round per cell), loses the sneaker (the age of the fact),
+searches the points around the last place (`Sine::Fine`) and calms down as
+the value decays. The light is `Lit` (the time of day) plus a lit cell; the
+scene runs in daylight and at night, where the sneaker is noticed later.
 Lit cells cost extra on the way (`Areas::cost`). Run it with
-`cargo run -p sagax-decide --example stealth_guard`
-(`crates/sagax-decide/examples/stealth_guard.rs`, with the derivation of
-every round number in the test).
+`cargo run -p sagax --example stealth_guard`
+(`crates/sagax/examples/stealth_guard.rs`; the test pins the daylight
+rounds).
 
 ### Recipe: area blocking and cost in `move_cost`
 
@@ -1006,9 +1015,202 @@ In JavaScript, call `a.blocks(cell, start, goal)` and `a.cost(cell, start,
 goal)` while building the grid's walls and costs before the search. When the
 areas are kept in cell coordinates, `Areas::cell_cost(to, start, goal)` (C
 `sx_areas_move_cost`, JavaScript `areas.cellCost`) does both in one call:
-section 8, "Areas to path costs".
+section 9, "Areas to path costs".
 
-## 8. Group tactics
+## 8. Perception
+
+What a character can see and hear, and how soon it notices: view cones,
+exact sight lines with fog, smoke and light, attention, disguise and
+hearing, on square and hex grids. Integer only and deterministic, no
+allocation, no global state. Rust: `sagax::perception` (the crate
+`sagax-perception` plus the helpers that join it with nav and memory),
+records in `sagax::debug::PerceptionTrace`. C: `sx_perception_*`, since API
+version 13. JavaScript: not yet.
+
+**No cheating.** The block never looks at the world on its own. The game
+passes its own candidate list of `Target`s and answers the questions of a
+`SenseMap` (walls, fog, light, sound); what comes out is `Percept`s, which
+the game turns into `Knowledge` facts. The squad and the mission stay blind:
+their rule slots ask `sight_line` or `in_sight` for one yes or no.
+
+**Fine points inside, whole cells at every edge.** A `World` has a cell
+size `S` in fine units (for example 256); eyes, targets, stimuli and the
+ends of a sight line are fine points `[x, y, level]`, so a character can
+stand anywhere in its cell. A square cell `x` spans `[x * S, (x + 1) * S)`
+with its centre at `x * S + S / 2`; on hex the fine points are axial and the
+centre of hex `(q, r)` is `(q * S, r * S)`. Everything that leaves the block
+is a whole cell: `Percept.cell`, the facts, the flood cells, the trace
+cells, the cells the map is asked about. `cell_centre(world, cell)` and
+`cell_of(world, point)` convert; a game that has only cells passes
+`cell_centre` as the point. In C on hex the whole cells are **offset** cells
+of the handle's layout (the handle converts them, as the mission does) and
+the fine points stay **axial**.
+
+### Sight line as a drop-in
+
+`sight_line(world, map, from, to)` replaces a game's own Bresenham `sees`:
+an exact walk over every cell the segment passes, fog by length, the same
+from both ends. It answers `Line { clear, clarity, blocked_at }`.
+`GridSight::square(&grid)` (or `GridSight::hex(&grid, layout)`) makes a
+sense map from a `DenseGrid` (blocked cells and cells off the grid are
+opaque); `MoveBlocks` blocks sight where movement is blocked.
+
+```rust
+use sagax::perception::{GridSight, World, cell_centre};
+
+let world = World::square(256);
+let c = |x, y| cell_centre(&world, Cell::new(x, y, 0));
+let sees = sight_line(&world, &mut GridSight::square(&walls), c(2, 10), c(15, 3)).clear;
+```
+
+The settled edge cases:
+
+- The eye's cell never blocks; the target's cell only through its edge
+  (`sight_edge`); every cell in between blocks when opaque.
+- A line running exactly along a grid line belongs to one side by a fixed
+  index rule (square: the cell by floor, the one whose lower border it is;
+  hex: the smaller of the two cells), so `A -> B` and `B -> A` agree.
+- Through an exact corner (square) or vertex (hex) sight passes when one
+  side is open; only two opaque sides block it. The movement tests
+  (`line_clear`, `hex_line_clear`) stay strict.
+- Between levels, `cross_level` answers (default: blocked).
+
+`in_sight(world, map, eye, point)` adds the eye's range and view cone, with
+no awareness and no time: the question of a rule slot such as "can the
+receiver see the hand sign?". The ambush example uses `sight_line` for the
+intruder's view of a spot and `in_sight` with the receiver's facing for hand
+signs (`crates/sagax/examples/ambush_rules.rs`, `examples/c/ambush_rules.c`).
+
+### A guard with `look`
+
+An `Eye` is one observer for one call: its fine point, its facing (a
+heading 0..=255, 0 = +x, 64 = +y; `hex_heading(dir)` on hex), a
+`SenseProfile`, its `Stats` and its `DisguiseRule`. Profiles are plain
+values: `SenseProfile::human`, `guard` and `watcher` with `with_night`,
+`with_thermal`, `with_scanner`, `with_hearing` and `with_cue`. `Stats` are
+passed on every call (`sight_scale`, `notice_scale`, `hearing_scale`,
+`reaction_ticks`), so a game stat or a boost acts without touching the
+profile. The game keeps one `Awareness` per observer–target pair and one
+`Attention` per observer, zeroed to start.
+
+```rust
+use sagax::perception::{Attention, Budget, Lit};
+
+let profile = SenseProfile::guard(256);
+let eye = Eye { id: 1, point, facing, profile: &profile,
+                stats: Stats::NORMAL, disguise: Default::default() };
+let mut map = Lit { inner: GridSight::square(&walls), ambient: 96 };   // night
+let budget = Budget { checks: 3, keep: 1, instant_cap: 1 };
+percepts.clear();
+look(&world, &mut map, now, &eye, &targets, &mut aware, &mut attention, budget,
+     &mut percepts);
+```
+
+Each check adds evidence by light, distance, band, size, conspicuity,
+crowd and fog; the counter makes the target *noticed* (stage 1) and then
+*recognised* (stage 2), after the reaction time, and decays once it is out
+of view. `look` checks targets with an instant cue first (up to
+`instant_cap`), then kept ones (noticed, up to `keep`), then the rest round
+robin, at most `checks` of the last two; skipped time is never paid back, so
+a crowd really dilutes attention. `observe` checks one pair directly.
+
+What comes out per check (at most `MAX_PERCEPTS_PER_CHECK`, 4): `Noticed`,
+`Recognized`, `Cues { new }` (cue bits seen at stage recognised), `Seen`
+(its place now, on every in-view check at stage noticed or higher), `Lost`
+(in view at the last check, not now), `Forgotten`, `SeenThrough`.
+
+- `Lost` comes only for a target that was noticed. Percepts with
+  `placed == false` (`Lost`, `Forgotten`, a delayed rise that became due
+  out of view) carry no position: `point` and `cell` are zero.
+- A cue rule with `gain` 0 is neutral (no gain factor), so a rule that is
+  only instant ("a drawn weapon is recognised at once in the focus") is
+  possible.
+- The scanner (`SCANNER`) reaches only *noticed*: it gives a location,
+  never cues, never recognition and never sees through a disguise.
+- Light is read at the target's cell (with its `glow`); `Lit { inner,
+  ambient }` caps a hook's light by one global level (time of day).
+
+**Disguise.** A target with `disguise > 0` is perceived, flagged
+`disguised`, and the cue bits in `eye.disguise.hides` are never reported.
+By default that always holds; `see_through: Some(..)` lets an observer
+grow doubt and see through it (a `SeenThrough` percept).
+
+### Hearing, with a second channel
+
+A `Stimulus` (a sound, a shout, a shot, smoke) has a loudness in fine units
+and a channel of `world.channels` (`MAX_CHANNELS`, 4). Each channel has its
+`damping`, `fuzz` (position error per cell of cost), `speed` and `Spread`:
+`Circle` (straight distance), `Straight` (distance plus the map's damping
+along one line). Smell is a channel, not a sense:
+
+```rust
+let mut world = World::square(256);
+world.channels[0].spread = Spread::Straight;                      // sound
+world.channels[1] = Channel { damping: 0, fuzz: 128, speed: 64,   // smell
+                              spread: Spread::Circle };
+let profile = SenseProfile::guard(256).with_hearing(1, 128);       // a weak nose
+percepts.clear();
+hear(&world, &mut map, now, &eye, &stimulus, None, Some(&mut aware), &mut percepts, seed);
+```
+
+`hear` pushes a `Heard` percept with a deterministically fuzzed whole cell
+and `margin`, `arrive_at`. With an `Awareness` it raises the pair at most to
+*noticed*; without one (`None`) it is stateless. One call returns up to 3
+percepts (`Heard`, `Noticed`, a due `Recognized` or `Forgotten`); in C give
+`sx_perception_hear` a cap of at least 3, `sx_perception_look` at least
+4 × (`checks` + `instant_cap`).
+
+Around corners: `flood_sound(nav, world, map, stimulus, budget, out)` spreads
+the stimulus with one `Navigator::reachable` over `SoundCost`, bounded by the
+stimulus' loudness; each listener then calls `hear` with `Some(cost)` of its
+cell. It expects the navigator's straight step cost (on hex every step) to
+equal `world.cell_size`, so the costs are fine units.
+
+### Into knowledge: `learn_percepts`
+
+`learn_percepts(known, alert, alert_cfg, now, percepts, kinds, amounts)` is
+the common use in one call. `FactKinds` names the game's kinds
+(`noticed_kind`, `seen_kind`, `heard_kind`, `disguised_kind`),
+`AlertAmounts` the `Alertness` stimulus per percept kind and cue bit.
+`Noticed` and `Seen` at stage noticed learn the noticed kind at the cell;
+`Recognized` and `Seen` at stage recognised remove it and learn the seen
+kind; `Cues` set the seen fact's `data`; `Heard` merges the heard kind
+(`SOURCE_HEARD`). It learns positions only from placed percepts, and
+`Lost`, `Forgotten`, `SeenThrough` remove nothing: facts age out by the
+game's `expire*`. A disguised percept uses `disguised_kind`, or is skipped
+without one. For one percept at a time: `percept_fact` and `alert_amount`.
+The stealth guard (`cargo run -p sagax --example stealth_guard`) runs this
+loop on a hex grid in daylight and at night.
+
+### C
+
+```c
+sx_perception_config cfg;
+sx_sense_map map;
+sx_sense_map_from_grid(grid, &map);
+sx_perception_config_default(SX_GRID_SQUARE, 256, &cfg);
+sx_perception *p = sx_perception_new(&cfg, &map);
+sx_sense_profile guard;
+sx_sense_profile_preset(SX_SENSE_PRESET_GUARD, 256, &guard);
+/* eye.profile = &guard; one sx_awareness per pair, one sx_attention per eye */
+int32_t n = sx_perception_look(p, now, &eye, targets, aware, count, &attention,
+                               &budget, out, 4 * (budget.checks + budget.instant_cap), NULL);
+sx_learn_percepts(known, alert, &alert_cfg, now, out, (uint32_t)n, &kinds, &amounts);
+```
+
+The names follow Rust: `sx_perception_line`, `_in_sight`, `_observe`,
+`_look`, `_hear`, `_flood`, `_cell_centre`, `_cell_of`, `_set_trace`;
+`sx_percept_fact`, `sx_percept_alert`, `sx_learn_percepts`,
+`sx_count_crowds`, `sx_hex_heading`, `sx_awareness_*`. Two families of
+constants look alike: **`SX_SENSES_*` are profile bit flags**
+(`sx_sense_profile.senses`: `SIGHT` 1, `NIGHT` 2, `THERMAL` 4, `SCANNER` 8),
+**`SX_SENSE_*` are percept sense codes** (`sx_percept.sense`: `SIGHT` 0,
+`THERMAL` 1, `SCANNER` 2, `HEARING` 3). Callbacks must not call any
+function on the same `sx_perception`. `examples/c/perception.c` (a guard,
+smoke, a crowd and a shot) prints the same lines as
+`crates/sagax/examples/perception_scene.rs`.
+
+## 9. Group tactics
 
 Several characters should act together: advance side by side, come from
 several sides and strike at the same moment, hold an ambush. Hand-written,
@@ -1726,7 +1928,7 @@ with `rows`, abort comparisons (`tactic.addAbortWhen`, `abortIfTargetLost`),
 
 For the why of every decision, trace the crew or the squad: `Crew::tick_traced`,
 `Squad::plan_traced` and `sx_crew_set_trace`, `sx_squad_set_trace` (see
-[Debugging and logging](#10-debugging-and-logging)).
+[Debugging and logging](#11-debugging-and-logging)).
 
 `validate` before the first tick, then watch the events (or `Status`) and
 `active_plan()` / `pending_plan()` (tactic, target, think time, when it
@@ -1734,9 +1936,9 @@ became active). The example `squad_walk` prints the whole sequence:
 sighting, plan, orders by radio, arrival at the gather spots, signal,
 attack.
 
-## 9. Missions
+## 10. Missions
 
-A squad (section 8) hands goals to its members. A **mission** is what one
+A squad (section 9) hands goals to its members. A **mission** is what one
 character does between such goals, or without any squad: guard a place,
 hunt a subject, get somewhere, and keep doing it sensibly when things go
 wrong. It is a small planner with five ideas:
@@ -1936,7 +2138,7 @@ step that begins sends `Begin { index, at }` with the place its `Where`
 stands for. A character holding after a fallback may score twice in one
 tick. The actions and events are the same with or without a sink, and
 `NoopSink` (what `tick` and `tick_with` use) costs nothing. All sinks and
-records: [Debugging and logging](#10-debugging-and-logging).
+records: [Debugging and logging](#11-debugging-and-logging).
 
 ```rust
 use sagax::debug::{Collector, MissionTrace, Overflow};
@@ -2021,7 +2223,7 @@ you pass. The mission converts inside. Without a layout positions pass
 unchanged. (The squad holds axial positions, see Hex in the Conventions; the
 mission does not.)
 
-## 10. Debugging and logging
+## 11. Debugging and logging
 
 One rule for every building block: **a trace is a parameter, not a setting.**
 
@@ -2045,6 +2247,7 @@ Everything lives in `sagax::debug` (`use sagax::debug::*;`): the sink pieces
 | `Squad` | `SquadTrace` | `plan_traced`, `check_traced`, `observe_traced`, `report_traced`, `signal_traced`, `reinstate_traced`, `orders_due_traced` |
 | `Crew` | `CrewTrace` | `tick_traced`, `observe_traced`, `report_traced`, `reinstate_traced` |
 | `Mission` | `MissionTrace` | `tick_traced` |
+| perception | `PerceptionTrace` | `observe_traced`, `look_traced`, `hear_traced` (and `learn_percepts_traced` with `KnowledgeTrace`) |
 
 Where an operation has a `_with(.., rules)` form, `op_traced` takes the rules
 too (pass the built-in rules for none); there is never an `op_with_traced`.
@@ -2117,6 +2320,7 @@ apply to the kind); a wrapped sub-record is a field by value (`decide`,
 | `sx_squad` | `sx_squad_set_trace` | `sx_squad_trace` | `SX_SQUAD_TRACE_*` |
 | `sx_keeper` | `sx_keeper_set_trace` | `sx_keeper_trace` | `SX_KEEPER_TRACE_*` |
 | `sx_crew` | `sx_crew_set_trace` | `sx_crew_trace` | `SX_CREW_TRACE_*` |
+| `sx_perception` | `sx_perception_set_trace` | `sx_perception_trace` | `SX_PERCEPTION_TRACE_*` |
 
 `sx_nav` covers everything that runs through it: `sx_nav_find_path`,
 `_continue`, `_reachable`, `_flee`, `_path_to`, `_way` (smoothing),
@@ -2143,7 +2347,9 @@ small fixed-size ring.
 
 **Untraced on purpose.** Pure functions and plain values whose result already
 says everything: `route`, `distance`, `arrival`, `points_around`,
-`sweep_heading`, `sine`, `line_clear`, `Alertness`, `Progress`, `Interval`,
+`sweep_heading`, `sine`, `line_clear`, `sight_line`, `in_sight`,
+`percept_fact`, `alert_amount`, `flood_sound`, `Alertness`, `Progress`,
+`Interval`,
 the skill table, and the rule slots of the squad and the mission (what a slot
 answered shows in the decision it fed, such as `Target.kept` or
 `Abort.fired`).
@@ -2160,7 +2366,7 @@ Typical uses: colour the expanded cells to see why a search is slow, log the
 `Decide` records to see why it chose a tactic, or `Evicted` to see which fact
 a full memory gave up.
 
-## 11. Pitfalls
+## 12. Pitfalls
 
 - Costs are integers ≥ 0. `move_cost` is an *extra* on top of the step cost.
 - There is no default cost for a grid: pick a preset (Rust `GridRules::preset`,
@@ -2181,5 +2387,9 @@ a full memory gave up.
   `leaveCost` take whole numbers.
 - Crew handles lent to C or JavaScript (squad, keepers) end with the crew; a
   keeper is stale after the next call that changes the crew.
+- Perception: `SX_SENSES_*` (profile bits) are not `SX_SENSE_*` (percept
+  sense codes). A percept with `placed == false` has no position. Give
+  `sx_perception_look` a cap of 4 × (`checks` + `instant_cap`) and
+  `sx_perception_hear` at least 3, or percepts are lost.
 - Load the library at run time, check `sx_api_version()`, and fall back to
   your own code if it is missing or too old.

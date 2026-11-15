@@ -118,7 +118,7 @@ fn choose_empty_is_none() {
     assert_eq!(d.choose(&[], &rows, Pick::Best, 0), Ok(None));
 }
 
-/// The trial-run recipe of USAGE section 9 with the prelude only.
+/// The trial-run recipe of USAGE section 10 with the prelude only.
 struct TrialRun {
     plans: Vec<(u32, u32)>, // playbook option -> cost of its dry run
 }

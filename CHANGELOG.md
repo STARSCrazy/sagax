@@ -1,5 +1,127 @@
 # Changelog
 
+## 0.13.0
+
+Perception. A character can now see and hear for itself: view cones,
+exact integer sight lines with fog, smoke and light, evidence that grows
+into *noticed* and *recognised* after a reaction time, limited attention
+over many targets, disguise, and hearing on channels (sound, smell, ...)
+in a straight line or around corners. Square and hex, fine points inside
+a cell and whole cells at every edge, no floats, no allocation. The game
+passes its own candidate targets and answers a sense map; the block
+answers with percepts, which become `Knowledge` facts in one call. The
+squad and the mission stay blind: their rule slots ask `sight_line` or
+`in_sight`. Purely additive for the library (`sine` and `mix` moved to
+`sagax-core` and are re-exported where they were); the `ambush_rules`
+example was rewritten on it and re-baselined once, `stealth_guard` moved
+to the `sagax` crate. **C API version 13.** `SX_API_VERSION` is 13, so a
+game built with the new header refuses an older library.
+
+### New
+
+- **The crate `sagax-perception`** (on `sagax-core` only), re-exported as
+  `sagax::perception`:
+  - `World` (`Grid::Square` or `Grid::Hex`, the cell size `S` in fine
+    units, `MAX_CHANNELS` hearing `Channel`s with `damping`, `fuzz`,
+    `speed` and `Spread::Circle` / `Straight`), `cell_centre`, `cell_of`,
+    `hex_heading`. Fine points: a square cell `x` spans `[x·S, (x+1)·S)`;
+    hex fine points are axial with the centre of `(q, r)` on `(q·S, r·S)`.
+  - `SenseMap`: the game's answers per cell and edge (`sight` with
+    `Medium { opaque, density, heat_density }`, `sight_edge`,
+    `cross_level`, `light`, `sound`, `sound_edge`), all with defaults;
+    `OpenAir`, and `Lit { inner, ambient }` for one global light level.
+  - `sight_line(world, map, from, to) -> Line { clear, clarity,
+    blocked_at }`: an exact walk over every cell the segment passes
+    (square: Amanatides–Woo with exact fractions; hex: a Voronoi walk in
+    cube coordinates), fog by length, symmetric from both ends. A line
+    along a grid line belongs to one side by a fixed index rule (square:
+    floor; hex: the smaller cell); an exact corner or vertex passes when
+    one side is open. `in_band`, `view_vector` for the cone.
+  - `SenseProfile` (presets `human`, `guard`, `watcher`; builders
+    `with_night`, `with_thermal`, `with_scanner`, `with_hearing`,
+    `with_cue`; bits `SIGHT`, `NIGHT`, `THERMAL`, `SCANNER`) with up to 3
+    view `Band`s and `MAX_CUES` `CueRule`s (a rule with gain 0 is neutral,
+    so a rule can be only instant); `Stats` per call (`sight_scale`,
+    `notice_scale`, `hearing_scale`, `reaction_ticks`); `DisguiseRule`
+    (`hides`, optional `SeeThrough`; a disguise holds by default); `Eye`;
+    `Target` (size, conspicuity, cues, disguise, heat, glow, crowd).
+  - `Awareness` per observer–target pair (stage 0 unseen, 1 noticed, 2
+    recognised; reaction delay, hold, decay, hysteresis) and `observe` /
+    `observe_traced` for one check; `Attention`, `Budget` and `look` /
+    `look_traced` for a bounded number of checks per call (instant cues
+    first, then kept targets, then round robin; skipped time is never paid
+    back); `count_crowds`; `in_sight` (range, cone, line; no awareness) for
+    rule slots.
+  - `Percept` (`Noticed`, `Recognized`, `Seen`, `Cues { new }`, `Lost`,
+    `Forgotten`, `SeenThrough`, `Heard`) with `placed`: only a placed
+    percept carries a position. At most `MAX_PERCEPTS_PER_CHECK` (4) per
+    check. `Lost` comes only for a target that was noticed; the scanner
+    reaches only *noticed* (a location, never cues, recognition or
+    see-through).
+  - `Stimulus` and `hear` / `hear_traced`: one check of one listener by
+    the channel's spread or a cost the game passes; a `Heard` percept with
+    a deterministically fuzzed whole cell; with an `Awareness` it raises
+    the pair at most to *noticed* (up to 3 percepts per call).
+  - `PerceptionTrace`, also in `sagax::debug`.
+- **`sagax::perception` helpers** that join it with nav and memory:
+  `GridSight::square` / `hex` (a sense map from a `DenseGrid`),
+  `MoveBlocks::square` / `hex` (sight blocked where movement is),
+  `SoundCost` and `flood_sound` (a stimulus around corners with one
+  `Navigator::reachable`, bounded by the loudness; the navigator's
+  straight step cost must equal `cell_size`), `FactKinds`, `AlertAmounts`,
+  `percept_fact`, `alert_amount` and `learn_percepts` /
+  `learn_percepts_traced` (percepts into `Knowledge` facts at whole cells
+  and `Alertness` stimuli; recognition replaces the noticed fact, `Heard`
+  merges as `SOURCE_HEARD`, `Lost` and `Forgotten` remove nothing, only
+  placed percepts give positions). The prelude gains `Awareness`, `Eye`,
+  `Percept`, `SenseProfile`, `Stats`, `Stimulus`, `Target`, `hear`,
+  `learn_percepts`, `look`, `observe` and `sight_line`.
+- **C:** the handle `sx_perception` (`sx_perception_config_default`,
+  `_new`, `_free`, `_set_map`, `_set_trace`) with the game's
+  `sx_sense_map` callbacks or `sx_sense_map_from_grid` /
+  `sx_sense_map_from_map`; `sx_sense_profile_preset`
+  (`SX_SENSE_PRESET_HUMAN`, `_GUARD`, `_WATCHER`); the value structs
+  `sx_sense_profile`, `sx_stats`, `sx_eye`, `sx_target`, `sx_awareness`
+  (with `sx_awareness_*` getters), `sx_attention`, `sx_budget`,
+  `sx_stimulus`, `sx_percept`, `sx_line`; `sx_perception_line`,
+  `_in_sight`, `_observe`, `_look`, `_hear`, `_flood`, `_cell_centre`,
+  `_cell_of`, `sx_hex_heading`, `sx_count_crowds`; `sx_fact_kinds`,
+  `sx_alert_amounts`, `sx_percept_fact`, `sx_percept_alert`,
+  `sx_learn_percepts`; `sx_perception_trace` with
+  `SX_PERCEPTION_TRACE_*`. `SX_SENSES_*` are the profile's bit flags,
+  `SX_SENSE_*` the percept's sense codes. On hex the whole cells are
+  offset cells of the handle's layout, the fine points axial. Caps: give
+  `observe` at least 4, `look` 4 × (`checks` + `instant_cap`), `hear` 3.
+- `sagax-abi`: the perception codes and the `perception_trace` codec.
+- Examples: `perception_scene` (Rust) and `examples/c/perception.c`, one
+  guard on a street with smoke, a crowd and a shot; both print the same
+  lines and `run.sh` diffs them.
+
+### Changed
+
+- **`sine`, `Sine` and `mix` moved to `sagax-core`.**
+  `sagax_decide::mix` and `sagax_decide::memory::{Sine, sine}` re-export
+  them, so every path keeps working.
+- **`ambush_rules` (Rust and C) is rewritten on perception:** sight is
+  `sight_line` over `GridSight` (C: `sx_perception_line` over
+  `sx_sense_map_from_grid`) instead of its own Bresenham test; hand signs
+  use `in_sight` with the receiver's facing; the intruder is a `Target`
+  that a lookout and the guards `look` at, and only their percepts reach
+  the crew (through `percept_fact`). Re-baselined once: the exact line
+  changes no outcome, but in scene B guard 2 now faces away from the
+  leader and misses the rush order (`t= 31 order member 2` and `t= 31
+  start member 2` are gone). Rust and C still print the same lines.
+- **`stealth_guard` moved** from `sagax-decide` to the `sagax` crate
+  (`cargo run -p sagax --example stealth_guard`, test in
+  `crates/sagax/tests`) and is rewritten on hex `look` with
+  `SenseProfile::guard`, `Lit` plus a lit cell, the noise as a `Stimulus`
+  on channel 0 with `Spread::Straight`, and `learn_percepts`. It runs by day
+  and by night; the test checks the heard fact, that the sneaker is noticed
+  later in the dark, and the daylight rounds. `sagax-decide` gains no
+  dependency.
+- The guide has a new section 8, Perception; group tactics, missions,
+  debugging and pitfalls are now sections 9 to 12.
+
 ## 0.12.0
 
 One way to debug every module, the mission's open small items and the last
