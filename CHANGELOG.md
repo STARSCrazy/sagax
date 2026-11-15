@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.11.0
+
+The mission planner. A character can now run a mission: a motive (what it
+wants), a plan of steps, short detours (engage, flee) on a leash, and
+replanning when the plan breaks. The mission sees only the `Knowledge` the
+game passes in and moves nobody; it answers each tick with one action and
+a few events. It is the step above the squad: a squad hands goals to its
+members, a mission is what one member does with its day. Purely additive:
+nothing of 0.10 changed, and the tests and golden traces of 0.10 pass
+unchanged. **C API version 11.** `SX_API_VERSION` is 11, so a game built
+with the new header refuses an older library.
+
+### New
+
+- **`sagax_decide::mission`** (re-exported in the `sagax` prelude):
+  `Mission` (`new`, `set_plan`, `add_playbook`, `clear_playbook`,
+  `set_leeway`, `set_motive`, `tick`, `tick_with`, `detour`, `end_detour`,
+  `finish_step`, `step_index`, `in_detour`, `returning`, `decider`,
+  `decider_mut`), `MissionConfig`, `Motive` (guard, defeat, reach, custom),
+  `Plan` (`once`, `looping`, `fails_when`), `Step` with one constructor per
+  kind (`go_to`, `go_to_where`, `wait`, `pause`, `follow`, `wait_for`,
+  `search`, `hold`, `attack`, `wander`, `signal`, `custom`, `call`,
+  `squad`; `fails_when`, `skip_if_impossible`), `Where`, `Fail` (unknown,
+  defeated, fact, flags, custom), `Leeway` (`STRICT`, `FLEXIBLE`, `FREE`),
+  `Leash`, `OnLost`, `Detour` (engage, flee, custom), `Action`, `Event`,
+  `BreakReason`, `DetourEnd`, `MissionError`.
+- **The rules object** `MissionRules` (with `BuiltInRules`, `FailCtx`,
+  `PlanCtx`): three fixed points, lent per tick and never stored. `fail`
+  (a condition of the game's own), `columns` (the game's columns in each
+  candidate plan's row) and `score` (replace or veto a candidate's score).
+  `score` is the place for a trial run: see "Missions" in the guide.
+- **Replanning:** on a break the mission scores the playbook plans, the
+  default plan of the motive and, for a character that may widen, a
+  built-in widening plan with a `Decider` and picks one (`MissionConfig::pick`).
+  `Mission::default_option`, `widen_option`, the input columns `IN_*` and
+  `DEFAULT_PREFERENCE`, `WIDEN_PREFERENCE` let a game add its own
+  considerations.
+- **Leeway:** a strict character never takes another plan and walks back to
+  its anchor after every detour; a flexible one replans; a free one also
+  widens. An `Engage` is refused when its subject is outside the leash
+  distance, so a guard does not run back and forth at the edge.
+- **The default search pattern of `MissionConfig` is in cells** (first
+  distance 1, distances 2, 4, 6), not in the memory blocks' fixed-point
+  units; set `min` and `max` for a bounded map.
+- **Hex:** with `MissionConfig::hex_layout` every position the game gives or
+  gets, also the fact positions in the knowledge, is in offset coordinates;
+  the mission converts.
+- **C interface (`sx_mission_*`):** `sx_mission_config_default`,
+  `sx_leeway_preset`, `sx_mission_new`, `sx_mission_free`,
+  `sx_mission_set_leeway`, `sx_mission_set_motive`, `sx_mission_set_plan`,
+  `sx_mission_add_playbook`, `sx_mission_clear_playbook`,
+  `sx_mission_tick`, `sx_mission_tick_with` (with `sx_mission_rules`),
+  `sx_mission_detour`, `sx_mission_end_detour`, `sx_mission_finish_step`,
+  `sx_mission_step_index`, `sx_mission_in_detour`, `sx_mission_returning`,
+  `sx_mission_decider`; the value types `sx_where`, `sx_fail`, `sx_step`,
+  `sx_motive`, `sx_leeway`, `sx_mission_config`, `sx_detour`,
+  `sx_mission_action`, `sx_mission_event`, `sx_mission_out` and the
+  `SX_STEP_*`, `SX_WHERE_*`, `SX_FAIL_*`, `SX_MOTIVE_*`, `SX_ON_LOST_*`,
+  `SX_LEEWAY_*`, `SX_DETOUR_*`, `SX_ACTION_*`, `SX_MISSION_EVENT_*`,
+  `SX_BREAK_*`, `SX_DETOUR_END_*` codes. Layouts are checked by the
+  header's `_Static_assert`s.
+- **Examples:** `cargo run -p sagax --example mission_guard` and
+  `examples/c/mission.c`: two guards on one patrol, a strict and a flexible
+  one, meet an attacker and a theft; the checks diff the Rust and C output.
+- **JavaScript:** no binding yet; it follows on demand.
+
 ## 0.10.0
 
 The slim round. A squad can now run a game's own logic at nine fixed points

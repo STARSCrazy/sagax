@@ -12,8 +12,13 @@
   (0.8.0: squad leader, orders, signal, skill), the 0.9.0 API round (one
   set of conventions, the `Crew`, the `sagax` crate with its prelude) and the
   0.10.0 slim round (a core with a kit, the rules object for a game's own
-  pieces) are done. Next: a mission / intention planner that hands goals to
-  groups the way groups hand goals to members.
+  pieces) are done, and so is the mission planner (0.11.0: motive, plan,
+  leeway, detours, replanning; Rust and C).
+- **Missions, next:** a *search planner* (GOAP or HTN) behind the same plan
+  format: it would build the plans that the game now writes by hand or
+  scores from a playbook, and a mission would run them unchanged. A
+  **JavaScript binding** of the mission follows on demand. *Perception*
+  (below) is the natural knowledge source for the characters' `Knowledge`.
 - **Next slim item:** the remaining per-layer duplicates in C and WASM (the
   tactic builder, the add-abort and slot codecs, `sine_of`, the route rule
   decoders) move to `sagax-abi`. `sx_spot_ctx` may gain separate miss and

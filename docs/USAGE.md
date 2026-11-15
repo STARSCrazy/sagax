@@ -181,6 +181,7 @@ There are two groups of exceptions, on purpose:
 | Patrol, chase, search: behaviour over time | State machine | `sx_machine_*` | `lib.machine()` |
 | Who did I see, where, how long ago; where is it dangerous | Memory of the world | `sx_knowledge_*`, `sx_areas_*`, ... | `lib.knowledge()`, `lib.areas()` |
 | Several characters act together: flank, ambush, advance in line | Group tactics | `sx_crew_*` (the loop), `sx_squad_*`, `sx_keeper_*`, `sx_gather` | `lib.crew()` (the loop), `lib.squad()`, `lib.tactics`, `lib.keeper()` |
+| What one character does over time: patrol, guard, chase, and what when the plan breaks | Missions | `sx_mission_*` | not yet |
 
 Everything works on square and hex grids and in every interface.
 
@@ -1718,7 +1719,228 @@ became active). The example `squad_walk` prints the whole sequence:
 sighting, plan, orders by radio, arrival at the gather spots, signal,
 attack.
 
-## 9. Debugging and logging
+## 9. Missions
+
+A squad (section 8) hands goals to its members. A **mission** is what one
+character does between such goals, or without any squad: guard a place,
+hunt a subject, get somewhere, and keep doing it sensibly when things go
+wrong. It is a small planner with five ideas:
+
+- **Motive**: what the character wants. `Motive::guard_place(pos)`,
+  `guard_subject(id)`, `defeat(id)`, `defeat_enemies()`, `reach(pos)` or
+  `custom(kind)`. The motive gives the mission its default plan.
+- **Plan**: a list of **steps**, run once or in a loop (`Plan::once`,
+  `Plan::looping`). A step is "walk to", "wait", "attack", and so on. A step
+  or the whole plan can carry up to four **fail conditions**
+  (`fails_when`): a subject is unknown or defeated, a fact has certain bits,
+  the game's flags match, or the game's own condition says so. When one
+  fires, the plan **breaks**.
+- **Leeway**: how freely the character acts (`Leeway::STRICT`, `FLEXIBLE`,
+  `FREE`). *Strict* never takes another plan: when its plan breaks it holds
+  where it stands. *Flexible* may **replan**: it takes the best of the
+  playbook plans and the motive's default plan. *Free* may also **widen**:
+  fall back to a built-in plan that calls for help and then does the default.
+- **Detour**: a short break from the plan that the game starts from its own
+  perception: `Detour::Engage(subject)` or `Detour::Flee { .. }`. The plan
+  waits, and when the detour ends the character walks back to where it left
+  the plan and goes on with the step it left.
+- **Leash**: how far and how long a detour may take the character from its
+  anchor (`Leash { distance, ticks, on_lost }`). An engage of a subject
+  farther away than the leash distance is refused (`detour` returns
+  `false`), so a guard does not run back and forth at the edge of its leash.
+  `on_lost` says what happens when the subject is lost: return, search for a
+  while, or keep going.
+
+**The mission moves nobody.** Each tick you give it the time, the
+character's position, the character's own `Knowledge` and a `u64` of
+condition bits (`flags`); it gives back one `Action` (go to, wait, follow,
+hold, attack, search, wander, flee or your own) and the `Event`s of that
+tick (step done, looped, broken, replanned, detour started and ended,
+signal, call, squad wish). The game walks and fights, and tells the mission
+when a custom step is over (`finish_step`). A step that is done hands over to
+the next within the same tick, but at most one step change happens per tick,
+so a plan of many `Signal` steps needs several ticks.
+
+```rust
+use sagax::prelude::*;
+
+let mut mission = Mission::new(MissionConfig::default(), Motive::guard_place([4, 3, 0]))?;
+mission.set_leeway(Leeway::FLEXIBLE);
+mission.set_plan(&Plan::looping(&[
+    Step::go_to([4, 3, 0]),
+    Step::wait(5),
+    Step::go_to([12, 3, 0]),
+]))?;
+
+// every tick, for this character:
+let out = mission.tick(now, pos, &knowledge, flags);
+match out.action {
+    Action::GoTo(p) | Action::Hold(p) => walk_toward(p),
+    Action::Attack { pos, .. } => shoot_at(pos),
+    _ => {}
+}
+for event in out.events() {
+    if let Event::Signal(n) = event {
+        game_signal(*n);
+    }
+}
+```
+
+### No cheating
+
+The mission sees only the `Knowledge` you pass. A subject whose fact is not
+in it is unknown: its position cannot be read, a `Fail::Unknown` fires, an
+`Engage` of it is refused, and a step that needs its position is
+impossible. Put into a character's `Knowledge` what *that character* has
+seen or been told (section 7), not what is true in the world. All positions
+come from facts of one kind, `MissionConfig::subject_kind`; a fact whose
+`data` has `enemy_bits` set is an enemy, `defeated_bits` a defeated
+subject. A subject not seen for `lost_after` ticks counts as lost.
+
+### Taking over a script
+
+A game with scripted characters (a tactics game's enemy scripts, say) can
+turn each script into a plan, and gain the replanning and the detours for
+free. The usual commands map like this:
+
+| Script command | Step |
+|---|---|
+| walk to (x, y) | `Step::go_to(pos)` |
+| walk to an object | `Step::go_to_where(Where::Subject(id))` (to follow it: `Step::follow(id)`) |
+| wait N ticks | `Step::wait(n)` |
+| pause (the game's usual pause) | `Step::pause()`, length from `MissionConfig::pause_ticks` |
+| enter a vehicle, use a switch, any act the mission does not know | `Step::custom(kind, Where::Fixed(pos), param)`; the game does it and calls `finish_step()` when done |
+| wait for an object to come near | `Step::wait_for(id, radius)` |
+| search an area | `Step::search(Where::Fixed(pos), radius, ticks)`: goes to the points of `MissionConfig::search` in turn |
+| wander | `Step::wander()` (as the last step the character keeps wandering) |
+| attack an object | `Step::attack(id)` |
+| mission won / lost, trigger something | `Step::signal(n)`: an `Event::Signal(n)` for the game to act on |
+| call for help | `Step::call(channel, kind)` |
+| ask for a squad tactic | `Step::squad(tactic, Where::Subject(id))` |
+| loop | `Plan::looping(&steps)` instead of `Plan::once(&steps)` |
+| "give up when X" | `.fails_when(Fail::..)` on the step or the plan |
+| "skip it if it cannot be done" | `.skip_if_impossible()` on the step |
+
+A step whose place is not known (a subject not in the knowledge) is
+*impossible*: it breaks the plan, or with `skip_if_impossible` counts as
+done. A plan holds at most `MissionConfig::max_steps` steps.
+
+### Recipe: strict and flexible guard
+
+Two guards walk the same patrol and have the same motive. One is on a short
+leash and never changes its mind; the other chases farther and takes another
+plan when the item it guards is stolen. They are the guards of the example
+`mission_guard` (`cargo run -p sagax --example mission_guard`; C:
+`examples/c/mission.c`).
+
+```rust
+let patrol = Plan::looping(&[Step::go_to(WEST), Step::wait(5), Step::go_to(EAST)])
+    .fails_when(Fail::Fact { subject: ITEM, kind: STOLEN, mask: 1, value: 1 });
+
+let mut a = Mission::new(config.clone(), Motive::guard_place(WEST))?;
+a.set_leeway(Leeway::STRICT);           // leash 3, never replans
+a.set_plan(&patrol)?;
+
+let mut b = Mission::new(config, Motive::guard_place(WEST))?;
+b.set_leeway(Leeway::FLEXIBLE);         // leash 12, searches, replans
+b.set_plan(&patrol)?;
+b.add_playbook(&Plan::once(&[Step::attack(THIEF)]), ONE, false)?;
+```
+
+When the attacker comes within sight, the game puts its fact into that
+guard's own `Knowledge` and calls `mission.detour(now, Detour::Engage(id),
+&knowledge)`. A strict guard follows three cells and walks back; the
+flexible one chases, loses sight, searches, returns and resumes the step it
+left. When the game tells guard B (only B) that the item is stolen, the
+patrol breaks on the fact; B scores its playbook and takes "attack the
+thief". The strict guard, if told, would only hold where it stands. The
+second number of `add_playbook` is the plan's **preference** (0 to `ONE`);
+with `widening` set, only a character that may widen takes the plan.
+
+### Recipe: score plans by a trial run
+
+The built-in score of a candidate plan is feasibility times preference. A
+game that can simulate (a path cost, a risk estimate, a dry run of the
+moves) replaces it in the `score` slot of `MissionRules`. The slot is asked
+once per candidate, in option order; the option is the playbook slot
+(`add_playbook` returns it), or `default_option()` and `widen_option()`.
+The mission does not hand over the plan; keep a table from option to plan on
+the game's side.
+
+```rust
+struct TrialRun<'a> {
+    world: &'a World,
+    plans: Vec<(u32, Plan)>,        // playbook option -> plan, kept by the game
+}
+
+impl MissionRules for TrialRun<'_> {
+    fn score(&mut self, ctx: &PlanCtx, built_in: u32) -> Option<u32> {
+        if !ctx.feasible {
+            return Some(0);                      // never take what cannot run
+        }
+        let (_, plan) = self.plans.iter().find(|(o, _)| *o == ctx.option)?; // else: built-in
+        let cost = self.world.dry_run(ctx.pos, plan)?;   // None: keep the built-in score
+        Some(built_in / (1 + cost))                      // cheaper is better
+    }
+}
+
+let out = mission.tick_with(now, pos, &knowledge, flags, &mut TrialRun { world: &world, plans });
+```
+
+`Some(0)` vetoes a candidate. The answer is final, also for a candidate that
+is not feasible (so the example returns 0 for it). When every candidate ends
+at 0 the mission falls back to its default plan if that is feasible, else
+holds where it stands. The slot gets no random number and must not call the
+same mission. A game that only wants to *add* a factor puts it in the
+`columns` slot instead (set `MissionConfig::extra_columns`) and a
+consideration on the options of `mission.decider_mut()`. The `fail` slot
+answers a `Fail::Custom(id)` of the game's own.
+
+### C
+
+```c
+sx_mission_config config;
+sx_mission_config_default(&config);
+config.subject_kind = SEEN;
+
+sx_motive motive = { .kind = SX_MOTIVE_GUARD, .has_place = 1, .place = {4, 3, 0} };
+sx_mission *m = sx_mission_new(&config, &motive);
+
+sx_leeway leeway;
+sx_leeway_preset(SX_LEEWAY_FLEXIBLE, &leeway);
+sx_mission_set_leeway(m, &leeway);
+
+sx_step steps[2] = { go_to(WEST), go_to(EAST) };   /* your helpers: a zeroed sx_step is GO_TO (0,0,0) */
+sx_mission_set_plan(m, steps, 2, 1 /* repeat */, NULL, 0);
+
+sx_mission_out out;
+sx_mission_tick(m, now, pos, knowledge, flags, &out);   /* or sx_mission_tick_with */
+if (out.action.kind == SX_ACTION_GO_TO)
+    walk_toward(out.action.pos);
+for (uint32_t i = 0; i < out.event_count; i++)
+    if (out.events[i].kind == SX_MISSION_EVENT_SIGNAL)
+        game_signal(out.events[i].a);
+sx_mission_free(m);
+```
+
+The rules are `sx_mission_rules` (callbacks `fail`, `columns`, `score`, all
+optional) lent to `sx_mission_tick_with`. `sx_mission_detour` returns 1 if
+the detour was taken and 0 if it was refused. JavaScript has no mission
+binding yet.
+
+### Hex
+
+With `MissionConfig::hex_layout` (C `config.grid = SX_GRID_HEX_*`, with
+`SX_METRIC_HEX`; in Rust the metric must be `Metric::Hex`, else
+`Mission::new` fails with `HexNeedsHexMetric`) every position **in and out**
+is in offset coordinates of your map: the position you tick with, fixed
+positions in steps, motive and detours, the actions and events you get
+back, the rule contexts, and the positions of the facts in the `Knowledge`
+you pass. The mission converts inside. Without a layout positions pass
+unchanged. (The squad holds axial positions, see Hex in the Conventions; the
+mission does not.)
+
+## 10. Debugging and logging
 
 Tracing hands every step of a search to you: `started`, `expanded` (cost now
 final), `improved` (reached more cheaply, with the parent cell), `paused`
@@ -1747,7 +1969,7 @@ the `finished` event with `expanded` to find costly searches, and follow
 `improved` to see why a way goes where it goes.
 
 
-## 10. Pitfalls
+## 11. Pitfalls
 
 - Costs are integers ≥ 0. `move_cost` is an *extra* on top of the step cost.
 - There is no default cost for a grid: pick a preset (Rust `GridRules::preset`,

@@ -28,6 +28,9 @@ dependencies).
   hands out goals with shout or radio delay, and strikes at the same moment.
   The `Crew` runs that loop in one call per tick. A rules object lets a game
   put its own logic (sight, costs, triggers) into nine fixed points.
+- **Missions**: one character's motive, plan of steps, detours on a leash
+  and replanning when the plan breaks (Rust and C); it sees only the
+  `Knowledge` it is given.
 - **Square and hex grids** (pointy or flat top, odd or even offset), 4 or 8
   directions, walls between cells, extra costs, zones that cost extra to
   leave (zones of control).
