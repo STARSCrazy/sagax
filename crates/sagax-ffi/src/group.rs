@@ -14,7 +14,7 @@ use super::memory::{SxArea, SxAreas, SxFact, SxKnowledge, SxMessage, pos3, put};
 use super::rules::{CRules, SxSquadRules};
 use super::{ERROR_ARGUMENT, create, destroy, guarded, slice_of, to_i32};
 use sagax_abi::convert;
-use sagax_decide::memory::Metric;
+use sagax_decide::memory::{Areas, Knowledge, Metric};
 
 // ---- value structs ------------------------------------------------------------
 
@@ -600,6 +600,32 @@ unsafe fn squad_decider(root: *mut c_void) -> Option<*mut Decider> {
         .map(|s| std::ptr::from_mut(s.decider_mut()))
 }
 
+/// The leader's knowledge of the squad handle `root` (an [`SxSquad`]).
+///
+/// # Safety
+/// As [`squad_decider`].
+unsafe fn squad_knowledge_of(root: *mut c_void) -> Option<*mut Knowledge> {
+    // SAFETY: see above.
+    let squad = unsafe { &mut *root.cast::<SxSquad>() };
+    squad
+        .squad
+        .get_mut()
+        .map(|s| std::ptr::from_mut(s.knowledge_mut()))
+}
+
+/// The leader's danger areas of the squad handle `root` (an [`SxSquad`]).
+///
+/// # Safety
+/// As [`squad_decider`].
+unsafe fn squad_areas_of(root: *mut c_void) -> Option<*mut Areas> {
+    // SAFETY: see above.
+    let squad = unsafe { &mut *root.cast::<SxSquad>() };
+    squad
+        .squad
+        .get_mut()
+        .map(|s| std::ptr::from_mut(s.areas_mut()))
+}
+
 /// A value lent by a crew. Only the crew's root pointer is kept: the value
 /// is reached through it anew on every call, so no pointer into the crew is
 /// held across calls that borrow the crew itself.
@@ -677,13 +703,24 @@ pub struct SxSquad {
     /// The decider handle lent by `sx_squad_decider` (null until asked),
     /// freed with the squad.
     pub(crate) decider: *mut SxDecider,
+    /// The knowledge handle lent by `sx_squad_knowledge` (null until
+    /// asked), freed with the squad.
+    pub(crate) knowledge: *mut SxKnowledge,
+    /// The areas handle lent by `sx_squad_areas` (null until asked), freed
+    /// with the squad.
+    pub(crate) areas: *mut SxAreas,
 }
 
 impl Drop for SxSquad {
     fn drop(&mut self) {
-        // SAFETY: made by `sx_squad_decider` with `Box::into_raw` for this
-        // squad only and freed here once; `sx_decider_free` leaves it alone.
-        unsafe { destroy(self.decider) };
+        // SAFETY: each was made by its `sx_squad_*` function with
+        // `Box::into_raw` for this squad only and is freed here once; the
+        // `sx_*_free` functions leave lent handles alone.
+        unsafe {
+            destroy(self.decider);
+            destroy(self.knowledge);
+            destroy(self.areas);
+        }
     }
 }
 
@@ -779,6 +816,8 @@ pub unsafe extern "C" fn sx_squad_new(config: *const SxSquadConfig) -> *mut SxSq
             squad: Held::Own(squad),
             due: Vec::new(),
             decider: std::ptr::null_mut(),
+            knowledge: std::ptr::null_mut(),
+            areas: std::ptr::null_mut(),
         })
     })
 }
@@ -1354,40 +1393,49 @@ pub unsafe extern "C" fn sx_squad_set_spot_radius(squad: *mut SxSquad, radius: i
     }
 }
 
-/// `sx_squad_knowledge`: the leader's knowledge, owned by the squad.
-///
-/// The pointer aliases the squad: it is valid until the squad is freed, and
-/// is only used while no other call on this squad runs (the C interface is
-/// single-threaded per handle). It must not be passed to
-/// `sx_knowledge_free`.
+/// `sx_squad_knowledge`: the leader's knowledge, lent until `sx_squad_free`;
+/// `sx_knowledge_free` does nothing to it. One handle per squad, reaching
+/// into the squad anew on every call. Null for a null squad.
 ///
 /// # Safety
 /// `squad` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_knowledge(squad: *mut SxSquad) -> *mut SxKnowledge {
-    // SAFETY: see above.
-    match unsafe { squad.as_mut() } {
-        // `SxKnowledge` is a transparent wrapper of `Knowledge`.
-        Some(s) => std::ptr::from_mut(s.squad.knowledge_mut()).cast(),
-        None => std::ptr::null_mut(),
+    // SAFETY: null or valid (see above).
+    let Some(s) = (unsafe { squad.as_mut() }) else {
+        return std::ptr::null_mut();
+    };
+    if s.knowledge.is_null() {
+        s.knowledge = create(|| {
+            Some(SxKnowledge::inside(Inside {
+                root: squad.cast(),
+                get: squad_knowledge_of,
+            }))
+        });
     }
+    s.knowledge
 }
 
-/// `sx_squad_areas`: the leader's danger areas, owned by the squad.
-///
-/// Aliases the squad as [`sx_squad_knowledge`] does; never pass it to
-/// `sx_areas_free`.
+/// `sx_squad_areas`: the leader's danger areas, lent as
+/// [`sx_squad_knowledge`] is; `sx_areas_free` does nothing to it.
 ///
 /// # Safety
 /// `squad` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_squad_areas(squad: *mut SxSquad) -> *mut SxAreas {
-    // SAFETY: see above.
-    match unsafe { squad.as_mut() } {
-        // `SxAreas` is a transparent wrapper of `Areas`.
-        Some(s) => std::ptr::from_mut(s.squad.areas_mut()).cast(),
-        None => std::ptr::null_mut(),
+    // SAFETY: null or valid (see above).
+    let Some(s) = (unsafe { squad.as_mut() }) else {
+        return std::ptr::null_mut();
+    };
+    if s.areas.is_null() {
+        s.areas = create(|| {
+            Some(SxAreas::inside(Inside {
+                root: squad.cast(),
+                get: squad_areas_of,
+            }))
+        });
     }
+    s.areas
 }
 
 /// `sx_squad_observe`.

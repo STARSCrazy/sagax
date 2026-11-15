@@ -1319,6 +1319,26 @@ mod squad {
             ("SX_DECIDE_TRACE_RANKED", DECIDE_TRACE_RANKED),
             ("SX_MACHINE_TRACE_CHANGED", MACHINE_TRACE_CHANGED),
             ("SX_MACHINE_TRACE_WAITING", MACHINE_TRACE_WAITING),
+            ("SX_POSTED", POSTED),
+            ("SX_REFUSED_FULL", REFUSED_FULL),
+            ("SX_REFUSED_COOLDOWN", REFUSED_COOLDOWN),
+            ("SX_KNOWLEDGE_TRACE_ADDED", KNOWLEDGE_TRACE_ADDED),
+            ("SX_KNOWLEDGE_TRACE_UPDATED", KNOWLEDGE_TRACE_UPDATED),
+            ("SX_KNOWLEDGE_TRACE_STALE", KNOWLEDGE_TRACE_STALE),
+            ("SX_KNOWLEDGE_TRACE_EVICTED", KNOWLEDGE_TRACE_EVICTED),
+            ("SX_KNOWLEDGE_TRACE_EXPIRED", KNOWLEDGE_TRACE_EXPIRED),
+            ("SX_AREAS_TRACE_ADDED", AREAS_TRACE_ADDED),
+            ("SX_AREAS_TRACE_RENEWED", AREAS_TRACE_RENEWED),
+            ("SX_AREAS_TRACE_EVICTED", AREAS_TRACE_EVICTED),
+            ("SX_AREAS_TRACE_EXPIRED", AREAS_TRACE_EXPIRED),
+            ("SX_TIMERS_TRACE_STARTED", TIMERS_TRACE_STARTED),
+            ("SX_TIMERS_TRACE_RENEWED", TIMERS_TRACE_RENEWED),
+            ("SX_TIMERS_TRACE_REPLACED", TIMERS_TRACE_REPLACED),
+            ("SX_MESSAGE_TRACE_POSTED", MESSAGE_TRACE_POSTED),
+            ("SX_MESSAGE_TRACE_REFUSED", MESSAGE_TRACE_REFUSED),
+            ("SX_MESSAGE_TRACE_QUEUED", MESSAGE_TRACE_QUEUED),
+            ("SX_MESSAGE_TRACE_DROPPED", MESSAGE_TRACE_DROPPED),
+            ("SX_MESSAGE_TRACE_DELIVERED", MESSAGE_TRACE_DELIVERED),
             ("SX_BREAK_FAIL", BREAK_FAIL),
             ("SX_BREAK_IMPOSSIBLE", BREAK_IMPOSSIBLE),
             ("SX_BREAK_PLAN_ENDED", BREAK_PLAN_ENDED),
@@ -1835,6 +1855,76 @@ mod squad {
             assert_eq!(sx_squad_add_tactic(sq, big), 11);
             assert_eq!(sx_squad_validate(sq, &mut tactic, &mut input), ERROR_PLAN);
             assert_eq!((tactic, input), (11, u32::MAX));
+            sx_squad_free(sq);
+        }
+    }
+
+    unsafe extern "C" fn keep<R: Copy>(ctx: *mut std::ffi::c_void, t: *const R) {
+        let records = unsafe { &mut *ctx.cast::<Vec<R>>() };
+        records.push(unsafe { *t });
+    }
+
+    #[test]
+    fn lent_memory_handles_trace_only_their_own_calls() {
+        use crate::memory::{
+            SxAreasTrace, SxKnowledgeTrace, sx_areas_add, sx_areas_free, sx_areas_set_trace,
+            sx_knowledge_free, sx_knowledge_learn, sx_knowledge_set_trace,
+        };
+        unsafe {
+            let sq = squad_of(EUCLID, &[(1, 0, 0), (2, 1, 0)]);
+            let k = sx_squad_knowledge(sq);
+            let a = sx_squad_areas(sq);
+            // one handle each per squad
+            assert_eq!(k, sx_squad_knowledge(sq));
+            assert_eq!(a, sx_squad_areas(sq));
+            let mut facts: Vec<SxKnowledgeTrace> = Vec::new();
+            let mut areas: Vec<SxAreasTrace> = Vec::new();
+            assert_eq!(
+                sx_knowledge_set_trace(k, Some(keep), (&raw mut facts).cast()),
+                0
+            );
+            assert_eq!(
+                sx_areas_set_trace(a, Some(keep), (&raw mut areas).cast()),
+                0
+            );
+            // The squad's own work is not the lent handle's.
+            let seen = SxFact {
+                subject: E1,
+                kind: ENEMY,
+                pos: [5, 0, 0],
+                seen_at: 1,
+                ..SxFact::default()
+            };
+            assert_eq!(sx_squad_observe(sq, 1, &seen, null_mut()), 0);
+            assert!(facts.is_empty());
+            assert_eq!(sx_knowledge_count(k), 1);
+            // A call through the lent handle is.
+            let told = SxFact {
+                subject: E2,
+                ..seen
+            };
+            assert_eq!(sx_knowledge_learn(k, 2, &told, null_mut()), 0);
+            assert_eq!(
+                facts,
+                [SxKnowledgeTrace {
+                    kind: KNOWLEDGE_TRACE_ADDED,
+                    fact: told
+                }]
+            );
+            let area = SxArea {
+                kind: 1,
+                radius: 2,
+                lifetime: 50,
+                ..SxArea::default()
+            };
+            assert_eq!(sx_areas_add(a, 2, &area), 0);
+            assert_eq!(areas.len(), 1);
+            assert_eq!(areas[0].kind, AREAS_TRACE_ADDED);
+            // Freeing a lent handle does nothing; the squad frees it.
+            sx_knowledge_free(k);
+            sx_areas_free(a);
+            assert_eq!(sx_knowledge_count(k), 2);
+            assert_eq!(sx_areas_count(a), 1);
             sx_squad_free(sq);
         }
     }
@@ -2996,8 +3086,8 @@ mod conventions {
         };
         use crate::machine::{SxChange, SxMachineTrace};
         use crate::memory::{
-            SxAlertConfig, SxAlertness, SxArea, SxFact, SxInterval, SxMessage, SxNearby,
-            SxPointPattern, SxProgress,
+            SxAlertConfig, SxAlertness, SxArea, SxAreasTrace, SxFact, SxInterval, SxKnowledgeTrace,
+            SxMessage, SxMessageTrace, SxNearby, SxPointPattern, SxProgress, SxTimersTrace,
         };
         use crate::mission::{
             SxDetour, SxFail, SxLeeway, SxMissionAction, SxMissionConfig, SxMissionEvent,
@@ -3074,6 +3164,10 @@ mod conventions {
             layout!("sx_fact", SxFact, pos, seen_at, data, source),
             layout!("sx_message", SxMessage, pos, sender, keep_if_sender_gone),
             layout!("sx_area", SxArea, radius, source, blocking, has_source),
+            layout!("sx_knowledge_trace", SxKnowledgeTrace, fact),
+            layout!("sx_message_trace", SxMessageTrace, msg, at, refused),
+            layout!("sx_areas_trace", SxAreasTrace, index, area),
+            layout!("sx_timers_trace", SxTimersTrace, duration, old, old_left),
             layout!("sx_progress", SxProgress, since, started),
             layout!("sx_interval", SxInterval, started),
             layout!("sx_alertness", SxAlertness),
@@ -4379,7 +4473,7 @@ mod mission {
 
         fn detour(&mut self, now: u32, c: SxDetour, r: Detour) -> i32 {
             let taken = unsafe { sx_mission_detour(self.c, now, &c, self.k) };
-            let k = unsafe { &(*self.k).0 };
+            let k = unsafe { &*(*self.k).value };
             assert_eq!(taken, i32::from(self.r.detour(now, r, k)));
             taken
         }
@@ -4396,7 +4490,7 @@ mod mission {
             let n = unsafe {
                 sx_mission_tick_with(self.c, now, self.pos.as_ptr(), self.k, 0, rules, &mut out)
             };
-            let k = unsafe { &(*self.k).0 };
+            let k = unsafe { &*(*self.k).value };
             let r = self.r.tick_with(now, self.pos, k, 0, r_rules);
             assert_eq!(out.action, action_of(r.action), "action at {now}");
             let events: Vec<_> = r.events().iter().map(|e| event_of(*e)).collect();
@@ -4850,7 +4944,7 @@ mod mission {
             }
             let mut out = SxMissionOut::default();
             unsafe { sx_mission_tick(t.c, now, pos.as_ptr(), k, 0, &mut out) };
-            let know = unsafe { &(*k).0 };
+            let know = unsafe { &*(*k).value };
             let mut sink = sagax_core::CallbackSink(|e| r_events.push(SxMissionTrace::of(e)));
             let r = t.r.tick_traced(
                 now,

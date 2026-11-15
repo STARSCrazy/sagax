@@ -779,6 +779,26 @@ int32_t sx_knowledge_expire_kind(sx_knowledge *k, uint32_t now, uint32_t kind,
 /* Forget everything. Returns 0. */
 int32_t sx_knowledge_clear(sx_knowledge *k);
 
+/* What learn, merge, their _message forms and the expire calls did (since
+ * version 12): one record per fact concerned. A full table sends EVICTED
+ * before the ADDED of the new fact. */
+#define SX_KNOWLEDGE_TRACE_ADDED   1   /* a new subject and kind was stored */
+#define SX_KNOWLEDGE_TRACE_UPDATED 2   /* a known one was replaced by fact */
+#define SX_KNOWLEDGE_TRACE_STALE   3   /* merge kept the stored one; fact is the refused one */
+#define SX_KNOWLEDGE_TRACE_EVICTED 4   /* dropped by the eviction rule to make room */
+#define SX_KNOWLEDGE_TRACE_EXPIRED 5   /* dropped by an expire call */
+
+typedef struct sx_knowledge_trace {
+	uint32_t kind;              /* SX_KNOWLEDGE_TRACE_* */
+	sx_fact fact;               /* the fact concerned */
+} sx_knowledge_trace;
+
+/* trace gets every record of the following calls on k, with context; NULL
+ * turns it off (the default). For sx_squad_knowledge it covers the calls
+ * made through that handle only. Returns 0. */
+typedef void (*sx_knowledge_trace_fn)(void *context, const sx_knowledge_trace *trace);
+int32_t sx_knowledge_set_trace(sx_knowledge *k, sx_knowledge_trace_fn trace, void *context);
+
 /* -- outbox and inbox: messages in flight -- */
 
 /* Null if capacity is 0. The whole capacity is reserved at once. */
@@ -812,6 +832,29 @@ int32_t sx_inbox_push(sx_inbox *b, const sx_message *msg, uint32_t arrive_at);
 int32_t sx_inbox_take_due(sx_inbox *b, uint32_t now, sx_message *out, uint32_t cap);
 int32_t sx_inbox_count(sx_inbox *b);
 int32_t sx_inbox_clear(sx_inbox *b);
+
+/* What post, due, sender_gone, push and take_due did (since version 12): one
+ * record per message concerned. A full inbox that makes room sends DROPPED
+ * (the message arriving last) before the QUEUED of the new one; one that
+ * refuses sends DROPPED of the new one. */
+#define SX_MESSAGE_TRACE_POSTED    1   /* at: when it becomes due */
+#define SX_MESSAGE_TRACE_REFUSED   2   /* refused: SX_REFUSED_* */
+#define SX_MESSAGE_TRACE_QUEUED    3   /* at: when it arrives */
+#define SX_MESSAGE_TRACE_DROPPED   4   /* lost: a full inbox or a gone sender */
+#define SX_MESSAGE_TRACE_DELIVERED 5   /* handed out by due or take_due */
+
+typedef struct sx_message_trace {
+	uint32_t kind;              /* SX_MESSAGE_TRACE_* */
+	sx_message msg;             /* the message concerned */
+	uint32_t at;                /* POSTED, QUEUED */
+	uint32_t refused;           /* REFUSED */
+} sx_message_trace;
+
+/* trace gets every record of the following calls on the outbox or inbox,
+ * with context; NULL turns it off (the default). Returns 0. */
+typedef void (*sx_message_trace_fn)(void *context, const sx_message_trace *trace);
+int32_t sx_outbox_set_trace(sx_outbox *o, sx_message_trace_fn trace, void *context);
+int32_t sx_inbox_set_trace(sx_inbox *b, sx_message_trace_fn trace, void *context);
 /* Arrival time of a message sent at now: now + base + distance * per_unit
  * (wrapping). */
 uint32_t sx_arrival(uint32_t now, uint32_t base, uint32_t distance, uint32_t per_unit);
@@ -887,6 +930,26 @@ int32_t sx_areas_at(sx_areas *a, uint32_t index, sx_area *out);
 /* Remove all areas. Returns 0. */
 int32_t sx_areas_clear(sx_areas *a);
 
+/* What add and expire did (since version 12), with the area as stored. A
+ * full set sends EVICTED before the ADDED of the new area. Fields that do
+ * not apply to the kind are 0. */
+#define SX_AREAS_TRACE_ADDED   1   /* appended at index */
+#define SX_AREAS_TRACE_RENEWED 2   /* the area at index was replaced */
+#define SX_AREAS_TRACE_EVICTED 3   /* the oldest, removed to make room */
+#define SX_AREAS_TRACE_EXPIRED 4   /* its lifetime ran out */
+
+typedef struct sx_areas_trace {
+	uint32_t kind;              /* SX_AREAS_TRACE_* */
+	uint32_t index;             /* ADDED, RENEWED */
+	sx_area area;               /* the area concerned */
+} sx_areas_trace;
+
+/* trace gets every record of the following calls on a, with context; NULL
+ * turns it off (the default). For sx_squad_areas it covers the calls made
+ * through that handle only. Returns 0. */
+typedef void (*sx_areas_trace_fn)(void *context, const sx_areas_trace *trace);
+int32_t sx_areas_set_trace(sx_areas *a, sx_areas_trace_fn trace, void *context);
+
 /* -- timers: ids that count as "on" for a while -- */
 
 /* Null if capacity is 0. The whole capacity is reserved at once. */
@@ -903,6 +966,25 @@ int64_t sx_timers_left(sx_timers *t, uint32_t id, uint32_t now);
 int32_t sx_timers_remove(sx_timers *t, uint32_t id);
 int32_t sx_timers_count(sx_timers *t);
 int32_t sx_timers_clear(sx_timers *t);
+
+/* What set did (since version 12): one record per call. Fields that do not
+ * apply to the kind are 0. */
+#define SX_TIMERS_TRACE_STARTED  1   /* id was new */
+#define SX_TIMERS_TRACE_RENEWED  2   /* id was present and starts again */
+#define SX_TIMERS_TRACE_REPLACED 3   /* full: old, with old_left ticks left, gave way to id */
+
+typedef struct sx_timers_trace {
+	uint32_t kind;              /* SX_TIMERS_TRACE_* */
+	uint32_t id;
+	uint32_t duration;
+	uint32_t old;               /* REPLACED */
+	uint32_t old_left;          /* REPLACED */
+} sx_timers_trace;
+
+/* trace gets every record of the following sx_timers_set calls on t, with
+ * context; NULL turns it off (the default). Returns 0. */
+typedef void (*sx_timers_trace_fn)(void *context, const sx_timers_trace *trace);
+int32_t sx_timers_set_trace(sx_timers *t, sx_timers_trace_fn trace, void *context);
 
 /* -- progress, interval, alertness: value structs -- */
 
@@ -1409,10 +1491,12 @@ int32_t sx_squad_extra_start(sx_squad *squad);
 int32_t sx_squad_set_spot_radius(sx_squad *squad, int64_t radius);
 
 /* The leader's own knowledge and danger areas, for every sx_knowledge_* and
- * sx_areas_* call (sx_areas_move_cost too). They belong to the squad: do
- * not free them; they are valid until sx_squad_free. Null for a null
- * squad. The pointers alias the squad: use them only between squad calls,
- * never while another call on the same squad runs (on another thread).
+ * sx_areas_* call (sx_areas_move_cost and set_trace too). One handle each
+ * per squad, lent until sx_squad_free; sx_knowledge_free and sx_areas_free
+ * do nothing to them. Null for a null squad. They reach into the squad:
+ * use them only between squad calls, never while another call on the same
+ * squad runs (on another thread). Their traces see only the calls made
+ * through them, not the squad's own work.
  * sx_squad_plan and sx_squad_check expire the areas (sx_areas_expire); the
  * game ages the knowledge itself (sx_knowledge_expire). */
 sx_knowledge *sx_squad_knowledge(sx_squad *squad);
@@ -2610,6 +2694,19 @@ _Static_assert(offsetof(sx_area, radius) == 16, "sx_area.radius layout");
 _Static_assert(offsetof(sx_area, source) == 36, "sx_area.source layout");
 _Static_assert(offsetof(sx_area, blocking) == 48, "sx_area.blocking layout");
 _Static_assert(offsetof(sx_area, has_source) == 49, "sx_area.has_source layout");
+_Static_assert(sizeof(sx_knowledge_trace) == 40, "sx_knowledge_trace layout");
+_Static_assert(offsetof(sx_knowledge_trace, fact) == 4, "sx_knowledge_trace.fact layout");
+_Static_assert(sizeof(sx_message_trace) == 52, "sx_message_trace layout");
+_Static_assert(offsetof(sx_message_trace, msg) == 4, "sx_message_trace.msg layout");
+_Static_assert(offsetof(sx_message_trace, at) == 44, "sx_message_trace.at layout");
+_Static_assert(offsetof(sx_message_trace, refused) == 48, "sx_message_trace.refused layout");
+_Static_assert(sizeof(sx_areas_trace) == 60, "sx_areas_trace layout");
+_Static_assert(offsetof(sx_areas_trace, index) == 4, "sx_areas_trace.index layout");
+_Static_assert(offsetof(sx_areas_trace, area) == 8, "sx_areas_trace.area layout");
+_Static_assert(sizeof(sx_timers_trace) == 20, "sx_timers_trace layout");
+_Static_assert(offsetof(sx_timers_trace, duration) == 8, "sx_timers_trace.duration layout");
+_Static_assert(offsetof(sx_timers_trace, old) == 12, "sx_timers_trace.old layout");
+_Static_assert(offsetof(sx_timers_trace, old_left) == 16, "sx_timers_trace.old_left layout");
 _Static_assert(sizeof(sx_progress) == 12, "sx_progress layout");
 _Static_assert(offsetof(sx_progress, since) == 4, "sx_progress.since layout");
 _Static_assert(offsetof(sx_progress, started) == 8, "sx_progress.started layout");

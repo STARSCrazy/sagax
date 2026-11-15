@@ -72,6 +72,51 @@ pub const MACHINE_TRACE_CHANGED: u32 = 1;
 /// `SX_MACHINE_TRACE_WAITING`: a transition holds but its time has not come.
 pub const MACHINE_TRACE_WAITING: u32 = 2;
 
+/// `SX_POSTED`: the outbox took the message.
+pub const POSTED: u32 = 0;
+/// `SX_REFUSED_FULL`: the outbox is full.
+pub const REFUSED_FULL: u32 = 1;
+/// `SX_REFUSED_COOLDOWN`: the last accepted post is younger than the cooldown.
+pub const REFUSED_COOLDOWN: u32 = 2;
+
+/// `SX_KNOWLEDGE_TRACE_ADDED`: a new key was stored.
+pub const KNOWLEDGE_TRACE_ADDED: u32 = 1;
+/// `SX_KNOWLEDGE_TRACE_UPDATED`: a known key was overwritten.
+pub const KNOWLEDGE_TRACE_UPDATED: u32 = 2;
+/// `SX_KNOWLEDGE_TRACE_STALE`: a merge kept the stored fact.
+pub const KNOWLEDGE_TRACE_STALE: u32 = 3;
+/// `SX_KNOWLEDGE_TRACE_EVICTED`: dropped to make room.
+pub const KNOWLEDGE_TRACE_EVICTED: u32 = 4;
+/// `SX_KNOWLEDGE_TRACE_EXPIRED`: dropped by an expire call.
+pub const KNOWLEDGE_TRACE_EXPIRED: u32 = 5;
+
+/// `SX_AREAS_TRACE_ADDED`: an area was appended.
+pub const AREAS_TRACE_ADDED: u32 = 1;
+/// `SX_AREAS_TRACE_RENEWED`: an area near the new centre was replaced.
+pub const AREAS_TRACE_RENEWED: u32 = 2;
+/// `SX_AREAS_TRACE_EVICTED`: the oldest area, removed to make room.
+pub const AREAS_TRACE_EVICTED: u32 = 3;
+/// `SX_AREAS_TRACE_EXPIRED`: an area whose lifetime ran out.
+pub const AREAS_TRACE_EXPIRED: u32 = 4;
+
+/// `SX_TIMERS_TRACE_STARTED`: a new id was added.
+pub const TIMERS_TRACE_STARTED: u32 = 1;
+/// `SX_TIMERS_TRACE_RENEWED`: a present id was started again.
+pub const TIMERS_TRACE_RENEWED: u32 = 2;
+/// `SX_TIMERS_TRACE_REPLACED`: full, the timer with the least time left gave way.
+pub const TIMERS_TRACE_REPLACED: u32 = 3;
+
+/// `SX_MESSAGE_TRACE_POSTED`: the outbox took the message.
+pub const MESSAGE_TRACE_POSTED: u32 = 1;
+/// `SX_MESSAGE_TRACE_REFUSED`: the outbox refused the message.
+pub const MESSAGE_TRACE_REFUSED: u32 = 2;
+/// `SX_MESSAGE_TRACE_QUEUED`: the inbox took the message.
+pub const MESSAGE_TRACE_QUEUED: u32 = 3;
+/// `SX_MESSAGE_TRACE_DROPPED`: a full inbox or a gone sender lost the message.
+pub const MESSAGE_TRACE_DROPPED: u32 = 4;
+/// `SX_MESSAGE_TRACE_DELIVERED`: the message was handed out.
+pub const MESSAGE_TRACE_DELIVERED: u32 = 5;
+
 /// `SX_GRID_SQUARE`.
 pub const GRID_SQUARE: u32 = 0;
 /// `SX_GRID_HEX_ODD_R`.

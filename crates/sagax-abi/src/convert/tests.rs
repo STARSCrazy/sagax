@@ -683,3 +683,134 @@ fn nav_trace_codes() {
         (NAV_TRACE_FLEE_BEST, c(9, 1), i32::MAX, 80)
     );
 }
+
+#[test]
+fn memory_trace_codes() {
+    let f = Fact {
+        subject: 3,
+        kind: 1,
+        seen_at: 9,
+        ..Fact::default()
+    };
+    let kinds = [
+        (KnowledgeTrace::Added(f), KNOWLEDGE_TRACE_ADDED),
+        (KnowledgeTrace::Updated(f), KNOWLEDGE_TRACE_UPDATED),
+        (KnowledgeTrace::Stale(f), KNOWLEDGE_TRACE_STALE),
+        (KnowledgeTrace::Evicted(f), KNOWLEDGE_TRACE_EVICTED),
+        (KnowledgeTrace::Expired(f), KNOWLEDGE_TRACE_EXPIRED),
+    ];
+    for (event, kind) in kinds {
+        assert_eq!(knowledge_trace(event), KnowledgeTraceCode { kind, fact: f });
+    }
+
+    let a = Area {
+        kind: 2,
+        radius: 4,
+        since: 7,
+        ..Area::default()
+    };
+    let areas = [
+        (
+            AreasTrace::Added { index: 3, area: a },
+            AREAS_TRACE_ADDED,
+            3,
+        ),
+        (
+            AreasTrace::Renewed { index: 1, area: a },
+            AREAS_TRACE_RENEWED,
+            1,
+        ),
+        (AreasTrace::Evicted(a), AREAS_TRACE_EVICTED, 0),
+        (AreasTrace::Expired(a), AREAS_TRACE_EXPIRED, 0),
+    ];
+    for (event, kind, index) in areas {
+        assert_eq!(
+            areas_trace(event),
+            AreasTraceCode {
+                kind,
+                index,
+                area: a
+            }
+        );
+    }
+
+    assert_eq!(
+        timers_trace(TimersTrace::Started { id: 4, duration: 9 }),
+        TimersTraceCode {
+            kind: TIMERS_TRACE_STARTED,
+            id: 4,
+            duration: 9,
+            ..TimersTraceCode::default()
+        }
+    );
+    assert_eq!(
+        timers_trace(TimersTrace::Renewed { id: 4, duration: 2 }).kind,
+        TIMERS_TRACE_RENEWED
+    );
+    assert_eq!(
+        timers_trace(TimersTrace::Replaced {
+            id: 5,
+            duration: 3,
+            old: 4,
+            old_left: 1
+        }),
+        TimersTraceCode {
+            kind: TIMERS_TRACE_REPLACED,
+            id: 5,
+            duration: 3,
+            old: 4,
+            old_left: 1,
+        }
+    );
+
+    let m = Message {
+        kind: 1,
+        subject: 2,
+        sender: 8,
+        ..Message::default()
+    };
+    let code = |kind, at, refused| MessageTraceCode {
+        kind,
+        msg: m,
+        at,
+        refused,
+    };
+    let messages = [
+        (
+            MessageTrace::Posted { msg: m, due_at: 12 },
+            code(MESSAGE_TRACE_POSTED, 12, 0),
+        ),
+        (
+            MessageTrace::Refused {
+                msg: m,
+                why: Refused::Full,
+            },
+            code(MESSAGE_TRACE_REFUSED, 0, REFUSED_FULL),
+        ),
+        (
+            MessageTrace::Refused {
+                msg: m,
+                why: Refused::Cooldown,
+            },
+            code(MESSAGE_TRACE_REFUSED, 0, REFUSED_COOLDOWN),
+        ),
+        (
+            MessageTrace::Queued {
+                msg: m,
+                arrive_at: 30,
+            },
+            code(MESSAGE_TRACE_QUEUED, 30, 0),
+        ),
+        (
+            MessageTrace::Dropped { msg: m },
+            code(MESSAGE_TRACE_DROPPED, 0, 0),
+        ),
+        (
+            MessageTrace::Delivered { msg: m },
+            code(MESSAGE_TRACE_DELIVERED, 0, 0),
+        ),
+    ];
+    for (event, expected) in messages {
+        assert_eq!(message_trace(event), expected);
+    }
+}

@@ -9,7 +9,9 @@ use sagax_decide::group::{
     Compare, CrewEvent, Goal, GoalKind, MemberState, Place, PlanError, PlanId, RoleCounts, Shape,
     Side, SkillTable, Start, Status as SquadStatus,
 };
-use sagax_decide::memory::Metric;
+use sagax_decide::memory::{
+    Area, AreasTrace, Fact, KnowledgeTrace, Message, MessageTrace, Metric, Refused, TimersTrace,
+};
 use sagax_decide::mission::{
     Action, BreakReason, Detour, DetourEnd, Fail, Leeway, MissionEvent, MissionTrace, Motive,
     MotiveKind, OnLost, StepKind, Where,
@@ -37,6 +39,13 @@ use crate::codes::{
     STEP_ATTACK, STEP_CALL, STEP_CUSTOM, STEP_FOLLOW, STEP_GO_TO, STEP_HOLD, STEP_PAUSE,
     STEP_SEARCH, STEP_SIGNAL, STEP_SQUAD, STEP_WAIT, STEP_WAIT_FOR, STEP_WANDER, WHERE_FIXED,
     WHERE_HERE, WHERE_MOTIVE_PLACE, WHERE_MOTIVE_SUBJECT, WHERE_SUBJECT,
+};
+use crate::codes::{
+    AREAS_TRACE_ADDED, AREAS_TRACE_EVICTED, AREAS_TRACE_EXPIRED, AREAS_TRACE_RENEWED,
+    KNOWLEDGE_TRACE_ADDED, KNOWLEDGE_TRACE_EVICTED, KNOWLEDGE_TRACE_EXPIRED, KNOWLEDGE_TRACE_STALE,
+    KNOWLEDGE_TRACE_UPDATED, MESSAGE_TRACE_DELIVERED, MESSAGE_TRACE_DROPPED, MESSAGE_TRACE_POSTED,
+    MESSAGE_TRACE_QUEUED, MESSAGE_TRACE_REFUSED, REFUSED_COOLDOWN, REFUSED_FULL,
+    TIMERS_TRACE_RENEWED, TIMERS_TRACE_REPLACED, TIMERS_TRACE_STARTED,
 };
 use crate::codes::{
     CMP_AT_LEAST, CMP_AT_MOST, CMP_EQUAL, CMP_NOT_EQUAL, COMBINE_FOLLOW, CREW_ACTIVATED,
@@ -461,6 +470,146 @@ pub fn state_trace(event: StateTrace) -> StateTraceCode {
             after,
             ..StateTraceCode::default()
         },
+    }
+}
+
+// ---- traces of the world memory -----------------------------------------------
+
+/// Why an outbox refused a post (`SX_REFUSED_*`).
+pub fn refused(why: Refused) -> u32 {
+    match why {
+        Refused::Full => REFUSED_FULL,
+        Refused::Cooldown => REFUSED_COOLDOWN,
+    }
+}
+
+/// The numbers of a knowledge trace record (`sx_knowledge_trace`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KnowledgeTraceCode {
+    /// `SX_KNOWLEDGE_TRACE_*`.
+    pub kind: u32,
+    /// The fact concerned.
+    pub fact: Fact,
+}
+
+/// The numbers of a knowledge trace record.
+pub fn knowledge_trace(event: KnowledgeTrace) -> KnowledgeTraceCode {
+    let (kind, fact) = match event {
+        KnowledgeTrace::Added(f) => (KNOWLEDGE_TRACE_ADDED, f),
+        KnowledgeTrace::Updated(f) => (KNOWLEDGE_TRACE_UPDATED, f),
+        KnowledgeTrace::Stale(f) => (KNOWLEDGE_TRACE_STALE, f),
+        KnowledgeTrace::Evicted(f) => (KNOWLEDGE_TRACE_EVICTED, f),
+        KnowledgeTrace::Expired(f) => (KNOWLEDGE_TRACE_EXPIRED, f),
+    };
+    KnowledgeTraceCode { kind, fact }
+}
+
+/// The numbers of an areas trace record (`sx_areas_trace`). `index` is 0
+/// for `EVICTED` and `EXPIRED`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AreasTraceCode {
+    /// `SX_AREAS_TRACE_*`.
+    pub kind: u32,
+    /// `ADDED`, `RENEWED`: the slot.
+    pub index: u32,
+    /// The area concerned.
+    pub area: Area,
+}
+
+/// The numbers of an areas trace record.
+pub fn areas_trace(event: AreasTrace) -> AreasTraceCode {
+    let slot = |i: usize| u32::try_from(i).unwrap_or(u32::MAX);
+    let (kind, index, area) = match event {
+        AreasTrace::Added { index, area } => (AREAS_TRACE_ADDED, slot(index), area),
+        AreasTrace::Renewed { index, area } => (AREAS_TRACE_RENEWED, slot(index), area),
+        AreasTrace::Evicted(area) => (AREAS_TRACE_EVICTED, 0, area),
+        AreasTrace::Expired(area) => (AREAS_TRACE_EXPIRED, 0, area),
+    };
+    AreasTraceCode { kind, index, area }
+}
+
+/// The numbers of a timers trace record (`sx_timers_trace`). Fields that
+/// do not apply to `kind` are 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TimersTraceCode {
+    /// `SX_TIMERS_TRACE_*`.
+    pub kind: u32,
+    /// The id set.
+    pub id: u32,
+    /// Its ticks.
+    pub duration: u32,
+    /// `REPLACED`: the id that gave way.
+    pub old: u32,
+    /// `REPLACED`: the ticks it had left.
+    pub old_left: u32,
+}
+
+/// The numbers of a timers trace record.
+pub fn timers_trace(event: TimersTrace) -> TimersTraceCode {
+    match event {
+        TimersTrace::Started { id, duration } => TimersTraceCode {
+            kind: TIMERS_TRACE_STARTED,
+            id,
+            duration,
+            ..TimersTraceCode::default()
+        },
+        TimersTrace::Renewed { id, duration } => TimersTraceCode {
+            kind: TIMERS_TRACE_RENEWED,
+            id,
+            duration,
+            ..TimersTraceCode::default()
+        },
+        TimersTrace::Replaced {
+            id,
+            duration,
+            old,
+            old_left,
+        } => TimersTraceCode {
+            kind: TIMERS_TRACE_REPLACED,
+            id,
+            duration,
+            old,
+            old_left,
+        },
+    }
+}
+
+/// The numbers of a message trace record (`sx_message_trace`). Fields that
+/// do not apply to `kind` are 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MessageTraceCode {
+    /// `SX_MESSAGE_TRACE_*`.
+    pub kind: u32,
+    /// The message concerned.
+    pub msg: Message,
+    /// `POSTED`: when it becomes due; `QUEUED`: when it arrives.
+    pub at: u32,
+    /// `REFUSED`: `SX_REFUSED_*`.
+    pub refused: u32,
+}
+
+/// The numbers of a message trace record.
+pub fn message_trace(event: MessageTrace) -> MessageTraceCode {
+    let code = |kind, msg| MessageTraceCode {
+        kind,
+        msg,
+        ..MessageTraceCode::default()
+    };
+    match event {
+        MessageTrace::Posted { msg, due_at } => MessageTraceCode {
+            at: due_at,
+            ..code(MESSAGE_TRACE_POSTED, msg)
+        },
+        MessageTrace::Refused { msg, why } => MessageTraceCode {
+            refused: refused(why),
+            ..code(MESSAGE_TRACE_REFUSED, msg)
+        },
+        MessageTrace::Queued { msg, arrive_at } => MessageTraceCode {
+            at: arrive_at,
+            ..code(MESSAGE_TRACE_QUEUED, msg)
+        },
+        MessageTrace::Dropped { msg } => code(MESSAGE_TRACE_DROPPED, msg),
+        MessageTrace::Delivered { msg } => code(MESSAGE_TRACE_DELIVERED, msg),
     }
 }
 

@@ -964,7 +964,7 @@ pub unsafe extern "C" fn sx_mission_tick_with(
         return ERROR_ARGUMENT;
     };
     // SAFETY: null or valid (see above).
-    let Some(k) = (unsafe { knowledge.as_ref() }) else {
+    let Some(k) = (unsafe { knowledge.as_ref() }).and_then(|k| k.value.get()) else {
         return ERROR_ARGUMENT;
     };
     if pos.is_null() {
@@ -985,7 +985,7 @@ pub unsafe extern "C" fn sx_mission_tick_with(
             }
         };
         let output = traced!(*trace, SxMissionTrace::of, |sink| m
-            .tick_traced(now, pos, &k.0, flags, rules, sink));
+            .tick_traced(now, pos, k, flags, rules, sink));
         let events = output.events();
         if !out.is_null() {
             let mut o = SxMissionOut {
@@ -1043,7 +1043,10 @@ pub unsafe extern "C" fn sx_mission_detour(
 ) -> i32 {
     let m = mission!(mission);
     // SAFETY: null or valid (see above).
-    let (Some(d), Some(k)) = (unsafe { detour.as_ref() }, unsafe { knowledge.as_ref() }) else {
+    let (Some(d), Some(k)) = (
+        unsafe { detour.as_ref() },
+        unsafe { knowledge.as_ref() }.and_then(|k| k.value.get()),
+    ) else {
         return ERROR_ARGUMENT;
     };
     let Some(d) = convert::detour(
@@ -1056,7 +1059,7 @@ pub unsafe extern "C" fn sx_mission_detour(
     ) else {
         return ERROR_ARGUMENT;
     };
-    guarded(|| i32::from(m.detour(now, d, &k.0)))
+    guarded(|| i32::from(m.detour(now, d, k)))
 }
 
 /// `sx_mission_end_detour`.

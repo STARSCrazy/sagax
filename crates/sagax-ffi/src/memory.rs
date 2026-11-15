@@ -1,13 +1,17 @@
 //! `sx_knowledge_*`, `sx_outbox_*`, `sx_inbox_*`, `sx_areas_*`, `sx_timers_*`,
 //! value structs and geometry helpers: world memory, see `sagax.h`.
 
+use std::ffi::c_void;
+
 use sagax_decide::memory::{
-    AlertConfig, Alertness, Area, Areas, Evict, Fact, Inbox, Interval, Knowledge, LOOK_OFFSETS,
-    Message, Outbox, PointPattern, Progress, Refused, Route, Sine, Timers, arrival, points_around,
-    route, sine, sweep_heading,
+    AlertConfig, Alertness, Area, Areas, AreasTrace, Evict, Fact, Inbox, Interval, Knowledge,
+    KnowledgeTrace, LOOK_OFFSETS, Message, MessageTrace, Outbox, PointPattern, Progress, Route,
+    Sine, Timers, TimersTrace, arrival, points_around, route, sine, sweep_heading,
 };
 
-use super::{ERROR_ARGUMENT, create, destroy, slice_of, to_i32};
+use super::group::{Held, Inside};
+use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, set_trace, slice_of, to_i32};
+use sagax_abi::codes::POSTED;
 use sagax_abi::convert;
 use sagax_nav::grid::Cell;
 
@@ -179,11 +183,59 @@ unsafe fn write_messages(moved: &[Message], out: *mut Message, out_cap: u32) -> 
     to_i32(moved.len().min(out_cap as usize))
 }
 
+/// The value behind a knowledge or areas handle and its trace slot, or
+/// `ERROR_ARGUMENT` (a null handle, or a lent one whose owner is stale).
+macro_rules! held {
+    ($p:expr) => {{
+        let h = get!($p);
+        match h.value.get_mut() {
+            Some(v) => (v, h.trace),
+            None => return ERROR_ARGUMENT,
+        }
+    }};
+}
+
 // ---- knowledge --------------------------------------------------------------
 
-/// `sx_knowledge`.
-#[repr(transparent)]
-pub struct SxKnowledge(pub(crate) Knowledge);
+/// `sx_knowledge_trace`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SxKnowledgeTrace {
+    /// `SX_KNOWLEDGE_TRACE_*`.
+    pub kind: u32,
+    /// The fact concerned.
+    pub fact: SxFact,
+}
+
+impl SxKnowledgeTrace {
+    /// The record of a knowledge trace.
+    pub fn of(event: KnowledgeTrace) -> Self {
+        let c = convert::knowledge_trace(event);
+        Self {
+            kind: c.kind,
+            fact: c.fact,
+        }
+    }
+}
+
+/// `sx_knowledge_trace_fn`.
+pub type KnowledgeTraceFn = unsafe extern "C" fn(*mut c_void, *const SxKnowledgeTrace);
+
+/// `sx_knowledge`: its own table, or the one of a squad (`sx_squad_knowledge`).
+pub struct SxKnowledge {
+    pub(crate) value: Held<Knowledge>,
+    trace: TraceSlot<SxKnowledgeTrace>,
+}
+
+impl SxKnowledge {
+    /// A handle on the table inside another handle.
+    pub(crate) fn inside(inside: Inside<Knowledge>) -> Self {
+        Self {
+            value: Held::Inside(inside),
+            trace: None,
+        }
+    }
+}
 
 /// `sx_knowledge_new`.
 #[unsafe(no_mangle)]
@@ -196,18 +248,41 @@ pub extern "C" fn sx_knowledge_new(capacity: u32, evict: u32) -> *mut SxKnowledg
         };
         Knowledge::new(capacity as usize, evict)
             .ok()
-            .map(SxKnowledge)
+            .map(|k| SxKnowledge {
+                value: Held::Own(k),
+                trace: None,
+            })
     })
 }
 
-/// `sx_knowledge_free`.
+/// `sx_knowledge_free`: does nothing for the table lent by
+/// `sx_squad_knowledge`.
 ///
 /// # Safety
-/// `k` is null or from [`sx_knowledge_new`] and not used again.
+/// `k` is null, from [`sx_knowledge_new`] and not used again, or lent.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_free(k: *mut SxKnowledge) {
+    // SAFETY: null or valid (see above).
+    if unsafe { k.as_ref() }.is_some_and(|k| k.value.is_lent()) {
+        return;
+    }
     // SAFETY: see above.
     unsafe { destroy(k) }
+}
+
+/// `sx_knowledge_set_trace`.
+///
+/// # Safety
+/// `k` is null or valid; `trace` and `context` stay valid while tracing is
+/// on.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_knowledge_set_trace(
+    k: *mut SxKnowledge,
+    trace: Option<KnowledgeTraceFn>,
+    context: *mut c_void,
+) -> i32 {
+    // SAFETY: see above.
+    set_trace(unsafe { k.as_mut() }.map(|k| &mut k.trace), trace, context)
 }
 
 /// `sx_knowledge_learn`.
@@ -221,9 +296,11 @@ pub unsafe extern "C" fn sx_knowledge_learn(
     fact: *const SxFact,
     evicted: *mut SxFact,
 ) -> i32 {
-    let k = get!(k);
+    let (k, trace) = held!(k);
     let fact = input!(fact);
-    match k.0.learn(now, *fact) {
+    let gone = traced!(trace, SxKnowledgeTrace::of, |sink| k
+        .learn_traced(now, *fact, sink));
+    match gone {
         Some(gone) => {
             // SAFETY: see above.
             unsafe { put(evicted, gone) };
@@ -244,9 +321,11 @@ pub unsafe extern "C" fn sx_knowledge_merge(
     fact: *const SxFact,
     evicted: *mut SxFact,
 ) -> i32 {
-    let k = get!(k);
+    let (k, trace) = held!(k);
     let fact = input!(fact);
-    match k.0.merge(now, *fact) {
+    let gone = traced!(trace, SxKnowledgeTrace::of, |sink| k
+        .merge_traced(now, *fact, sink));
+    match gone {
         Some(gone) => {
             // SAFETY: see above.
             unsafe { put(evicted, gone) };
@@ -268,9 +347,11 @@ pub unsafe extern "C" fn sx_knowledge_learn_message(
     source: u8,
     evicted: *mut SxFact,
 ) -> i32 {
-    let k = get!(k);
+    let (k, trace) = held!(k);
     let msg = input!(msg);
-    match k.0.learn_message(now, msg, source) {
+    let gone = traced!(trace, SxKnowledgeTrace::of, |sink| k
+        .learn_message_traced(now, msg, source, sink));
+    match gone {
         Some(gone) => {
             // SAFETY: see above.
             unsafe { put(evicted, gone) };
@@ -292,9 +373,11 @@ pub unsafe extern "C" fn sx_knowledge_merge_message(
     source: u8,
     evicted: *mut SxFact,
 ) -> i32 {
-    let k = get!(k);
+    let (k, trace) = held!(k);
     let msg = input!(msg);
-    match k.0.merge_message(now, msg, source) {
+    let gone = traced!(trace, SxKnowledgeTrace::of, |sink| k
+        .merge_message_traced(now, msg, source, sink));
+    match gone {
         Some(gone) => {
             // SAFETY: see above.
             unsafe { put(evicted, gone) };
@@ -315,7 +398,7 @@ pub unsafe extern "C" fn sx_knowledge_touch(
     kind: u32,
     now: u32,
 ) -> i32 {
-    flag(get!(k).0.touch(subject, kind, now))
+    flag(held!(k).0.touch(subject, kind, now))
 }
 
 /// `sx_knowledge_set_pos`.
@@ -331,7 +414,7 @@ pub unsafe extern "C" fn sx_knowledge_set_pos(
     y: i32,
     z: i32,
 ) -> i32 {
-    flag(get!(k).0.set_pos(subject, kind, [x, y, z]))
+    flag(held!(k).0.set_pos(subject, kind, [x, y, z]))
 }
 
 /// `sx_knowledge_set_data`.
@@ -345,7 +428,7 @@ pub unsafe extern "C" fn sx_knowledge_set_data(
     kind: u32,
     data: u32,
 ) -> i32 {
-    flag(get!(k).0.set_data(subject, kind, data))
+    flag(held!(k).0.set_data(subject, kind, data))
 }
 
 /// `sx_knowledge_set_strength`.
@@ -359,7 +442,7 @@ pub unsafe extern "C" fn sx_knowledge_set_strength(
     kind: u32,
     strength: u32,
 ) -> i32 {
-    flag(get!(k).0.set_strength(subject, kind, strength))
+    flag(held!(k).0.set_strength(subject, kind, strength))
 }
 
 /// `sx_knowledge_remove`.
@@ -368,7 +451,7 @@ pub unsafe extern "C" fn sx_knowledge_set_strength(
 /// `k` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_remove(k: *mut SxKnowledge, subject: u32, kind: u32) -> i32 {
-    flag(get!(k).0.remove(subject, kind))
+    flag(held!(k).0.remove(subject, kind))
 }
 
 /// `sx_knowledge_remove_subject`.
@@ -377,7 +460,7 @@ pub unsafe extern "C" fn sx_knowledge_remove(k: *mut SxKnowledge, subject: u32, 
 /// `k` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_remove_subject(k: *mut SxKnowledge, subject: u32) -> i32 {
-    to_i32(get!(k).0.remove_subject(subject))
+    to_i32(held!(k).0.remove_subject(subject))
 }
 
 /// `sx_knowledge_get`.
@@ -391,11 +474,11 @@ pub unsafe extern "C" fn sx_knowledge_get(
     kind: u32,
     out: *mut SxFact,
 ) -> i32 {
-    let k = get!(k);
+    let (k, _) = held!(k);
     if out.is_null() {
         return ERROR_ARGUMENT;
     }
-    match k.0.get(subject, kind) {
+    match k.get(subject, kind) {
         Some(found) => {
             // SAFETY: `out` is non-null and writable (see above).
             unsafe { put(out, *found) };
@@ -411,7 +494,7 @@ pub unsafe extern "C" fn sx_knowledge_get(
 /// `k` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_count(k: *mut SxKnowledge) -> i32 {
-    to_i32(get!(k).0.len())
+    to_i32(held!(k).0.len())
 }
 
 /// `sx_knowledge_at`.
@@ -420,11 +503,11 @@ pub unsafe extern "C" fn sx_knowledge_count(k: *mut SxKnowledge) -> i32 {
 /// `k` is null or valid; `out` is null or writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_at(k: *mut SxKnowledge, index: u32, out: *mut SxFact) -> i32 {
-    let k = get!(k);
+    let (k, _) = held!(k);
     if out.is_null() {
         return ERROR_ARGUMENT;
     }
-    match k.0.iter().nth(index as usize) {
+    match k.iter().nth(index as usize) {
         Some(found) => {
             // SAFETY: `out` is non-null and writable (see above).
             unsafe { put(out, *found) };
@@ -460,9 +543,14 @@ pub unsafe extern "C" fn sx_knowledge_expire(
     removed: *mut SxFact,
     cap: u32,
 ) -> i32 {
-    let k = get!(k);
+    let (k, trace) = held!(k);
     let mut gone = Vec::new();
-    k.0.expire(now, max_age, |f| gone.push(f));
+    traced!(trace, SxKnowledgeTrace::of, |sink| k.expire_traced(
+        now,
+        max_age,
+        |f| gone.push(f),
+        sink
+    ));
     // SAFETY: see above.
     unsafe { write_facts(&gone, removed, cap) };
     to_i32(gone.len())
@@ -481,9 +569,15 @@ pub unsafe extern "C" fn sx_knowledge_expire_kind(
     removed: *mut SxFact,
     cap: u32,
 ) -> i32 {
-    let k = get!(k);
+    let (k, trace) = held!(k);
     let mut gone = Vec::new();
-    k.0.expire_kind(now, kind, max_age, |f| gone.push(f));
+    traced!(trace, SxKnowledgeTrace::of, |sink| k.expire_kind_traced(
+        now,
+        kind,
+        max_age,
+        |f| gone.push(f),
+        sink
+    ));
     // SAFETY: see above.
     unsafe { write_facts(&gone, removed, cap) };
     to_i32(gone.len())
@@ -495,19 +589,72 @@ pub unsafe extern "C" fn sx_knowledge_expire_kind(
 /// `k` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_knowledge_clear(k: *mut SxKnowledge) -> i32 {
-    get!(k).0.clear();
+    held!(k).0.clear();
     0
 }
 
 // ---- outbox -----------------------------------------------------------------
 
+/// `sx_message_trace`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SxMessageTrace {
+    /// `SX_MESSAGE_TRACE_*`.
+    pub kind: u32,
+    /// The message concerned.
+    pub msg: SxMessage,
+    /// `POSTED`: when it becomes due; `QUEUED`: when it arrives.
+    pub at: u32,
+    /// `REFUSED`: `SX_REFUSED_*`.
+    pub refused: u32,
+}
+
+impl SxMessageTrace {
+    /// The record of a message trace.
+    pub fn of(event: MessageTrace) -> Self {
+        let c = convert::message_trace(event);
+        Self {
+            kind: c.kind,
+            msg: c.msg,
+            at: c.at,
+            refused: c.refused,
+        }
+    }
+}
+
+/// `sx_message_trace_fn`.
+pub type MessageTraceFn = unsafe extern "C" fn(*mut c_void, *const SxMessageTrace);
+
 /// `sx_outbox`.
-pub struct SxOutbox(Outbox);
+pub struct SxOutbox {
+    outbox: Outbox,
+    trace: TraceSlot<SxMessageTrace>,
+}
 
 /// `sx_outbox_new`.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_outbox_new(capacity: u32) -> *mut SxOutbox {
-    create(|| Outbox::new(capacity as usize).ok().map(SxOutbox))
+    create(|| {
+        Outbox::new(capacity as usize).ok().map(|outbox| SxOutbox {
+            outbox,
+            trace: None,
+        })
+    })
+}
+
+/// `sx_outbox_set_trace`.
+///
+/// # Safety
+/// `o` is null or valid; `trace` and `context` stay valid while tracing is
+/// on.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_outbox_set_trace(
+    o: *mut SxOutbox,
+    trace: Option<MessageTraceFn>,
+    context: *mut c_void,
+) -> i32 {
+    // SAFETY: see above.
+    set_trace(unsafe { o.as_mut() }.map(|o| &mut o.trace), trace, context)
 }
 
 /// `sx_outbox_free`.
@@ -534,10 +681,12 @@ pub unsafe extern "C" fn sx_outbox_post(
 ) -> i32 {
     let o = get!(o);
     let msg = input!(msg);
-    match o.0.post(now, *msg, delay, cooldown) {
-        Ok(()) => 0,
-        Err(Refused::Full) => 1,
-        Err(Refused::Cooldown) => 2,
+    let posted = traced!(o.trace, SxMessageTrace::of, |sink| o
+        .outbox
+        .post_traced(now, *msg, delay, cooldown, sink));
+    match posted {
+        Ok(()) => POSTED as i32,
+        Err(why) => convert::refused(why) as i32,
     }
 }
 
@@ -557,7 +706,12 @@ pub unsafe extern "C" fn sx_outbox_due(
         return ERROR_ARGUMENT;
     }
     let mut moved = Vec::new();
-    o.0.due_max(now, cap as usize, &mut moved);
+    traced!(o.trace, SxMessageTrace::of, |sink| o.outbox.due_max_traced(
+        now,
+        cap as usize,
+        &mut moved,
+        sink
+    ));
     // SAFETY: at most `cap` messages (see above).
     unsafe { write_messages(&moved, out, cap) }
 }
@@ -568,7 +722,10 @@ pub unsafe extern "C" fn sx_outbox_due(
 /// `o` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_outbox_sender_gone(o: *mut SxOutbox) -> i32 {
-    get!(o).0.sender_gone();
+    let o = get!(o);
+    traced!(o.trace, SxMessageTrace::of, |sink| o
+        .outbox
+        .sender_gone_traced(sink));
     0
 }
 
@@ -578,7 +735,7 @@ pub unsafe extern "C" fn sx_outbox_sender_gone(o: *mut SxOutbox) -> i32 {
 /// `o` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_outbox_pending(o: *mut SxOutbox) -> i32 {
-    to_i32(get!(o).0.pending())
+    to_i32(get!(o).outbox.pending())
 }
 
 /// `sx_outbox_clear`.
@@ -587,19 +744,41 @@ pub unsafe extern "C" fn sx_outbox_pending(o: *mut SxOutbox) -> i32 {
 /// `o` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_outbox_clear(o: *mut SxOutbox) -> i32 {
-    get!(o).0.clear();
+    get!(o).outbox.clear();
     0
 }
 
 // ---- inbox ------------------------------------------------------------------
 
 /// `sx_inbox`.
-pub struct SxInbox(Inbox);
+pub struct SxInbox {
+    inbox: Inbox,
+    trace: TraceSlot<SxMessageTrace>,
+}
 
 /// `sx_inbox_new`.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_inbox_new(capacity: u32) -> *mut SxInbox {
-    create(|| Inbox::new(capacity as usize).ok().map(SxInbox))
+    create(|| {
+        Inbox::new(capacity as usize)
+            .ok()
+            .map(|inbox| SxInbox { inbox, trace: None })
+    })
+}
+
+/// `sx_inbox_set_trace`.
+///
+/// # Safety
+/// `b` is null or valid; `trace` and `context` stay valid while tracing is
+/// on.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_inbox_set_trace(
+    b: *mut SxInbox,
+    trace: Option<MessageTraceFn>,
+    context: *mut c_void,
+) -> i32 {
+    // SAFETY: see above.
+    set_trace(unsafe { b.as_mut() }.map(|b| &mut b.trace), trace, context)
 }
 
 /// `sx_inbox_free`.
@@ -624,7 +803,9 @@ pub unsafe extern "C" fn sx_inbox_push(
 ) -> i32 {
     let b = get!(b);
     let msg = input!(msg);
-    flag(b.0.push(*msg, arrive_at))
+    flag(traced!(b.trace, SxMessageTrace::of, |sink| b
+        .inbox
+        .push_traced(*msg, arrive_at, sink)))
 }
 
 /// `sx_inbox_take_due`.
@@ -643,7 +824,9 @@ pub unsafe extern "C" fn sx_inbox_take_due(
         return ERROR_ARGUMENT;
     }
     let mut moved = Vec::new();
-    b.0.take_due_max(now, cap as usize, &mut moved);
+    traced!(b.trace, SxMessageTrace::of, |sink| b
+        .inbox
+        .take_due_max_traced(now, cap as usize, &mut moved, sink));
     // SAFETY: at most `cap` messages (see above).
     unsafe { write_messages(&moved, out, cap) }
 }
@@ -654,7 +837,7 @@ pub unsafe extern "C" fn sx_inbox_take_due(
 /// `b` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_inbox_count(b: *mut SxInbox) -> i32 {
-    to_i32(get!(b).0.len())
+    to_i32(get!(b).inbox.len())
 }
 
 /// `sx_inbox_clear`.
@@ -663,7 +846,7 @@ pub unsafe extern "C" fn sx_inbox_count(b: *mut SxInbox) -> i32 {
 /// `b` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_inbox_clear(b: *mut SxInbox) -> i32 {
-    get!(b).0.clear();
+    get!(b).inbox.clear();
     0
 }
 
@@ -726,24 +909,87 @@ pub unsafe extern "C" fn sx_route(
 
 // ---- areas ------------------------------------------------------------------
 
-/// `sx_areas`.
-#[repr(transparent)]
-pub struct SxAreas(Areas);
+/// `sx_areas_trace`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SxAreasTrace {
+    /// `SX_AREAS_TRACE_*`.
+    pub kind: u32,
+    /// `ADDED`, `RENEWED`: the slot.
+    pub index: u32,
+    /// The area concerned.
+    pub area: SxArea,
+}
+
+impl SxAreasTrace {
+    /// The record of an areas trace.
+    pub fn of(event: AreasTrace) -> Self {
+        let c = convert::areas_trace(event);
+        Self {
+            kind: c.kind,
+            index: c.index,
+            area: c.area,
+        }
+    }
+}
+
+/// `sx_areas_trace_fn`.
+pub type AreasTraceFn = unsafe extern "C" fn(*mut c_void, *const SxAreasTrace);
+
+/// `sx_areas`: its own set, or the one of a squad (`sx_squad_areas`).
+pub struct SxAreas {
+    pub(crate) value: Held<Areas>,
+    trace: TraceSlot<SxAreasTrace>,
+}
+
+impl SxAreas {
+    /// A handle on the set inside another handle.
+    pub(crate) fn inside(inside: Inside<Areas>) -> Self {
+        Self {
+            value: Held::Inside(inside),
+            trace: None,
+        }
+    }
+}
 
 /// `sx_areas_new`.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_areas_new(capacity: u32) -> *mut SxAreas {
-    create(|| Areas::new(capacity as usize).ok().map(SxAreas))
+    create(|| {
+        Areas::new(capacity as usize).ok().map(|a| SxAreas {
+            value: Held::Own(a),
+            trace: None,
+        })
+    })
 }
 
-/// `sx_areas_free`.
+/// `sx_areas_free`: does nothing for the set lent by `sx_squad_areas`.
 ///
 /// # Safety
-/// `a` is null or from [`sx_areas_new`] and not used again.
+/// `a` is null, from [`sx_areas_new`] and not used again, or lent.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_areas_free(a: *mut SxAreas) {
+    // SAFETY: null or valid (see above).
+    if unsafe { a.as_ref() }.is_some_and(|a| a.value.is_lent()) {
+        return;
+    }
     // SAFETY: see above.
     unsafe { destroy(a) }
+}
+
+/// `sx_areas_set_trace`.
+///
+/// # Safety
+/// `a` is null or valid; `trace` and `context` stay valid while tracing is
+/// on.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_areas_set_trace(
+    a: *mut SxAreas,
+    trace: Option<AreasTraceFn>,
+    context: *mut c_void,
+) -> i32 {
+    // SAFETY: see above.
+    set_trace(unsafe { a.as_mut() }.map(|a| &mut a.trace), trace, context)
 }
 
 /// `sx_areas_add`.
@@ -752,9 +998,10 @@ pub unsafe extern "C" fn sx_areas_free(a: *mut SxAreas) {
 /// `a` is null or valid; `area` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_areas_add(a: *mut SxAreas, now: u32, area: *const SxArea) -> i32 {
-    let a = get!(a);
+    let (a, trace) = held!(a);
     let area = input!(area);
-    to_i32(a.0.add(now, *area))
+    to_i32(traced!(trace, SxAreasTrace::of, |sink| a
+        .add_traced(now, *area, sink)))
 }
 
 /// `sx_areas_expire`.
@@ -763,7 +1010,8 @@ pub unsafe extern "C" fn sx_areas_add(a: *mut SxAreas, now: u32, area: *const Sx
 /// `a` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_areas_expire(a: *mut SxAreas, now: u32) -> i32 {
-    to_i32(get!(a).0.expire(now))
+    let (a, trace) = held!(a);
+    to_i32(traced!(trace, SxAreasTrace::of, |sink| a.expire_traced(now, sink)))
 }
 
 /// `sx_areas_contains`.
@@ -778,7 +1026,7 @@ pub unsafe extern "C" fn sx_areas_contains(
     z: i32,
     index: *mut u32,
 ) -> i32 {
-    match get!(a).0.contains([x, y, z]) {
+    match held!(a).0.contains([x, y, z]) {
         Some(i) => {
             // SAFETY: see above.
             unsafe { put(index, i as u32) };
@@ -801,7 +1049,7 @@ pub unsafe extern "C" fn sx_areas_contains_kind(
     kind: u32,
     index: *mut u32,
 ) -> i32 {
-    match get!(a).0.contains_kind([x, y, z], kind) {
+    match held!(a).0.contains_kind([x, y, z], kind) {
         Some(i) => {
             // SAFETY: see above.
             unsafe { put(index, i as u32) };
@@ -822,12 +1070,12 @@ pub unsafe extern "C" fn sx_areas_blocks(
     start: *const i32,
     goal: *const i32,
 ) -> i32 {
-    let a = get!(a);
+    let (a, _) = held!(a);
     if cell.is_null() || start.is_null() || goal.is_null() {
         return ERROR_ARGUMENT;
     }
     // SAFETY: see above.
-    unsafe { flag(a.0.blocks(pos3(cell), pos3(start), pos3(goal))) }
+    unsafe { flag(a.blocks(pos3(cell), pos3(start), pos3(goal))) }
 }
 
 /// `sx_areas_cost`.
@@ -843,17 +1091,16 @@ pub unsafe extern "C" fn sx_areas_cost(
     goal: *const i32,
 ) -> i64 {
     // SAFETY: the caller passes null or a valid pointer (sagax.h).
-    let Some(a) = (unsafe { a.as_mut() }) else {
+    let Some(a) = (unsafe { a.as_ref() }).and_then(|a| a.value.get()) else {
         return i64::from(ERROR_ARGUMENT);
     };
     if cell.is_null() || start.is_null() || goal.is_null() {
         return i64::from(ERROR_ARGUMENT);
     }
     // SAFETY: see above.
-    let cost =
-        a.0.cost(unsafe { pos3(cell) }, unsafe { pos3(start) }, unsafe {
-            pos3(goal)
-        });
+    let cost = a.cost(unsafe { pos3(cell) }, unsafe { pos3(start) }, unsafe {
+        pos3(goal)
+    });
     i64::from(cost)
 }
 
@@ -891,11 +1138,11 @@ pub unsafe extern "C" fn sx_areas_move_cost(
         return 0;
     };
     // SAFETY: see above.
-    let Some(areas) = (unsafe { ctx.areas.as_ref() }) else {
+    let Some(areas) = (unsafe { ctx.areas.as_ref() }).and_then(|a| a.value.get()) else {
         return 0;
     };
     let _ = (x, y, level);
-    match areas.0.cell_cost(
+    match areas.cell_cost(
         Cell::new(to_x, to_y, to_level),
         Cell::from(ctx.start),
         Cell::from(ctx.goal),
@@ -911,7 +1158,7 @@ pub unsafe extern "C" fn sx_areas_move_cost(
 /// `a` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_areas_count(a: *mut SxAreas) -> i32 {
-    to_i32(get!(a).0.len())
+    to_i32(held!(a).0.len())
 }
 
 /// `sx_areas_at`.
@@ -920,11 +1167,11 @@ pub unsafe extern "C" fn sx_areas_count(a: *mut SxAreas) -> i32 {
 /// `a` is null or valid; `out` is null or writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_areas_at(a: *mut SxAreas, index: u32, out: *mut SxArea) -> i32 {
-    let a = get!(a);
+    let (a, _) = held!(a);
     if out.is_null() {
         return ERROR_ARGUMENT;
     }
-    match a.0.iter().nth(index as usize) {
+    match a.iter().nth(index as usize) {
         Some(found) => {
             // SAFETY: `out` is non-null and writable (see above).
             unsafe { put(out, *found) };
@@ -940,19 +1187,75 @@ pub unsafe extern "C" fn sx_areas_at(a: *mut SxAreas, index: u32, out: *mut SxAr
 /// `a` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_areas_clear(a: *mut SxAreas) -> i32 {
-    get!(a).0.clear();
+    held!(a).0.clear();
     0
 }
 
 // ---- timers -----------------------------------------------------------------
 
+/// `sx_timers_trace`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SxTimersTrace {
+    /// `SX_TIMERS_TRACE_*`.
+    pub kind: u32,
+    /// The id set.
+    pub id: u32,
+    /// Its ticks.
+    pub duration: u32,
+    /// `REPLACED`: the id that gave way.
+    pub old: u32,
+    /// `REPLACED`: the ticks it had left.
+    pub old_left: u32,
+}
+
+impl SxTimersTrace {
+    /// The record of a timers trace.
+    pub fn of(event: TimersTrace) -> Self {
+        let c = convert::timers_trace(event);
+        Self {
+            kind: c.kind,
+            id: c.id,
+            duration: c.duration,
+            old: c.old,
+            old_left: c.old_left,
+        }
+    }
+}
+
+/// `sx_timers_trace_fn`.
+pub type TimersTraceFn = unsafe extern "C" fn(*mut c_void, *const SxTimersTrace);
+
 /// `sx_timers`.
-pub struct SxTimers(Timers);
+pub struct SxTimers {
+    timers: Timers,
+    trace: TraceSlot<SxTimersTrace>,
+}
 
 /// `sx_timers_new`.
 #[unsafe(no_mangle)]
 pub extern "C" fn sx_timers_new(capacity: u32) -> *mut SxTimers {
-    create(|| Timers::new(capacity as usize).ok().map(SxTimers))
+    create(|| {
+        Timers::new(capacity as usize).ok().map(|timers| SxTimers {
+            timers,
+            trace: None,
+        })
+    })
+}
+
+/// `sx_timers_set_trace`.
+///
+/// # Safety
+/// `t` is null or valid; `trace` and `context` stay valid while tracing is
+/// on.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_timers_set_trace(
+    t: *mut SxTimers,
+    trace: Option<TimersTraceFn>,
+    context: *mut c_void,
+) -> i32 {
+    // SAFETY: see above.
+    set_trace(unsafe { t.as_mut() }.map(|t| &mut t.trace), trace, context)
 }
 
 /// `sx_timers_free`.
@@ -971,7 +1274,10 @@ pub unsafe extern "C" fn sx_timers_free(t: *mut SxTimers) {
 /// `t` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_timers_set(t: *mut SxTimers, id: u32, now: u32, duration: u32) -> i32 {
-    get!(t).0.set(id, now, duration);
+    let t = get!(t);
+    traced!(t.trace, SxTimersTrace::of, |sink| t
+        .timers
+        .set_traced(id, now, duration, sink));
     0
 }
 
@@ -981,7 +1287,7 @@ pub unsafe extern "C" fn sx_timers_set(t: *mut SxTimers, id: u32, now: u32, dura
 /// `t` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_timers_active(t: *mut SxTimers, id: u32, now: u32) -> i32 {
-    flag(get!(t).0.active(id, now))
+    flag(get!(t).timers.active(id, now))
 }
 
 /// `sx_timers_left`.
@@ -992,7 +1298,7 @@ pub unsafe extern "C" fn sx_timers_active(t: *mut SxTimers, id: u32, now: u32) -
 pub unsafe extern "C" fn sx_timers_left(t: *mut SxTimers, id: u32, now: u32) -> i64 {
     // SAFETY: the caller passes null or a valid pointer (sagax.h).
     match unsafe { t.as_mut() } {
-        Some(t) => i64::from(t.0.left(id, now)),
+        Some(t) => i64::from(t.timers.left(id, now)),
         None => i64::from(ERROR_ARGUMENT),
     }
 }
@@ -1003,7 +1309,7 @@ pub unsafe extern "C" fn sx_timers_left(t: *mut SxTimers, id: u32, now: u32) -> 
 /// `t` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_timers_remove(t: *mut SxTimers, id: u32) -> i32 {
-    flag(get!(t).0.remove(id))
+    flag(get!(t).timers.remove(id))
 }
 
 /// `sx_timers_count`.
@@ -1012,7 +1318,7 @@ pub unsafe extern "C" fn sx_timers_remove(t: *mut SxTimers, id: u32) -> i32 {
 /// `t` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_timers_count(t: *mut SxTimers) -> i32 {
-    to_i32(get!(t).0.len())
+    to_i32(get!(t).timers.len())
 }
 
 /// `sx_timers_clear`.
@@ -1021,7 +1327,7 @@ pub unsafe extern "C" fn sx_timers_count(t: *mut SxTimers) -> i32 {
 /// `t` is null or valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sx_timers_clear(t: *mut SxTimers) -> i32 {
-    get!(t).0.clear();
+    get!(t).timers.clear();
     0
 }
 
@@ -1234,6 +1540,7 @@ pub unsafe extern "C" fn sx_sweep_heading(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sagax_decide::memory::{SOURCE_OWN, SOURCE_TOLD};
     use std::mem::{offset_of, size_of};
     use std::ptr::{null, null_mut};
 
@@ -1671,6 +1978,230 @@ mod tests {
             let own = [1, 2];
             assert_eq!(sx_sweep_heading(10, 5, 5, own.as_ptr(), 2), 12);
             assert_eq!(sx_sweep_heading(10, 50, 5, own.as_ptr(), 2), 10);
+        }
+    }
+
+    /// A trace callback that keeps a copy of each record in a `Vec<R>`.
+    unsafe extern "C" fn collect<R: Copy>(ctx: *mut c_void, t: *const R) {
+        let records = unsafe { &mut *ctx.cast::<Vec<R>>() };
+        records.push(unsafe { *t });
+    }
+
+    fn ctx<R>(records: &mut Vec<R>) -> *mut c_void {
+        std::ptr::from_mut(records).cast()
+    }
+
+    #[test]
+    fn knowledge_trace_through_c() {
+        use sagax_abi::codes::{
+            KNOWLEDGE_TRACE_ADDED, KNOWLEDGE_TRACE_EVICTED, KNOWLEDGE_TRACE_EXPIRED,
+            KNOWLEDGE_TRACE_STALE, KNOWLEDGE_TRACE_UPDATED,
+        };
+        let rec = |kind, fact| SxKnowledgeTrace { kind, fact };
+        unsafe {
+            let k = sx_knowledge_new(2, 0);
+            let mut records: Vec<SxKnowledgeTrace> = Vec::new();
+            let c = ctx(&mut records);
+            assert_eq!(sx_knowledge_set_trace(k, Some(collect), c), 0);
+            assert_eq!(
+                sx_knowledge_set_trace(null_mut(), Some(collect), c),
+                ERROR_ARGUMENT
+            );
+            let (a, b, x) = (fact(1, 0, 1, 0), fact(2, 0, 2, 0), fact(3, 0, 3, 0));
+            assert_eq!(sx_knowledge_learn(k, 3, &a, null_mut()), 0);
+            assert_eq!(sx_knowledge_merge(k, 3, &b, null_mut()), 0);
+            let mut gone = SxFact::default();
+            assert_eq!(sx_knowledge_learn(k, 3, &x, &mut gone), 1);
+            assert_eq!(gone, a);
+            let old = fact(2, 0, 0, 0);
+            assert_eq!(sx_knowledge_merge(k, 3, &old, null_mut()), 0);
+            let m = msg(3);
+            let told = m.to_fact(SOURCE_TOLD);
+            assert_eq!(
+                sx_knowledge_learn_message(k, 3, &m, SOURCE_TOLD, null_mut()),
+                1
+            );
+            assert_eq!(
+                sx_knowledge_merge_message(k, 3, &m, SOURCE_OWN, null_mut()),
+                0
+            );
+            let own = m.to_fact(SOURCE_OWN);
+            assert_eq!(sx_knowledge_expire_kind(k, 9, 0, 1, null_mut(), 0), 1);
+            assert_eq!(sx_knowledge_expire(k, 9, 1, null_mut(), 0), 1);
+            assert_eq!(
+                records,
+                [
+                    rec(KNOWLEDGE_TRACE_ADDED, a),
+                    rec(KNOWLEDGE_TRACE_ADDED, b),
+                    rec(KNOWLEDGE_TRACE_EVICTED, a),
+                    rec(KNOWLEDGE_TRACE_ADDED, x),
+                    rec(KNOWLEDGE_TRACE_STALE, old),
+                    rec(KNOWLEDGE_TRACE_EVICTED, b),
+                    rec(KNOWLEDGE_TRACE_ADDED, told),
+                    rec(KNOWLEDGE_TRACE_UPDATED, own),
+                    rec(KNOWLEDGE_TRACE_EXPIRED, x),
+                    rec(KNOWLEDGE_TRACE_EXPIRED, own),
+                ]
+            );
+            // Off: nothing more arrives.
+            assert_eq!(sx_knowledge_set_trace(k, None, null_mut()), 0);
+            assert_eq!(sx_knowledge_learn(k, 9, &a, null_mut()), 0);
+            assert_eq!(records.len(), 10);
+            sx_knowledge_free(k);
+        }
+    }
+
+    #[test]
+    fn message_traces_through_c() {
+        use sagax_abi::codes::{
+            MESSAGE_TRACE_DELIVERED, MESSAGE_TRACE_DROPPED, MESSAGE_TRACE_POSTED,
+            MESSAGE_TRACE_QUEUED, MESSAGE_TRACE_REFUSED, REFUSED_COOLDOWN, REFUSED_FULL,
+        };
+        let rec = |kind, msg, at, refused| SxMessageTrace {
+            kind,
+            msg,
+            at,
+            refused,
+        };
+        unsafe {
+            let o = sx_outbox_new(1);
+            let b = sx_inbox_new(1);
+            let mut records: Vec<SxMessageTrace> = Vec::new();
+            let c = ctx(&mut records);
+            assert_eq!(sx_outbox_set_trace(o, Some(collect), c), 0);
+            assert_eq!(sx_inbox_set_trace(b, Some(collect), c), 0);
+            assert_eq!(
+                sx_outbox_set_trace(null_mut(), Some(collect), c),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_inbox_set_trace(null_mut(), Some(collect), c),
+                ERROR_ARGUMENT
+            );
+            let (m1, m2) = (msg(1), msg(2));
+            assert_eq!(sx_outbox_post(o, 10, &m1, 5, 0), 0);
+            assert_eq!(sx_outbox_post(o, 10, &m2, 5, 0), REFUSED_FULL as i32);
+            let mut out = [SxMessage::default(); 2];
+            assert_eq!(sx_outbox_due(o, 15, out.as_mut_ptr(), 2), 1);
+            assert_eq!(sx_outbox_post(o, 16, &m2, 0, 9), REFUSED_COOLDOWN as i32);
+            assert_eq!(sx_outbox_post(o, 30, &m2, 0, 9), 0);
+            assert_eq!(sx_outbox_sender_gone(o), 0);
+            assert_eq!(sx_inbox_push(b, &m1, 20), 1);
+            assert_eq!(sx_inbox_push(b, &m2, 10), 1);
+            assert_eq!(sx_inbox_push(b, &m1, 30), 0);
+            assert_eq!(sx_inbox_take_due(b, 10, out.as_mut_ptr(), 2), 1);
+            assert_eq!(
+                records,
+                [
+                    rec(MESSAGE_TRACE_POSTED, m1, 15, 0),
+                    rec(MESSAGE_TRACE_REFUSED, m2, 0, REFUSED_FULL),
+                    rec(MESSAGE_TRACE_DELIVERED, m1, 0, 0),
+                    rec(MESSAGE_TRACE_REFUSED, m2, 0, REFUSED_COOLDOWN),
+                    rec(MESSAGE_TRACE_POSTED, m2, 30, 0),
+                    rec(MESSAGE_TRACE_DROPPED, m2, 0, 0),
+                    rec(MESSAGE_TRACE_QUEUED, m1, 20, 0),
+                    rec(MESSAGE_TRACE_DROPPED, m1, 0, 0),
+                    rec(MESSAGE_TRACE_QUEUED, m2, 10, 0),
+                    rec(MESSAGE_TRACE_DROPPED, m1, 0, 0),
+                    rec(MESSAGE_TRACE_DELIVERED, m2, 0, 0),
+                ]
+            );
+            // Off: nothing more arrives.
+            assert_eq!(sx_outbox_set_trace(o, None, null_mut()), 0);
+            assert_eq!(sx_inbox_set_trace(b, None, null_mut()), 0);
+            assert_eq!(sx_outbox_post(o, 50, &m1, 0, 0), 0);
+            assert_eq!(sx_inbox_push(b, &m1, 50), 1);
+            assert_eq!(records.len(), 11);
+            sx_outbox_free(o);
+            sx_inbox_free(b);
+        }
+    }
+
+    #[test]
+    fn areas_trace_through_c() {
+        use sagax_abi::codes::{
+            AREAS_TRACE_ADDED, AREAS_TRACE_EVICTED, AREAS_TRACE_EXPIRED, AREAS_TRACE_RENEWED,
+        };
+        let area = |x, since| SxArea {
+            kind: 1,
+            pos: [x, 0, 0],
+            radius: 2,
+            since,
+            lifetime: 10,
+            ..SxArea::default()
+        };
+        let rec = |kind, index, area| SxAreasTrace { kind, index, area };
+        unsafe {
+            let a = sx_areas_new(1);
+            let mut records: Vec<SxAreasTrace> = Vec::new();
+            let c = ctx(&mut records);
+            assert_eq!(sx_areas_set_trace(a, Some(collect), c), 0);
+            assert_eq!(
+                sx_areas_set_trace(null_mut(), Some(collect), c),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(sx_areas_add(a, 1, &area(0, 0)), 0);
+            assert_eq!(sx_areas_add(a, 2, &area(1, 0)), 0);
+            assert_eq!(sx_areas_add(a, 3, &area(9, 0)), 0);
+            assert_eq!(sx_areas_expire(a, 20), 1);
+            assert_eq!(
+                records,
+                [
+                    rec(AREAS_TRACE_ADDED, 0, area(0, 1)),
+                    rec(AREAS_TRACE_RENEWED, 0, area(1, 2)),
+                    rec(AREAS_TRACE_EVICTED, 0, area(1, 2)),
+                    rec(AREAS_TRACE_ADDED, 0, area(9, 3)),
+                    rec(AREAS_TRACE_EXPIRED, 0, area(9, 3)),
+                ]
+            );
+            assert_eq!(sx_areas_set_trace(a, None, null_mut()), 0);
+            assert_eq!(sx_areas_add(a, 30, &area(0, 0)), 0);
+            assert_eq!(records.len(), 5);
+            sx_areas_free(a);
+        }
+    }
+
+    #[test]
+    fn timers_trace_through_c() {
+        use sagax_abi::codes::{TIMERS_TRACE_RENEWED, TIMERS_TRACE_REPLACED, TIMERS_TRACE_STARTED};
+        unsafe {
+            let t = sx_timers_new(1);
+            let mut records: Vec<SxTimersTrace> = Vec::new();
+            let c = ctx(&mut records);
+            assert_eq!(sx_timers_set_trace(t, Some(collect), c), 0);
+            assert_eq!(
+                sx_timers_set_trace(null_mut(), Some(collect), c),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(sx_timers_set(t, 4, 0, 10), 0);
+            assert_eq!(sx_timers_set(t, 4, 2, 6), 0);
+            assert_eq!(sx_timers_set(t, 5, 5, 3), 0);
+            let (started, renewed) = (
+                SxTimersTrace {
+                    kind: TIMERS_TRACE_STARTED,
+                    id: 4,
+                    duration: 10,
+                    ..SxTimersTrace::default()
+                },
+                SxTimersTrace {
+                    kind: TIMERS_TRACE_RENEWED,
+                    id: 4,
+                    duration: 6,
+                    ..SxTimersTrace::default()
+                },
+            );
+            let replaced = SxTimersTrace {
+                kind: TIMERS_TRACE_REPLACED,
+                id: 5,
+                duration: 3,
+                old: 4,
+                old_left: 3,
+            };
+            assert_eq!(records, [started, renewed, replaced]);
+            assert_eq!(sx_timers_set_trace(t, None, null_mut()), 0);
+            assert_eq!(sx_timers_set(t, 5, 9, 3), 0);
+            assert_eq!(records.len(), 3);
+            sx_timers_free(t);
         }
     }
 }
