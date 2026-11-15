@@ -77,8 +77,8 @@ fn wall_line() -> Walls {
 }
 
 #[test]
-fn version_is_10() {
-    assert_eq!(sx_api_version(), 10);
+fn version_is_11() {
+    assert_eq!(sx_api_version(), 11);
 }
 
 #[test]
@@ -1002,7 +1002,7 @@ mod squad {
         assert_eq!(size_of::<SxPlan>(), 28);
         assert_eq!(size_of::<SxSkillTable>(), 204);
         assert_eq!(size_of::<SxScoreEvent>(), 36);
-        assert_eq!(define("SX_API_VERSION"), 10);
+        assert_eq!(define("SX_API_VERSION"), 11);
         assert_eq!(define("SX_ERROR_PLAN"), i64::from(ERROR_PLAN));
         assert_eq!(define("SX_IDLE"), i64::from(IDLE));
         let core = [
@@ -1108,6 +1108,82 @@ mod squad {
             ("SX_CREW_BROKEN", i64::from(CREW_BROKEN)),
             ("SX_CREW_NO_PLAN", i64::from(CREW_NO_PLAN)),
         ];
+        let mission = [
+            ("SX_WHERE_FIXED", WHERE_FIXED),
+            ("SX_WHERE_SUBJECT", WHERE_SUBJECT),
+            ("SX_WHERE_MOTIVE_PLACE", WHERE_MOTIVE_PLACE),
+            ("SX_WHERE_MOTIVE_SUBJECT", WHERE_MOTIVE_SUBJECT),
+            ("SX_WHERE_HERE", WHERE_HERE),
+            ("SX_STEP_GO_TO", STEP_GO_TO),
+            ("SX_STEP_WAIT", STEP_WAIT),
+            ("SX_STEP_PAUSE", STEP_PAUSE),
+            ("SX_STEP_FOLLOW", STEP_FOLLOW),
+            ("SX_STEP_WAIT_FOR", STEP_WAIT_FOR),
+            ("SX_STEP_SEARCH", STEP_SEARCH),
+            ("SX_STEP_HOLD", STEP_HOLD),
+            ("SX_STEP_ATTACK", STEP_ATTACK),
+            ("SX_STEP_WANDER", STEP_WANDER),
+            ("SX_STEP_SIGNAL", STEP_SIGNAL),
+            ("SX_STEP_CUSTOM", STEP_CUSTOM),
+            ("SX_STEP_CALL", STEP_CALL),
+            ("SX_STEP_SQUAD", STEP_SQUAD),
+            ("SX_FAIL_UNKNOWN", FAIL_UNKNOWN),
+            ("SX_FAIL_DEFEATED", FAIL_DEFEATED),
+            ("SX_FAIL_FACT", FAIL_FACT),
+            ("SX_FAIL_FLAGS", FAIL_FLAGS),
+            ("SX_FAIL_CUSTOM", FAIL_CUSTOM),
+            ("SX_MOTIVE_GUARD", MOTIVE_GUARD),
+            ("SX_MOTIVE_DEFEAT", MOTIVE_DEFEAT),
+            ("SX_MOTIVE_REACH", MOTIVE_REACH),
+            ("SX_MOTIVE_CUSTOM", MOTIVE_CUSTOM),
+            ("SX_ON_LOST_RETURN", ON_LOST_RETURN),
+            ("SX_ON_LOST_SEARCH", ON_LOST_SEARCH),
+            ("SX_ON_LOST_KEEP", ON_LOST_KEEP),
+            ("SX_LEEWAY_STRICT", LEEWAY_STRICT),
+            ("SX_LEEWAY_FLEXIBLE", LEEWAY_FLEXIBLE),
+            ("SX_LEEWAY_FREE", LEEWAY_FREE),
+            ("SX_DETOUR_ENGAGE", DETOUR_ENGAGE),
+            ("SX_DETOUR_FLEE", DETOUR_FLEE),
+            ("SX_DETOUR_CUSTOM", DETOUR_CUSTOM),
+            ("SX_ACTION_NONE", ACTION_NONE),
+            ("SX_ACTION_GO_TO", ACTION_GO_TO),
+            ("SX_ACTION_WAIT", ACTION_WAIT),
+            ("SX_ACTION_FOLLOW", ACTION_FOLLOW),
+            ("SX_ACTION_HOLD", ACTION_HOLD),
+            ("SX_ACTION_ATTACK", ACTION_ATTACK),
+            ("SX_ACTION_SEARCH", ACTION_SEARCH),
+            ("SX_ACTION_WANDER", ACTION_WANDER),
+            ("SX_ACTION_FLEE", ACTION_FLEE),
+            ("SX_ACTION_CUSTOM", ACTION_CUSTOM),
+            ("SX_MISSION_EVENT_STEP_DONE", MISSION_EVENT_STEP_DONE),
+            ("SX_MISSION_EVENT_LOOPED", MISSION_EVENT_LOOPED),
+            ("SX_MISSION_EVENT_PLAN_DONE", MISSION_EVENT_PLAN_DONE),
+            ("SX_MISSION_EVENT_BROKEN", MISSION_EVENT_BROKEN),
+            ("SX_MISSION_EVENT_REPLANNED", MISSION_EVENT_REPLANNED),
+            ("SX_MISSION_EVENT_FELL_BACK", MISSION_EVENT_FELL_BACK),
+            (
+                "SX_MISSION_EVENT_DETOUR_STARTED",
+                MISSION_EVENT_DETOUR_STARTED,
+            ),
+            ("SX_MISSION_EVENT_DETOUR_ENDED", MISSION_EVENT_DETOUR_ENDED),
+            ("SX_MISSION_EVENT_RETURNED", MISSION_EVENT_RETURNED),
+            ("SX_MISSION_EVENT_SIGNAL", MISSION_EVENT_SIGNAL),
+            ("SX_MISSION_EVENT_CALL", MISSION_EVENT_CALL),
+            ("SX_MISSION_EVENT_WANTS_SQUAD", MISSION_EVENT_WANTS_SQUAD),
+            ("SX_BREAK_FAIL", BREAK_FAIL),
+            ("SX_BREAK_IMPOSSIBLE", BREAK_IMPOSSIBLE),
+            ("SX_BREAK_PLAN_ENDED", BREAK_PLAN_ENDED),
+            ("SX_DETOUR_END_DEFEATED", DETOUR_END_DEFEATED),
+            ("SX_DETOUR_END_FORGOTTEN", DETOUR_END_FORGOTTEN),
+            ("SX_DETOUR_END_LOST", DETOUR_END_LOST),
+            ("SX_DETOUR_END_LEASH", DETOUR_END_LEASH),
+            ("SX_DETOUR_END_SAFE", DETOUR_END_SAFE),
+            ("SX_DETOUR_END_ARRIVED", DETOUR_END_ARRIVED),
+            ("SX_DETOUR_END_ENDED", DETOUR_END_ENDED),
+        ];
+        for (name, value) in mission {
+            assert_eq!(define(name), i64::from(value), "{name}");
+        }
         for (name, value) in numbers {
             assert_eq!(define(name), value, "{name}");
         }
@@ -1127,6 +1203,7 @@ mod squad {
             include_str!("group.rs"),
             include_str!("machine.rs"),
             include_str!("memory.rs"),
+            include_str!("mission.rs"),
             include_str!("../../sagax-wasm/src/lib.rs"),
             include_str!("../../sagax-wasm/src/crew.rs"),
             include_str!("../../sagax-wasm/src/values.rs"),
@@ -2688,10 +2765,11 @@ mod conventions {
     use std::ptr::null_mut;
 
     const HEADER: &str = include_str!("../include/sagax.h");
-    const SOURCES: [&str; 8] = [
+    const SOURCES: [&str; 9] = [
         include_str!("lib.rs"),
         include_str!("grid.rs"),
         include_str!("memory.rs"),
+        include_str!("mission.rs"),
         include_str!("decide.rs"),
         include_str!("machine.rs"),
         include_str!("group.rs"),
@@ -2771,6 +2849,10 @@ mod conventions {
         use crate::memory::{
             SxAlertConfig, SxAlertness, SxArea, SxFact, SxInterval, SxMessage, SxNearby,
             SxPointPattern, SxProgress,
+        };
+        use crate::mission::{
+            SxDetour, SxFail, SxLeeway, SxMissionAction, SxMissionConfig, SxMissionEvent,
+            SxMissionFailCtx, SxMissionOut, SxMissionPlanCtx, SxMotive, SxStep, SxWhere,
         };
         use crate::rules::{SxChannelCtx, SxCostCtx, SxPlaceCtx, SxSpotCtx, SxViewPlan};
         use crate::{Point, SxEvent, SxResult, SxRules};
@@ -2901,6 +2983,78 @@ mod conventions {
                 has_target,
                 signal_given
             ),
+            layout!("sx_where", SxWhere, pos, subject),
+            layout!("sx_fail", SxFail, id, flags_mask, flags_value),
+            layout!(
+                "sx_step",
+                SxStep,
+                at,
+                a,
+                b,
+                fails,
+                fail_count,
+                skip_if_impossible
+            ),
+            layout!(
+                "sx_motive",
+                SxMotive,
+                place,
+                subject,
+                radius,
+                has_place,
+                has_subject
+            ),
+            layout!(
+                "sx_leeway",
+                SxLeeway,
+                on_lost,
+                lost_radius,
+                has_distance,
+                widen
+            ),
+            layout!(
+                "sx_mission_config",
+                SxMissionConfig,
+                metric,
+                grid,
+                pick_top,
+                search
+            ),
+            layout!("sx_detour", SxDetour, at, to, custom, param, has_to),
+            layout!(
+                "sx_mission_action",
+                SxMissionAction,
+                pos,
+                subject,
+                param,
+                has_pos
+            ),
+            layout!(
+                "sx_mission_event",
+                SxMissionEvent,
+                subject,
+                pos,
+                has_pos,
+                has_subject,
+                fail
+            ),
+            layout!("sx_mission_out", SxMissionOut, event_count, events),
+            layout!(
+                "sx_mission_fail_ctx",
+                SxMissionFailCtx,
+                step,
+                motive,
+                has_step
+            ),
+            layout!(
+                "sx_mission_plan_ctx",
+                SxMissionPlanCtx,
+                option,
+                first,
+                motive,
+                widening,
+                has_first
+            ),
         ]
     }
 
@@ -2946,11 +3100,12 @@ mod conventions {
     }
 
     /// Structs holding pointers: no size assert (they differ between 32 and 64 bit).
-    const POINTER_STRUCTS: [&str; 4] = [
+    const POINTER_STRUCTS: [&str; 5] = [
         "sx_map",
         "sx_areas_cost_ctx",
         "sx_row_ctx",
         "sx_squad_rules",
+        "sx_mission_rules",
     ];
 
     #[test]
@@ -3865,6 +4020,850 @@ mod path_cost {
             );
             sx_nav_free(nav);
             sx_grid_free(grid);
+        }
+    }
+}
+
+mod mission {
+    //! `sx_mission_*` (C API 11): the Rust `Mission` through C. Each scene
+    //! runs a C mission and the same Rust mission side by side and checks
+    //! that every tick gives the same action and events.
+
+    use super::squad::define;
+    use crate::decide::{SxConsideration, sx_decider_add_consideration, sx_decider_free};
+    use crate::memory::{SxKnowledge, sx_knowledge_free, sx_knowledge_learn, sx_knowledge_new};
+    use crate::mission::*;
+    use sagax_abi::codes::*;
+    use sagax_decide::memory::{Fact, PointPattern, Pos};
+    use sagax_decide::mission::{
+        DEFAULT_PREFERENCE, DIST_CAP, Detour, FailCtx, IN_DIST, IN_EXTRA, IN_FEASIBLE, IN_KNOWN,
+        IN_PREF, IN_WIDEN, KNOWN_CAP, Leeway, Mission, MissionConfig, MissionRules, Motive,
+        PlanCtx, Step, WIDEN_PREFERENCE,
+    };
+    use sagax_decide::{ONE, mission::Fail, mission::Plan};
+    use std::ffi::c_void;
+    use std::ptr::{null, null_mut};
+
+    const SEEN: u32 = 0;
+    const STOLEN: u32 = 1;
+    const ITEM: u32 = 20;
+    const THIEF: u32 = 30;
+    const ATTACKER: u32 = 50;
+    const WEST: Pos = [4, 3, 0];
+    const EAST: Pos = [12, 3, 0];
+
+    fn at(pos: Pos) -> SxWhere {
+        SxWhere {
+            kind: WHERE_FIXED,
+            pos,
+            subject: 0,
+        }
+    }
+
+    fn c_step(kind: u32, a: u32, b: u32, place: SxWhere) -> SxStep {
+        SxStep {
+            kind,
+            at: place,
+            a,
+            b,
+            ..SxStep::default()
+        }
+    }
+
+    fn c_go(pos: Pos) -> SxStep {
+        c_step(STEP_GO_TO, 0, 0, at(pos))
+    }
+
+    fn guard_motive() -> SxMotive {
+        SxMotive {
+            kind: MOTIVE_GUARD,
+            place: WEST,
+            has_place: 1,
+            ..SxMotive::default()
+        }
+    }
+
+    fn stolen_fail() -> SxFail {
+        SxFail {
+            kind: FAIL_FACT,
+            subject: ITEM,
+            fact_kind: STOLEN,
+            mask: 1,
+            value: 1,
+            ..SxFail::default()
+        }
+    }
+
+    fn c_config() -> SxMissionConfig {
+        let mut c = SxMissionConfig::default();
+        assert_eq!(unsafe { sx_mission_config_default(&mut c) }, 0);
+        c.id = 7;
+        c.lost_after = 3;
+        c
+    }
+
+    fn rust_config() -> MissionConfig {
+        MissionConfig {
+            id: 7,
+            lost_after: 3,
+            ..MissionConfig::default()
+        }
+    }
+
+    fn fact(subject: u32, kind: u32, pos: Pos, now: u32) -> Fact {
+        Fact {
+            subject,
+            kind,
+            pos,
+            seen_at: now,
+            data: 1,
+            ..Fact::default()
+        }
+    }
+
+    /// One cell from `pos` toward the action's position, if it has one.
+    fn toward(pos: &mut Pos, action: &SxMissionAction) {
+        if action.has_pos != 0 {
+            for (p, t) in pos.iter_mut().zip(action.pos).take(2) {
+                *p += (t - *p).signum();
+            }
+        }
+    }
+
+    /// A C mission and a Rust mission that should act the same, at one
+    /// position and with one knowledge.
+    struct Twin {
+        c: *mut SxMission,
+        r: Mission,
+        k: *mut SxKnowledge,
+        pos: Pos,
+        trace: Vec<SxMissionOut>,
+    }
+
+    impl Twin {
+        fn new(c: *mut SxMission, r: Mission, pos: Pos) -> Self {
+            assert!(!c.is_null());
+            Self {
+                c,
+                r,
+                k: sx_knowledge_new(8, 0),
+                pos,
+                trace: Vec::new(),
+            }
+        }
+
+        fn learn(&mut self, now: u32, f: Fact) {
+            assert!(unsafe { sx_knowledge_learn(self.k, now, &f, null_mut()) } >= 0);
+        }
+
+        fn detour(&mut self, now: u32, c: SxDetour, r: Detour) -> i32 {
+            let taken = unsafe { sx_mission_detour(self.c, now, &c, self.k) };
+            let k = unsafe { &(*self.k).0 };
+            assert_eq!(taken, i32::from(self.r.detour(now, r, k)));
+            taken
+        }
+
+        /// One tick of both, with `rules` for C and `r_rules` for Rust;
+        /// then one cell toward the action's target.
+        fn tick_with(
+            &mut self,
+            now: u32,
+            rules: *const SxMissionRules,
+            r_rules: &mut dyn MissionRules,
+        ) -> SxMissionOut {
+            let mut out = SxMissionOut::default();
+            let n = unsafe {
+                sx_mission_tick_with(self.c, now, self.pos.as_ptr(), self.k, 0, rules, &mut out)
+            };
+            let k = unsafe { &(*self.k).0 };
+            let r = self.r.tick_with(now, self.pos, k, 0, r_rules);
+            assert_eq!(out.action, action_of(r.action), "action at {now}");
+            let events: Vec<_> = r.events().iter().map(|e| event_of(*e)).collect();
+            assert_eq!(n, events.len() as i32, "count at {now}");
+            assert_eq!(out.event_count, events.len() as u32);
+            assert_eq!(&out.events[..events.len()], &events[..], "events at {now}");
+            let mut index = 0;
+            let has = unsafe { sx_mission_step_index(self.c, &mut index) };
+            assert_eq!(has == 1, self.r.step_index().is_some(), "step at {now}");
+            if has == 1 {
+                assert_eq!(Some(index as usize), self.r.step_index());
+            }
+            assert_eq!(
+                unsafe { sx_mission_in_detour(self.c) },
+                i32::from(self.r.in_detour())
+            );
+            assert_eq!(
+                unsafe { sx_mission_returning(self.c) },
+                i32::from(self.r.returning())
+            );
+            toward(&mut self.pos, &out.action);
+            self.trace.push(out);
+            out
+        }
+
+        fn tick(&mut self, now: u32) -> SxMissionOut {
+            self.tick_with(now, null(), &mut sagax_decide::mission::BuiltInRules)
+        }
+
+        /// Every event of the trace with this kind.
+        fn events(&self, kind: u32) -> Vec<SxMissionEvent> {
+            self.trace
+                .iter()
+                .flat_map(|o| o.events[..o.event_count as usize].to_vec())
+                .filter(|e| e.kind == kind)
+                .collect()
+        }
+    }
+
+    impl Drop for Twin {
+        fn drop(&mut self) {
+            unsafe {
+                sx_mission_free(self.c);
+                sx_knowledge_free(self.k);
+            }
+        }
+    }
+
+    /// The patrol in both forms: go west, wait 5, go east, again; it
+    /// breaks when the item is stolen.
+    fn patrol(c: *mut SxMission, r: &mut Mission) {
+        let steps = [
+            c_go(WEST),
+            c_step(STEP_WAIT, 5, 0, SxWhere::default()),
+            c_go(EAST),
+        ];
+        let fails = [stolen_fail()];
+        assert_eq!(
+            unsafe { sx_mission_set_plan(c, steps.as_ptr(), 3, 1, fails.as_ptr(), 1) },
+            0
+        );
+        let plan = Plan::looping(&[Step::go_to(WEST), Step::wait(5), Step::go_to(EAST)])
+            .fails_when(Fail::Fact {
+                subject: ITEM,
+                kind: STOLEN,
+                mask: 1,
+                value: 1,
+            });
+        r.set_plan(&plan).unwrap();
+    }
+
+    fn twin(leeway: u32) -> Twin {
+        let c = unsafe { sx_mission_new(&c_config(), &guard_motive()) };
+        let mut r = Mission::new(rust_config(), Motive::guard_place(WEST)).unwrap();
+        let mut l = SxLeeway::default();
+        unsafe {
+            assert_eq!(sx_leeway_preset(leeway, &mut l), 0);
+            assert_eq!(sx_mission_set_leeway(c, &l), 0);
+        }
+        r.set_leeway(convert_leeway(leeway));
+        patrol(c, &mut r);
+        Twin::new(c, r, [3, 2, 0])
+    }
+
+    fn convert_leeway(which: u32) -> Leeway {
+        [Leeway::STRICT, Leeway::FLEXIBLE, Leeway::FREE][which as usize]
+    }
+
+    #[test]
+    fn defaults_match_rust() {
+        let mut c = SxMissionConfig::default();
+        unsafe { assert_eq!(sx_mission_config_default(&mut c), 0) };
+        let d = MissionConfig::default();
+        assert_eq!(
+            (c.id, c.max_steps, c.max_playbook, c.subject_kind),
+            (0, 16, 8, 0)
+        );
+        assert_eq!((c.enemy_bits, c.defeated_bits, c.arrive_radius), (1, 2, 0));
+        assert_eq!((c.lost_after, c.pause_ticks, c.safe_distance), (30, 50, 12));
+        assert_eq!(c.reached_signal, d.reached_signal);
+        assert_eq!(
+            (c.metric, c.grid, c.extra_columns),
+            (METRIC_CHEBYSHEV, 0, 0)
+        );
+        assert_eq!((c.pick, c.pick_top), (PICK_BEST, 0));
+        let s = c.search;
+        assert_eq!((s.heading_step, s.first_distance, s.count), (0x62, 1, 3));
+        assert_eq!(s.distances[..3], [2, 4, 6]);
+        assert_eq!(s.offsets[..3], [0, 0x20, -0x20]);
+        assert_eq!(s.sine, 0);
+        assert_eq!((s.min_x, s.min_y), (i32::MIN, i32::MIN));
+        assert_eq!((s.max_x, s.max_y), (i32::MAX, i32::MAX));
+        assert_eq!(
+            d.search,
+            PointPattern {
+                first_distance: 1,
+                distances: vec![2, 4, 6],
+                ..PointPattern::default()
+            }
+        );
+        for (which, want) in [
+            (LEEWAY_STRICT, Leeway::STRICT),
+            (LEEWAY_FLEXIBLE, Leeway::FLEXIBLE),
+            (LEEWAY_FREE, Leeway::FREE),
+        ] {
+            let mut l = SxLeeway::default();
+            unsafe { assert_eq!(sx_leeway_preset(which, &mut l), 0) };
+            let back = Leeway {
+                leash: sagax_decide::mission::Leash {
+                    distance: (l.has_distance != 0).then_some(l.distance),
+                    ticks: (l.has_ticks != 0).then_some(l.ticks),
+                    on_lost: sagax_abi::convert::on_lost(l.on_lost, l.lost_ticks, l.lost_radius)
+                        .unwrap(),
+                },
+                replan: l.replan != 0,
+                widen: l.widen != 0,
+            };
+            assert_eq!(back, want);
+        }
+        let mut l = SxLeeway::default();
+        unsafe { assert_eq!(sx_leeway_preset(LEEWAY_STRICT, &mut l), 0) };
+        assert_eq!(
+            (l.distance, l.has_distance, l.on_lost),
+            (3, 1, ON_LOST_RETURN)
+        );
+        unsafe { assert_eq!(sx_leeway_preset(LEEWAY_FLEXIBLE, &mut l), 0) };
+        assert_eq!(
+            (l.on_lost, l.lost_ticks, l.lost_radius),
+            (ON_LOST_SEARCH, 60, 6)
+        );
+        let core = [
+            ("SX_MISSION_IN_FEASIBLE", IN_FEASIBLE as i64),
+            ("SX_MISSION_IN_DIST", IN_DIST as i64),
+            ("SX_MISSION_IN_PREF", IN_PREF as i64),
+            ("SX_MISSION_IN_WIDEN", IN_WIDEN as i64),
+            ("SX_MISSION_IN_KNOWN", IN_KNOWN as i64),
+            ("SX_MISSION_IN_EXTRA", IN_EXTRA as i64),
+            ("SX_MISSION_DIST_CAP", i64::from(DIST_CAP)),
+            ("SX_MISSION_KNOWN_CAP", i64::from(KNOWN_CAP)),
+            (
+                "SX_MISSION_DEFAULT_PREFERENCE",
+                i64::from(DEFAULT_PREFERENCE),
+            ),
+            ("SX_MISSION_WIDEN_PREFERENCE", i64::from(WIDEN_PREFERENCE)),
+            (
+                "SX_MISSION_MAX_FAILS",
+                sagax_decide::mission::MAX_FAILS as i64,
+            ),
+            (
+                "SX_MISSION_MAX_EVENTS",
+                sagax_decide::mission::MAX_EVENTS as i64,
+            ),
+        ];
+        for (name, value) in core {
+            assert_eq!(define(name), value, "{name}");
+        }
+    }
+
+    #[test]
+    fn patrol_loops() {
+        let mut t = twin(LEEWAY_STRICT);
+        for now in 0..40 {
+            t.tick(now);
+        }
+        assert!(t.events(MISSION_EVENT_LOOPED).len() >= 2, "it loops");
+        let done: Vec<u32> = t
+            .events(MISSION_EVENT_STEP_DONE)
+            .iter()
+            .map(|e| e.a)
+            .collect();
+        assert_eq!(done[..3], [0, 1, 2]);
+        assert_eq!(t.trace[0].action.kind, ACTION_GO_TO);
+        assert_eq!(t.trace[0].action.pos, WEST);
+    }
+
+    #[test]
+    fn strict_returns() {
+        let mut t = twin(LEEWAY_STRICT);
+        for now in 0..40 {
+            // An attacker near the west end, running east two cells a tick.
+            if now >= 8 {
+                let x = 6 + 2 * (now as i32 - 8);
+                if x < 16 {
+                    t.learn(now, fact(ATTACKER, SEEN, [x, 3, 0], now));
+                    if now == 8 {
+                        let d = SxDetour {
+                            kind: DETOUR_ENGAGE,
+                            subject: ATTACKER,
+                            ..SxDetour::default()
+                        };
+                        assert_eq!(t.detour(now, d, Detour::Engage(ATTACKER)), 1);
+                    }
+                }
+            }
+            t.tick(now);
+        }
+        assert_eq!(t.events(MISSION_EVENT_DETOUR_STARTED).len(), 1);
+        let ended = t.events(MISSION_EVENT_DETOUR_ENDED);
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].a, DETOUR_END_LEASH);
+        assert_eq!(t.events(MISSION_EVENT_RETURNED).len(), 1);
+        assert!(t.events(MISSION_EVENT_REPLANNED).is_empty());
+        let attacks = t
+            .trace
+            .iter()
+            .filter(|o| o.action.kind == ACTION_ATTACK)
+            .count();
+        assert!(attacks > 0);
+    }
+
+    #[test]
+    fn replan_on_fact() {
+        let mut t = twin(LEEWAY_FLEXIBLE);
+        let attack = [c_step(STEP_ATTACK, THIEF, 0, SxWhere::default())];
+        let option =
+            unsafe { sx_mission_add_playbook(t.c, attack.as_ptr(), 1, 0, null(), 0, ONE, 0) };
+        assert_eq!(option, 0);
+        let r_option =
+            t.r.add_playbook(&Plan::once(&[Step::attack(THIEF)]), ONE, false)
+                .unwrap();
+        assert_eq!(r_option, 0);
+        for now in 0..20 {
+            if now == 10 {
+                t.learn(now, fact(ITEM, STOLEN, [0; 3], now));
+                t.learn(now, fact(THIEF, SEEN, [13, 6, 0], now));
+            }
+            t.tick(now);
+        }
+        let broken = t.events(MISSION_EVENT_BROKEN);
+        assert_eq!(broken.len(), 1);
+        assert_eq!(broken[0].a, BREAK_FAIL);
+        assert_eq!(broken[0].fail, stolen_fail());
+        let replanned = t.events(MISSION_EVENT_REPLANNED);
+        assert_eq!(replanned.len(), 1);
+        assert_eq!(replanned[0].a, 0);
+        let last = t.trace.last().unwrap().action;
+        assert_eq!((last.kind, last.subject), (ACTION_ATTACK, THIEF));
+        assert_eq!((last.pos, last.has_pos), ([13, 6, 0], 1));
+    }
+
+    /// What the C callbacks saw, and what they answer.
+    #[derive(Default)]
+    struct Seen {
+        fails: Vec<(u32, u8, u32)>,
+        columns: Vec<(u32, u32)>,
+        scores: Vec<(u32, u32)>,
+    }
+
+    unsafe extern "C" fn c_fail(user: *mut c_void, ctx: *const SxMissionFailCtx, id: u32) -> i32 {
+        let seen = unsafe { &mut *user.cast::<Seen>() };
+        let ctx = unsafe { &*ctx };
+        seen.fails.push((ctx.now, ctx.has_step, id));
+        i32::from(id == 9 && ctx.now >= 6)
+    }
+
+    unsafe extern "C" fn c_columns(
+        user: *mut c_void,
+        ctx: *const SxMissionPlanCtx,
+        out: *mut i32,
+        count: u32,
+    ) {
+        let seen = unsafe { &mut *user.cast::<Seen>() };
+        let option = unsafe { (*ctx).option };
+        seen.columns.push((option, count));
+        for i in 0..count as usize {
+            unsafe { out.add(i).write(option as i32 + 1) };
+        }
+    }
+
+    unsafe extern "C" fn c_score(
+        user: *mut c_void,
+        ctx: *const SxMissionPlanCtx,
+        built_in: u32,
+        score: *mut u32,
+    ) -> i32 {
+        let seen = unsafe { &mut *user.cast::<Seen>() };
+        let option = unsafe { (*ctx).option };
+        seen.scores.push((option, built_in));
+        // Veto the playbook slot: the default plan wins.
+        if option == 0 {
+            unsafe { score.write(0) };
+            1
+        } else {
+            0
+        }
+    }
+
+    /// The same rules in Rust.
+    struct Same;
+
+    impl MissionRules for Same {
+        fn fail(&mut self, ctx: &FailCtx, id: u32) -> bool {
+            id == 9 && ctx.now >= 6
+        }
+        fn columns(&mut self, ctx: &PlanCtx, out: &mut [i32]) {
+            out.fill(ctx.option as i32 + 1);
+        }
+        fn score(&mut self, ctx: &PlanCtx, _built_in: u32) -> Option<u32> {
+            (ctx.option == 0).then_some(0)
+        }
+    }
+
+    #[test]
+    fn rules_through_c() {
+        let mut cfg = c_config();
+        cfg.extra_columns = 2;
+        let c = unsafe { sx_mission_new(&cfg, &guard_motive()) };
+        let r = Mission::new(
+            MissionConfig {
+                extra_columns: 2,
+                ..rust_config()
+            },
+            Motive::guard_place(WEST),
+        )
+        .unwrap();
+        let mut t = Twin::new(c, r, [3, 2, 0]);
+        let custom = SxFail {
+            kind: FAIL_CUSTOM,
+            id: 9,
+            ..SxFail::default()
+        };
+        let steps = [c_go(WEST), c_go(EAST)];
+        let attack = [c_step(STEP_ATTACK, THIEF, 0, SxWhere::default())];
+        unsafe {
+            assert_eq!(sx_mission_set_plan(c, steps.as_ptr(), 2, 1, &custom, 1), 0);
+            assert_eq!(
+                sx_mission_add_playbook(c, attack.as_ptr(), 1, 0, null(), 0, ONE, 0),
+                0
+            );
+        }
+        let plan =
+            Plan::looping(&[Step::go_to(WEST), Step::go_to(EAST)]).fails_when(Fail::Custom(9));
+        t.r.set_plan(&plan).unwrap();
+        t.r.add_playbook(&Plan::once(&[Step::attack(THIEF)]), ONE, false)
+            .unwrap();
+        t.learn(0, fact(THIEF, SEEN, [13, 6, 0], 0));
+        let mut seen = Seen::default();
+        let rules = SxMissionRules {
+            fail: Some(c_fail),
+            columns: Some(c_columns),
+            score: Some(c_score),
+            user: (&mut seen as *mut Seen).cast(),
+        };
+        for now in 0..10 {
+            t.tick_with(now, &rules, &mut Same);
+        }
+        let broken = t.events(MISSION_EVENT_BROKEN);
+        assert_eq!(broken.len(), 1);
+        assert_eq!((broken[0].a, broken[0].fail), (BREAK_FAIL, custom));
+        assert!(seen.fails.contains(&(6, 0, 9)), "the plan's condition at 6");
+        // Playbook slot 0 and the default plan (option 8) were scored.
+        assert!(seen.columns.contains(&(0, 2)) && seen.columns.contains(&(8, 2)));
+        assert!(seen.scores.iter().any(|&(o, _)| o == 0));
+        // The vetoed slot loses; the default plan (option 8) wins.
+        let replanned = t.events(MISSION_EVENT_REPLANNED);
+        assert_eq!(replanned.iter().map(|e| e.a).collect::<Vec<_>>(), [8]);
+        assert!(t.events(MISSION_EVENT_FELL_BACK).is_empty());
+    }
+
+    #[test]
+    fn null_rules_is_built_in() {
+        // Plain tick, NULL rules and a zeroed table act the same, also
+        // with a custom condition (it never fires without a callback).
+        let custom = SxFail {
+            kind: FAIL_CUSTOM,
+            id: 1,
+            ..SxFail::default()
+        };
+        let steps = [c_go(WEST), c_step(STEP_WAIT, 3, 0, SxWhere::default())];
+        let zeroed = SxMissionRules {
+            fail: None,
+            columns: None,
+            score: None,
+            user: null_mut(),
+        };
+        let mut traces = Vec::new();
+        for way in 0..3 {
+            let c = unsafe { sx_mission_new(&c_config(), &guard_motive()) };
+            let k = sx_knowledge_new(4, 0);
+            unsafe { assert_eq!(sx_mission_set_plan(c, steps.as_ptr(), 2, 1, &custom, 1), 0) };
+            let mut pos = [3, 2, 0];
+            let mut trace = Vec::new();
+            for now in 0..20 {
+                let mut out = SxMissionOut::default();
+                let n = unsafe {
+                    match way {
+                        0 => sx_mission_tick(c, now, pos.as_ptr(), k, 0, &mut out),
+                        1 => sx_mission_tick_with(c, now, pos.as_ptr(), k, 0, null(), &mut out),
+                        _ => sx_mission_tick_with(c, now, pos.as_ptr(), k, 0, &zeroed, &mut out),
+                    }
+                };
+                assert!(n >= 0);
+                toward(&mut pos, &out.action);
+                trace.push(out);
+            }
+            assert!(trace.iter().all(|o| {
+                o.events[..o.event_count as usize]
+                    .iter()
+                    .all(|e| e.kind != MISSION_EVENT_BROKEN)
+            }));
+            traces.push(trace);
+            unsafe {
+                sx_mission_free(c);
+                sx_knowledge_free(k);
+            }
+        }
+        assert_eq!(traces[0], traces[1]);
+        assert_eq!(traces[0], traces[2]);
+    }
+
+    #[test]
+    fn every_step_kind_converts() {
+        let c = unsafe { sx_mission_new(&c_config(), &guard_motive()) };
+        let subject = SxWhere {
+            kind: WHERE_SUBJECT,
+            subject: 4,
+            ..SxWhere::default()
+        };
+        let mut all = Vec::new();
+        for kind in STEP_GO_TO..=STEP_SQUAD {
+            let mut s = c_step(kind, 3, 4, subject);
+            s.skip_if_impossible = 1;
+            s.fails[0] = SxFail {
+                kind: FAIL_FLAGS,
+                flags_mask: 1 << 40,
+                flags_value: 1 << 40,
+                ..SxFail::default()
+            };
+            s.fail_count = 1;
+            all.push(s);
+        }
+        unsafe {
+            assert_eq!(
+                sx_mission_set_plan(c, all.as_ptr(), all.len() as u32, 0, null(), 0),
+                0
+            );
+            sx_mission_free(c);
+        }
+        let s = all[STEP_SEARCH as usize].step().unwrap();
+        assert_eq!(
+            s.kind,
+            sagax_decide::mission::StepKind::Search {
+                centre: sagax_decide::mission::Where::Subject(4),
+                radius: 3,
+                ticks: 4,
+            }
+        );
+        assert!(s.skip_if_impossible);
+        assert_eq!(
+            s.fails[0],
+            Some(Fail::Flags {
+                mask: 1 << 40,
+                value: 1 << 40
+            })
+        );
+    }
+
+    #[test]
+    fn decider_is_lent() {
+        unsafe {
+            let c = sx_mission_new(&c_config(), &guard_motive());
+            let d = sx_mission_decider(c);
+            assert!(!d.is_null());
+            assert_eq!(sx_mission_decider(c), d, "one handle per mission");
+            let cons = SxConsideration {
+                input: IN_DIST as u32,
+                curve: 1,
+                min: 0,
+                max: 20,
+            };
+            // Option 8 is the default plan; 10 does not exist.
+            assert_eq!(sx_decider_add_consideration(d, 8, &cons), 0);
+            assert_eq!(sx_decider_add_consideration(d, 10, &cons), -1);
+            sx_decider_free(d);
+            assert_eq!(sx_decider_add_consideration(d, 8, &cons), 0, "still lent");
+            assert!(sx_mission_decider(null_mut()).is_null());
+            sx_mission_free(c);
+        }
+    }
+
+    #[test]
+    fn bad_arguments() {
+        unsafe {
+            let cfg = c_config();
+            let motive = guard_motive();
+            assert!(sx_mission_new(null(), &motive).is_null());
+            assert!(sx_mission_new(&cfg, null()).is_null());
+            for bad in [
+                SxMissionConfig {
+                    max_steps: 0,
+                    ..cfg
+                },
+                SxMissionConfig {
+                    max_steps: 65537,
+                    ..cfg
+                },
+                SxMissionConfig { metric: 9, ..cfg },
+                SxMissionConfig { grid: 9, ..cfg },
+                SxMissionConfig { grid: 1, ..cfg },
+                SxMissionConfig { pick: 3, ..cfg },
+            ] {
+                assert!(sx_mission_new(&bad, &motive).is_null(), "{bad:?}");
+            }
+            let mut wide = cfg;
+            wide.search.count = 9;
+            assert!(sx_mission_new(&wide, &motive).is_null());
+            let mut sine = cfg;
+            sine.search.sine = 2;
+            assert!(sx_mission_new(&sine, &motive).is_null());
+            let hex = SxMissionConfig {
+                grid: GRID_HEX_ODD_R,
+                metric: METRIC_HEX,
+                ..cfg
+            };
+            let h = sx_mission_new(&hex, &motive);
+            assert!(!h.is_null());
+            sx_mission_free(h);
+            let odd = SxMotive { kind: 4, ..motive };
+            assert!(sx_mission_new(&cfg, &odd).is_null());
+            assert_eq!(sx_mission_config_default(null_mut()), ERROR_ARGUMENT);
+            let mut l = SxLeeway::default();
+            assert_eq!(sx_leeway_preset(3, &mut l), ERROR_ARGUMENT);
+            assert_eq!(sx_leeway_preset(0, null_mut()), ERROR_ARGUMENT);
+
+            let m = sx_mission_new(&cfg, &motive);
+            let k = sx_knowledge_new(4, 0);
+            let pos = [0, 0, 0];
+            let go = [c_go(WEST)];
+            let five = [stolen_fail(); 5];
+            assert_eq!(
+                sx_mission_set_plan(m, null(), 0, 0, null(), 0),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_mission_set_plan(m, null(), 1, 0, null(), 0),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_mission_set_plan(m, go.as_ptr(), 1, 0, null(), 1),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_mission_set_plan(m, go.as_ptr(), 1, 0, five.as_ptr(), 5),
+                ERROR_ARGUMENT
+            );
+            let mut many = go[0];
+            many.fail_count = 5;
+            assert_eq!(
+                sx_mission_set_plan(m, &many, 1, 0, null(), 0),
+                ERROR_ARGUMENT
+            );
+            let mut odd_step = go[0];
+            odd_step.kind = 13;
+            assert_eq!(
+                sx_mission_set_plan(m, &odd_step, 1, 0, null(), 0),
+                ERROR_ARGUMENT
+            );
+            let mut odd_where = go[0];
+            odd_where.at.kind = 5;
+            assert_eq!(
+                sx_mission_set_plan(m, &odd_where, 1, 0, null(), 0),
+                ERROR_ARGUMENT
+            );
+            let mut odd_fail = go[0];
+            odd_fail.fails[0].kind = 5;
+            odd_fail.fail_count = 1;
+            assert_eq!(
+                sx_mission_set_plan(m, &odd_fail, 1, 0, null(), 0),
+                ERROR_ARGUMENT
+            );
+            // A wait ignores its place, so a bad one does not matter there.
+            let mut wait = c_step(STEP_WAIT, 1, 0, SxWhere::default());
+            wait.at.kind = 77;
+            assert_eq!(sx_mission_set_plan(m, &wait, 1, 0, null(), 0), 0);
+            let long = vec![c_go(WEST); 17];
+            assert_eq!(
+                sx_mission_set_plan(m, long.as_ptr(), 17, 0, null(), 0),
+                ERROR_ARGUMENT
+            );
+            for slot in 0..8 {
+                assert_eq!(
+                    sx_mission_add_playbook(m, go.as_ptr(), 1, 0, null(), 0, ONE, 0),
+                    slot
+                );
+            }
+            assert_eq!(
+                sx_mission_add_playbook(m, go.as_ptr(), 1, 0, null(), 0, ONE, 0),
+                ERROR_ARGUMENT,
+                "full"
+            );
+            assert_eq!(sx_mission_clear_playbook(m), 0);
+            assert_eq!(
+                sx_mission_add_playbook(m, go.as_ptr(), 1, 0, null(), 0, ONE, 1),
+                0
+            );
+            let mut out = SxMissionOut::default();
+            assert_eq!(
+                sx_mission_tick(m, 0, null(), k, 0, &mut out),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_mission_tick(m, 0, pos.as_ptr(), null(), 0, &mut out),
+                ERROR_ARGUMENT
+            );
+            assert!(sx_mission_tick(m, 0, pos.as_ptr(), k, 0, null_mut()) >= 0);
+            let odd_leeway = SxLeeway {
+                on_lost: 3,
+                ..SxLeeway::default()
+            };
+            assert_eq!(sx_mission_set_leeway(m, &odd_leeway), ERROR_ARGUMENT);
+            assert_eq!(sx_mission_set_leeway(m, null()), ERROR_ARGUMENT);
+            assert_eq!(sx_mission_set_motive(m, &odd), ERROR_ARGUMENT);
+            assert_eq!(sx_mission_set_motive(m, null()), ERROR_ARGUMENT);
+            assert_eq!(sx_mission_set_motive(m, &motive), 0);
+            let flee_bad = SxDetour {
+                kind: DETOUR_FLEE,
+                at: SxWhere {
+                    kind: 9,
+                    ..SxWhere::default()
+                },
+                ..SxDetour::default()
+            };
+            assert_eq!(sx_mission_detour(m, 1, &flee_bad, k), ERROR_ARGUMENT);
+            let odd_detour = SxDetour {
+                kind: 3,
+                ..SxDetour::default()
+            };
+            assert_eq!(sx_mission_detour(m, 1, &odd_detour, k), ERROR_ARGUMENT);
+            assert_eq!(sx_mission_detour(m, 1, null(), k), ERROR_ARGUMENT);
+            let engage = SxDetour::default();
+            assert_eq!(sx_mission_detour(m, 1, &engage, null()), ERROR_ARGUMENT);
+            assert_eq!(sx_mission_detour(m, 1, &engage, k), 0, "unknown subject");
+            let flee = SxDetour {
+                kind: DETOUR_FLEE,
+                at: at([1, 0, 0]),
+                ..SxDetour::default()
+            };
+            assert_eq!(sx_mission_detour(m, 1, &flee, k), 1);
+            assert_eq!(sx_mission_end_detour(m), 0);
+            assert_eq!(sx_mission_finish_step(m), 0);
+            assert_eq!(sx_mission_step_index(m, null_mut()), ERROR_ARGUMENT);
+            sx_mission_free(m);
+            sx_knowledge_free(k);
+
+            let n = null_mut::<SxMission>();
+            let mut index = 0;
+            assert_eq!(sx_mission_set_leeway(n, &l), ERROR_ARGUMENT);
+            assert_eq!(sx_mission_set_motive(n, &motive), ERROR_ARGUMENT);
+            assert_eq!(
+                sx_mission_set_plan(n, go.as_ptr(), 1, 0, null(), 0),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_mission_add_playbook(n, go.as_ptr(), 1, 0, null(), 0, 0, 0),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(sx_mission_clear_playbook(n), ERROR_ARGUMENT);
+            assert_eq!(
+                sx_mission_tick(n, 0, pos.as_ptr(), null(), 0, &mut out),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(sx_mission_detour(n, 0, &engage, null()), ERROR_ARGUMENT);
+            assert_eq!(sx_mission_end_detour(n), ERROR_ARGUMENT);
+            assert_eq!(sx_mission_finish_step(n), ERROR_ARGUMENT);
+            assert_eq!(sx_mission_step_index(n, &mut index), ERROR_ARGUMENT);
+            assert_eq!(sx_mission_in_detour(n), ERROR_ARGUMENT);
+            assert_eq!(sx_mission_returning(n), ERROR_ARGUMENT);
+            sx_mission_free(n);
         }
     }
 }

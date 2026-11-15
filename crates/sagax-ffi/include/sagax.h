@@ -47,7 +47,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 10
+#define SX_API_VERSION 11
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -1954,6 +1954,433 @@ int32_t sx_report_enemy(uint32_t sender, const sx_fact *fact, sx_message *out);
 int32_t sx_report_arrived(uint32_t sender, uint32_t plan, sx_message *out);
 int32_t sx_report_goal_broken(uint32_t sender, uint32_t plan, sx_message *out);
 
+/* ---- missions (since version 11) ----------------------------------------- */
+
+/* A character's mission: a motive (what it wants), a plan of steps toward it
+ * (patrol, wait, search, attack, ...), short detours from the plan (engage,
+ * flee) and replanning when the plan breaks. The game ticks the mission with
+ * the character's position, its sx_knowledge and the game's condition bits
+ * (flags); the mission returns one action and what happened (events). The
+ * mission moves nobody; the game walks or attacks as the action says.
+ *
+ * Positions are 3 values in cells. With config.grid SX_GRID_HEX_* every
+ * position the game gives or gets is in offset coordinates of that layout,
+ * also the fact positions in the knowledge and in the rules' contexts.
+ * Everything is reserved in sx_mission_new; a tick allocates nothing
+ * (sx_mission_set_plan and sx_mission_add_playbook may). Integer only,
+ * deterministic, no random numbers but the seed of the decider's pick (now
+ * with the mission's id).
+ *
+ * The functions without their own note return 0, or SX_ERROR_ARGUMENT for a
+ * null mission, a null required pointer or an unknown code. */
+typedef struct sx_mission sx_mission;
+
+/* Most fail conditions of a step and of a plan; most events of a tick. */
+#define SX_MISSION_MAX_FAILS  4
+#define SX_MISSION_MAX_EVENTS 8
+
+/* Places a step or detour refers to (sx_where.kind). */
+#define SX_WHERE_FIXED          0 /* pos */
+#define SX_WHERE_SUBJECT        1 /* where subject was last known */
+#define SX_WHERE_MOTIVE_PLACE   2 /* the motive's place */
+#define SX_WHERE_MOTIVE_SUBJECT 3 /* where the motive's subject was last known */
+#define SX_WHERE_HERE           4 /* where the character stands at that moment */
+
+typedef struct sx_where {
+	uint32_t kind;              /* SX_WHERE_* */
+	int32_t pos[3];             /* SX_WHERE_FIXED */
+	uint32_t subject;           /* SX_WHERE_SUBJECT */
+} sx_where;
+
+/* Conditions that break a step or a plan (sx_fail.kind). A subject is known
+ * when a fact of the config's subject_kind exists for it. */
+#define SX_FAIL_UNKNOWN  0 /* subject is not known */
+#define SX_FAIL_DEFEATED 1 /* subject is known as defeated (config.defeated_bits) */
+#define SX_FAIL_FACT     2 /* a fact (subject, fact_kind) has data & mask == value */
+#define SX_FAIL_FLAGS    3 /* the tick's flags have flags & flags_mask == flags_value */
+#define SX_FAIL_CUSTOM   4 /* the fail callback of sx_mission_rules says so for id */
+
+typedef struct sx_fail {
+	uint32_t kind;              /* SX_FAIL_* */
+	uint32_t subject;           /* UNKNOWN, DEFEATED, FACT */
+	uint32_t fact_kind;         /* FACT */
+	uint32_t mask;              /* FACT */
+	uint32_t value;             /* FACT */
+	uint32_t id;                /* CUSTOM */
+	uint64_t flags_mask;        /* FLAGS */
+	uint64_t flags_value;       /* FLAGS */
+} sx_fail;
+
+/* What a step does (sx_step.kind), with its place at and numbers a and b:
+ *   GO_TO     walk to at
+ *   WAIT      wait a ticks
+ *   PAUSE     wait config.pause_ticks
+ *   FOLLOW    follow subject a
+ *   WAIT_FOR  wait until subject a is within radius b
+ *   SEARCH    search around at within radius a (0: no limit; Euclid
+ *             compares squares) for b ticks, going to the points of
+ *             config.search in turn
+ *   HOLD      hold at
+ *   ATTACK    attack subject a
+ *   WANDER    wander about
+ *   SIGNAL    give signal a (done at once)
+ *   CUSTOM    the game's step a at at with param b; done on
+ *             sx_mission_finish_step
+ *   CALL      call for help on channel a, kind b
+ *   SQUAD     ask for squad tactic a against at */
+#define SX_STEP_GO_TO    0
+#define SX_STEP_WAIT     1
+#define SX_STEP_PAUSE    2
+#define SX_STEP_FOLLOW   3
+#define SX_STEP_WAIT_FOR 4
+#define SX_STEP_SEARCH   5
+#define SX_STEP_HOLD     6
+#define SX_STEP_ATTACK   7
+#define SX_STEP_WANDER   8
+#define SX_STEP_SIGNAL   9
+#define SX_STEP_CUSTOM   10
+#define SX_STEP_CALL     11
+#define SX_STEP_SQUAD    12
+
+/* One step of a plan. A zeroed sx_step is GO_TO (0, 0, 0). at is read only
+ * by the kinds with a place. */
+typedef struct sx_step {
+	uint32_t kind;              /* SX_STEP_* */
+	sx_where at;
+	uint32_t a, b;
+	sx_fail fails[4];           /* conditions that break the step */
+	uint32_t fail_count;        /* used entries of fails, at most 4 */
+	uint8_t skip_if_impossible; /* 1: skip the step instead of breaking the plan
+	                             * when a position it needs is not known */
+} sx_step;
+
+/* What the character wants (sx_motive.kind). */
+#define SX_MOTIVE_GUARD  0 /* keep a place or a subject safe */
+#define SX_MOTIVE_DEFEAT 1 /* defeat a subject or (without one) the enemies */
+#define SX_MOTIVE_REACH  2 /* get to a place */
+#define SX_MOTIVE_CUSTOM 3 /* the game's motive custom */
+
+typedef struct sx_motive {
+	uint32_t kind;              /* SX_MOTIVE_* */
+	uint32_t custom;            /* SX_MOTIVE_CUSTOM: the game's kind */
+	int32_t place[3];           /* valid if has_place */
+	uint32_t subject;           /* valid if has_subject */
+	uint32_t radius;            /* how close counts as there; 0: config.arrive_radius */
+	uint8_t has_place;
+	uint8_t has_subject;
+} sx_motive;
+
+/* What a character does when it loses the subject of an engage detour
+ * (sx_leeway.on_lost). */
+#define SX_ON_LOST_RETURN 0 /* go back to the anchor */
+#define SX_ON_LOST_SEARCH 1 /* search lost_ticks within lost_radius of the last
+                             * known place first */
+#define SX_ON_LOST_KEEP   2 /* go on to the last known place */
+
+/* The presets of sx_leeway_preset. */
+#define SX_LEEWAY_STRICT   0 /* distance 3, returns when the subject is lost, never replans */
+#define SX_LEEWAY_FLEXIBLE 1 /* distance 12, searches 60 ticks within 6, replans (the default) */
+#define SX_LEEWAY_FREE     2 /* no leash, keeps going, replans and widens */
+
+/* How freely a character acts: its leash for detours (distance from the
+ * anchor in the mission's metric, Euclid compares squares, and duration)
+ * and whether it may replan and widen. */
+typedef struct sx_leeway {
+	uint32_t distance;          /* valid if has_distance (else no limit) */
+	uint32_t ticks;             /* valid if has_ticks (else no limit) */
+	uint32_t on_lost;           /* SX_ON_LOST_* */
+	uint32_t lost_ticks;        /* SX_ON_LOST_SEARCH */
+	uint32_t lost_radius;       /* SX_ON_LOST_SEARCH */
+	uint8_t has_distance;
+	uint8_t has_ticks;
+	uint8_t replan;             /* 1: may take another plan when its plan breaks or ends */
+	uint8_t widen;              /* 1: may take the widening plans (only with replan) */
+} sx_leeway;
+
+/* Settings of a mission. Start from sx_mission_config_default. */
+typedef struct sx_mission_config {
+	uint32_t id;                /* for the seed and the search points */
+	uint32_t max_steps;         /* most steps of a plan, 1 .. 65536 */
+	uint32_t max_playbook;      /* playbook slots */
+	uint32_t subject_kind;      /* the fact kind positions are read from */
+	uint32_t enemy_bits;        /* bits of a fact's data that mark an enemy */
+	uint32_t defeated_bits;     /* bits of a fact's data that mark a defeated subject */
+	uint32_t arrive_radius;     /* how close counts as arrived */
+	uint32_t lost_after;        /* ticks after which a subject not seen counts as lost */
+	uint32_t pause_ticks;       /* ticks of SX_STEP_PAUSE */
+	uint32_t safe_distance;     /* distance at which a fleeing character is safe */
+	uint32_t reached_signal;    /* the signal given when the motive's place is reached */
+	uint32_t metric;            /* SX_METRIC_* */
+	uint32_t grid;              /* SX_GRID_SQUARE or SX_GRID_HEX_* (needs SX_METRIC_HEX) */
+	uint32_t extra_columns;     /* the game's columns of each decider row (columns callback) */
+	uint32_t pick;              /* SX_PICK_* among the candidate plans of a replan */
+	uint32_t pick_top;          /* top of the pick */
+	sx_point_pattern search;    /* the search points, in cells */
+} sx_mission_config;
+
+/* Detours (sx_detour.kind): a short break from the plan. */
+#define SX_DETOUR_ENGAGE 0 /* go for subject */
+#define SX_DETOUR_FLEE   1 /* get away from at, to to if has_to */
+#define SX_DETOUR_CUSTOM 2 /* the game's detour custom at at with param; ends on
+                            * sx_mission_end_detour */
+
+typedef struct sx_detour {
+	uint32_t kind;              /* SX_DETOUR_* */
+	uint32_t subject;           /* ENGAGE */
+	sx_where at;                /* FLEE: what to get away from; CUSTOM: where */
+	int32_t to[3];              /* FLEE: where to run to; valid if has_to */
+	uint32_t custom;            /* CUSTOM: the game's kind */
+	uint32_t param;             /* CUSTOM */
+	uint8_t has_to;
+} sx_detour;
+
+/* What the character should do now (sx_mission_action.kind). */
+#define SX_ACTION_NONE   0
+#define SX_ACTION_GO_TO  1 /* walk to pos */
+#define SX_ACTION_WAIT   2 /* stand and wait */
+#define SX_ACTION_FOLLOW 3 /* follow subject, last known at pos */
+#define SX_ACTION_HOLD   4 /* hold pos */
+#define SX_ACTION_ATTACK 5 /* attack subject, last known at pos */
+#define SX_ACTION_SEARCH 6 /* search at pos */
+#define SX_ACTION_WANDER 7 /* wander about */
+#define SX_ACTION_FLEE   8 /* run to pos */
+#define SX_ACTION_CUSTOM 9 /* the game's step or detour custom, at pos if has_pos */
+
+typedef struct sx_mission_action {
+	uint32_t kind;              /* SX_ACTION_* */
+	int32_t pos[3];             /* valid if has_pos */
+	uint32_t subject;           /* FOLLOW, ATTACK */
+	uint32_t custom;            /* CUSTOM: the game's kind */
+	uint32_t param;             /* CUSTOM */
+	uint8_t has_pos;
+} sx_mission_action;
+
+/* What happened during a tick (sx_mission_event.kind), with a and b: */
+#define SX_MISSION_EVENT_STEP_DONE      0  /* step a is done */
+#define SX_MISSION_EVENT_LOOPED         1  /* the plan started again */
+#define SX_MISSION_EVENT_PLAN_DONE      2  /* the plan is done */
+#define SX_MISSION_EVENT_BROKEN         3  /* the plan broke, a = SX_BREAK_* (fail: the
+                                            * condition for SX_BREAK_FAIL) */
+#define SX_MISSION_EVENT_REPLANNED      4  /* the plan of decider option a was taken */
+#define SX_MISSION_EVENT_FELL_BACK      5  /* fell back to the default plan or to
+                                            * holding where it stands */
+#define SX_MISSION_EVENT_DETOUR_STARTED 6
+#define SX_MISSION_EVENT_DETOUR_ENDED   7  /* a = SX_DETOUR_END_* */
+#define SX_MISSION_EVENT_RETURNED       8  /* back at the anchor, the plan resumes */
+#define SX_MISSION_EVENT_SIGNAL         9  /* signal a was given */
+#define SX_MISSION_EVENT_CALL           10 /* call on channel a, kind b, from pos */
+#define SX_MISSION_EVENT_WANTS_SQUAD    11 /* squad tactic a, against pos (has_pos) or
+                                            * subject (has_subject) */
+
+/* Why a plan broke (a of SX_MISSION_EVENT_BROKEN). */
+#define SX_BREAK_FAIL       0 /* a fail condition fired */
+#define SX_BREAK_IMPOSSIBLE 1 /* a step could not be done */
+#define SX_BREAK_PLAN_ENDED 2 /* the plan ended */
+
+/* Why a detour ended (a of SX_MISSION_EVENT_DETOUR_ENDED). */
+#define SX_DETOUR_END_DEFEATED  0 /* the subject was defeated */
+#define SX_DETOUR_END_FORGOTTEN 1 /* the subject is no longer known */
+#define SX_DETOUR_END_LOST      2 /* the subject was lost */
+#define SX_DETOUR_END_LEASH     3 /* the leash ran out */
+#define SX_DETOUR_END_SAFE      4 /* the fleeing character is safe */
+#define SX_DETOUR_END_ARRIVED   5 /* the fleeing character arrived */
+#define SX_DETOUR_END_ENDED     6 /* sx_mission_end_detour */
+
+typedef struct sx_mission_event {
+	uint32_t kind;              /* SX_MISSION_EVENT_* */
+	uint32_t a, b;
+	uint32_t subject;           /* WANTS_SQUAD; valid if has_subject */
+	int32_t pos[3];             /* CALL, WANTS_SQUAD; valid if has_pos */
+	uint8_t has_pos;
+	uint8_t has_subject;
+	sx_fail fail;               /* BROKEN with SX_BREAK_FAIL */
+} sx_mission_event;
+
+/* What one tick gives: the action and the events in order. */
+typedef struct sx_mission_out {
+	sx_mission_action action;
+	uint32_t event_count;
+	sx_mission_event events[8];
+} sx_mission_out;
+
+/* Id 0, 16 steps, 8 playbook slots, subject kind 0, enemy bits 1, defeated
+ * bits 2, arrive radius 0, lost after 30, pause 50, safe distance 12, reached
+ * signal 0, SX_METRIC_CHEBYSHEV, square, no extra columns, SX_PICK_BEST, and a
+ * search pattern in cells: heading step 0x62, first distance 1, offsets 0,
+ * 0x20, -0x20 at distances 2, 4, 6, SX_SINE_FINE, unclamped (set min and max
+ * for a bounded map). */
+int32_t sx_mission_config_default(sx_mission_config *out);
+/* The leeway of SX_LEEWAY_* to *out. */
+int32_t sx_leeway_preset(uint32_t which, sx_leeway *out);
+
+/* A mission for motive, without a plan, with SX_LEEWAY_FLEXIBLE. Null for a
+ * null pointer, an unknown code, max_steps 0 or above 65536, a search pattern
+ * with more than 8 entries, or a hex grid without SX_METRIC_HEX. */
+sx_mission *sx_mission_new(const sx_mission_config *config, const sx_motive *motive);
+/* Frees the mission and the decider handle it lent. */
+void sx_mission_free(sx_mission *mission);
+int32_t sx_mission_set_leeway(sx_mission *mission, const sx_leeway *leeway);
+/* The running plan stays. */
+int32_t sx_mission_set_motive(sx_mission *mission, const sx_motive *motive);
+
+/* A plan: count steps (repeat 1: start again after the last) and fail_count
+ * conditions for the whole plan (at most 4; fails may be null if 0). The
+ * mission copies it; its first step begins at the next tick, whatever ran
+ * before (during a detour, when the character resumes). SX_ERROR_ARGUMENT
+ * for no steps, more than max_steps, more than 4 conditions or an unknown
+ * code (the mission keeps what it had). */
+int32_t sx_mission_set_plan(sx_mission *mission, const sx_step *steps, uint32_t count,
+                            uint32_t repeat, const sx_fail *fails, uint32_t fail_count);
+/* A plan for the playbook, as for sx_mission_set_plan, in the first free
+ * slot. preference (0 .. SX_ONE, more is cut) is its SX_MISSION_IN_PREF
+ * column; widening 1: a candidate only for a character that may widen, and
+ * only on a real break. Returns the slot, which is its decider option;
+ * SX_ERROR_ARGUMENT also when the playbook is full. */
+int32_t sx_mission_add_playbook(sx_mission *mission, const sx_step *steps, uint32_t count,
+                                uint32_t repeat, const sx_fail *fails, uint32_t fail_count,
+                                uint32_t preference, uint32_t widening);
+/* Empties every slot; the decider keeps its considerations. A running
+ * playbook plan runs on. */
+int32_t sx_mission_clear_playbook(sx_mission *mission);
+
+/* Runs one tick at now for a character standing at pos (3 values), from what
+ * it knows and the game's condition bits flags. The action and the events go
+ * to *out (out may be null). Returns the number of events (at most
+ * SX_MISSION_MAX_EVENTS), or SX_ERROR_ARGUMENT for a null mission, pos or
+ * knowledge.
+ *
+ * Each tick checks the fail conditions of the running step, then of the plan;
+ * a fail breaks the plan. Then the step runs: one that needs a position that
+ * is not known breaks the plan (or is skipped with skip_if_impossible); a
+ * step that is done hands over to the next within the tick. After the last
+ * step a looping plan starts again; else the plan is done, which counts as a
+ * break for replanning (a plan ending in SX_STEP_WANDER wanders instead).
+ * CALL and SQUAD steps give their event only to a character that may widen.
+ *
+ * On a break: with leeway.replan the candidates (the filled playbook slots,
+ * the motive's default plan, and for a character that may widen and only on
+ * a real break the widening slots and the built-in widening plan) are scored
+ * by the mission's decider and the winner starts at once
+ * (SX_MISSION_EVENT_REPLANNED); when every candidate scores 0, the default
+ * plan if it is feasible, else holding where it stands
+ * (SX_MISSION_EVENT_FELL_BACK). Without replan: holding where it stands. The
+ * default plan: GUARD follows its subject or holds its place, DEFEAT attacks
+ * its subject (or the nearest known enemy) when seen within lost_after, else
+ * searches its last known place, REACH goes there, gives reached_signal and
+ * holds, CUSTOM has none. Without a plan yet the tick does what a break does.
+ * During a detour the detour runs and no fail condition is checked. */
+int32_t sx_mission_tick(sx_mission *mission, uint32_t now, const int32_t *pos,
+                        const sx_knowledge *knowledge, uint64_t flags, sx_mission_out *out);
+
+/* Rules: the game's logic at fixed points, lent to one tick
+ * (sx_mission_tick_with; rules NULL is the plain tick). Each callback may be
+ * NULL: that slot does what the mission does without rules (a zeroed
+ * sx_mission_rules is all built-in). user is passed to every callback. A
+ * callback must not call any function on the same mission. With a hex grid
+ * every position in a context is in offset coordinates.
+ *   fail     1: the game's condition id (SX_FAIL_CUSTOM) holds now and breaks
+ *            the step (has_step) or plan. Built-in: never.
+ *   columns  fill the count game columns of a candidate's row (all 0 when
+ *            called; count is config.extra_columns). Built-in: nothing.
+ *   score    1 and the score in *score (preset to built_in, SX_ONE = 1.0; 0
+ *            vetoes) replaces the candidate's score, also for one that is not
+ *            feasible; 0 keeps built_in. When every candidate ends at 0 the
+ *            fallback still applies. Built-in: keep.
+ * Order of calls, always the same: each tick while a plan runs, fail for the
+ * running step's custom conditions, then the plan's, in list order, stopping
+ * at the first condition that fires. On a replan, per candidate in option
+ * order: fail for the custom conditions of its first step, then of the plan,
+ * then columns, then score. */
+typedef struct sx_mission_fail_ctx {
+	uint32_t now;
+	int32_t pos[3];             /* where the character stands */
+	uint32_t step;              /* the step the condition belongs to; valid if has_step */
+	sx_motive motive;
+	uint8_t has_step;           /* 0: a condition of the whole plan */
+} sx_mission_fail_ctx;
+
+typedef struct sx_mission_plan_ctx {
+	uint32_t now;
+	int32_t pos[3];             /* where the character stands */
+	uint32_t option;            /* the candidate's decider option */
+	int32_t first[3];           /* its first position; valid if has_first */
+	sx_motive motive;
+	uint8_t widening;           /* 1: a widening plan */
+	uint8_t feasible;           /* 1: its conditions hold now and first can be filled */
+	uint8_t has_first;
+} sx_mission_plan_ctx;
+
+typedef struct sx_mission_rules {
+	int32_t (*fail)(void *user, const sx_mission_fail_ctx *ctx, uint32_t id);
+	void (*columns)(void *user, const sx_mission_plan_ctx *ctx, int32_t *out, uint32_t count);
+	int32_t (*score)(void *user, const sx_mission_plan_ctx *ctx, uint32_t built_in,
+	                 uint32_t *score);
+	void *user;
+} sx_mission_rules;
+
+/* As sx_mission_tick with the game's rules (NULL = the plain tick). */
+int32_t sx_mission_tick_with(sx_mission *mission, uint32_t now, const int32_t *pos,
+                             const sx_knowledge *knowledge, uint64_t flags,
+                             const sx_mission_rules *rules, sx_mission_out *out);
+
+/* Starts a detour at now (the game decides when, from its own perception).
+ * Returns 1 if taken, 0 if refused: an ENGAGE of a subject that is not known
+ * or, with a leash distance, whose last known place is farther than that from
+ * the anchor. The plan waits until the detour ends, then the character walks
+ * back to the anchor (where it stood at the last tick, or the place it held)
+ * and resumes (SX_MISSION_EVENT_RETURNED). A new detour replaces a running
+ * one; the anchor stays. The next tick gives SX_MISSION_EVENT_DETOUR_STARTED.
+ * ENGAGE ends when the subject is defeated or forgotten, the leash runs out,
+ * or the subject was not seen for lost_after ticks (then on_lost decides);
+ * FLEE when it arrives at to or is farther than safe_distance from at;
+ * CUSTOM only by sx_mission_end_detour. SX_ERROR_ARGUMENT also for an unknown
+ * code. */
+int32_t sx_mission_detour(sx_mission *mission, uint32_t now, const sx_detour *detour,
+                          const sx_knowledge *knowledge);
+/* Ends the running detour at the next tick (SX_DETOUR_END_ENDED). Ignored
+ * when no detour runs. */
+int32_t sx_mission_end_detour(sx_mission *mission);
+/* Marks the running SX_STEP_CUSTOM step as done; the plan moves on at the
+ * next tick. Other steps ignore it. */
+int32_t sx_mission_finish_step(sx_mission *mission);
+/* 1 and the index of the running step to *index while a plan runs, 0 during
+ * a detour, the walk back or without a plan. */
+int32_t sx_mission_step_index(sx_mission *mission, uint32_t *index);
+/* 1 while a detour runs, else 0. */
+int32_t sx_mission_in_detour(sx_mission *mission);
+/* 1 while the character walks back to its anchor after a detour, else 0. */
+int32_t sx_mission_returning(sx_mission *mission);
+
+/* The decider that scores the candidate plans of a replan, lent until
+ * sx_mission_free (sx_decider_free does nothing to it; one handle per
+ * mission; null for a null mission). Option i below max_playbook is playbook
+ * slot i, then come the default plan (max_playbook) and the built-in widening
+ * plan (max_playbook + 1). Each option has two built-in considerations, both
+ * SX_APPLY_MULTIPLY: a step on SX_MISSION_IN_FEASIBLE and SX_MISSION_IN_PREF
+ * linear over 0 .. SX_ONE. A row has SX_MISSION_IN_EXTRA built-in columns,
+ * then config.extra_columns of the game's. A consideration on an input beyond
+ * the row makes its candidate score 0; options added beyond the built-in ones
+ * are never scored. */
+sx_decider *sx_mission_decider(sx_mission *mission);
+
+/* The built-in columns of a candidate's row. */
+#define SX_MISSION_IN_FEASIBLE 0 /* 1 if its conditions hold and its first position
+                                  * can be filled, else 0 */
+#define SX_MISSION_IN_DIST     1 /* distance to its first position in the metric
+                                  * (Euclid: the rounded-down root), at most
+                                  * SX_MISSION_DIST_CAP; 0 when no step names one */
+#define SX_MISSION_IN_PREF     2 /* its preference (0 .. SX_ONE) */
+#define SX_MISSION_IN_WIDEN    3 /* 1 for a widening plan */
+#define SX_MISSION_IN_KNOWN    4 /* age of the freshest fact of the subjects its
+                                  * steps name, at most SX_MISSION_KNOWN_CAP; 0 when
+                                  * it names none, the cap when none is known */
+#define SX_MISSION_IN_EXTRA    5 /* the first of the game's columns */
+#define SX_MISSION_DIST_CAP    1024
+#define SX_MISSION_KNOWN_CAP   65535
+/* Preference of the default plan and of the built-in widening plan. */
+#define SX_MISSION_DEFAULT_PREFERENCE 32767
+#define SX_MISSION_WIDEN_PREFERENCE   49149
+
 #ifdef __cplusplus
 }
 #endif
@@ -2103,6 +2530,66 @@ _Static_assert(offsetof(sx_view_plan, since) == 12, "sx_view_plan.since layout")
 _Static_assert(offsetof(sx_view_plan, has_plan) == 16, "sx_view_plan.has_plan layout");
 _Static_assert(offsetof(sx_view_plan, has_target) == 17, "sx_view_plan.has_target layout");
 _Static_assert(offsetof(sx_view_plan, signal_given) == 18, "sx_view_plan.signal_given layout");
+_Static_assert(sizeof(sx_where) == 20, "sx_where layout");
+_Static_assert(offsetof(sx_where, pos) == 4, "sx_where.pos layout");
+_Static_assert(offsetof(sx_where, subject) == 16, "sx_where.subject layout");
+_Static_assert(sizeof(sx_fail) == 40, "sx_fail layout");
+_Static_assert(offsetof(sx_fail, id) == 20, "sx_fail.id layout");
+_Static_assert(offsetof(sx_fail, flags_mask) == 24, "sx_fail.flags_mask layout");
+_Static_assert(offsetof(sx_fail, flags_value) == 32, "sx_fail.flags_value layout");
+_Static_assert(sizeof(sx_step) == 200, "sx_step layout");
+_Static_assert(offsetof(sx_step, at) == 4, "sx_step.at layout");
+_Static_assert(offsetof(sx_step, a) == 24, "sx_step.a layout");
+_Static_assert(offsetof(sx_step, b) == 28, "sx_step.b layout");
+_Static_assert(offsetof(sx_step, fails) == 32, "sx_step.fails layout");
+_Static_assert(offsetof(sx_step, fail_count) == 192, "sx_step.fail_count layout");
+_Static_assert(offsetof(sx_step, skip_if_impossible) == 196, "sx_step.skip_if_impossible layout");
+_Static_assert(sizeof(sx_motive) == 32, "sx_motive layout");
+_Static_assert(offsetof(sx_motive, place) == 8, "sx_motive.place layout");
+_Static_assert(offsetof(sx_motive, subject) == 20, "sx_motive.subject layout");
+_Static_assert(offsetof(sx_motive, radius) == 24, "sx_motive.radius layout");
+_Static_assert(offsetof(sx_motive, has_place) == 28, "sx_motive.has_place layout");
+_Static_assert(offsetof(sx_motive, has_subject) == 29, "sx_motive.has_subject layout");
+_Static_assert(sizeof(sx_leeway) == 24, "sx_leeway layout");
+_Static_assert(offsetof(sx_leeway, on_lost) == 8, "sx_leeway.on_lost layout");
+_Static_assert(offsetof(sx_leeway, lost_radius) == 16, "sx_leeway.lost_radius layout");
+_Static_assert(offsetof(sx_leeway, has_distance) == 20, "sx_leeway.has_distance layout");
+_Static_assert(offsetof(sx_leeway, widen) == 23, "sx_leeway.widen layout");
+_Static_assert(sizeof(sx_mission_config) == 160, "sx_mission_config layout");
+_Static_assert(offsetof(sx_mission_config, metric) == 44, "sx_mission_config.metric layout");
+_Static_assert(offsetof(sx_mission_config, grid) == 48, "sx_mission_config.grid layout");
+_Static_assert(offsetof(sx_mission_config, pick_top) == 60, "sx_mission_config.pick_top layout");
+_Static_assert(offsetof(sx_mission_config, search) == 64, "sx_mission_config.search layout");
+_Static_assert(sizeof(sx_detour) == 52, "sx_detour layout");
+_Static_assert(offsetof(sx_detour, at) == 8, "sx_detour.at layout");
+_Static_assert(offsetof(sx_detour, to) == 28, "sx_detour.to layout");
+_Static_assert(offsetof(sx_detour, custom) == 40, "sx_detour.custom layout");
+_Static_assert(offsetof(sx_detour, param) == 44, "sx_detour.param layout");
+_Static_assert(offsetof(sx_detour, has_to) == 48, "sx_detour.has_to layout");
+_Static_assert(sizeof(sx_mission_action) == 32, "sx_mission_action layout");
+_Static_assert(offsetof(sx_mission_action, pos) == 4, "sx_mission_action.pos layout");
+_Static_assert(offsetof(sx_mission_action, subject) == 16, "sx_mission_action.subject layout");
+_Static_assert(offsetof(sx_mission_action, param) == 24, "sx_mission_action.param layout");
+_Static_assert(offsetof(sx_mission_action, has_pos) == 28, "sx_mission_action.has_pos layout");
+_Static_assert(sizeof(sx_mission_event) == 72, "sx_mission_event layout");
+_Static_assert(offsetof(sx_mission_event, subject) == 12, "sx_mission_event.subject layout");
+_Static_assert(offsetof(sx_mission_event, pos) == 16, "sx_mission_event.pos layout");
+_Static_assert(offsetof(sx_mission_event, has_pos) == 28, "sx_mission_event.has_pos layout");
+_Static_assert(offsetof(sx_mission_event, has_subject) == 29, "sx_mission_event.has_subject layout");
+_Static_assert(offsetof(sx_mission_event, fail) == 32, "sx_mission_event.fail layout");
+_Static_assert(sizeof(sx_mission_out) == 616, "sx_mission_out layout");
+_Static_assert(offsetof(sx_mission_out, event_count) == 32, "sx_mission_out.event_count layout");
+_Static_assert(offsetof(sx_mission_out, events) == 40, "sx_mission_out.events layout");
+_Static_assert(sizeof(sx_mission_fail_ctx) == 56, "sx_mission_fail_ctx layout");
+_Static_assert(offsetof(sx_mission_fail_ctx, step) == 16, "sx_mission_fail_ctx.step layout");
+_Static_assert(offsetof(sx_mission_fail_ctx, motive) == 20, "sx_mission_fail_ctx.motive layout");
+_Static_assert(offsetof(sx_mission_fail_ctx, has_step) == 52, "sx_mission_fail_ctx.has_step layout");
+_Static_assert(sizeof(sx_mission_plan_ctx) == 68, "sx_mission_plan_ctx layout");
+_Static_assert(offsetof(sx_mission_plan_ctx, option) == 16, "sx_mission_plan_ctx.option layout");
+_Static_assert(offsetof(sx_mission_plan_ctx, first) == 20, "sx_mission_plan_ctx.first layout");
+_Static_assert(offsetof(sx_mission_plan_ctx, motive) == 32, "sx_mission_plan_ctx.motive layout");
+_Static_assert(offsetof(sx_mission_plan_ctx, widening) == 64, "sx_mission_plan_ctx.widening layout");
+_Static_assert(offsetof(sx_mission_plan_ctx, has_first) == 66, "sx_mission_plan_ctx.has_first layout");
 #endif
 
 #endif

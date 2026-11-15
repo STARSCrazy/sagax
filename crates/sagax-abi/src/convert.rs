@@ -10,9 +10,28 @@ use sagax_decide::group::{
     Side, SkillTable, Start, Status as SquadStatus,
 };
 use sagax_decide::memory::Metric;
+use sagax_decide::mission::{
+    Action, BreakReason, Detour, DetourEnd, Event, Fail, Leeway, MotiveKind, OnLost, StepKind,
+    Where,
+};
 use sagax_decide::{Combine, Decider, Pick};
 use sagax_nav::nav::{Budget, Output, Status};
 
+use crate::codes::{
+    ACTION_ATTACK, ACTION_CUSTOM, ACTION_FLEE, ACTION_FOLLOW, ACTION_GO_TO, ACTION_HOLD,
+    ACTION_NONE, ACTION_SEARCH, ACTION_WAIT, ACTION_WANDER, BREAK_FAIL, BREAK_IMPOSSIBLE,
+    BREAK_PLAN_ENDED, DETOUR_CUSTOM, DETOUR_END_ARRIVED, DETOUR_END_DEFEATED, DETOUR_END_ENDED,
+    DETOUR_END_FORGOTTEN, DETOUR_END_LEASH, DETOUR_END_LOST, DETOUR_END_SAFE, DETOUR_ENGAGE,
+    DETOUR_FLEE, FAIL_CUSTOM, FAIL_DEFEATED, FAIL_FACT, FAIL_FLAGS, FAIL_UNKNOWN, GRID_SQUARE,
+    LEEWAY_FLEXIBLE, LEEWAY_FREE, LEEWAY_STRICT, MISSION_EVENT_BROKEN, MISSION_EVENT_CALL,
+    MISSION_EVENT_DETOUR_ENDED, MISSION_EVENT_DETOUR_STARTED, MISSION_EVENT_FELL_BACK,
+    MISSION_EVENT_LOOPED, MISSION_EVENT_PLAN_DONE, MISSION_EVENT_REPLANNED, MISSION_EVENT_RETURNED,
+    MISSION_EVENT_SIGNAL, MISSION_EVENT_STEP_DONE, MISSION_EVENT_WANTS_SQUAD, MOTIVE_CUSTOM,
+    MOTIVE_DEFEAT, MOTIVE_GUARD, MOTIVE_REACH, ON_LOST_KEEP, ON_LOST_RETURN, ON_LOST_SEARCH,
+    STEP_ATTACK, STEP_CALL, STEP_CUSTOM, STEP_FOLLOW, STEP_GO_TO, STEP_HOLD, STEP_PAUSE,
+    STEP_SEARCH, STEP_SIGNAL, STEP_SQUAD, STEP_WAIT, STEP_WAIT_FOR, STEP_WANDER, WHERE_FIXED,
+    WHERE_HERE, WHERE_MOTIVE_PLACE, WHERE_MOTIVE_SUBJECT, WHERE_SUBJECT,
+};
 use crate::codes::{
     CMP_AT_LEAST, CMP_AT_MOST, CMP_EQUAL, CMP_NOT_EQUAL, COMBINE_FOLLOW, CREW_ACTIVATED,
     CREW_ARRIVED, CREW_BROKEN, CREW_NO_PLAN, CREW_ORDER, CREW_PLANNED, CREW_SIGNAL, CREW_START,
@@ -320,11 +339,7 @@ pub fn skill_table(codes: &SkillCodes) -> Option<SkillTable> {
 
 /// The numbers of a skill table, the inverse of [`skill_table`].
 pub fn skill_codes(table: &SkillTable) -> SkillCodes {
-    let pick = table.pick.map(|p| match p {
-        Pick::Best => (PICK_BEST, 0),
-        Pick::Weighted { top } => (PICK_WEIGHTED, top),
-        Pick::Uniform { top } => (PICK_UNIFORM, top),
-    });
+    let pick = table.pick.map(pick_code);
     SkillCodes {
         rows: u32::from(table.rows),
         pick: pick.map(|p| p.0),
@@ -437,6 +452,386 @@ pub fn crew_event(event: &CrewEvent) -> CrewEventCode {
         CrewEvent::Arrived { member } => plain(CREW_ARRIVED, member, 0),
         CrewEvent::Broken { member } => plain(CREW_BROKEN, member, 0),
         CrewEvent::NoPlan => plain(CREW_NO_PLAN, 0, 0),
+    }
+}
+
+// ---- mission ------------------------------------------------------------------
+
+/// The `SX_PICK_*` value and `top` of a pick.
+pub const fn pick_code(pick: Pick) -> (u32, u32) {
+    match pick {
+        Pick::Best => (PICK_BEST, 0),
+        Pick::Weighted { top } => (PICK_WEIGHTED, top),
+        Pick::Uniform { top } => (PICK_UNIFORM, top),
+    }
+}
+
+/// The `SX_GRID_*` value of a hex layout, `SX_GRID_SQUARE` for none.
+pub const fn grid_code(layout: Option<HexLayout>) -> u32 {
+    match layout {
+        None => GRID_SQUARE,
+        Some(HexLayout::OddR) => GRID_HEX_ODD_R,
+        Some(HexLayout::EvenR) => GRID_HEX_EVEN_R,
+        Some(HexLayout::OddQ) => GRID_HEX_ODD_Q,
+        Some(HexLayout::EvenQ) => GRID_HEX_EVEN_Q,
+    }
+}
+
+/// The place of an `SX_WHERE_*` value; `pos` and `subject` are used by
+/// `FIXED` and `SUBJECT` only.
+pub fn where_of(kind: u32, pos: Pos, subject: u32) -> Option<Where> {
+    Some(match kind {
+        WHERE_FIXED => Where::Fixed(pos),
+        WHERE_SUBJECT => Where::Subject(subject),
+        WHERE_MOTIVE_PLACE => Where::MotivePlace,
+        WHERE_MOTIVE_SUBJECT => Where::MotiveSubject,
+        WHERE_HERE => Where::Here,
+        _ => return None,
+    })
+}
+
+/// The step of an `SX_STEP_*` value with its place `at` (`None`: the place
+/// was not valid, which only a step with a place refuses) and the numbers
+/// `a` and `b`:
+///
+/// | Kind | `at` | `a` | `b` |
+/// |------|------|-----|-----|
+/// | `GO_TO`, `HOLD` | the place | | |
+/// | `WAIT` | | ticks | |
+/// | `FOLLOW`, `ATTACK` | | subject | |
+/// | `WAIT_FOR` | | subject | radius |
+/// | `SEARCH` | centre | radius | ticks |
+/// | `SIGNAL` | | signal | |
+/// | `CUSTOM` | where | the game's kind | param |
+/// | `CALL` | | channel | kind |
+/// | `SQUAD` | target | tactic | |
+pub fn step_kind(kind: u32, at: Option<Where>, a: u32, b: u32) -> Option<StepKind> {
+    Some(match kind {
+        STEP_GO_TO => StepKind::GoTo(at?),
+        STEP_WAIT => StepKind::Wait(a),
+        STEP_PAUSE => StepKind::Pause,
+        STEP_FOLLOW => StepKind::Follow(a),
+        STEP_WAIT_FOR => StepKind::WaitFor {
+            subject: a,
+            radius: b,
+        },
+        STEP_SEARCH => StepKind::Search {
+            centre: at?,
+            radius: a,
+            ticks: b,
+        },
+        STEP_HOLD => StepKind::Hold(at?),
+        STEP_ATTACK => StepKind::Attack(a),
+        STEP_WANDER => StepKind::Wander,
+        STEP_SIGNAL => StepKind::Signal(a),
+        STEP_CUSTOM => StepKind::Custom {
+            kind: a,
+            at: at?,
+            param: b,
+        },
+        STEP_CALL => StepKind::Call {
+            channel: a,
+            kind: b,
+        },
+        STEP_SQUAD => StepKind::Squad {
+            tactic: a,
+            target: at?,
+        },
+        _ => return None,
+    })
+}
+
+/// A fail condition as numbers (`SX_FAIL_*`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FailCode {
+    /// `SX_FAIL_*`.
+    pub kind: u32,
+    /// The subject (`UNKNOWN`, `DEFEATED`, `FACT`).
+    pub subject: u32,
+    /// The fact kind (`FACT`).
+    pub fact_kind: u32,
+    /// Bits of the fact's data (`FACT`).
+    pub mask: u32,
+    /// The value of those bits (`FACT`).
+    pub value: u32,
+    /// The game's condition (`CUSTOM`).
+    pub id: u32,
+    /// Bits of the flags (`FLAGS`).
+    pub flags_mask: u64,
+    /// The value of those bits (`FLAGS`).
+    pub flags_value: u64,
+}
+
+/// The fail condition of its numbers; `None` for an unknown kind.
+pub const fn fail(code: &FailCode) -> Option<Fail> {
+    Some(match code.kind {
+        FAIL_UNKNOWN => Fail::Unknown {
+            subject: code.subject,
+        },
+        FAIL_DEFEATED => Fail::Defeated {
+            subject: code.subject,
+        },
+        FAIL_FACT => Fail::Fact {
+            subject: code.subject,
+            kind: code.fact_kind,
+            mask: code.mask,
+            value: code.value,
+        },
+        FAIL_FLAGS => Fail::Flags {
+            mask: code.flags_mask,
+            value: code.flags_value,
+        },
+        FAIL_CUSTOM => Fail::Custom(code.id),
+        _ => return None,
+    })
+}
+
+/// The numbers of a fail condition, the inverse of [`fail`] (unused fields 0).
+pub const fn fail_code(fail: Fail) -> FailCode {
+    let zero = FailCode {
+        kind: 0,
+        subject: 0,
+        fact_kind: 0,
+        mask: 0,
+        value: 0,
+        id: 0,
+        flags_mask: 0,
+        flags_value: 0,
+    };
+    match fail {
+        Fail::Unknown { subject } => FailCode {
+            kind: FAIL_UNKNOWN,
+            subject,
+            ..zero
+        },
+        Fail::Defeated { subject } => FailCode {
+            kind: FAIL_DEFEATED,
+            subject,
+            ..zero
+        },
+        Fail::Fact {
+            subject,
+            kind,
+            mask,
+            value,
+        } => FailCode {
+            kind: FAIL_FACT,
+            subject,
+            fact_kind: kind,
+            mask,
+            value,
+            ..zero
+        },
+        Fail::Flags { mask, value } => FailCode {
+            kind: FAIL_FLAGS,
+            flags_mask: mask,
+            flags_value: value,
+            ..zero
+        },
+        Fail::Custom(id) => FailCode {
+            kind: FAIL_CUSTOM,
+            id,
+            ..zero
+        },
+    }
+}
+
+/// The motive kind of an `SX_MOTIVE_*` value (`custom`: the game's kind).
+pub const fn motive_kind(kind: u32, custom: u32) -> Option<MotiveKind> {
+    Some(match kind {
+        MOTIVE_GUARD => MotiveKind::Guard,
+        MOTIVE_DEFEAT => MotiveKind::Defeat,
+        MOTIVE_REACH => MotiveKind::Reach,
+        MOTIVE_CUSTOM => MotiveKind::Custom(custom),
+        _ => return None,
+    })
+}
+
+/// The `SX_MOTIVE_*` value and the game's kind (0 if not custom).
+pub const fn motive_kind_code(kind: MotiveKind) -> (u32, u32) {
+    match kind {
+        MotiveKind::Guard => (MOTIVE_GUARD, 0),
+        MotiveKind::Defeat => (MOTIVE_DEFEAT, 0),
+        MotiveKind::Reach => (MOTIVE_REACH, 0),
+        MotiveKind::Custom(k) => (MOTIVE_CUSTOM, k),
+    }
+}
+
+/// The reaction of an `SX_ON_LOST_*` value; `ticks` and `radius` are the
+/// search's.
+pub const fn on_lost(kind: u32, ticks: u32, radius: u32) -> Option<OnLost> {
+    Some(match kind {
+        ON_LOST_RETURN => OnLost::Return,
+        ON_LOST_SEARCH => OnLost::Search { ticks, radius },
+        ON_LOST_KEEP => OnLost::Keep,
+        _ => return None,
+    })
+}
+
+/// The `SX_ON_LOST_*` value, ticks and radius (0 unless it searches).
+pub const fn on_lost_code(on_lost: OnLost) -> (u32, u32, u32) {
+    match on_lost {
+        OnLost::Return => (ON_LOST_RETURN, 0, 0),
+        OnLost::Search { ticks, radius } => (ON_LOST_SEARCH, ticks, radius),
+        OnLost::Keep => (ON_LOST_KEEP, 0, 0),
+    }
+}
+
+/// The preset of an `SX_LEEWAY_*` value.
+pub const fn leeway_preset(which: u32) -> Option<Leeway> {
+    match which {
+        LEEWAY_STRICT => Some(Leeway::STRICT),
+        LEEWAY_FLEXIBLE => Some(Leeway::FLEXIBLE),
+        LEEWAY_FREE => Some(Leeway::FREE),
+        _ => None,
+    }
+}
+
+/// The detour of an `SX_DETOUR_*` value: `ENGAGE` takes `subject`, `FLEE`
+/// the place `at` (`None`: not valid) to get away from and `to`, `CUSTOM`
+/// the game's kind `custom`, `at` and `param`.
+pub const fn detour(
+    kind: u32,
+    subject: u32,
+    at: Option<Where>,
+    to: Option<Pos>,
+    custom: u32,
+    param: u32,
+) -> Option<Detour> {
+    Some(match (kind, at) {
+        (DETOUR_ENGAGE, _) => Detour::Engage(subject),
+        (DETOUR_FLEE, Some(from)) => Detour::Flee { from, to },
+        (DETOUR_CUSTOM, Some(at)) => Detour::Custom {
+            kind: custom,
+            at,
+            param,
+        },
+        _ => return None,
+    })
+}
+
+/// An action as numbers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActionCode {
+    /// `SX_ACTION_*`.
+    pub kind: u32,
+    /// The position, if the action has one.
+    pub pos: Option<Pos>,
+    /// The subject (`FOLLOW`, `ATTACK`).
+    pub subject: u32,
+    /// The game's kind (`CUSTOM`).
+    pub custom: u32,
+    /// The parameter (`CUSTOM`).
+    pub param: u32,
+}
+
+/// The numbers of an action.
+pub const fn action_code(action: Action) -> ActionCode {
+    const fn of(kind: u32, pos: Option<Pos>) -> ActionCode {
+        ActionCode {
+            kind,
+            pos,
+            subject: 0,
+            custom: 0,
+            param: 0,
+        }
+    }
+    match action {
+        Action::None => of(ACTION_NONE, None),
+        Action::GoTo(p) => of(ACTION_GO_TO, Some(p)),
+        Action::Wait => of(ACTION_WAIT, None),
+        Action::Follow { subject, pos } => ActionCode {
+            subject,
+            ..of(ACTION_FOLLOW, Some(pos))
+        },
+        Action::Hold(p) => of(ACTION_HOLD, Some(p)),
+        Action::Attack { subject, pos } => ActionCode {
+            subject,
+            ..of(ACTION_ATTACK, Some(pos))
+        },
+        Action::Search(p) => of(ACTION_SEARCH, Some(p)),
+        Action::Wander => of(ACTION_WANDER, None),
+        Action::Flee(p) => of(ACTION_FLEE, Some(p)),
+        Action::Custom { kind, pos, param } => ActionCode {
+            custom: kind,
+            param,
+            ..of(ACTION_CUSTOM, pos)
+        },
+    }
+}
+
+/// A mission event as numbers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MissionEventCode {
+    /// `SX_MISSION_EVENT_*`.
+    pub kind: u32,
+    /// `STEP_DONE`: the step; `BROKEN`: `SX_BREAK_*`; `REPLANNED`: the
+    /// option; `DETOUR_ENDED`: `SX_DETOUR_END_*`; `SIGNAL`: the signal;
+    /// `CALL`: the channel; `WANTS_SQUAD`: the tactic.
+    pub a: u32,
+    /// `CALL`: the kind of call.
+    pub b: u32,
+    /// `CALL`: the caller's position; `WANTS_SQUAD`: the target place.
+    pub pos: Option<Pos>,
+    /// `WANTS_SQUAD`: the target subject.
+    pub subject: Option<u32>,
+    /// `BROKEN` with `SX_BREAK_FAIL`: the condition that fired.
+    pub fail: Option<Fail>,
+}
+
+/// The numbers of a mission event.
+pub const fn mission_event(event: Event) -> MissionEventCode {
+    const fn of(kind: u32, a: u32) -> MissionEventCode {
+        MissionEventCode {
+            kind,
+            a,
+            b: 0,
+            pos: None,
+            subject: None,
+            fail: None,
+        }
+    }
+    match event {
+        Event::StepDone(i) => of(MISSION_EVENT_STEP_DONE, i as u32),
+        Event::Looped => of(MISSION_EVENT_LOOPED, 0),
+        Event::PlanDone => of(MISSION_EVENT_PLAN_DONE, 0),
+        Event::Broken(BreakReason::Fail(f)) => MissionEventCode {
+            fail: Some(f),
+            ..of(MISSION_EVENT_BROKEN, BREAK_FAIL)
+        },
+        Event::Broken(BreakReason::Impossible) => of(MISSION_EVENT_BROKEN, BREAK_IMPOSSIBLE),
+        Event::Broken(BreakReason::PlanEnded) => of(MISSION_EVENT_BROKEN, BREAK_PLAN_ENDED),
+        Event::Replanned { option } => of(MISSION_EVENT_REPLANNED, option),
+        Event::FellBack => of(MISSION_EVENT_FELL_BACK, 0),
+        Event::DetourStarted => of(MISSION_EVENT_DETOUR_STARTED, 0),
+        Event::DetourEnded(why) => of(
+            MISSION_EVENT_DETOUR_ENDED,
+            match why {
+                DetourEnd::Defeated => DETOUR_END_DEFEATED,
+                DetourEnd::Forgotten => DETOUR_END_FORGOTTEN,
+                DetourEnd::Lost => DETOUR_END_LOST,
+                DetourEnd::Leash => DETOUR_END_LEASH,
+                DetourEnd::Safe => DETOUR_END_SAFE,
+                DetourEnd::Arrived => DETOUR_END_ARRIVED,
+                DetourEnd::Ended => DETOUR_END_ENDED,
+            },
+        ),
+        Event::Returned => of(MISSION_EVENT_RETURNED, 0),
+        Event::Signal(n) => of(MISSION_EVENT_SIGNAL, n),
+        Event::Call { channel, kind, pos } => MissionEventCode {
+            b: kind,
+            pos: Some(pos),
+            ..of(MISSION_EVENT_CALL, channel)
+        },
+        Event::WantsSquad {
+            tactic,
+            target,
+            subject,
+        } => MissionEventCode {
+            pos: target,
+            subject,
+            ..of(MISSION_EVENT_WANTS_SQUAD, tactic)
+        },
     }
 }
 

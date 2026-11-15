@@ -153,3 +153,150 @@ pub const ALL_OPTIONS: u32 = u32::MAX;
 /// `SX_COMBINE_FOLLOW`: `combine` of `sx_decider_set_combine` for "follow
 /// the decider".
 pub const COMBINE_FOLLOW: u32 = u32::MAX;
+
+/// `SX_WHERE_FIXED`: a fixed position.
+pub const WHERE_FIXED: u32 = 0;
+/// `SX_WHERE_SUBJECT`: where a subject was last known.
+pub const WHERE_SUBJECT: u32 = 1;
+/// `SX_WHERE_MOTIVE_PLACE`: the place of the motive.
+pub const WHERE_MOTIVE_PLACE: u32 = 2;
+/// `SX_WHERE_MOTIVE_SUBJECT`: where the motive's subject was last known.
+pub const WHERE_MOTIVE_SUBJECT: u32 = 3;
+/// `SX_WHERE_HERE`: where the character stands.
+pub const WHERE_HERE: u32 = 4;
+
+/// `SX_STEP_GO_TO`.
+pub const STEP_GO_TO: u32 = 0;
+/// `SX_STEP_WAIT`.
+pub const STEP_WAIT: u32 = 1;
+/// `SX_STEP_PAUSE`.
+pub const STEP_PAUSE: u32 = 2;
+/// `SX_STEP_FOLLOW`.
+pub const STEP_FOLLOW: u32 = 3;
+/// `SX_STEP_WAIT_FOR`.
+pub const STEP_WAIT_FOR: u32 = 4;
+/// `SX_STEP_SEARCH`.
+pub const STEP_SEARCH: u32 = 5;
+/// `SX_STEP_HOLD`.
+pub const STEP_HOLD: u32 = 6;
+/// `SX_STEP_ATTACK`.
+pub const STEP_ATTACK: u32 = 7;
+/// `SX_STEP_WANDER`.
+pub const STEP_WANDER: u32 = 8;
+/// `SX_STEP_SIGNAL`.
+pub const STEP_SIGNAL: u32 = 9;
+/// `SX_STEP_CUSTOM`.
+pub const STEP_CUSTOM: u32 = 10;
+/// `SX_STEP_CALL`.
+pub const STEP_CALL: u32 = 11;
+/// `SX_STEP_SQUAD`.
+pub const STEP_SQUAD: u32 = 12;
+
+/// `SX_FAIL_UNKNOWN`.
+pub const FAIL_UNKNOWN: u32 = 0;
+/// `SX_FAIL_DEFEATED`.
+pub const FAIL_DEFEATED: u32 = 1;
+/// `SX_FAIL_FACT`.
+pub const FAIL_FACT: u32 = 2;
+/// `SX_FAIL_FLAGS`.
+pub const FAIL_FLAGS: u32 = 3;
+/// `SX_FAIL_CUSTOM`.
+pub const FAIL_CUSTOM: u32 = 4;
+
+/// `SX_MOTIVE_GUARD`.
+pub const MOTIVE_GUARD: u32 = 0;
+/// `SX_MOTIVE_DEFEAT`.
+pub const MOTIVE_DEFEAT: u32 = 1;
+/// `SX_MOTIVE_REACH`.
+pub const MOTIVE_REACH: u32 = 2;
+/// `SX_MOTIVE_CUSTOM`.
+pub const MOTIVE_CUSTOM: u32 = 3;
+
+/// `SX_ON_LOST_RETURN`.
+pub const ON_LOST_RETURN: u32 = 0;
+/// `SX_ON_LOST_SEARCH`.
+pub const ON_LOST_SEARCH: u32 = 1;
+/// `SX_ON_LOST_KEEP`.
+pub const ON_LOST_KEEP: u32 = 2;
+
+/// `SX_LEEWAY_STRICT`.
+pub const LEEWAY_STRICT: u32 = 0;
+/// `SX_LEEWAY_FLEXIBLE`.
+pub const LEEWAY_FLEXIBLE: u32 = 1;
+/// `SX_LEEWAY_FREE`.
+pub const LEEWAY_FREE: u32 = 2;
+
+/// `SX_DETOUR_ENGAGE`.
+pub const DETOUR_ENGAGE: u32 = 0;
+/// `SX_DETOUR_FLEE`.
+pub const DETOUR_FLEE: u32 = 1;
+/// `SX_DETOUR_CUSTOM`.
+pub const DETOUR_CUSTOM: u32 = 2;
+
+/// `SX_ACTION_NONE`.
+pub const ACTION_NONE: u32 = 0;
+/// `SX_ACTION_GO_TO`.
+pub const ACTION_GO_TO: u32 = 1;
+/// `SX_ACTION_WAIT`.
+pub const ACTION_WAIT: u32 = 2;
+/// `SX_ACTION_FOLLOW`.
+pub const ACTION_FOLLOW: u32 = 3;
+/// `SX_ACTION_HOLD`.
+pub const ACTION_HOLD: u32 = 4;
+/// `SX_ACTION_ATTACK`.
+pub const ACTION_ATTACK: u32 = 5;
+/// `SX_ACTION_SEARCH`.
+pub const ACTION_SEARCH: u32 = 6;
+/// `SX_ACTION_WANDER`.
+pub const ACTION_WANDER: u32 = 7;
+/// `SX_ACTION_FLEE`.
+pub const ACTION_FLEE: u32 = 8;
+/// `SX_ACTION_CUSTOM`.
+pub const ACTION_CUSTOM: u32 = 9;
+
+/// `SX_MISSION_EVENT_STEP_DONE`.
+pub const MISSION_EVENT_STEP_DONE: u32 = 0;
+/// `SX_MISSION_EVENT_LOOPED`.
+pub const MISSION_EVENT_LOOPED: u32 = 1;
+/// `SX_MISSION_EVENT_PLAN_DONE`.
+pub const MISSION_EVENT_PLAN_DONE: u32 = 2;
+/// `SX_MISSION_EVENT_BROKEN`.
+pub const MISSION_EVENT_BROKEN: u32 = 3;
+/// `SX_MISSION_EVENT_REPLANNED`.
+pub const MISSION_EVENT_REPLANNED: u32 = 4;
+/// `SX_MISSION_EVENT_FELL_BACK`.
+pub const MISSION_EVENT_FELL_BACK: u32 = 5;
+/// `SX_MISSION_EVENT_DETOUR_STARTED`.
+pub const MISSION_EVENT_DETOUR_STARTED: u32 = 6;
+/// `SX_MISSION_EVENT_DETOUR_ENDED`.
+pub const MISSION_EVENT_DETOUR_ENDED: u32 = 7;
+/// `SX_MISSION_EVENT_RETURNED`.
+pub const MISSION_EVENT_RETURNED: u32 = 8;
+/// `SX_MISSION_EVENT_SIGNAL`.
+pub const MISSION_EVENT_SIGNAL: u32 = 9;
+/// `SX_MISSION_EVENT_CALL`.
+pub const MISSION_EVENT_CALL: u32 = 10;
+/// `SX_MISSION_EVENT_WANTS_SQUAD`.
+pub const MISSION_EVENT_WANTS_SQUAD: u32 = 11;
+
+/// `SX_BREAK_FAIL`: a fail condition fired.
+pub const BREAK_FAIL: u32 = 0;
+/// `SX_BREAK_IMPOSSIBLE`: a step could not be done.
+pub const BREAK_IMPOSSIBLE: u32 = 1;
+/// `SX_BREAK_PLAN_ENDED`: the plan ended.
+pub const BREAK_PLAN_ENDED: u32 = 2;
+
+/// `SX_DETOUR_END_DEFEATED`.
+pub const DETOUR_END_DEFEATED: u32 = 0;
+/// `SX_DETOUR_END_FORGOTTEN`.
+pub const DETOUR_END_FORGOTTEN: u32 = 1;
+/// `SX_DETOUR_END_LOST`.
+pub const DETOUR_END_LOST: u32 = 2;
+/// `SX_DETOUR_END_LEASH`.
+pub const DETOUR_END_LEASH: u32 = 3;
+/// `SX_DETOUR_END_SAFE`.
+pub const DETOUR_END_SAFE: u32 = 4;
+/// `SX_DETOUR_END_ARRIVED`.
+pub const DETOUR_END_ARRIVED: u32 = 5;
+/// `SX_DETOUR_END_ENDED`.
+pub const DETOUR_END_ENDED: u32 = 6;

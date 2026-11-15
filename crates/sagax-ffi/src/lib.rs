@@ -23,7 +23,7 @@ use sagax_nav::topology::Topology;
 use sagax_nav::trace::{TraceEvent, TraceSink, Tracer};
 
 /// Version of the C interface (`SX_API_VERSION`).
-pub const API_VERSION: u32 = 10;
+pub const API_VERSION: u32 = 11;
 
 /// `sx_step_fn`.
 pub type StepFn = unsafe extern "C" fn(*mut c_void, i32, i32, i32, i32, i32) -> i32;
@@ -1241,4 +1241,5 @@ pub mod machine;
 pub mod memory;
 pub mod crew;
 pub mod group;
+pub mod mission;
 pub mod rules;

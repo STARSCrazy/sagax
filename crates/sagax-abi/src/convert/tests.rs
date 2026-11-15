@@ -1,5 +1,4 @@
 use super::*;
-use crate::codes::*;
 use sagax_decide::group::Goal;
 
 fn goal(plan: u32) -> Goal {
@@ -214,4 +213,158 @@ fn statuses_and_errors() {
         plan_error(PlanError::TooManySlots { tactic: 1 }),
         (ERROR_PLAN, 1, u32::MAX)
     );
+}
+
+#[test]
+fn mission_codes_round_trip() {
+    for p in [
+        Pick::Best,
+        Pick::Weighted { top: 3 },
+        Pick::Uniform { top: 0 },
+    ] {
+        let (mode, top) = pick_code(p);
+        assert_eq!(Pick::from_u32(mode, top), Some(p));
+    }
+    for grid in GRID_SQUARE..=GRID_HEX_EVEN_Q {
+        assert_eq!(grid_code(hex_layout(grid)), grid);
+    }
+    let fails = [
+        Fail::Unknown { subject: 1 },
+        Fail::Defeated { subject: 2 },
+        Fail::Fact {
+            subject: 3,
+            kind: 4,
+            mask: 5,
+            value: 6,
+        },
+        Fail::Flags {
+            mask: 1 << 50,
+            value: 7,
+        },
+        Fail::Custom(8),
+    ];
+    for f in fails {
+        assert_eq!(fail(&fail_code(f)), Some(f));
+    }
+    assert_eq!(
+        fail(&FailCode {
+            kind: 5,
+            ..FailCode::default()
+        }),
+        None
+    );
+    for k in [
+        MotiveKind::Guard,
+        MotiveKind::Defeat,
+        MotiveKind::Reach,
+        MotiveKind::Custom(9),
+    ] {
+        let (kind, custom) = motive_kind_code(k);
+        assert_eq!(motive_kind(kind, custom), Some(k));
+    }
+    assert_eq!(motive_kind(4, 0), None);
+    for o in [
+        OnLost::Return,
+        OnLost::Search {
+            ticks: 6,
+            radius: 3,
+        },
+        OnLost::Keep,
+    ] {
+        let (kind, ticks, radius) = on_lost_code(o);
+        assert_eq!(on_lost(kind, ticks, radius), Some(o));
+    }
+    assert_eq!(on_lost(3, 0, 0), None);
+    assert_eq!(leeway_preset(LEEWAY_FREE), Some(Leeway::FREE));
+    assert_eq!(leeway_preset(3), None);
+}
+
+#[test]
+fn mission_steps_and_detours() {
+    let here = Some(Where::Here);
+    for kind in STEP_GO_TO..=STEP_SQUAD {
+        let with = step_kind(kind, here, 1, 2);
+        assert!(with.is_some(), "kind {kind}");
+        let needs_place = matches!(
+            kind,
+            STEP_GO_TO | STEP_SEARCH | STEP_HOLD | STEP_CUSTOM | STEP_SQUAD
+        );
+        assert_eq!(
+            step_kind(kind, None, 1, 2).is_none(),
+            needs_place,
+            "kind {kind}"
+        );
+    }
+    assert_eq!(step_kind(STEP_SQUAD + 1, here, 0, 0), None);
+    assert_eq!(
+        step_kind(STEP_CALL, None, 3, 4),
+        Some(StepKind::Call {
+            channel: 3,
+            kind: 4
+        })
+    );
+    for kind in WHERE_FIXED..=WHERE_HERE {
+        assert!(where_of(kind, [1, 2, 3], 4).is_some());
+    }
+    assert_eq!(where_of(WHERE_HERE + 1, [0; 3], 0), None);
+    assert_eq!(
+        detour(DETOUR_ENGAGE, 5, None, None, 0, 0),
+        Some(Detour::Engage(5))
+    );
+    assert_eq!(detour(DETOUR_FLEE, 0, None, None, 0, 0), None);
+    assert_eq!(
+        detour(DETOUR_FLEE, 0, here, Some([1, 1, 0]), 0, 0),
+        Some(Detour::Flee {
+            from: Where::Here,
+            to: Some([1, 1, 0])
+        })
+    );
+    assert_eq!(detour(DETOUR_CUSTOM + 1, 0, here, None, 0, 0), None);
+}
+
+#[test]
+fn mission_outputs() {
+    let a = action_code(Action::Custom {
+        kind: 4,
+        pos: None,
+        param: 9,
+    });
+    assert_eq!(
+        (a.kind, a.pos, a.custom, a.param),
+        (ACTION_CUSTOM, None, 4, 9)
+    );
+    let a = action_code(Action::Attack {
+        subject: 3,
+        pos: [1, 2, 0],
+    });
+    assert_eq!(
+        (a.kind, a.pos, a.subject),
+        (ACTION_ATTACK, Some([1, 2, 0]), 3)
+    );
+    let e = mission_event(Event::Broken(BreakReason::Fail(Fail::Custom(2))));
+    assert_eq!(
+        (e.kind, e.a, e.fail),
+        (MISSION_EVENT_BROKEN, BREAK_FAIL, Some(Fail::Custom(2)))
+    );
+    let e = mission_event(Event::WantsSquad {
+        tactic: 1,
+        target: None,
+        subject: Some(7),
+    });
+    assert_eq!(
+        (e.kind, e.a, e.pos, e.subject),
+        (MISSION_EVENT_WANTS_SQUAD, 1, None, Some(7))
+    );
+    let e = mission_event(Event::Call {
+        channel: 2,
+        kind: 3,
+        pos: [4, 5, 0],
+    });
+    assert_eq!((e.a, e.b, e.pos), (2, 3, Some([4, 5, 0])));
+    let e = mission_event(Event::DetourEnded(DetourEnd::Arrived));
+    assert_eq!(
+        (e.kind, e.a),
+        (MISSION_EVENT_DETOUR_ENDED, DETOUR_END_ARRIVED)
+    );
+    assert_eq!(mission_event(Event::StepDone(3)).a, 3);
 }

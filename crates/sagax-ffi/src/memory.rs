@@ -67,6 +67,51 @@ pub struct SxPointPattern {
     pub max_y: i32,
 }
 
+impl SxPointPattern {
+    /// The pattern; `None` for more than 8 entries or an unknown sine.
+    pub(crate) fn pattern(&self) -> Option<PointPattern> {
+        let n = self.count as usize;
+        if n > PATTERN_MAX {
+            return None;
+        }
+        Some(PointPattern {
+            heading_step: self.heading_step,
+            first_distance: self.first_distance,
+            offsets: self.offsets[..n].to_vec(),
+            distances: self.distances[..n].to_vec(),
+            sine: sine_of(self.sine)?,
+            min: (self.min_x, self.min_y),
+            max: (self.max_x, self.max_y),
+        })
+    }
+
+    /// The C form of a pattern; `None` for more than 8 entries or
+    /// `offsets` and `distances` of different lengths.
+    pub(crate) fn of(p: &PointPattern) -> Option<Self> {
+        let n = p.distances.len();
+        if n > PATTERN_MAX || p.offsets.len() != n {
+            return None;
+        }
+        let mut c = Self {
+            heading_step: p.heading_step,
+            first_distance: p.first_distance,
+            count: n as u32,
+            sine: match p.sine {
+                Sine::Fine => 0,
+                Sine::Coarse => 1,
+            },
+            min_x: p.min.0,
+            min_y: p.min.1,
+            max_x: p.max.0,
+            max_y: p.max.1,
+            ..Self::default()
+        };
+        c.offsets[..n].copy_from_slice(&p.offsets);
+        c.distances[..n].copy_from_slice(&p.distances);
+        Some(c)
+    }
+}
+
 fn flag(b: bool) -> i32 {
     i32::from(b)
 }
@@ -138,7 +183,7 @@ unsafe fn write_messages(moved: &[Message], out: *mut Message, out_cap: u32) -> 
 
 /// `sx_knowledge`.
 #[repr(transparent)]
-pub struct SxKnowledge(Knowledge);
+pub struct SxKnowledge(pub(crate) Knowledge);
 
 /// `sx_knowledge_new`.
 #[unsafe(no_mangle)]
@@ -1150,24 +1195,10 @@ pub unsafe extern "C" fn sx_points_around(
     // SAFETY: see above.
     let pattern = match unsafe { pattern.as_ref() } {
         None => PointPattern::default(),
-        Some(p) => {
-            let n = p.count as usize;
-            let Some(kind) = sine_of(p.sine) else {
-                return ERROR_ARGUMENT;
-            };
-            if n > PATTERN_MAX {
-                return ERROR_ARGUMENT;
-            }
-            PointPattern {
-                heading_step: p.heading_step,
-                first_distance: p.first_distance,
-                offsets: p.offsets[..n].to_vec(),
-                distances: p.distances[..n].to_vec(),
-                sine: kind,
-                min: (p.min_x, p.min_y),
-                max: (p.max_x, p.max_y),
-            }
-        }
+        Some(p) => match p.pattern() {
+            Some(pattern) => pattern,
+            None => return ERROR_ARGUMENT,
+        },
     };
     match points_around(agent, step as usize, [cx, cy, cz], &pattern) {
         Some(pos) => {

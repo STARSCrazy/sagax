@@ -5,7 +5,8 @@ use sagax_decide::group::{
     Abort, Channel, Goal, GoalKeeper, Member, MemberState, Nearby, Order, Place, Plan, PlanError,
     SkillTable, Slot, Spot, Squad, SquadConfig, Tactic, Trigger, gather, tactics,
 };
-use sagax_decide::{Consideration, Curve};
+use sagax_decide::{Consideration, Curve, Decider};
+use std::ffi::c_void;
 
 use super::crew::SxCrew;
 use super::decide::{SxConsideration, SxDecideEvent, SxDecider};
@@ -556,30 +557,47 @@ pub(crate) enum Held<T> {
     /// Lent by a crew (see `sx_crew_squad`, `sx_crew_keeper`), which frees
     /// the handle with itself. Freeing the handle does nothing.
     Lent(Lend<T>),
-    /// Lent by a squad handle (see `sx_squad_decider`), which frees the
-    /// handle with itself. Freeing the handle does nothing.
+    /// Lent by another handle (see `sx_squad_decider`,
+    /// `sx_mission_decider`), which frees the handle with itself. Freeing
+    /// the handle does nothing.
     Inside(Inside<T>),
 }
 
-/// A value inside a squad, reached through its handle anew on every call.
+/// A value inside another handle (a squad, a mission), reached through it
+/// anew on every call.
 pub(crate) struct Inside<T> {
-    /// The squad handle, which frees this handle with itself.
-    pub(crate) root: *mut SxSquad,
-    /// The value in the squad.
-    pub(crate) get: fn(&mut Squad) -> &mut T,
+    /// The owning handle, which frees this handle with itself.
+    pub(crate) root: *mut c_void,
+    /// The value in the owner, or `None` (a stale squad handle).
+    ///
+    /// # Safety
+    /// Called only with `root`, while no other reference into it is alive.
+    pub(crate) get: unsafe fn(*mut c_void) -> Option<*mut T>,
 }
 
 impl<T> Inside<T> {
-    /// The value, or `None` for a stale squad handle.
+    /// The value, or `None` for a stale owner.
     fn reach<'a>(&self) -> Option<&'a mut T> {
-        // SAFETY: `root` is the squad handle that made this one and frees it
-        // with itself, so it is alive while this handle is. This handle is
-        // its own allocation, and the C interface is single-threaded per
-        // squad, so no other reference into the squad is alive during this
-        // call; the reference is used only within it.
-        let squad = unsafe { &mut *self.root };
-        squad.squad.get_mut().map(self.get)
+        // SAFETY: `root` is the handle that made this one and frees it with
+        // itself, so it is alive while this handle is. This handle is its
+        // own allocation, and the C interface is single-threaded per handle,
+        // so no other reference into the owner is alive during this call;
+        // the reference is used only within it.
+        unsafe { (self.get)(self.root).map(|p| &mut *p) }
     }
+}
+
+/// The decider of the squad handle `root` (an [`SxSquad`]).
+///
+/// # Safety
+/// `root` is a live squad handle with no other reference into it alive.
+unsafe fn squad_decider(root: *mut c_void) -> Option<*mut Decider> {
+    // SAFETY: see above.
+    let squad = unsafe { &mut *root.cast::<SxSquad>() };
+    squad
+        .squad
+        .get_mut()
+        .map(|s| std::ptr::from_mut(s.decider_mut()))
 }
 
 /// A value lent by a crew. Only the crew's root pointer is kept: the value
@@ -1144,8 +1162,8 @@ pub unsafe extern "C" fn sx_squad_decider(squad: *mut SxSquad) -> *mut SxDecider
     if s.decider.is_null() {
         s.decider = create(|| {
             Some(SxDecider::held(Held::Inside(Inside {
-                root: squad,
-                get: Squad::decider_mut,
+                root: squad.cast(),
+                get: squad_decider,
             })))
         });
     }
