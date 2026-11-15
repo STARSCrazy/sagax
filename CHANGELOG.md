@@ -17,8 +17,8 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   candidate in option order, its row (`MissionTraceEvent::Column`), its
   considerations (`Factor`) and its score (`Scored`: product, the decider's
   score and the score after the `score` slot), then the winner (`Picked`,
-  `None` when every candidate scored 0; `MissionTraceEvent` is in the
-  prelude). The events are plain data, so
+  `None` when every candidate scored 0; `MissionTraceEvent` is in
+  `sagax::decide::mission`). The events are plain data, so
   `sagax_debug::Collector` keeps them. A trace never changes an action or
   an event.
 - **C:** `sx_mission_set_trace(mission, fn, context)` in the style of
@@ -32,6 +32,38 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   `Mission::motive`, `leeway` and `plan` give in Rust.
 - `sagax-abi`: `where_code` and `step_kind_code` (the inverses of `where_of`
   and `step_kind`), `mission_trace_event`.
+- **One trace pattern** (navigation first): a trace is a `Sink` parameter.
+  Every operation that decides something is `op_traced(.., sink)` with the
+  sink last; the plain `op(..)` is `op_traced(.., &mut NoopSink)` and costs
+  nothing extra. No Rust type stores a trace. Debug records end in `*Trace`,
+  game output in `*Event`.
+- `sagax_core::MapSink`: the one adapter between trace types; it maps each
+  record and hands it on (`enabled` is the inner sink's). A facade passes
+  `&mut MapSink::new(sink, Outer::Inner)` to the module it drives.
+- **`sagax::debug` is a module**, the one place for tracing:
+  `Sink`, `NoopSink`, `CallbackSink`, `MapSink`, `Collector`, `Overflow`,
+  `Record`, `SearchTrace`, `NavTrace`, `SmoothTrace`, `FormationTrace`
+  (`use sagax::debug::*;`).
+- **`Navigator` traces:** `find_path_traced`, `continue_search_traced`,
+  `reachable_traced`, `flee_traced`, `output_traced`, `formation_traced`
+  report `NavTrace` records: `Search(SearchTrace)` (paths, areas, both
+  searches of a flee), `Smooth(SmoothTrace)` (each line the smoothing
+  tested), `Formation(FormationTrace)` (each member placement) and
+  `FleeBest { cell, distance, cost }` (the cell a flee chose).
+- `smooth::SmoothTrace` with `smooth_path_traced`; `formation::FormationTrace`
+  (`Placed { member, step, cell, slot }`, `Unplaced { member, step }`) with
+  `place_members_traced`, `place_members_hex_traced`;
+  `Topology::smooth_traced`, `Topology::place_members_traced`;
+  `nav::write_way_traced`. `sagax_nav::search` is a public module.
+- `sagax-abi`: `search_trace` / `SearchTraceCode`, `nav_trace` /
+  `NavTraceCode` and the codes `SEARCH_TRACE_*`, `NAV_TRACE_*`, shared by
+  the C and the WebAssembly layer.
+- **C:** `sx_search_trace` (`sx_search_trace_fn`) for flow fields and D*
+  Lite, `sx_nav_trace` (`sx_nav_trace_fn`) for the navigator with the codes
+  `SX_SEARCH_TRACE_STARTED` .. `_FINISHED` and `SX_NAV_TRACE_SEARCH`,
+  `_SHORTCUT`, `_PLACED`, `_UNPLACED`, `_FLEE_BEST`. The nav trace covers
+  every `sx_nav_*` call and `sx_path_cost`. A null handle to a
+  `sx_*_set_trace` answers `SX_ERROR_ARGUMENT`.
 
 ### Changed
 
@@ -42,6 +74,37 @@ older library; `sx_mission_event` and `sx_mission_out` grew (see below).
   *Migration:* a Rust `match` that names every field of `Event::Call` adds
   `motive` (or `..`); code that builds an `Event::Call` sets it. C code
   recompiles against the new header; nothing else changes.
+- **The navigator stores no tracer any more**: `Navigator::set_tracer`, the
+  module `sagax_nav::trace` (`TraceEvent`, `TraceKind`, `Tracer`,
+  `TraceSink`) are removed; pass a sink to the `_traced` calls instead.
+  `SearchEvent` is renamed `SearchTrace` (same variants). The search,
+  flow and D* Lite traced calls accept unsized sinks (`&mut dyn Sink<..>`).
+- **The `sagax` root no longer re-exports `Sink`, `NoopSink`,
+  `CallbackSink`** (they are in `sagax::debug`). The prelude exports no
+  trace items.
+- **C:** `sx_event` and `sx_trace_fn` are replaced: `sx_nav_set_trace` takes
+  an `sx_nav_trace_fn` (search steps arrive as `SX_NAV_TRACE_SEARCH` with the
+  step in `search`), `sx_flow_set_trace` and `sx_dstar_set_trace` take an
+  `sx_search_trace_fn`. The search record gains `search` (the search's
+  number) and `first`, `kind` is `uint32_t`, `found` a `uint8_t`; the kind
+  numbers stay 1 to 5. The nav trace now also reports the smoothing, the
+  formation and the flee's choice and the threats' search of a flee.
+- WebAssembly / JavaScript: unchanged (`grid.setTrace`, `grid.takeTrace`
+  give the search steps as before).
+
+### Migration table, 0.11 to 0.12
+
+| 0.11 | 0.12 |
+|---|---|
+| `sagax::{Sink, NoopSink, CallbackSink}` | `sagax::debug::{Sink, NoopSink, CallbackSink}` |
+| `sagax::debug` (the `sagax-debug` crate) | `sagax::debug` module: the same `Collector`, `Overflow`, `Record` plus the sinks and trace types |
+| `SearchEvent<N>` | `SearchTrace<N>` (also `sagax_nav::search::SearchTrace`) |
+| `sagax_nav::trace::{TraceEvent, TraceKind, Tracer, TraceSink}` | removed; `NavTrace` and the `_traced` calls |
+| `nav.set_tracer(Some(..))`, then `find_path` | `nav.find_path_traced(.., &mut sink)`; likewise `continue_search_traced`, `reachable_traced`, `flee_traced`, `output_traced`, `formation_traced` |
+| C `sx_event`, `sx_trace_fn` | `sx_search_trace`, `sx_search_trace_fn` (flow, D* Lite); `sx_nav_trace`, `sx_nav_trace_fn` (nav: the search step in `.search`) |
+| C `SX_TRACE_STARTED` .. `SX_TRACE_FINISHED` | `SX_SEARCH_TRACE_STARTED` .. `SX_SEARCH_TRACE_FINISHED` (same numbers) |
+| C `sx_nav_set_trace(nav, sx_trace_fn, ..)` | `sx_nav_set_trace(nav, sx_nav_trace_fn, ..)` |
+| C `sx_flow_set_trace`, `sx_dstar_set_trace` with `sx_trace_fn` | the same names with `sx_search_trace_fn` |
 
 ## 0.11.0
 
