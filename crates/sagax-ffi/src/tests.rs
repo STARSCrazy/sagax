@@ -77,8 +77,8 @@ fn wall_line() -> Walls {
 }
 
 #[test]
-fn version_is_11() {
-    assert_eq!(sx_api_version(), 11);
+fn version_is_12() {
+    assert_eq!(sx_api_version(), 12);
 }
 
 #[test]
@@ -1002,7 +1002,7 @@ mod squad {
         assert_eq!(size_of::<SxPlan>(), 28);
         assert_eq!(size_of::<SxSkillTable>(), 204);
         assert_eq!(size_of::<SxScoreEvent>(), 36);
-        assert_eq!(define("SX_API_VERSION"), 11);
+        assert_eq!(define("SX_API_VERSION"), 12);
         assert_eq!(define("SX_ERROR_PLAN"), i64::from(ERROR_PLAN));
         assert_eq!(define("SX_IDLE"), i64::from(IDLE));
         let core = [
@@ -1170,6 +1170,10 @@ mod squad {
             ("SX_MISSION_EVENT_SIGNAL", MISSION_EVENT_SIGNAL),
             ("SX_MISSION_EVENT_CALL", MISSION_EVENT_CALL),
             ("SX_MISSION_EVENT_WANTS_SQUAD", MISSION_EVENT_WANTS_SQUAD),
+            ("SX_MISSION_TRACE_COLUMN", MISSION_TRACE_COLUMN),
+            ("SX_MISSION_TRACE_FACTOR", MISSION_TRACE_FACTOR),
+            ("SX_MISSION_TRACE_SCORED", MISSION_TRACE_SCORED),
+            ("SX_MISSION_TRACE_PICKED", MISSION_TRACE_PICKED),
             ("SX_BREAK_FAIL", BREAK_FAIL),
             ("SX_BREAK_IMPOSSIBLE", BREAK_IMPOSSIBLE),
             ("SX_BREAK_PLAN_ENDED", BREAK_PLAN_ENDED),
@@ -2852,8 +2856,8 @@ mod conventions {
         };
         use crate::mission::{
             SxDetour, SxFail, SxLeeway, SxMissionAction, SxMissionConfig, SxMissionEvent,
-            SxMissionFailCtx, SxMissionOut, SxMissionPlanCtx, SxMissionPlanInfo, SxMotive, SxStep,
-            SxWhere,
+            SxMissionFailCtx, SxMissionOut, SxMissionPlanCtx, SxMissionPlanInfo,
+            SxMissionTraceEvent, SxMotive, SxStep, SxWhere,
         };
         use crate::rules::{SxChannelCtx, SxCostCtx, SxPlaceCtx, SxSpotCtx, SxViewPlan};
         use crate::{Point, SxEvent, SxResult, SxRules};
@@ -3020,6 +3024,13 @@ mod conventions {
                 grid,
                 pick_top,
                 search
+            ),
+            layout!(
+                "sx_mission_trace_event",
+                SxMissionTraceEvent,
+                index,
+                score,
+                has_option
             ),
             layout!(
                 "sx_mission_plan_info",
@@ -4036,7 +4047,7 @@ mod path_cost {
 }
 
 mod mission {
-    //! `sx_mission_*` (C API 11): the Rust `Mission` through C. Each scene
+    //! `sx_mission_*` (C API 11, getters and trace 12): the Rust `Mission` through C. Each scene
     //! runs a C mission and the same Rust mission side by side and checks
     //! that every tick gives the same action and events.
 
@@ -4593,6 +4604,88 @@ mod mission {
         for (c, r) in back.iter().zip(plan.steps()) {
             assert_eq!(c.step(), Some(*r));
         }
+    }
+
+    unsafe extern "C" fn collect_trace(ctx: *mut c_void, e: *const SxMissionTraceEvent) {
+        let events = unsafe { &mut *ctx.cast::<Vec<SxMissionTraceEvent>>() };
+        events.push(unsafe { *e });
+    }
+
+    #[test]
+    fn trace_matches_rust() {
+        let mut t = twin(LEEWAY_FLEXIBLE);
+        let attack = [c_step(STEP_ATTACK, THIEF, 0, SxWhere::default())];
+        unsafe { sx_mission_add_playbook(t.c, attack.as_ptr(), 1, 0, null(), 0, ONE, 0) };
+        t.r.add_playbook(&Plan::once(&[Step::attack(THIEF)]), ONE, false)
+            .unwrap();
+        let mut c_events: Vec<SxMissionTraceEvent> = Vec::new();
+        let ctx = (&raw mut c_events).cast();
+        assert_eq!(
+            unsafe { sx_mission_set_trace(t.c, Some(collect_trace), ctx) },
+            0
+        );
+        assert_eq!(
+            unsafe { sx_mission_set_trace(null_mut(), None, null_mut()) },
+            -1
+        );
+        let k = t.k;
+        let mut r_events = Vec::new();
+        let mut pos = t.pos;
+        for now in 0..14 {
+            if now == 10 {
+                t.learn(now, fact(ITEM, STOLEN, [0; 3], now));
+                t.learn(now, fact(THIEF, SEEN, [13, 6, 0], now));
+            }
+            let mut out = SxMissionOut::default();
+            unsafe { sx_mission_tick(t.c, now, pos.as_ptr(), k, 0, &mut out) };
+            let know = unsafe { &(*k).0 };
+            let mut sink = sagax_core::CallbackSink(|e| r_events.push(SxMissionTraceEvent::of(e)));
+            let r = t.r.tick_traced(
+                now,
+                pos,
+                know,
+                0,
+                &mut sagax_decide::mission::BuiltInRules,
+                &mut sink,
+            );
+            assert_eq!(out.action, action_of(r.action));
+            toward(&mut pos, &out.action);
+        }
+        assert_eq!(c_events, r_events);
+        // One scoring: the playbook slot and the default plan, then the pick.
+        let picked: Vec<_> = c_events
+            .iter()
+            .filter(|e| e.kind == MISSION_TRACE_PICKED)
+            .collect();
+        assert_eq!(picked.len(), 1);
+        assert_eq!((picked[0].option, picked[0].has_option), (0, 1));
+        let scored: Vec<u32> = c_events
+            .iter()
+            .filter(|e| e.kind == MISSION_TRACE_SCORED)
+            .map(|e| e.option)
+            .collect();
+        assert_eq!(scored, [0, 8]);
+        let columns = c_events
+            .iter()
+            .filter(|e| e.kind == MISSION_TRACE_COLUMN)
+            .count();
+        assert_eq!(columns, 2 * IN_EXTRA);
+
+        // Off again: nothing more arrives.
+        let before = c_events.len();
+        unsafe {
+            assert_eq!(sx_mission_set_trace(t.c, None, null_mut()), 0);
+            let mut out = SxMissionOut::default();
+            let empty = sx_knowledge_new(4, 0);
+            // A fresh replan: the knowledge is empty, the thief unknown.
+            let steps = [c_step(STEP_WAIT, 1, 0, SxWhere::default())];
+            sx_mission_set_plan(t.c, steps.as_ptr(), 1, 0, null(), 0);
+            for now in 14..18 {
+                sx_mission_tick(t.c, now, pos.as_ptr(), empty, 0, &mut out);
+            }
+            sx_knowledge_free(empty);
+        }
+        assert_eq!(c_events.len(), before);
     }
 
     #[test]

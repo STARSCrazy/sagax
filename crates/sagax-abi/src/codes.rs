@@ -279,6 +279,15 @@ pub const MISSION_EVENT_CALL: u32 = 10;
 /// `SX_MISSION_EVENT_WANTS_SQUAD`.
 pub const MISSION_EVENT_WANTS_SQUAD: u32 = 11;
 
+/// `SX_MISSION_TRACE_COLUMN`: one column of a candidate's row.
+pub const MISSION_TRACE_COLUMN: u32 = 0;
+/// `SX_MISSION_TRACE_FACTOR`: one consideration of a candidate.
+pub const MISSION_TRACE_FACTOR: u32 = 1;
+/// `SX_MISSION_TRACE_SCORED`: a candidate's score.
+pub const MISSION_TRACE_SCORED: u32 = 2;
+/// `SX_MISSION_TRACE_PICKED`: the winner of a scoring.
+pub const MISSION_TRACE_PICKED: u32 = 3;
+
 /// `SX_BREAK_FAIL`: a fail condition fired.
 pub const BREAK_FAIL: u32 = 0;
 /// `SX_BREAK_IMPOSSIBLE`: a step could not be done.

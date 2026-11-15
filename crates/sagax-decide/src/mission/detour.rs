@@ -1,8 +1,7 @@
 //! Detours: a short break from the plan, the leash, and the walk back.
 
-use super::{Activity, Mission, View};
+use super::{Activity, Hooks, Mission, View};
 use crate::memory::{Knowledge, Pos};
-use crate::mission::rules::MissionRules;
 use crate::mission::types::{Action, Detour, DetourEnd, Event, OnLost, StepKind, Where};
 
 /// The search that runs when the subject of an `Engage` is lost and the
@@ -185,7 +184,7 @@ impl Mission {
         self.last_pos
     }
 
-    pub(super) fn run_detour(&mut self, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
+    pub(super) fn run_detour(&mut self, view: View<'_>, rules: &mut Hooks<'_>) -> Action {
         let anchor = *self.detour.anchor.get_or_insert(view.pos);
         if self.detour.end_asked {
             return self.end_with(DetourEnd::Ended, view, rules);
@@ -206,7 +205,7 @@ impl Mission {
         subject: u32,
         anchor: Pos,
         view: View<'_>,
-        rules: &mut dyn MissionRules,
+        rules: &mut Hooks<'_>,
     ) -> Action {
         let Some(fact) = self.fact(subject, view) else {
             return self.end_with(DetourEnd::Forgotten, view, rules);
@@ -255,7 +254,7 @@ impl Mission {
         from: Where,
         to: Option<Pos>,
         view: View<'_>,
-        rules: &mut dyn MissionRules,
+        rules: &mut Hooks<'_>,
     ) -> Action {
         let Some(from) = self.resolve(from, view) else {
             return self.end_with(DetourEnd::Safe, view, rules);
@@ -301,7 +300,7 @@ impl Mission {
     }
 
     /// Ends the detour: emits the event and starts the walk back.
-    fn end_with(&mut self, why: DetourEnd, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
+    fn end_with(&mut self, why: DetourEnd, view: View<'_>, rules: &mut Hooks<'_>) -> Action {
         self.emit(Event::DetourEnded(why));
         self.activity = Activity::Returning;
         self.detour.search = None;
@@ -309,7 +308,7 @@ impl Mission {
         self.run_return(view, rules)
     }
 
-    pub(super) fn run_return(&mut self, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
+    pub(super) fn run_return(&mut self, view: View<'_>, rules: &mut Hooks<'_>) -> Action {
         let anchor = self.detour.anchor.unwrap_or(view.pos);
         // A strict character always walks back first: if its plan broke
         // during the detour it holds where it stands, which must be the
@@ -339,7 +338,7 @@ impl Mission {
     }
 
     /// Back from the detour: what ran before goes on.
-    fn resume(&mut self, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
+    fn resume(&mut self, view: View<'_>, rules: &mut Hooks<'_>) -> Action {
         self.emit(Event::Returned);
         self.activity = self.detour.resume;
         match self.activity {

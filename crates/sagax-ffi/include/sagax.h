@@ -47,7 +47,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 11
+#define SX_API_VERSION 12
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -2417,6 +2417,38 @@ sx_decider *sx_mission_decider(sx_mission *mission);
 #define SX_MISSION_DEFAULT_PREFERENCE 32767
 #define SX_MISSION_WIDEN_PREFERENCE   49149
 
+/* Tracing a replan (since version 12): why a plan won. Each scoring sends,
+ * per candidate in option order, its row (one COLUMN per column, after the
+ * columns callback), its considerations (FACTOR) and its score (SCORED),
+ * then the winner (PICKED). A tick may score twice (holding after a
+ * fallback it looks again, then its plan breaks); a tick that does not
+ * replan sends nothing. The actions and events are the same with tracing
+ * on or off. */
+#define SX_MISSION_TRACE_COLUMN 0 /* column index of the candidate's row has value input */
+#define SX_MISSION_TRACE_FACTOR 1 /* consideration index read input, gave the factor value */
+#define SX_MISSION_TRACE_SCORED 2 /* value: the product before the weight (0 when a
+                                   * consideration reads beyond the row), built_in: the
+                                   * decider's score, score: after the score callback */
+#define SX_MISSION_TRACE_PICKED 3 /* the winner option and its score; has_option 0 when
+                                   * every candidate scored 0 (the fallback applies) */
+
+typedef struct sx_mission_trace_event {
+	uint32_t kind;              /* SX_MISSION_TRACE_* */
+	uint32_t option;            /* the candidate's decider option; valid if has_option */
+	int32_t index;              /* COLUMN: the column; FACTOR: the consideration; else -1 */
+	int32_t input;              /* COLUMN: its value; FACTOR: the raw input; else 0 */
+	uint32_t value;             /* FACTOR: the factor; SCORED: the product */
+	uint32_t built_in;          /* SCORED */
+	uint32_t score;             /* SCORED, PICKED */
+	uint8_t has_option;
+} sx_mission_trace_event;
+
+/* trace gets every event of every replan scoring of the following ticks,
+ * with context; NULL turns it off (the default). trace must not call any
+ * function on the same mission. Returns 0. */
+typedef void (*sx_mission_trace_fn)(void *context, const sx_mission_trace_event *event);
+int32_t sx_mission_set_trace(sx_mission *mission, sx_mission_trace_fn trace, void *context);
+
 #ifdef __cplusplus
 }
 #endif
@@ -2627,6 +2659,10 @@ _Static_assert(offsetof(sx_mission_fail_ctx, candidate) == 20, "sx_mission_fail_
 _Static_assert(offsetof(sx_mission_fail_ctx, motive) == 24, "sx_mission_fail_ctx.motive layout");
 _Static_assert(offsetof(sx_mission_fail_ctx, has_step) == 56, "sx_mission_fail_ctx.has_step layout");
 _Static_assert(offsetof(sx_mission_fail_ctx, has_candidate) == 57, "sx_mission_fail_ctx.has_candidate layout");
+_Static_assert(sizeof(sx_mission_trace_event) == 32, "sx_mission_trace_event layout");
+_Static_assert(offsetof(sx_mission_trace_event, index) == 8, "sx_mission_trace_event.index layout");
+_Static_assert(offsetof(sx_mission_trace_event, score) == 24, "sx_mission_trace_event.score layout");
+_Static_assert(offsetof(sx_mission_trace_event, has_option) == 28, "sx_mission_trace_event.has_option layout");
 _Static_assert(sizeof(sx_mission_plan_ctx) == 68, "sx_mission_plan_ctx layout");
 _Static_assert(offsetof(sx_mission_plan_ctx, option) == 16, "sx_mission_plan_ctx.option layout");
 _Static_assert(offsetof(sx_mission_plan_ctx, first) == 20, "sx_mission_plan_ctx.first layout");

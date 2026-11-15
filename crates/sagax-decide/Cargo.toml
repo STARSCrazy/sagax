@@ -13,5 +13,8 @@ repository.workspace = true
 [dependencies]
 sagax-core = { path = "../sagax-core" }
 
+[dev-dependencies]
+sagax-debug = { path = "../sagax-debug" }
+
 [lints]
 workspace = true

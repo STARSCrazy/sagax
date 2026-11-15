@@ -11,8 +11,8 @@ use sagax_decide::group::{
 };
 use sagax_decide::memory::Metric;
 use sagax_decide::mission::{
-    Action, BreakReason, Detour, DetourEnd, Event, Fail, Leeway, Motive, MotiveKind, OnLost,
-    StepKind, Where,
+    Action, BreakReason, Detour, DetourEnd, Event, Fail, Leeway, MissionTraceEvent, Motive,
+    MotiveKind, OnLost, StepKind, Where,
 };
 use sagax_decide::{Combine, Decider, Pick};
 use sagax_nav::nav::{Budget, Output, Status};
@@ -26,11 +26,12 @@ use crate::codes::{
     LEEWAY_FLEXIBLE, LEEWAY_FREE, LEEWAY_STRICT, MISSION_EVENT_BROKEN, MISSION_EVENT_CALL,
     MISSION_EVENT_DETOUR_ENDED, MISSION_EVENT_DETOUR_STARTED, MISSION_EVENT_FELL_BACK,
     MISSION_EVENT_LOOPED, MISSION_EVENT_PLAN_DONE, MISSION_EVENT_REPLANNED, MISSION_EVENT_RETURNED,
-    MISSION_EVENT_SIGNAL, MISSION_EVENT_STEP_DONE, MISSION_EVENT_WANTS_SQUAD, MOTIVE_CUSTOM,
-    MOTIVE_DEFEAT, MOTIVE_GUARD, MOTIVE_REACH, ON_LOST_KEEP, ON_LOST_RETURN, ON_LOST_SEARCH,
-    STEP_ATTACK, STEP_CALL, STEP_CUSTOM, STEP_FOLLOW, STEP_GO_TO, STEP_HOLD, STEP_PAUSE,
-    STEP_SEARCH, STEP_SIGNAL, STEP_SQUAD, STEP_WAIT, STEP_WAIT_FOR, STEP_WANDER, WHERE_FIXED,
-    WHERE_HERE, WHERE_MOTIVE_PLACE, WHERE_MOTIVE_SUBJECT, WHERE_SUBJECT,
+    MISSION_EVENT_SIGNAL, MISSION_EVENT_STEP_DONE, MISSION_EVENT_WANTS_SQUAD, MISSION_TRACE_COLUMN,
+    MISSION_TRACE_FACTOR, MISSION_TRACE_PICKED, MISSION_TRACE_SCORED, MOTIVE_CUSTOM, MOTIVE_DEFEAT,
+    MOTIVE_GUARD, MOTIVE_REACH, ON_LOST_KEEP, ON_LOST_RETURN, ON_LOST_SEARCH, STEP_ATTACK,
+    STEP_CALL, STEP_CUSTOM, STEP_FOLLOW, STEP_GO_TO, STEP_HOLD, STEP_PAUSE, STEP_SEARCH,
+    STEP_SIGNAL, STEP_SQUAD, STEP_WAIT, STEP_WAIT_FOR, STEP_WANDER, WHERE_FIXED, WHERE_HERE,
+    WHERE_MOTIVE_PLACE, WHERE_MOTIVE_SUBJECT, WHERE_SUBJECT,
 };
 use crate::codes::{
     CMP_AT_LEAST, CMP_AT_MOST, CMP_EQUAL, CMP_NOT_EQUAL, COMBINE_FOLLOW, CREW_ACTIVATED,
@@ -877,6 +878,72 @@ pub const fn mission_event(event: Event) -> MissionEventCode {
             pos: target,
             subject,
             ..of(MISSION_EVENT_WANTS_SQUAD, tactic)
+        },
+    }
+}
+
+/// A mission trace event as numbers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MissionTraceCode {
+    /// `SX_MISSION_TRACE_*`.
+    pub kind: u32,
+    /// The candidate's option; `PICKED`: the winner, `None` for none.
+    pub option: Option<u32>,
+    /// `COLUMN`: the column; `FACTOR`: the consideration; else -1.
+    pub index: i32,
+    /// `COLUMN`: its value; `FACTOR`: the raw input; else 0.
+    pub input: i32,
+    /// `FACTOR`: the factor; `SCORED`: the product before the weight.
+    pub value: u32,
+    /// `SCORED`: the decider's score.
+    pub built_in: u32,
+    /// `SCORED`: the score after the game's slot; `PICKED`: the winner's.
+    pub score: u32,
+}
+
+/// The numbers of a mission trace event.
+pub fn mission_trace_event(event: MissionTraceEvent) -> MissionTraceCode {
+    let of = |kind, option| MissionTraceCode {
+        kind,
+        option,
+        index: -1,
+        ..MissionTraceCode::default()
+    };
+    match event {
+        MissionTraceEvent::Column {
+            option,
+            column,
+            value,
+        } => MissionTraceCode {
+            index: to_i32(column),
+            input: value,
+            ..of(MISSION_TRACE_COLUMN, Some(option))
+        },
+        MissionTraceEvent::Factor {
+            option,
+            consideration,
+            input,
+            value,
+        } => MissionTraceCode {
+            index: to_i32(consideration),
+            input,
+            value,
+            ..of(MISSION_TRACE_FACTOR, Some(option))
+        },
+        MissionTraceEvent::Scored {
+            option,
+            product,
+            built_in,
+            score,
+        } => MissionTraceCode {
+            value: product,
+            built_in,
+            score,
+            ..of(MISSION_TRACE_SCORED, Some(option))
+        },
+        MissionTraceEvent::Picked { option, score } => MissionTraceCode {
+            score,
+            ..of(MISSION_TRACE_PICKED, option)
         },
     }
 }

@@ -1484,6 +1484,118 @@ fn closer_plan_wins_with_distance_and_game_columns() {
 }
 
 #[test]
+fn traced_replan_shows_why_a_plan_won() {
+    use sagax_debug::{Collector, Overflow};
+
+    struct Rules;
+    impl MissionRules for Rules {
+        fn columns(&mut self, ctx: &PlanCtx, out: &mut [i32]) {
+            out[0] = i32::from(ctx.option == 1);
+        }
+        fn score(&mut self, ctx: &PlanCtx, _built_in: u32) -> Option<u32> {
+            // Veto the farthest plan.
+            (ctx.option == 0).then_some(0)
+        }
+    }
+    let make = || {
+        let mut m = mission(MissionConfig {
+            extra_columns: 1,
+            ..MissionConfig::default()
+        });
+        for x in [9, 2, 1] {
+            m.add_playbook(&Plan::once(&[Step::go_to([x, 0, 0])]), ONE, false)
+                .unwrap();
+        }
+        let near = Consideration::new(IN_DIST as u32, Curve::Inverse, 0, 10);
+        for o in 0..3 {
+            assert!(m.decider_mut().add_consideration(o, near));
+        }
+        let mine = Consideration::new(IN_EXTRA as u32, Curve::Step, 1, 1);
+        assert!(m.decider_mut().add_consideration(2, mine));
+        m
+    };
+    let k = knowledge();
+    let mut plain = make();
+    let mut traced = make();
+    let mut collector = Collector::new(256, Overflow::DropNewest);
+    let a = plain.tick_with(0, [0, 0, 0], &k, 0, &mut Rules);
+    let b = traced.tick_traced(0, [0, 0, 0], &k, 0, &mut Rules, &mut collector);
+    assert_eq!(a.action, b.action);
+    assert_eq!(a.events(), b.events());
+    assert_eq!(b.events(), &[Event::Replanned { option: 1 }]);
+    let events: Vec<MissionTraceEvent> = collector.records().map(|r| r.event).collect();
+    assert_eq!(collector.dropped(), 0);
+
+    // Per candidate in option order (slots 0..3, then the default plan):
+    // its row, its considerations, its score; then the pick.
+    let scored: Vec<(u32, u32, u32)> = events
+        .iter()
+        .filter_map(|e| match *e {
+            MissionTraceEvent::Scored {
+                option,
+                built_in,
+                score,
+                ..
+            } => Some((option, built_in, score)),
+            _ => None,
+        })
+        .collect();
+    let default = traced.default_option();
+    assert_eq!(
+        scored.iter().map(|s| s.0).collect::<Vec<_>>(),
+        [0, 1, 2, default]
+    );
+    let (_, built_in, score) = scored[0];
+    assert!(built_in > 0, "slot 0 scores before the veto");
+    assert_eq!(score, 0, "the game vetoed it");
+    assert_eq!(scored[2].2, 0, "the game's column rules slot 2 out");
+    let winner = scored[1].2;
+    assert!(winner > scored[3].2, "the near plan beats the default");
+    assert_eq!(
+        events.last(),
+        Some(&MissionTraceEvent::Picked {
+            option: Some(1),
+            score: winner
+        })
+    );
+    let row: Vec<i32> = events
+        .iter()
+        .filter_map(|e| match *e {
+            MissionTraceEvent::Column {
+                option: 1, value, ..
+            } => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(row, [1, 2, ONE as i32, 0, 0, 1]);
+    let factors = |o: u32| {
+        events
+            .iter()
+            .filter(|e| matches!(e, MissionTraceEvent::Factor { option, .. } if *option == o))
+            .count()
+    };
+    assert_eq!(
+        (factors(0), factors(1), factors(2), factors(default)),
+        (3, 3, 4, 2)
+    );
+    assert!(events.contains(&MissionTraceEvent::Factor {
+        option: 2,
+        consideration: 3,
+        input: 0,
+        value: 0
+    }));
+
+    // A tick that does not replan traces nothing; a disabled sink nothing
+    // at all.
+    let before = collector.records().len();
+    traced.tick_traced(1, [1, 0, 0], &k, 0, &mut Rules, &mut collector);
+    assert_eq!(collector.records().len(), before);
+    let mut off = Collector::new(0, Overflow::DropNewest);
+    make().tick_traced(0, [0, 0, 0], &k, 0, &mut Rules, &mut off);
+    assert_eq!((off.records().len(), off.dropped()), (0, 0));
+}
+
+#[test]
 fn playbook_slots() {
     let mut m = mission(MissionConfig {
         max_steps: 2,

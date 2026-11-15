@@ -389,3 +389,44 @@ fn mission_outputs() {
     );
     assert_eq!(mission_event(Event::StepDone(3)).a, 3);
 }
+
+#[test]
+fn mission_trace_events() {
+    let c = mission_trace_event(MissionTraceEvent::Column {
+        option: 2,
+        column: 5,
+        value: -7,
+    });
+    assert_eq!(
+        (c.kind, c.option, c.index, c.input),
+        (MISSION_TRACE_COLUMN, Some(2), 5, -7)
+    );
+    let f = mission_trace_event(MissionTraceEvent::Factor {
+        option: 1,
+        consideration: 3,
+        input: 9,
+        value: 100,
+    });
+    assert_eq!(
+        (f.kind, f.option, f.index, f.input, f.value),
+        (MISSION_TRACE_FACTOR, Some(1), 3, 9, 100)
+    );
+    let s = mission_trace_event(MissionTraceEvent::Scored {
+        option: 8,
+        product: 10,
+        built_in: 20,
+        score: 30,
+    });
+    assert_eq!(
+        (s.kind, s.option, s.index, s.value, s.built_in, s.score),
+        (MISSION_TRACE_SCORED, Some(8), -1, 10, 20, 30)
+    );
+    let p = mission_trace_event(MissionTraceEvent::Picked {
+        option: None,
+        score: 0,
+    });
+    assert_eq!(
+        (p.kind, p.option, p.index, p.score),
+        (MISSION_TRACE_PICKED, None, -1, 0)
+    );
+}

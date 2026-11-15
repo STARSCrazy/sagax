@@ -682,6 +682,54 @@ pub enum Event {
     },
 }
 
+/// What a replan scoring did, for debugging and logs (see
+/// [`Mission::tick_traced`](super::Mission::tick_traced)). `option` is the
+/// candidate's decider option.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MissionTraceEvent {
+    /// One column of a candidate's row, after the game's `columns` slot.
+    Column {
+        /// The candidate's option.
+        option: u32,
+        /// Index of the column (see [`IN_FEASIBLE`](super::IN_FEASIBLE) and
+        /// the other `IN_*`).
+        column: usize,
+        /// Its value.
+        value: i32,
+    },
+    /// One consideration of a candidate.
+    Factor {
+        /// The candidate's option.
+        option: u32,
+        /// Index of the consideration within its option.
+        consideration: usize,
+        /// The raw input.
+        input: i32,
+        /// The factor the curve made of it, after its pull.
+        value: u32,
+    },
+    /// A candidate's score.
+    Scored {
+        /// The candidate's option.
+        option: u32,
+        /// The factors put together, before the weight (0 when a
+        /// consideration reads beyond the row).
+        product: u32,
+        /// The decider's score.
+        built_in: u32,
+        /// The score after the game's `score` slot; the pick uses it.
+        score: u32,
+    },
+    /// The end of a scoring: the winner and its score. `None` when every
+    /// candidate scored 0 (then the fallback applies).
+    Picked {
+        /// The winning option.
+        option: Option<u32>,
+        /// Its score.
+        score: u32,
+    },
+}
+
 /// Most events one tick can give.
 pub const MAX_EVENTS: usize = 8;
 

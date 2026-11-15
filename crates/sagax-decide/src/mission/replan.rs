@@ -1,13 +1,15 @@
 //! Replanning: the playbook, the default and widening plans, and how the
 //! mission scores them when a plan breaks or ends.
 
-use super::{Activity, Mission, View};
+use super::{Activity, Hooks, Mission, View};
 use crate::memory::{Fact, Metric, Pos, distance};
 use crate::mission::rules::{MissionRules, PlanCtx};
 use crate::mission::types::{
-    Action, Event, MissionConfig, MissionError, MotiveKind, Plan, Step, StepKind, Where,
+    Action, Event, MissionConfig, MissionError, MissionTraceEvent, MotiveKind, Plan, Step,
+    StepKind, Where,
 };
-use crate::{Apply, Candidate, Consideration, Curve, Decider, ONE, choose, mix};
+use crate::{Apply, Candidate, Consideration, Curve, DecideEvent, Decider, ONE, choose, mix};
+use sagax_core::Sink;
 
 /// Row column: 1 when the candidate's conditions hold now and its first
 /// position can be filled, else 0.
@@ -43,6 +45,34 @@ const MAX_DEFAULT_STEPS: usize = 3;
 /// Most steps of a built-in plan (the widening plan: a call, then the
 /// default plan).
 pub(super) const MAX_BUILT_IN_STEPS: usize = MAX_DEFAULT_STEPS + 1;
+
+/// Hands the decider's factors of one candidate on as mission events and
+/// keeps its product.
+struct FactorSink<'a> {
+    trace: &'a mut dyn Sink<MissionTraceEvent>,
+    option: u32,
+    product: u32,
+}
+
+impl Sink<DecideEvent> for FactorSink<'_> {
+    fn emit(&mut self, event: DecideEvent) {
+        match event {
+            DecideEvent::Factor {
+                consideration,
+                input,
+                value,
+                ..
+            } => self.trace.emit(MissionTraceEvent::Factor {
+                option: self.option,
+                consideration,
+                input,
+                value,
+            }),
+            DecideEvent::Scored { product, .. } => self.product = product,
+            DecideEvent::Chosen { .. } => {}
+        }
+    }
+}
 
 /// One playbook slot.
 #[derive(Clone, Debug)]
@@ -209,7 +239,7 @@ impl Mission {
         view: View<'_>,
         excluded: Option<u32>,
         broke: bool,
-        rules: &mut dyn MissionRules,
+        rules: &mut Hooks<'_>,
     ) -> Action {
         if !self.leeway.replan {
             return self.hold_here(view);
@@ -227,7 +257,7 @@ impl Mission {
     pub(super) fn retry_fallback(
         &mut self,
         view: View<'_>,
-        rules: &mut dyn MissionRules,
+        rules: &mut Hooks<'_>,
     ) -> Option<Action> {
         let choice = self.pick(view, None, false, rules);
         self.take(choice, view)
@@ -257,7 +287,7 @@ impl Mission {
         view: View<'_>,
         excluded: Option<u32>,
         broke: bool,
-        rules: &mut dyn MissionRules,
+        rules: &mut Hooks<'_>,
     ) -> (Option<u32>, bool) {
         let widen = broke && self.leeway.widen;
         self.build_defaults(view, widen);
@@ -269,6 +299,7 @@ impl Mission {
         scores.clear();
         options.clear();
         let stride = IN_EXTRA + self.config.extra_columns;
+        let tracing = rules.trace.enabled();
         let mut default_feasible = false;
         for option in 0..=self.widen_option() {
             if excluded == Some(option) {
@@ -299,17 +330,47 @@ impl Mission {
                 motive: self.motive,
             };
             rules.columns(&ctx, &mut row[IN_EXTRA..]);
-            let built_in = self
-                .replan
-                .decider
-                .score(Candidate::new(option, 0), row)
-                .unwrap_or(0);
-            scores.push(rules.score(&ctx, built_in).unwrap_or(built_in));
+            let candidate = Candidate::new(option, 0);
+            let decider = &self.replan.decider;
+            let (built_in, product) = if tracing {
+                for (column, &value) in row.iter().enumerate() {
+                    rules.trace.emit(MissionTraceEvent::Column {
+                        option,
+                        column,
+                        value,
+                    });
+                }
+                let mut sink = FactorSink {
+                    trace: &mut *rules.trace,
+                    option,
+                    product: 0,
+                };
+                let built_in = decider.score_traced(0, candidate, row, &mut sink);
+                (built_in.unwrap_or(0), sink.product)
+            } else {
+                (decider.score(candidate, row).unwrap_or(0), 0)
+            };
+            let score = rules.score(&ctx, built_in).unwrap_or(built_in);
+            if tracing {
+                rules.trace.emit(MissionTraceEvent::Scored {
+                    option,
+                    product,
+                    built_in,
+                    score,
+                });
+            }
+            scores.push(score);
             options.push(option);
         }
         let seed = mix((u64::from(self.config.id) << 32) | u64::from(view.now));
-        let chosen =
-            choose(&scores, self.config.pick, seed, &mut order).map(|c| options[c.candidate]);
+        let choice = choose(&scores, self.config.pick, seed, &mut order);
+        let chosen = choice.map(|c| options[c.candidate]);
+        if tracing {
+            rules.trace.emit(MissionTraceEvent::Picked {
+                option: chosen,
+                score: choice.map_or(0, |c| c.score),
+            });
+        }
         self.replan.rows = rows;
         self.replan.scores = scores;
         self.replan.options = options;
@@ -381,7 +442,7 @@ impl Mission {
         option: u32,
         plan: &Plan,
         view: View<'_>,
-        rules: &mut dyn MissionRules,
+        rules: &mut Hooks<'_>,
     ) -> (bool, Option<Pos>) {
         let fails = plan.steps().first().map_or(&[][..], |s| &s.fails[..]);
         let failed = self

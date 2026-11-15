@@ -1,9 +1,11 @@
 //! Running a plan: [`Mission`] and its tick.
 
-use super::rules::{BuiltInRules, FailCtx, MissionRules};
+use sagax_core::{NoopSink, Sink};
+
+use super::rules::{BuiltInRules, FailCtx, MissionRules, PlanCtx};
 use super::types::{
-    Action, BreakReason, Event, Fail, Leeway, MAX_EVENTS, MissionConfig, MissionError, Motive,
-    Plan, StepKind, Where,
+    Action, BreakReason, Event, Fail, Leeway, MAX_EVENTS, MissionConfig, MissionError,
+    MissionTraceEvent, Motive, Plan, StepKind, Where,
 };
 use crate::memory::{Fact, Knowledge, Metric, Pos, distance, points_around};
 
@@ -74,6 +76,27 @@ struct View<'k> {
     pos: Pos,
     knowledge: &'k Knowledge,
     flags: u64,
+}
+
+/// What a tick lends the mission: the game's rules and where trace events
+/// go. Forwards the slots, so it is passed wherever the rules are.
+struct Hooks<'a> {
+    rules: &'a mut dyn MissionRules,
+    trace: &'a mut dyn Sink<MissionTraceEvent>,
+}
+
+impl MissionRules for Hooks<'_> {
+    fn fail(&mut self, ctx: &FailCtx, id: u32) -> bool {
+        self.rules.fail(ctx, id)
+    }
+
+    fn columns(&mut self, ctx: &PlanCtx, out: &mut [i32]) {
+        self.rules.columns(ctx, out);
+    }
+
+    fn score(&mut self, ctx: &PlanCtx, built_in: u32) -> Option<u32> {
+        self.rules.score(ctx, built_in)
+    }
 }
 
 /// A character's mission: a motive and the plan it runs toward it.
@@ -303,6 +326,28 @@ impl Mission {
         flags: u64,
         rules: &mut dyn MissionRules,
     ) -> Output<'_> {
+        self.tick_traced(now, pos, knowledge, flags, rules, &mut NoopSink)
+    }
+
+    /// [`Mission::tick_with`] with events: each replan scoring of the tick
+    /// goes to `sink`, per candidate in option order its row
+    /// ([`MissionTraceEvent::Column`]), its considerations
+    /// ([`MissionTraceEvent::Factor`]) and its score
+    /// ([`MissionTraceEvent::Scored`]), then the winner
+    /// ([`MissionTraceEvent::Picked`]). A tick may score twice (a character
+    /// holding after a fallback looks again, then its plan breaks). A sink
+    /// that is not [`Sink::enabled`] costs nothing beyond that check; the
+    /// actions and events are the same with any sink.
+    pub fn tick_traced<S: Sink<MissionTraceEvent>>(
+        &mut self,
+        now: u32,
+        pos: Pos,
+        knowledge: &Knowledge,
+        flags: u64,
+        rules: &mut dyn MissionRules,
+        sink: &mut S,
+    ) -> Output<'_> {
+        let rules = &mut Hooks { rules, trace: sink };
         self.events.clear();
         let view = View {
             now,
@@ -328,7 +373,7 @@ impl Mission {
         }
     }
 
-    fn run_plan(&mut self, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
+    fn run_plan(&mut self, view: View<'_>, rules: &mut Hooks<'_>) -> Action {
         if self.pending_start {
             self.pending_start = false;
             self.begin(0, view);
@@ -386,7 +431,7 @@ impl Mission {
 
     /// The plan ended in a `Wander` step: wander on until a condition of
     /// the plan fires.
-    fn run_wander(&mut self, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
+    fn run_wander(&mut self, view: View<'_>, rules: &mut Hooks<'_>) -> Action {
         match self.first_fail(&[], 0, self.plan.fails(), None, view, rules) {
             Some(fail) => self.break_plan(BreakReason::Fail(fail), view, rules),
             None => Action::Wander,
@@ -394,7 +439,7 @@ impl Mission {
     }
 
     /// Ends the running step and begins the next; returns its action.
-    fn advance(&mut self, view: View<'_>, rules: &mut dyn MissionRules) -> Action {
+    fn advance(&mut self, view: View<'_>, rules: &mut Hooks<'_>) -> Action {
         self.emit(Event::StepDone(self.step.index as u16));
         let mut next = self.step.index + 1;
         if next == self.plan.steps().len() {
@@ -424,12 +469,7 @@ impl Mission {
         };
     }
 
-    fn break_plan(
-        &mut self,
-        reason: BreakReason,
-        view: View<'_>,
-        rules: &mut dyn MissionRules,
-    ) -> Action {
+    fn break_plan(&mut self, reason: BreakReason, view: View<'_>, rules: &mut Hooks<'_>) -> Action {
         self.emit(Event::Broken(reason));
         // The plan that broke is no candidate on this tick.
         let broken = self.running_option.filter(|&o| o < self.default_option());
@@ -447,7 +487,7 @@ impl Mission {
         plan_fails: &[Option<Fail>],
         candidate: Option<u32>,
         view: View<'_>,
-        rules: &mut dyn MissionRules,
+        rules: &mut Hooks<'_>,
     ) -> Option<Fail> {
         let step = step_fails.iter().flatten().map(|&f| (Some(index), f));
         let plan = plan_fails.iter().flatten().map(|&f| (None, f));
@@ -462,7 +502,7 @@ impl Mission {
         step: Option<usize>,
         candidate: Option<u32>,
         view: View<'_>,
-        rules: &mut dyn MissionRules,
+        rules: &mut Hooks<'_>,
     ) -> bool {
         match fail {
             Fail::Unknown { subject } => self.fact(subject, view).is_none(),
