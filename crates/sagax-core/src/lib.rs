@@ -4,6 +4,11 @@
 //! diagnostic [`Sink`], through which algorithms report what they do without
 //! depending on any debug UI or log format, and the shared places: [`Pos`],
 //! [`Cell`] and [`HexLayout`].
+//!
+//! A trace is always a `Sink` parameter: every operation that decides
+//! something has an `op_traced(.., sink)` form, and the plain `op(..)` is
+//! `op_traced(.., &mut NoopSink)`. No type stores a sink. A facade that
+//! drives a sub-module wraps the sub-module's records with [`MapSink`].
 
 mod cell;
 mod hex;
@@ -62,6 +67,46 @@ impl<E, F: FnMut(E)> Sink<E> for CallbackSink<F> {
     }
 }
 
+/// Hands each event to `inner` after `map`; `enabled` is the inner one.
+///
+/// The one adapter between trace types: a facade passes
+/// `&mut MapSink::new(sink, Outer::Inner)` to the sub-module it drives, so
+/// the sub-module's records arrive wrapped, without an allocation.
+///
+/// ```
+/// use sagax_core::{CallbackSink, MapSink, Sink};
+///
+/// let mut seen = Vec::new();
+/// let mut outer = CallbackSink(|e: (u8, u32)| seen.push(e));
+/// let mut inner = MapSink::new(&mut outer, |e: u32| (1, e));
+/// inner.emit(7);
+/// assert_eq!(seen, [(1, 7)]);
+/// ```
+pub struct MapSink<'a, S: ?Sized, F> {
+    inner: &'a mut S,
+    map: F,
+}
+
+impl<'a, S: ?Sized, F> MapSink<'a, S, F> {
+    /// A sink that maps each event with `map` and hands it to `inner`.
+    #[inline]
+    pub fn new(inner: &'a mut S, map: F) -> Self {
+        Self { inner, map }
+    }
+}
+
+impl<E, D, S: Sink<D> + ?Sized, F: FnMut(E) -> D> Sink<E> for MapSink<'_, S, F> {
+    #[inline]
+    fn enabled(&self) -> bool {
+        self.inner.enabled()
+    }
+
+    #[inline]
+    fn emit(&mut self, event: E) {
+        self.inner.emit((self.map)(event));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +126,20 @@ mod tests {
             sink.emit(2);
         }
         assert_eq!(seen, [1, 2]);
+    }
+
+    #[test]
+    fn map_sink_wraps_and_keeps_enabled() {
+        let mut seen = Vec::new();
+        {
+            let mut outer = CallbackSink(|e: Option<u32>| seen.push(e));
+            let mut inner = MapSink::new(&mut outer, Some);
+            assert!(Sink::<u32>::enabled(&inner));
+            inner.emit(3);
+        }
+        assert_eq!(seen, [Some(3)]);
+        let mut off = NoopSink;
+        let inner = MapSink::new(&mut off, |e: u32| e + 1);
+        assert!(!Sink::<u32>::enabled(&inner));
     }
 }
