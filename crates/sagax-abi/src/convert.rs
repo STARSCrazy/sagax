@@ -490,6 +490,18 @@ pub fn where_of(kind: u32, pos: Pos, subject: u32) -> Option<Where> {
     })
 }
 
+/// The `SX_WHERE_*` value of a place, with its position (`FIXED`) and
+/// subject (`SUBJECT`); both 0 when unused. The inverse of [`where_of`].
+pub const fn where_code(at: Where) -> (u32, Pos, u32) {
+    match at {
+        Where::Fixed(p) => (WHERE_FIXED, p, 0),
+        Where::Subject(s) => (WHERE_SUBJECT, [0; 3], s),
+        Where::MotivePlace => (WHERE_MOTIVE_PLACE, [0; 3], 0),
+        Where::MotiveSubject => (WHERE_MOTIVE_SUBJECT, [0; 3], 0),
+        Where::Here => (WHERE_HERE, [0; 3], 0),
+    }
+}
+
 /// The step of an `SX_STEP_*` value with its place `at` (`None`: the place
 /// was not valid, which only a step with a place refuses) and the numbers
 /// `a` and `b`:
@@ -539,6 +551,31 @@ pub fn step_kind(kind: u32, at: Option<Where>, a: u32, b: u32) -> Option<StepKin
         },
         _ => return None,
     })
+}
+
+/// The `SX_STEP_*` value of a step with its place (`None` for a kind
+/// without one) and the numbers `a` and `b` (0 when unused), as in the
+/// table of [`step_kind`]; its inverse.
+pub const fn step_kind_code(kind: StepKind) -> (u32, Option<Where>, u32, u32) {
+    match kind {
+        StepKind::GoTo(at) => (STEP_GO_TO, Some(at), 0, 0),
+        StepKind::Wait(ticks) => (STEP_WAIT, None, ticks, 0),
+        StepKind::Pause => (STEP_PAUSE, None, 0, 0),
+        StepKind::Follow(s) => (STEP_FOLLOW, None, s, 0),
+        StepKind::WaitFor { subject, radius } => (STEP_WAIT_FOR, None, subject, radius),
+        StepKind::Search {
+            centre,
+            radius,
+            ticks,
+        } => (STEP_SEARCH, Some(centre), radius, ticks),
+        StepKind::Hold(at) => (STEP_HOLD, Some(at), 0, 0),
+        StepKind::Attack(s) => (STEP_ATTACK, None, s, 0),
+        StepKind::Wander => (STEP_WANDER, None, 0, 0),
+        StepKind::Signal(n) => (STEP_SIGNAL, None, n, 0),
+        StepKind::Custom { kind, at, param } => (STEP_CUSTOM, Some(at), kind, param),
+        StepKind::Call { channel, kind } => (STEP_CALL, None, channel, kind),
+        StepKind::Squad { tactic, target } => (STEP_SQUAD, Some(target), tactic, 0),
+    }
 }
 
 /// A fail condition as numbers (`SX_FAIL_*`).

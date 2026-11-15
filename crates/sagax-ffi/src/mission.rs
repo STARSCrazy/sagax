@@ -32,6 +32,11 @@ impl SxWhere {
     fn place(&self) -> Option<Where> {
         convert::where_of(self.kind, self.pos, self.subject)
     }
+
+    fn of(at: Where) -> Self {
+        let (kind, pos, subject) = convert::where_code(at);
+        Self { kind, pos, subject }
+    }
 }
 
 /// `sx_fail`.
@@ -114,6 +119,31 @@ impl SxStep {
         step.skip_if_impossible = self.skip_if_impossible != 0;
         Some(step)
     }
+
+    pub(crate) fn of(step: &Step) -> Self {
+        let (kind, at, a, b) = convert::step_kind_code(step.kind);
+        let (fails, fail_count) = fails_out(&step.fails);
+        Self {
+            kind,
+            at: at.map(SxWhere::of).unwrap_or_default(),
+            a,
+            b,
+            fails,
+            fail_count,
+            skip_if_impossible: u8::from(step.skip_if_impossible),
+        }
+    }
+}
+
+/// The C form of conditions filled from the front, and how many there are.
+fn fails_out(fails: &[Option<Fail>; MAX_FAILS]) -> ([SxFail; MAX_FAILS], u32) {
+    let mut out = [SxFail::default(); MAX_FAILS];
+    let mut count = 0;
+    for (slot, f) in out.iter_mut().zip(fails.iter().flatten()) {
+        *slot = SxFail::of(*f);
+        count += 1;
+    }
+    (out, count)
 }
 
 /// The first `count` of `fails`, filled from the front; `None` for more
@@ -225,6 +255,20 @@ impl SxLeeway {
             widen: u8::from(l.widen),
         }
     }
+}
+
+/// `sx_mission_plan_info`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SxMissionPlanInfo {
+    /// Number of steps of the plan.
+    pub step_count: u32,
+    /// Used entries of `fails`.
+    pub fail_count: u32,
+    /// Conditions that break the whole plan.
+    pub fails: [SxFail; MAX_FAILS],
+    /// 1: the plan starts again after its last step.
+    pub repeat: u8,
 }
 
 /// `sx_mission_config`.
@@ -656,6 +700,71 @@ pub unsafe extern "C" fn sx_mission_set_motive(
     };
     m.set_motive(motive);
     0
+}
+
+/// `sx_mission_motive`.
+///
+/// # Safety
+/// `mission` is null or valid; `out` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_mission_motive(mission: *const SxMission, out: *mut SxMotive) -> i32 {
+    let m = mission_ref!(mission);
+    if out.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: not null and writable (see above).
+    unsafe { put(out, SxMotive::of(m.motive())) };
+    0
+}
+
+/// `sx_mission_leeway`.
+///
+/// # Safety
+/// `mission` is null or valid; `out` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_mission_leeway(mission: *const SxMission, out: *mut SxLeeway) -> i32 {
+    let m = mission_ref!(mission);
+    if out.is_null() {
+        return ERROR_ARGUMENT;
+    }
+    // SAFETY: not null and writable (see above).
+    unsafe { put(out, SxLeeway::of(m.leeway())) };
+    0
+}
+
+/// `sx_mission_plan`: 1 and the plan, or 0 when there is none yet.
+///
+/// # Safety
+/// `mission` is null or valid; `out` is null or writable; `steps` is null
+/// or has room for `cap` steps.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_mission_plan(
+    mission: *const SxMission,
+    out: *mut SxMissionPlanInfo,
+    steps: *mut SxStep,
+    cap: u32,
+) -> i32 {
+    let m = mission_ref!(mission);
+    if steps.is_null() && cap > 0 {
+        return ERROR_ARGUMENT;
+    }
+    let Some(plan) = m.plan() else {
+        return 0;
+    };
+    let (fails, fail_count) = fails_out(plan.fails());
+    let info = SxMissionPlanInfo {
+        step_count: u32::try_from(plan.steps().len()).unwrap_or(u32::MAX),
+        fail_count,
+        fails,
+        repeat: u8::from(plan.repeat),
+    };
+    // SAFETY: null or writable (see above).
+    unsafe { put(out, info) };
+    for (i, s) in plan.steps().iter().take(cap as usize).enumerate() {
+        // SAFETY: within `cap` (see above).
+        unsafe { steps.add(i).write(SxStep::of(s)) };
+    }
+    1
 }
 
 /// The plan of `count` steps and `fail_count` plan conditions; `None` for

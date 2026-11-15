@@ -304,7 +304,18 @@ fn mission_steps_and_detours() {
         })
     );
     for kind in WHERE_FIXED..=WHERE_HERE {
-        assert!(where_of(kind, [1, 2, 3], 4).is_some());
+        let at = where_of(kind, [1, 2, 3], 4).unwrap();
+        let (k, pos, subject) = where_code(at);
+        assert_eq!((k, where_of(k, pos, subject)), (kind, Some(at)));
+    }
+    let places = [Where::Fixed([1, 2, 3]), Where::Subject(4), Where::Here];
+    for kind in STEP_GO_TO..=STEP_SQUAD {
+        for at in places {
+            let step = step_kind(kind, Some(at), 5, 6).unwrap();
+            let (k, place, a, b) = step_kind_code(step);
+            assert_eq!(k, kind);
+            assert_eq!(step_kind(k, place, a, b), Some(step), "kind {kind}");
+        }
     }
     assert_eq!(where_of(WHERE_HERE + 1, [0; 3], 0), None);
     assert_eq!(

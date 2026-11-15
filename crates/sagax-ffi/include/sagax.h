@@ -2225,6 +2225,10 @@ void sx_mission_free(sx_mission *mission);
 int32_t sx_mission_set_leeway(sx_mission *mission, const sx_leeway *leeway);
 /* The running plan stays. */
 int32_t sx_mission_set_motive(sx_mission *mission, const sx_motive *motive);
+/* The motive and the leeway to *out (since version 12). SX_ERROR_ARGUMENT
+ * for a null pointer. */
+int32_t sx_mission_motive(const sx_mission *mission, sx_motive *out);
+int32_t sx_mission_leeway(const sx_mission *mission, sx_leeway *out);
 
 /* A plan: count steps (repeat 1: start again after the last) and fail_count
  * conditions for the whole plan (at most 4; fails may be null if 0). The
@@ -2245,6 +2249,23 @@ int32_t sx_mission_add_playbook(sx_mission *mission, const sx_step *steps, uint3
 /* Empties every slot; the decider keeps its considerations. A running
  * playbook plan runs on. */
 int32_t sx_mission_clear_playbook(sx_mission *mission);
+
+/* A plan as sx_mission_plan reads it back (since version 12). */
+typedef struct sx_mission_plan_info {
+	uint32_t step_count;        /* steps of the plan */
+	uint32_t fail_count;        /* used entries of fails */
+	sx_fail fails[4];           /* conditions that break the whole plan */
+	uint8_t repeat;             /* 1: starts again after the last step */
+} sx_mission_plan_info;
+
+/* The plan that runs, or ran last (also after it ended or broke): the one
+ * set by sx_mission_set_plan, a playbook plan, the default or the widening
+ * plan, or the hold of a fallback. Its summary goes to *out (may be null),
+ * its first cap steps to steps (may be null if cap is 0), as
+ * sx_mission_set_plan takes them (unused fields 0). Returns 1, or 0 if
+ * there is none yet (nothing written). */
+int32_t sx_mission_plan(const sx_mission *mission, sx_mission_plan_info *out, sx_step *steps,
+                        uint32_t cap);
 
 /* Runs one tick at now for a character standing at pos (3 values), from what
  * it knows and the game's condition bits flags. The action and the events go
@@ -2575,6 +2596,10 @@ _Static_assert(offsetof(sx_mission_config, metric) == 44, "sx_mission_config.met
 _Static_assert(offsetof(sx_mission_config, grid) == 48, "sx_mission_config.grid layout");
 _Static_assert(offsetof(sx_mission_config, pick_top) == 60, "sx_mission_config.pick_top layout");
 _Static_assert(offsetof(sx_mission_config, search) == 64, "sx_mission_config.search layout");
+_Static_assert(sizeof(sx_mission_plan_info) == 176, "sx_mission_plan_info layout");
+_Static_assert(offsetof(sx_mission_plan_info, fail_count) == 4, "sx_mission_plan_info.fail_count layout");
+_Static_assert(offsetof(sx_mission_plan_info, fails) == 8, "sx_mission_plan_info.fails layout");
+_Static_assert(offsetof(sx_mission_plan_info, repeat) == 168, "sx_mission_plan_info.repeat layout");
 _Static_assert(sizeof(sx_detour) == 52, "sx_detour layout");
 _Static_assert(offsetof(sx_detour, at) == 8, "sx_detour.at layout");
 _Static_assert(offsetof(sx_detour, to) == 28, "sx_detour.to layout");

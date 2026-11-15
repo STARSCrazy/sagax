@@ -2852,7 +2852,8 @@ mod conventions {
         };
         use crate::mission::{
             SxDetour, SxFail, SxLeeway, SxMissionAction, SxMissionConfig, SxMissionEvent,
-            SxMissionFailCtx, SxMissionOut, SxMissionPlanCtx, SxMotive, SxStep, SxWhere,
+            SxMissionFailCtx, SxMissionOut, SxMissionPlanCtx, SxMissionPlanInfo, SxMotive, SxStep,
+            SxWhere,
         };
         use crate::rules::{SxChannelCtx, SxCostCtx, SxPlaceCtx, SxSpotCtx, SxViewPlan};
         use crate::{Point, SxEvent, SxResult, SxRules};
@@ -3019,6 +3020,13 @@ mod conventions {
                 grid,
                 pick_top,
                 search
+            ),
+            layout!(
+                "sx_mission_plan_info",
+                SxMissionPlanInfo,
+                fail_count,
+                fails,
+                repeat
             ),
             layout!("sx_detour", SxDetour, at, to, custom, param, has_to),
             layout!(
@@ -4437,6 +4445,154 @@ mod mission {
         let last = t.trace.last().unwrap().action;
         assert_eq!((last.kind, last.subject), (ACTION_ATTACK, THIEF));
         assert_eq!((last.pos, last.has_pos), ([13, 6, 0], 1));
+    }
+
+    #[test]
+    fn getters_give_back_what_was_set() {
+        unsafe {
+            let c = sx_mission_new(&c_config(), &guard_motive());
+            let mut motive = SxMotive::default();
+            assert_eq!(sx_mission_motive(c, &mut motive), 0);
+            assert_eq!(motive, guard_motive());
+            let hunt = SxMotive {
+                kind: MOTIVE_CUSTOM,
+                custom: 9,
+                subject: THIEF,
+                has_subject: 1,
+                radius: 4,
+                ..SxMotive::default()
+            };
+            assert_eq!(sx_mission_set_motive(c, &hunt), 0);
+            assert_eq!(sx_mission_motive(c, &mut motive), 0);
+            assert_eq!(motive, hunt);
+
+            let mut leeway = SxLeeway::default();
+            assert_eq!(sx_mission_leeway(c, &mut leeway), 0);
+            let mut flexible = SxLeeway::default();
+            assert_eq!(sx_leeway_preset(LEEWAY_FLEXIBLE, &mut flexible), 0);
+            assert_eq!(leeway, flexible, "the default leeway");
+            let mine = SxLeeway {
+                distance: 0,
+                ticks: 40,
+                on_lost: ON_LOST_SEARCH,
+                lost_ticks: 7,
+                lost_radius: 2,
+                has_distance: 0,
+                has_ticks: 1,
+                replan: 1,
+                widen: 0,
+            };
+            assert_eq!(sx_mission_set_leeway(c, &mine), 0);
+            assert_eq!(sx_mission_leeway(c, &mut leeway), 0);
+            assert_eq!(leeway, mine);
+
+            // No plan yet: 0 and nothing written.
+            let mut info = SxMissionPlanInfo {
+                step_count: 99,
+                ..SxMissionPlanInfo::default()
+            };
+            let mut back = [SxStep::default(); 16];
+            assert_eq!(sx_mission_plan(c, &mut info, back.as_mut_ptr(), 16), 0);
+            assert_eq!(info.step_count, 99);
+
+            // Every step kind, with conditions, through set and get.
+            let subject = SxWhere {
+                kind: WHERE_SUBJECT,
+                subject: 4,
+                ..SxWhere::default()
+            };
+            let mut steps = Vec::new();
+            for kind in STEP_GO_TO..=STEP_SQUAD {
+                let has_place = matches!(
+                    kind,
+                    STEP_GO_TO | STEP_SEARCH | STEP_HOLD | STEP_CUSTOM | STEP_SQUAD
+                );
+                let uses_a = !matches!(kind, STEP_GO_TO | STEP_HOLD | STEP_PAUSE | STEP_WANDER);
+                let uses_b = matches!(kind, STEP_WAIT_FOR | STEP_SEARCH | STEP_CUSTOM | STEP_CALL);
+                let place = if has_place {
+                    subject
+                } else {
+                    SxWhere::default()
+                };
+                let mut s = c_step(kind, u32::from(uses_a) * 3, u32::from(uses_b) * 5, place);
+                if kind % 2 == 0 {
+                    s.skip_if_impossible = 1;
+                    s.fails[0] = stolen_fail();
+                    s.fails[1] = SxFail {
+                        kind: FAIL_CUSTOM,
+                        id: 8,
+                        ..SxFail::default()
+                    };
+                    s.fail_count = 2;
+                }
+                steps.push(s);
+            }
+            steps[0] = c_go(EAST);
+            let fails = [
+                stolen_fail(),
+                SxFail {
+                    kind: FAIL_FLAGS,
+                    flags_mask: 1 << 40,
+                    flags_value: 1 << 40,
+                    ..SxFail::default()
+                },
+            ];
+            let n = steps.len() as u32;
+            assert_eq!(
+                sx_mission_set_plan(c, steps.as_ptr(), n, 1, fails.as_ptr(), 2),
+                0
+            );
+            assert_eq!(sx_mission_plan(c, &mut info, back.as_mut_ptr(), 16), 1);
+            assert_eq!((info.step_count, info.repeat), (n, 1));
+            assert_eq!(info.fail_count, 2);
+            assert_eq!(info.fails[..2], fails);
+            assert_eq!(info.fails[2], SxFail::default());
+            assert_eq!(&back[..n as usize], &steps[..]);
+            assert_eq!(back[n as usize], SxStep::default(), "beyond the plan");
+
+            // A short buffer gets the first steps; null with cap 0 is fine.
+            let mut two = [SxStep::default(); 2];
+            assert_eq!(sx_mission_plan(c, null_mut(), two.as_mut_ptr(), 2), 1);
+            assert_eq!(two, [steps[0], steps[1]]);
+            assert_eq!(sx_mission_plan(c, &mut info, null_mut(), 0), 1);
+            assert_eq!(info.step_count, n);
+
+            // Bad arguments.
+            assert_eq!(sx_mission_plan(c, &mut info, null_mut(), 1), -1);
+            assert_eq!(sx_mission_plan(null(), &mut info, null_mut(), 0), -1);
+            assert_eq!(sx_mission_motive(c, null_mut()), -1);
+            assert_eq!(sx_mission_motive(null(), &mut motive), -1);
+            assert_eq!(sx_mission_leeway(c, null_mut()), -1);
+            assert_eq!(sx_mission_leeway(null(), &mut leeway), -1);
+            sx_mission_free(c);
+        }
+    }
+
+    #[test]
+    fn plan_getter_reads_a_replanned_plan() {
+        let mut t = twin(LEEWAY_FLEXIBLE);
+        t.r.set_plan(&Plan::once(&[Step::wait(1)])).unwrap();
+        let wait = [c_step(STEP_WAIT, 1, 0, SxWhere::default())];
+        assert_eq!(
+            unsafe { sx_mission_set_plan(t.c, wait.as_ptr(), 1, 0, null(), 0) },
+            0
+        );
+        for now in 0..4 {
+            t.tick(now);
+        }
+        assert_eq!(t.events(MISSION_EVENT_REPLANNED).len(), 1);
+        let plan = t.r.plan().unwrap();
+        let mut info = SxMissionPlanInfo::default();
+        let mut back = [SxStep::default(); 4];
+        assert_eq!(
+            unsafe { sx_mission_plan(t.c, &mut info, back.as_mut_ptr(), 4) },
+            1
+        );
+        assert_eq!(info.step_count as usize, plan.steps().len());
+        assert_eq!(info.repeat, u8::from(plan.repeat));
+        for (c, r) in back.iter().zip(plan.steps()) {
+            assert_eq!(c.step(), Some(*r));
+        }
     }
 
     #[test]
