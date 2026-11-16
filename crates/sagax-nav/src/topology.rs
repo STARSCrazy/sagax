@@ -9,9 +9,11 @@ use sagax_core::{NoopSink, Sink};
 
 use crate::dstar::{DStarLite, Heuristic, HexHeuristic};
 use crate::formation::{Formation, FormationTrace, place_members_hex_traced, place_members_traced};
-use crate::grid::{Cell, CellMap, GridGraph, GridRules, Preset, turning_points};
+use std::ops::RangeInclusive;
+
+use crate::grid::{Cell, CellMap, DenseGrid, GridGraph, GridRules, Preset, turning_points};
 use crate::hex::{HexGraph, HexLayout, hex_turning_points};
-use crate::search::{Cost, Graph};
+use crate::search::{Cost, Graph, Reversed};
 use crate::smooth::{SmoothTrace, hex_line_clear_within, line_clear_within, smooth_path_traced};
 
 /// The kind of grid and its move costs.
@@ -163,6 +165,50 @@ impl Topology {
                 AnyGraph::Hex(HexGraph::new(map, layout, step_cost, start))
             }
         }
+    }
+
+    /// The cells a move into `cell` could come from: its neighbours (square:
+    /// all eight, hex: six) on `cell`'s level and on every level of
+    /// `levels` (where stairs or ramps arrive from). For [`Reversed`].
+    pub fn predecessors(&self, cell: Cell, levels: RangeInclusive<i32>, out: &mut Vec<Cell>) {
+        let mut push = |x: i32, y: i32| {
+            out.push(Cell::new(x, y, cell.level));
+            for l in levels.clone() {
+                if l != cell.level {
+                    out.push(Cell::new(x, y, l));
+                }
+            }
+        };
+        match *self {
+            Self::Square(_) => {
+                for (dx, dy) in DenseGrid::DIRECTIONS {
+                    push(cell.x + dx, cell.y + dy);
+                }
+            }
+            Self::Hex { layout, .. } => {
+                for d in 0..6 {
+                    let (x, y) = layout.neighbor(cell.x, cell.y, d);
+                    push(x, y);
+                }
+            }
+        }
+    }
+
+    /// The graph of `map` turned round ([`Reversed`] with
+    /// [`predecessors`](Self::predecessors)): a flow field from a goal over
+    /// it holds the real cost of walking to the goal, also on maps whose
+    /// moves cost differently in the two directions. `start_step` is not
+    /// used (the field serves every start).
+    pub fn reversed<M: CellMap>(
+        &self,
+        map: M,
+        levels: RangeInclusive<i32>,
+    ) -> Reversed<AnyGraph<M>, impl FnMut(Cell, &mut Vec<Cell>) + use<M>> {
+        let topology = *self;
+        Reversed::new(
+            self.graph(map, None),
+            move |c: Cell, out: &mut Vec<Cell>| topology.predecessors(c, levels.clone(), out),
+        )
     }
 
     /// Estimated cost between two cells ([`Heuristic`] for D* Lite and goals).

@@ -58,6 +58,156 @@ impl<N> Goal<N> for NoGoal {
     }
 }
 
+/// A graph with every move turned round: the neighbours of `node` are the
+/// nodes that reach `node` in one move, each with the cost of that forward
+/// move. A search (or a flow field) from a goal over the reversed graph
+/// therefore finds the real cost of walking *to* the goal from every node,
+/// also where moves cost differently in the two directions (one-way walls,
+/// the cost of the cell entered, leave costs).
+///
+/// The graph only knows moves forward, so `candidates(node, out)` names the
+/// nodes that might reach `node` (for a grid: its neighbours, on every level
+/// a move could come from); each is asked for its moves and kept if one ends
+/// at `node` (the cheapest, if several do). A candidate missing from the
+/// list is a move the reversed graph does not see.
+///
+/// Only nodes a walker can be on count as predecessors: a candidate is kept
+/// only if some node moves into it ([`enterable`](Self::enterable), asked
+/// among its own candidates). So cells off the map or blocked, which many
+/// maps let a walker *leave* but never enter, do not spread the search; a
+/// walker that starts on such a cell takes its first move forward itself
+/// (see [`FlowField::cost_from`](crate::flow::FlowField::cost_from)).
+///
+/// ```
+/// use sagax_nav::grid::{Cell, DenseGrid, GridGraph, GridRules, Preset};
+/// use sagax_nav::{Graph, Reversed};
+///
+/// let mut map = DenseGrid::new(3, 1);
+/// map.set(1, 0, 90); // a swamp: entering it costs 90 extra
+/// let graph = GridGraph::new(&mut map, GridRules::preset(Preset::Octile), None);
+/// let mut back = Reversed::new(graph, |c: Cell, out: &mut Vec<Cell>| {
+///     out.extend([Cell::new(c.x - 1, c.y, 0), Cell::new(c.x + 1, c.y, 0)]);
+/// });
+/// let mut moves = Vec::new();
+/// back.neighbors(Cell::new(1, 0, 0), &mut moves);
+/// // both neighbours walk into the swamp: 10 + 90 (the cells off the map,
+/// // x -1 and 3, are no predecessors)
+/// assert_eq!(moves, [(Cell::new(0, 0, 0), 100), (Cell::new(2, 0, 0), 100)]);
+/// ```
+pub struct Reversed<G: Graph, F> {
+    /// The forward graph.
+    pub graph: G,
+    candidates: F,
+    buffers: ReverseBuffers<G::Node>,
+}
+
+/// The working memory of a [`Reversed`] graph, to keep between uses
+/// ([`Reversed::with_buffers`], [`Reversed::into_parts`]).
+pub struct ReverseBuffers<N> {
+    near: Vec<N>,
+    probe: Vec<N>,
+    moves: Vec<(N, Cost)>,
+    own: Vec<(N, Cost)>,
+}
+
+impl<N> ReverseBuffers<N> {
+    /// Buffers with room for `candidates` candidates of a node and `moves`
+    /// moves of a node.
+    pub fn with_capacity(candidates: usize, moves: usize) -> Self {
+        Self {
+            near: Vec::with_capacity(candidates),
+            probe: Vec::with_capacity(candidates),
+            moves: Vec::with_capacity(moves),
+            own: Vec::with_capacity(moves),
+        }
+    }
+}
+
+impl<N> Default for ReverseBuffers<N> {
+    fn default() -> Self {
+        Self::with_capacity(0, 0)
+    }
+}
+
+impl<G: Graph, F: FnMut(G::Node, &mut Vec<G::Node>)> Reversed<G, F> {
+    /// `graph` turned round, with `candidates` naming the possible
+    /// predecessors of a node.
+    pub fn new(graph: G, candidates: F) -> Self {
+        Self::with_buffers(graph, candidates, ReverseBuffers::default())
+    }
+
+    /// As [`new`](Self::new), reusing `buffers`, so nothing is allocated
+    /// once they are large enough.
+    pub fn with_buffers(graph: G, candidates: F, buffers: ReverseBuffers<G::Node>) -> Self {
+        Self {
+            graph,
+            candidates,
+            buffers,
+        }
+    }
+
+    /// The forward graph and the buffers, given back.
+    pub fn into_parts(self) -> (G, ReverseBuffers<G::Node>) {
+        (self.graph, self.buffers)
+    }
+
+    /// `true` if some candidate of `node` moves into it.
+    pub fn enterable(&mut self, node: G::Node) -> bool {
+        self.enterable_except(node, None)
+    }
+
+    fn enterable_except(&mut self, node: G::Node, known: Option<G::Node>) -> bool {
+        let b = &mut self.buffers;
+        b.probe.clear();
+        (self.candidates)(node, &mut b.probe);
+        for i in 0..b.probe.len() {
+            let q = b.probe[i];
+            if Some(q) == known {
+                continue;
+            }
+            b.moves.clear();
+            self.graph.neighbors(q, &mut b.moves);
+            if b.moves.iter().any(|&(to, _)| to == node) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl<G: Graph, F: FnMut(G::Node, &mut Vec<G::Node>)> Graph for Reversed<G, F> {
+    type Node = G::Node;
+
+    fn neighbors(&mut self, node: G::Node, out: &mut Vec<(G::Node, Cost)>) {
+        // `node`'s own moves: a candidate it moves into is enterable.
+        self.buffers.own.clear();
+        self.graph.neighbors(node, &mut self.buffers.own);
+        self.buffers.near.clear();
+        (self.candidates)(node, &mut self.buffers.near);
+        for i in 0..self.buffers.near.len() {
+            let p = self.buffers.near[i];
+            self.buffers.moves.clear();
+            self.graph.neighbors(p, &mut self.buffers.moves);
+            let cheapest = self
+                .buffers
+                .moves
+                .iter()
+                .filter(|&&(to, _)| to == node)
+                .map(|&(_, c)| c)
+                .min();
+            let Some(c) = cheapest else {
+                continue;
+            };
+            // `node` itself was just checked: it is no way into `p` here.
+            let entered = self.buffers.own.iter().any(|&(to, _)| to == p)
+                || self.enterable_except(p, Some(node));
+            if entered {
+                out.push((p, c));
+            }
+        }
+    }
+}
+
 /// Bounds of one search, fixed when it begins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {

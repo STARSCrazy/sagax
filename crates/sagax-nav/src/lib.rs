@@ -38,5 +38,6 @@ pub mod topology;
 pub use nav::Budget;
 
 pub use search::{
-    Cost, Goal, Graph, Limits, NoGoal, PathResult, Search, SearchStatus, SearchTrace, find_path,
+    Cost, Goal, Graph, Limits, NoGoal, PathResult, ReverseBuffers, Reversed, Search, SearchStatus,
+    SearchTrace, find_path,
 };

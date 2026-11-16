@@ -70,6 +70,28 @@ impl<N: Copy + Eq + Hash> FlowField<N> {
         self.search.settled_cost(node)
     }
 
+    /// Cost from `node` to the nearest goal over `graph` (the forward
+    /// moves): the field's cost if it holds `node`, else the cheapest first
+    /// move into the field plus the field's cost from there. For a walker
+    /// on a node no search enters (a blocked cell it stands on) in a field
+    /// built over [`Reversed`](crate::Reversed) moves. `moves` is scratch.
+    pub fn cost_from<G: Graph<Node = N>>(
+        &self,
+        graph: &mut G,
+        node: N,
+        moves: &mut Vec<(N, Cost)>,
+    ) -> Option<Cost> {
+        if let Some(c) = self.cost(node) {
+            return Some(c);
+        }
+        moves.clear();
+        graph.neighbors(node, moves);
+        moves
+            .iter()
+            .filter_map(|&(next, c)| self.cost(next)?.checked_add(c))
+            .min()
+    }
+
     /// Number of nodes in the field.
     pub fn len(&self) -> usize {
         self.search.settled().count()
