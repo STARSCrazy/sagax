@@ -50,6 +50,35 @@
 //!   members' reports over the same channel, built-in or custom. With a hex
 //!   layout its slots see offset coordinates (contexts, view, report
 //!   `pos`), and the positions they return are taken as offset.
+//! - [`SquadRules::walk`] whenever a decision asks how far a figure has to
+//!   walk (see *Walking distance* below); it is no decision of its own and
+//!   may be asked any number of times per call.
+//!
+//! **Walking distance.** With a [`Distance`] from [`SquadRules::walk`]
+//! (for example through [`Walking`]) the questions "how far does a figure
+//! have to walk" use it instead of the straight line of the metric:
+//!
+//! - [`IN_TARGET_DIST`](super::IN_TARGET_DIST): the mean walking distance
+//!   of the active members to the target (rounded down; members that
+//!   cannot get there do not count; none can: `i32::MAX`), and
+//!   [`Trigger::TargetInRadius`] by the same measure;
+//! - [`IN_TARGET_FRIEND_DIST`](super::IN_TARGET_FRIEND_DIST) and the friend
+//!   of [`Place::Between`]: from the other targets to the target;
+//! - [`CostCtx::built_in`]: from the member to the wish point;
+//! - the spot radius and [`SpotCtx::built_in`]: from the spot to the wish
+//!   point;
+//! - in a [`Crew`](super::Crew): the arrive radius and the keeper's
+//!   distance to its goal
+//!   ([`Crew::member_inputs_with`](super::Crew::member_inputs_with)).
+//!
+//! The provider answers in cells, so every threshold keeps its meaning;
+//! where squares are compared ([`Metric::Euclid`]) the walking distance is
+//! squared. A place that cannot be reached is infinitely far: out of every
+//! range, never the nearest, last in every ordering (a member cost of
+//! [`UNREACHABLE`], a row value of `i32::MAX`), never the straight line
+//! instead. The straight line stays where nobody walks: channel delays
+//! (shout, radio), headings, wish points, the nearest threat a tactic
+//! without a target faces. Without a provider everything is as before.
 //!
 //! **Without rules.** A squad that needs rules ([`Squad::needs_rules`])
 //! fails loudly instead of losing orders: [`Squad::plan`] and
@@ -73,6 +102,7 @@
 //! | `abort` | never fires |
 //! | `channel_delay` | never arrives |
 //! | `report` | drops the report (no action) |
+//! | `walk` | none: the metric's straight line |
 //!
 //! Costs and scores are `i128`, lower is better; ties go to the lower
 //! member index or spot index.
@@ -82,7 +112,7 @@ use super::orders::{Channel, Status};
 use super::spots::{Spot, SpotPick, SpotTrace};
 use super::squad::{Goal, PlanError, PlanId, Squad, SquadTrace};
 use super::tactic::{Abort, Place, Tactic, Trigger};
-use crate::memory::{Area, Fact, Message, Metric, Pos, distance};
+use crate::memory::{Area, Distance, Fact, Message, Metric, Pos, distance};
 use sagax_core::{HexLayout, MapSink, NoopSink, Sink};
 
 /// Game logic a squad calls at fixed points; see the [module](self) for the
@@ -179,6 +209,193 @@ pub trait SquadRules {
     ) {
         let _ = (view, msg, now, actions);
     }
+
+    /// Slot 10, **walk**: the walking distance the squad asks instead of
+    /// the metric's straight line wherever a figure has to walk (see the
+    /// [module](self)), or `None` for the straight line. Give the same
+    /// answer for the whole call. Default: `None`.
+    fn walk(&mut self) -> Option<&mut dyn Distance> {
+        None
+    }
+}
+
+impl<T: SquadRules + ?Sized> SquadRules for &mut T {
+    fn keep_target(&mut self, view: &SquadView<'_>, fact: &Fact) -> bool {
+        (**self).keep_target(view, fact)
+    }
+
+    fn columns(&mut self, view: &SquadView<'_>, ctx: &RowCtx<'_>, out: &mut [i32]) {
+        (**self).columns(view, ctx, out);
+    }
+
+    fn place(&mut self, id: u32, ctx: &PlaceCtx) -> Pos {
+        (**self).place(id, ctx)
+    }
+
+    fn member_cost(&mut self, ctx: &CostCtx) -> Option<i128> {
+        (**self).member_cost(ctx)
+    }
+
+    fn spot_score(&mut self, ctx: &SpotCtx) -> Option<i128> {
+        (**self).spot_score(ctx)
+    }
+
+    fn trigger(&mut self, id: u32, view: &SquadView<'_>, now: u32) -> bool {
+        (**self).trigger(id, view, now)
+    }
+
+    fn abort(&mut self, id: u32, view: &SquadView<'_>, ctx: &RowCtx<'_>) -> bool {
+        (**self).abort(id, view, ctx)
+    }
+
+    fn channel_delay(&mut self, id: u32, ctx: &ChannelCtx) -> Option<u32> {
+        (**self).channel_delay(id, ctx)
+    }
+
+    fn report(
+        &mut self,
+        view: &SquadView<'_>,
+        msg: &Message,
+        now: u32,
+        actions: &mut ReportActions<'_>,
+    ) {
+        (**self).report(view, msg, now, actions);
+    }
+
+    fn walk(&mut self) -> Option<&mut dyn Distance> {
+        (**self).walk()
+    }
+}
+
+/// Rules that walk: every slot goes to `rules`, and [`SquadRules::walk`]
+/// answers `distance`.
+///
+/// ```
+/// use sagax_decide::group::{BuiltInRules, SquadRules, Walking};
+/// use sagax_decide::memory::{Distance, Pos};
+///
+/// /// Everything is three cells away.
+/// struct Three;
+/// impl Distance for Three {
+///     fn distance(&mut self, _from: Pos, _to: Pos) -> Option<u32> {
+///         Some(3)
+///     }
+/// }
+///
+/// let mut three = Three;
+/// let mut rules = Walking::new(&mut three);
+/// assert_eq!(rules.walk().and_then(|d| d.distance([0; 3], [9; 3])), Some(3));
+/// // With the game's own rules (also borrowed):
+/// let mut own = BuiltInRules;
+/// let _ = Walking::with(&mut own, &mut three);
+/// ```
+pub struct Walking<'a, R = BuiltInRules> {
+    /// The rules every slot but `walk` goes to.
+    pub rules: R,
+    /// The walking distance.
+    pub distance: &'a mut dyn Distance,
+}
+
+impl<'a> Walking<'a> {
+    /// The built-in rules, walking with `distance`.
+    pub fn new(distance: &'a mut dyn Distance) -> Self {
+        Self {
+            rules: BuiltInRules,
+            distance,
+        }
+    }
+}
+
+impl<'a, R: SquadRules> Walking<'a, R> {
+    /// `rules` (also `&mut` the game's rules), walking with `distance`.
+    pub fn with(rules: R, distance: &'a mut dyn Distance) -> Self {
+        Self { rules, distance }
+    }
+}
+
+impl<R: SquadRules> SquadRules for Walking<'_, R> {
+    fn keep_target(&mut self, view: &SquadView<'_>, fact: &Fact) -> bool {
+        self.rules.keep_target(view, fact)
+    }
+
+    fn columns(&mut self, view: &SquadView<'_>, ctx: &RowCtx<'_>, out: &mut [i32]) {
+        self.rules.columns(view, ctx, out);
+    }
+
+    fn place(&mut self, id: u32, ctx: &PlaceCtx) -> Pos {
+        self.rules.place(id, ctx)
+    }
+
+    fn member_cost(&mut self, ctx: &CostCtx) -> Option<i128> {
+        self.rules.member_cost(ctx)
+    }
+
+    fn spot_score(&mut self, ctx: &SpotCtx) -> Option<i128> {
+        self.rules.spot_score(ctx)
+    }
+
+    fn trigger(&mut self, id: u32, view: &SquadView<'_>, now: u32) -> bool {
+        self.rules.trigger(id, view, now)
+    }
+
+    fn abort(&mut self, id: u32, view: &SquadView<'_>, ctx: &RowCtx<'_>) -> bool {
+        self.rules.abort(id, view, ctx)
+    }
+
+    fn channel_delay(&mut self, id: u32, ctx: &ChannelCtx) -> Option<u32> {
+        self.rules.channel_delay(id, ctx)
+    }
+
+    fn report(
+        &mut self,
+        view: &SquadView<'_>,
+        msg: &Message,
+        now: u32,
+        actions: &mut ReportActions<'_>,
+    ) {
+        self.rules.report(view, msg, now, actions);
+    }
+
+    fn walk(&mut self) -> Option<&mut dyn Distance> {
+        Some(&mut *self.distance)
+    }
+}
+
+/// The built-in member cost ([`CostCtx::built_in`]) of a member that cannot
+/// walk to the wish point (see [`SquadRules::walk`]): above every real
+/// distance, so it comes last, and far enough below `i128::MAX` that a
+/// game's own cost may still add to it.
+pub const UNREACHABLE: i128 = 1 << 100;
+
+/// The squad's distance from `a` to `b` as it compares distances: the
+/// walking distance of `rules` if it walks (squared for
+/// [`Metric::Euclid`]), else the metric's; `None` when `b` cannot be
+/// reached.
+pub(super) fn walk_dist(
+    metric: Metric,
+    rules: &mut dyn SquadRules,
+    a: Pos,
+    b: Pos,
+) -> Option<i128> {
+    match rules.walk() {
+        None => Some(super::squad::dist(metric, a, b)),
+        Some(w) => w.distance(a, b).map(|c| {
+            let c = i128::from(c);
+            if metric == Metric::Euclid { c * c } else { c }
+        }),
+    }
+}
+
+/// The squad's plain distance from `a` to `b` for a row: the walking
+/// distance of `rules` if it walks, else the metric's (the root for
+/// [`Metric::Euclid`]); `i32::MAX` when `b` cannot be reached.
+pub(super) fn walk_plain(metric: Metric, rules: &mut dyn SquadRules, a: Pos, b: Pos) -> i32 {
+    match rules.walk() {
+        None => super::squad::plain_dist(metric, a, b),
+        Some(w) => w
+            .distance(a, b)
+            .map_or(i32::MAX, |c| i32::try_from(c).unwrap_or(i32::MAX)),
+    }
 }
 
 /// The rules without any game logic: every slot does its default.
@@ -244,7 +461,9 @@ pub struct CostCtx {
     /// The slot's first wish point (its gather point, if it gathers).
     pub wish: Pos,
     /// The built-in cost: the metric distance from the member to `wish`
-    /// (squared for [`Metric::Euclid`]).
+    /// (squared for [`Metric::Euclid`]); with a walking distance
+    /// ([`SquadRules::walk`]) the walking distance (also squared for
+    /// Euclid), [`UNREACHABLE`] when the member cannot get there.
     pub built_in: i128,
 }
 
@@ -269,7 +488,9 @@ pub struct SpotCtx {
     pub spot: Spot,
     /// The plan's target, if any.
     pub target: Option<Fact>,
-    /// The built-in score ([`spot_score_builtin`]).
+    /// The built-in score ([`spot_score_builtin`]; with a walking distance
+    /// ([`SquadRules::walk`]) the same with the walking distance from the
+    /// spot to the wish point).
     pub built_in: i128,
 }
 
@@ -506,7 +727,7 @@ pub fn spot_score_builtin(wish: Pos, want_tags: u32, spot: &Spot, metric: Metric
 /// as [`pick_spot`](super::pick_spot) sees them) and the pick.
 pub(super) fn rank_spots<S: Sink<SpotTrace>>(
     rules: &mut dyn SquadRules,
-    keys: &mut Vec<(i128, usize)>,
+    keys: &mut Vec<(i128, usize, i128)>,
     ctx: &SpotCtx,
     spots: &[Spot],
     taken: &[bool],
@@ -524,12 +745,16 @@ pub(super) fn rank_spots<S: Sink<SpotTrace>>(
         if radius < 0 || taken.get(index).copied().unwrap_or(false) {
             continue;
         }
-        let dx = i64::from(spot.pos[0]) - i64::from(ctx.wish[0]);
-        let dy = i64::from(spot.pos[1]) - i64::from(ctx.wish[1]);
-        if distance(metric, dx, dy) > limit {
+        // Unreachable is out of every radius.
+        let Some(d) = walk_dist(metric, rules, spot.pos, ctx.wish) else {
+            continue;
+        };
+        if d > limit {
             continue;
         }
-        let built_in = spot_score_builtin(ctx.wish, ctx.want_tags, spot, metric);
+        // As `spot_score_builtin`, with the distance just measured.
+        let miss = spot.tags & ctx.want_tags != ctx.want_tags;
+        let built_in = (i128::from(miss) << 100) | d;
         let scored = rules.spot_score(&SpotCtx {
             index,
             spot: *spot,
@@ -537,7 +762,7 @@ pub(super) fn rank_spots<S: Sink<SpotTrace>>(
             ..*ctx
         });
         if let Some(score) = scored {
-            keys.push((score, index));
+            keys.push((score, index, d));
         }
     }
     keys.sort_unstable();
@@ -546,14 +771,12 @@ pub(super) fn rank_spots<S: Sink<SpotTrace>>(
         n => SpotPick::Spot(keys[usize::from(skip).min(n - 1)].1),
     };
     if sink.enabled() {
-        for &(_, index) in keys.iter() {
+        for &(_, index, d) in keys.iter() {
             let spot = &spots[index];
-            let dx = i64::from(spot.pos[0]) - i64::from(ctx.wish[0]);
-            let dy = i64::from(spot.pos[1]) - i64::from(ctx.wish[1]);
             sink.emit(SpotTrace::Ranked {
                 spot: index,
                 fits: spot.tags & ctx.want_tags == ctx.want_tags,
-                distance: distance(metric, dx, dy),
+                distance: d,
             });
         }
         sink.emit(SpotTrace::Picked(pick));

@@ -548,7 +548,9 @@ impl Squad {
     ///   [`REPORT_ARRIVED`] came in) or `max_wait` ticks passed since
     ///   activation.
     ///   [`Trigger::TargetInRadius`]: the plan's target, as the leader knows
-    ///   it, is within the radius of the group centre.
+    ///   it, is within the radius of the group centre (with a walking
+    ///   distance, [`SquadRules::walk`]: the members' mean walking distance
+    ///   to it, as [`IN_TARGET_DIST`](super::IN_TARGET_DIST)).
     ///   [`Trigger::Custom`]: when [`SquadRules::trigger`] says so.
     ///   [`Trigger::None`] and [`Trigger::Manual`] never fire here.
     /// - Else [`Status::Keep`].
@@ -863,6 +865,7 @@ impl Squad {
         };
         let fact = found.map(|i| s.targets[i]);
         self.row_into(
+            rules,
             &mut s.rows,
             now,
             centre,
@@ -940,11 +943,19 @@ impl Squad {
                 } else {
                     i128::from(r)
                 };
+                let target = a
+                    .plan
+                    .target
+                    .and_then(|id| self.knowledge.get(id, self.target_kind));
                 r >= 0
-                    && a.plan
-                        .target
-                        .and_then(|id| self.knowledge.get(id, self.target_kind))
-                        .is_some_and(|f| dist(self.metric, centre, f.pos) <= limit)
+                    && target.is_some_and(|f| match rules.walk() {
+                        None => dist(self.metric, centre, f.pos) <= limit,
+                        // The same measure as `IN_TARGET_DIST`.
+                        Some(_) => {
+                            let d = self.target_dist(&mut *rules, centre, f.pos);
+                            d != i32::MAX && i64::from(d) <= r
+                        }
+                    })
             }
             Trigger::Custom(id) => rules.trigger(id, &SquadView::new(self), now),
             Trigger::None | Trigger::Manual => false,

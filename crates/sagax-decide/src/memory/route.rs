@@ -1,3 +1,5 @@
+use sagax_core::Pos;
+
 /// How the distance between two places is measured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -13,6 +15,23 @@ pub enum Metric {
     /// with a divisor the axis differences are truncated first, and the
     /// final `/ 2` truncates an odd sum.
     Hex = 3,
+}
+
+/// Walking distance between two places, for the decisions that ask how far
+/// a figure has to walk (see [`SquadRules::walk`](crate::group::SquadRules::walk)).
+///
+/// It knows the map; the decide crate does not. The facade's
+/// `FlowDistance` is a ready one built on flow fields.
+pub trait Distance {
+    /// Walking distance from `from` to `to` in metric units (cells), or
+    /// `None` when `to` cannot be reached from `from`.
+    fn distance(&mut self, from: Pos, to: Pos) -> Option<u32>;
+}
+
+impl<T: Distance + ?Sized> Distance for &mut T {
+    fn distance(&mut self, from: Pos, to: Pos) -> Option<u32> {
+        (**self).distance(from, to)
+    }
 }
 
 /// Which candidates get a message.

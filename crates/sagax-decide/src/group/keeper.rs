@@ -2,7 +2,7 @@
 //! suspended, and the inputs its own decider reads.
 
 use super::squad::{Goal, plain_dist};
-use crate::memory::{Metric, Pos};
+use crate::memory::{Distance, Metric, Pos};
 use crate::{Candidate, Consideration, Curve, Decider};
 use sagax_core::{NoopSink, Sink};
 
@@ -215,10 +215,31 @@ impl GoalKeeper {
         signal_given: bool,
         discipline: u32,
     ) -> [i32; 5] {
+        self.inputs_with(now, me, metric, None, signal_given, discipline)
+    }
+
+    /// [`GoalKeeper::inputs`], `dist_to_goal` by the walking distance
+    /// `walk` from `me` to the goal's position when there is one
+    /// (`i32::MAX` when it cannot be reached); `None` is the metric's.
+    pub fn inputs_with(
+        &self,
+        now: u32,
+        me: Pos,
+        metric: Metric,
+        walk: Option<&mut dyn Distance>,
+        signal_given: bool,
+        discipline: u32,
+    ) -> [i32; 5] {
+        let dist_to = |p: Pos| match walk {
+            None => plain_dist(metric, me, p),
+            Some(w) => w
+                .distance(me, p)
+                .map_or(i32::MAX, |c| i32::try_from(c).unwrap_or(i32::MAX)),
+        };
         let (has, dist, age) = match &self.goal {
             Some(g) => (
                 1,
-                g.pos.map_or(-1, |p| plain_dist(metric, me, p)),
+                g.pos.map_or(-1, dist_to),
                 i32::try_from(now.wrapping_sub(g.issued_at)).unwrap_or(i32::MAX),
             ),
             None => (0, -1, 0),

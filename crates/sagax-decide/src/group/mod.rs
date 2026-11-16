@@ -23,6 +23,10 @@
 //! - [`rules`]: the game's own logic at fixed points of a plan or check
 //!   ([`SquadRules`], lent per call to [`Squad::plan_with`] and
 //!   [`Squad::check_with`]).
+//! - Walking distance: a [`SquadRules::walk`] (for example [`Walking`])
+//!   makes every "how far does a figure have to walk" question ask the
+//!   game's [`crate::memory::Distance`] instead of the straight line; see
+//!   the [`rules`].
 //! - [`Crew`]: a squad with one [`GoalKeeper`] per member, run as one call
 //!   per tick ([`Crew::tick`]) that reports [`CrewEvent`]s; every step is
 //!   also a public squad or keeper call.
@@ -49,6 +53,8 @@ mod layout_tests;
 mod rules_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod walk_tests;
 
 pub use crew::{Crew, CrewConfig, CrewError, CrewEvent, CrewTrace};
 pub use keeper::{GOAL_OPTION_RANGE, GoalKeeper, KeeperInputs, KeeperTrace};
@@ -62,7 +68,8 @@ pub use orders::{
 };
 pub use rules::{
     BuiltInRules, ChannelCtx, CostCtx, MAX_REPORT_ACTIONS, PlaceCtx, PlanInfo, ReportAction,
-    ReportActions, RowCtx, SpotCtx, SquadRules, SquadView, spot_score_builtin,
+    ReportActions, RowCtx, SpotCtx, SquadRules, SquadView, UNREACHABLE, Walking,
+    spot_score_builtin,
 };
 pub use skill::{MAX_SKILL_ROWS, SkillTable};
 pub use spots::{Spot, SpotPick, SpotTrace, heading, pick_spot, pick_spot_traced, wish_point};

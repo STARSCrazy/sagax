@@ -2,7 +2,7 @@ use super::members::{Group, Member, MemberState};
 use super::orders::{Channel, Order};
 use super::rules::{
     BuiltInRules, CostCtx, PlaceCtx, ReportAction, RowCtx, SpotCtx, SquadRules, SquadView,
-    rank_spots,
+    UNREACHABLE, rank_spots, walk_dist, walk_plain,
 };
 use super::skill::{MAX_SKILL_ROWS, SkillTable};
 use super::spots::{Spot, SpotPick, SpotTrace, heading, wish_point};
@@ -28,7 +28,10 @@ pub const IN_OFF_PLAN: usize = 1;
 pub const IN_TARGET_AGE: usize = 2;
 /// Built-in row column: distance from the group centre to the target, in
 /// the metric (for [`Metric::Euclid`] the rounded-down root; no target:
-/// `i32::MAX`).
+/// `i32::MAX`). With a walking distance
+/// ([`SquadRules::walk`](super::SquadRules::walk)) the mean walking
+/// distance of the active members to the target (rounded down; members
+/// that cannot get there do not count; none can: `i32::MAX`).
 pub const IN_TARGET_DIST: usize = 3;
 /// Built-in row column: active members with the first role of
 /// [`SquadConfig::roles`].
@@ -40,8 +43,10 @@ pub const IN_ROLE_1: usize = 5;
 /// row of the active (tactic, target); 0 in the row of any other candidate.
 pub const IN_PLAN_AGE: usize = 6;
 /// Built-in row column: distance from the target to its nearest other known
-/// target, measured as [`IN_TARGET_DIST`]; -1 without a target or without
-/// another known target (a curve starting at 0 reads it as 0).
+/// target, in the metric as [`IN_TARGET_DIST`]; -1 without a target or
+/// without another known target (a curve starting at 0 reads it as 0).
+/// With a walking distance the way from the other target to this one
+/// (`i32::MAX` when none of them can get there).
 pub const IN_TARGET_FRIEND_DIST: usize = 7;
 /// First caller column, with at most two roles in [`SquadConfig::roles`];
 /// with more roles use [`Squad::extra_start`].
@@ -447,7 +452,7 @@ pub(super) struct Scratch {
     /// Member costs, slot-major (`slot * group.len() + member index`).
     pub(super) costs: Vec<Option<i128>>,
     /// `(score, index)` of the spots ranked for one member.
-    pub(super) spot_keys: Vec<(i128, usize)>,
+    pub(super) spot_keys: Vec<(i128, usize, i128)>,
     /// The report actions of one read of the inbox, in report order.
     pub(super) actions: Vec<ReportAction>,
 }
@@ -956,6 +961,7 @@ impl Squad {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn row_into(
         &self,
+        rules: &mut dyn SquadRules,
         row: &mut Vec<i32>,
         now: u32,
         centre: Pos,
@@ -990,11 +996,11 @@ impl Squad {
         row[IN_TARGET_FRIEND_DIST] = -1;
         if let Some(f) = target {
             row[IN_TARGET_AGE] = clamp_i32(i128::from(now.wrapping_sub(f.seen_at)));
-            row[IN_TARGET_DIST] = plain_dist(self.metric, centre, f.pos);
+            row[IN_TARGET_DIST] = self.target_dist(rules, centre, f.pos);
             if let Some(d) = self
                 .targets()
                 .filter(|o| o.subject != f.subject)
-                .map(|o| plain_dist(self.metric, f.pos, o.pos))
+                .map(|o| self.friend_dist(rules, f.pos, o.pos))
                 .min()
             {
                 row[IN_TARGET_FRIEND_DIST] = d;
@@ -1015,6 +1021,37 @@ impl Squad {
                 let at = b.checked_mul(n).and_then(|i| i.checked_add(c));
                 row[extra_start + c] = at.and_then(|i| extra.get(i)).copied().unwrap_or(0);
             }
+        }
+    }
+
+    /// [`IN_TARGET_DIST`] of a target at `target`: the plain metric
+    /// distance from `centre`, or with a walking distance the mean walking
+    /// distance of the active members (rounded down; members that cannot
+    /// get there do not count; none can: `i32::MAX`).
+    pub(super) fn target_dist(&self, rules: &mut dyn SquadRules, centre: Pos, target: Pos) -> i32 {
+        if rules.walk().is_none() {
+            return plain_dist(self.metric, centre, target);
+        }
+        let (mut sum, mut n) = (0u64, 0u64);
+        for (_, m) in self.group.active() {
+            let d = walk_plain(self.metric, rules, m.pos, target);
+            if d != i32::MAX {
+                sum += d as u64;
+                n += 1;
+            }
+        }
+        sum.checked_div(n)
+            .map_or(i32::MAX, |d| i32::try_from(d).unwrap_or(i32::MAX))
+    }
+
+    /// [`IN_TARGET_FRIEND_DIST`] of one other target at `other` for the
+    /// target at `target`: the plain distance, with a walking distance the
+    /// way from the other target to this one (`i32::MAX` when it cannot get
+    /// there).
+    fn friend_dist(&self, rules: &mut dyn SquadRules, target: Pos, other: Pos) -> i32 {
+        match rules.walk() {
+            None => plain_dist(self.metric, target, other),
+            Some(_) => walk_plain(self.metric, rules, other, target),
         }
     }
 
@@ -1098,6 +1135,7 @@ impl Squad {
                 .is_some_and(|a| a.plan.tactic == t && a.plan.target == id);
             let block = Some(target.map_or(0, |i| i + 1));
             self.row_into(
+                rules,
                 &mut s.rows,
                 now,
                 centre,
@@ -1355,7 +1393,7 @@ impl Squad {
                 .iter()
                 .enumerate()
                 .filter(|&(j, _)| j != i)
-                .min_by_key(|&(j, f)| (dist(self.metric, me, f.pos), j))
+                .min_by_key(|&(j, f)| (self.friend_key(&mut *rules, me, f.pos), j))
                 .map(|(_, f)| f.pos)
         });
         let tactic = &self.tactics[t];
@@ -1403,12 +1441,14 @@ impl Squad {
             let wish = s.wishes[si];
             for (i, m) in self.group.active() {
                 if m.roles & slot.roles == slot.roles {
+                    let built_in =
+                        walk_dist(self.metric, &mut *rules, m.pos, wish).unwrap_or(UNREACHABLE);
                     s.costs[si * n + i] = rules.member_cost(&CostCtx {
                         tactic: t,
                         slot: si,
                         member: *m,
                         wish,
-                        built_in: dist(self.metric, m.pos, wish),
+                        built_in,
                     });
                 }
             }
@@ -1603,6 +1643,16 @@ impl Squad {
             s.counts[si] -= 1;
         }
         false
+    }
+
+    /// The key that picks the friend of the target at `target` (lowest
+    /// first): the metric distance to it, with a walking distance the way
+    /// from `other` to the target (`i128::MAX` when it cannot get there).
+    fn friend_key(&self, rules: &mut dyn SquadRules, target: Pos, other: Pos) -> i128 {
+        match rules.walk() {
+            None => dist(self.metric, target, other),
+            Some(_) => walk_dist(self.metric, rules, other, target).unwrap_or(i128::MAX),
+        }
     }
 
     /// The nearest known target to `centre`, else the nearest danger area's

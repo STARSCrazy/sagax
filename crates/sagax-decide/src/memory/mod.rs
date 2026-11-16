@@ -56,7 +56,7 @@ pub use knowledge::{
 };
 pub use messages::{Inbox, Message, MessageTrace, Outbox, Refused, arrival};
 pub use progress::Progress;
-pub use route::{Metric, Route, distance, route};
+pub use route::{Distance, Metric, Route, distance, route};
 pub use timers::{Timers, TimersTrace};
 
 pub use sagax_core::Pos;

@@ -10,7 +10,7 @@ use super::rules::{
 };
 use super::spots::Spot;
 use super::squad::{Goal, PlanError, PlanId, Squad, SquadConfig, SquadTrace};
-use crate::memory::{Area, Fact, Message, Metric, Pos, distance};
+use crate::memory::{Area, Distance, Fact, Message, Metric, Pos, distance};
 use sagax_core::{HexLayout, MapSink, NoopSink, Sink};
 
 /// The trace record of a [`Crew`]: what its `*_traced` calls decided
@@ -60,7 +60,9 @@ pub struct CrewConfig {
     pub squad: SquadConfig,
     /// How far from its first spot a member counts as arrived, in the
     /// squad's metric (for [`Metric::Euclid`] the squared distance is
-    /// compared with the radius squared). Default 0: on the spot.
+    /// compared with the radius squared); with a walking distance
+    /// ([`SquadRules::walk`]) by the way it still has to walk. Default 0:
+    /// on the spot.
     pub arrive_radius: u32,
     /// The map's hex layout: the crew takes and returns offset coordinates
     /// in this layout and keeps the squad in axial ones (needs
@@ -643,7 +645,9 @@ impl Crew {
             };
             if !seat.arrived
                 && goal.awaits_arrival()
-                && goal.pos.is_some_and(|p| self.within_radius(member.pos, p))
+                && goal
+                    .pos
+                    .is_some_and(|p| self.within_radius(&mut *rules, member.pos, p))
                 && self.send(
                     Message::arrived(seat.id, goal.plan),
                     seat.id,
@@ -694,17 +698,35 @@ impl Crew {
     /// [`hold_bonus`](super::SkillTable::hold_bonus_for) of its own skill
     /// as discipline). `None` when the id is unknown.
     pub fn member_inputs(&self, id: u32, now: u32) -> Option<KeeperInputs> {
+        self.member_inputs_with(id, now, &mut BuiltInRules)
+    }
+
+    /// [`Crew::member_inputs`], the distance to the goal by the walking
+    /// distance of `rules` when it walks ([`SquadRules::walk`];
+    /// [`GoalKeeper::inputs_with`]; with a hex layout it gets offset
+    /// coordinates). Only [`SquadRules::walk`] is asked.
+    pub fn member_inputs_with(
+        &self,
+        id: u32,
+        now: u32,
+        rules: &mut dyn SquadRules,
+    ) -> Option<KeeperInputs> {
         let seat = self.seat(id)?;
         let g = self.squad.group();
         let m = g.get(g.index(id)?)?;
         let discipline = self.squad.skill_table().hold_bonus_for(m.skill);
-        let row = seat.keeper.inputs(
-            now,
-            m.pos,
-            self.metric,
-            self.squad.signal_given(),
-            discipline,
-        );
+        let signal = self.squad.signal_given();
+        let row = match self.hex {
+            Some(layout) => {
+                let mut hex = HexRules::new(rules, layout);
+                seat.keeper
+                    .inputs_with(now, m.pos, self.metric, hex.walk(), signal, discipline)
+            }
+            None => {
+                seat.keeper
+                    .inputs_with(now, m.pos, self.metric, rules.walk(), signal, discipline)
+            }
+        };
         Some(KeeperInputs::from(row))
     }
 
@@ -814,9 +836,19 @@ impl Crew {
         at.is_none() || queued
     }
 
-    fn within_radius(&self, at: Pos, spot: Pos) -> bool {
+    /// True when `at` is within the arrive radius of `spot` on the same
+    /// level: by the walking distance of `rules` from `at` to `spot` when
+    /// it walks (offset coordinates with a hex layout; unreachable is never
+    /// within), else by the metric.
+    fn within_radius(&self, rules: &mut dyn SquadRules, at: Pos, spot: Pos) -> bool {
         if at[2] != spot[2] {
             return false;
+        }
+        if let Some(w) = rules.walk() {
+            let (from, to) = (self.pos_out(at), self.pos_out(spot));
+            return w
+                .distance(from, to)
+                .is_some_and(|d| d <= self.arrive_radius);
         }
         let d = distance(
             self.metric,
@@ -863,7 +895,8 @@ fn is_active(squad: &Squad, id: u32) -> bool {
 /// The game's rules as a hex crew lends them: every position a slot gets
 /// goes from axial to offset coordinates of `layout`, every position it
 /// returns from offset to axial. Values the core computed (`built_in`,
-/// distances, headings) pass unchanged.
+/// distances, headings) pass unchanged. Its walking distance
+/// ([`SquadRules::walk`]) asks the game's with offset coordinates.
 struct HexRules<'a> {
     inner: &'a mut dyn SquadRules,
     layout: HexLayout,
@@ -985,5 +1018,21 @@ impl SquadRules for HexRules<'_> {
             }),
             other => other,
         });
+    }
+
+    fn walk(&mut self) -> Option<&mut dyn Distance> {
+        if self.inner.walk().is_some() {
+            Some(self)
+        } else {
+            None
+        }
+    }
+}
+
+/// The game's walking distance as a hex crew asks it: offset coordinates.
+impl Distance for HexRules<'_> {
+    fn distance(&mut self, from: Pos, to: Pos) -> Option<u32> {
+        let (from, to) = (self.out(from), self.out(to));
+        self.inner.walk().and_then(|w| w.distance(from, to))
     }
 }

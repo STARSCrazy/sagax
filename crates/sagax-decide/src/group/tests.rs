@@ -517,7 +517,16 @@ fn row_with(roles: Option<RoleCounts>, members: &[u32], extra_block: &[i32]) -> 
     let mut extra = vec![0; extra_block.len()];
     extra.extend_from_slice(extra_block);
     let mut row = Vec::new();
-    sq.row_into(&mut row, 0, [0; 3], Some(&fact), Some(1), &extra, false);
+    sq.row_into(
+        &mut BuiltInRules,
+        &mut row,
+        0,
+        [0; 3],
+        Some(&fact),
+        Some(1),
+        &extra,
+        false,
+    );
     (sq, row)
 }
 
