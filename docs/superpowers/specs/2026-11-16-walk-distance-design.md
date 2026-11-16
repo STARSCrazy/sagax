@@ -141,7 +141,8 @@ ROADMAP item moved to done; README if it lists features.
   uses the same measure when walking.
 - **`IN_TARGET_FRIEND_DIST`** and the friend of `Place::Between`: from the
   other target to the target; an unreachable friend is infinitely far
-  (never picked as the nearest; the column `i32::MAX`).
+  (never picked as the friend: with only unreachable others the target is
+  alone, as without a friend; the column `i32::MAX`).
 - **Member cost:** member to the slot's first wish point. Unreachable is
   `UNREACHABLE` = 2^100, above every real cost but still assignable (the
   slot is filled last by such a member rather than left empty; a game that
@@ -175,10 +176,35 @@ ROADMAP item moved to done; README if it lists features.
 - **Hex:** the crew hands its rules offset coordinates, so it asks the
   distance in offset coordinates too (the map's cells, what `FlowDistance`
   wants); a plain squad on hex keeps axial ones and the game converts.
-- **The field is rooted at `to`** and read at `from`; `from == to` gives 0
-  (the root; still one search, cached like any other). The capacity bounds each
-  field: a cell beyond it is unreachable (documented: size it for the
-  farthest walk that should count).
+- **The field is rooted at `to` over the reversed graph** (review fix): a
+  plain flow field from `to` measured `to -> from`, wrong on asymmetric
+  maps (enter costs, zone leave costs, one-way walls). `sagax-nav` got a
+  generic `Reversed` adapter (predecessors from a candidate list, the cost
+  of the forward move; a candidate counts only if some node enters it, so
+  off-map and blocked cells, which `DenseGrid` lets a walker leave, do not
+  spread the search) with `Topology::predecessors` / `reversed`, and
+  `FlowField::cost_from`. The distance equals the forward path search
+  (`find_path` on the graph without a start cell; `start_step` is not
+  used, the field serves every start); tested on random maps with zones,
+  enter costs and one-way walls, square (8 and 4 ways) and hex.
+- **Edges, decided against `find_path`:** a walker on a blocked cell
+  (occupied by itself) walks off it, as `find_path` does (`cost_from`: the
+  first move forward). A destination nobody can enter (the enemy's occupied
+  cell) is unreachable for `find_path`; here it is walked up to: the field
+  is rooted at the cells next to it and the distance is one cell more,
+  because the squad asks for the enemy's own cell and an occupancy map must
+  not make every enemy unreachable. `from == to` is 0 without a search.
+- **Levels:** moves are looked for backwards from neighbours on the cell's
+  own level and on `with_levels(lo..=hi)` (C `sx_flow_distance_set_levels`,
+  default 0..=0); a stair from another level is otherwise not seen. The
+  capacity bounds each field: a cell beyond it is unreachable (documented:
+  size it for the farthest walk that should count).
+- **Review fixes, small:** a slot is unclaimed while its field is built (a
+  panic in the map leaves no half-built field behind a destination);
+  `sx_crew_member_inputs` runs under the panic guard; the header says that
+  `sx_cost_ctx.built_in` is the walking distance and `INT64_MAX` (never to
+  add to) for an unreachable member, that `sx_spot_ctx.distance` walks, and
+  that `sx_flow_distance_fn` wants map cells (a plain hex squad converts).
 - **Cache thrash:** per-member destinations (keeper goals, arrival) need one
   slot each; with fewer slots than destinations per tick every question is
   a search. Documented ("give at least as many slots as destinations"),

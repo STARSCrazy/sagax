@@ -1966,13 +1966,25 @@ Without a provider nothing changes.
 there, in a fixed number of slots; the least recently used is replaced.
 Many members asking about the same target cost one search, not one per
 member: `searches()` counts them, `cached(to)` tells whether a field is
-kept. The sum of the step costs is divided by the straight step cost
-(octile: a diagonal adds 1.4 cells). Give it at least as many slots as
+kept. The field is built over the map's moves turned round
+(`sagax::nav::Reversed`), so the distance is the cost of walking from the
+member to the destination, as a path search from the member finds it: the
+cell entered, zone leave costs and one-way walls count in the right
+direction (`start_step` is not used). A member on a cell the map blocks
+(occupied by itself) still walks off it; a destination nobody can enter
+(the enemy's occupied cell) is walked up to, one cell more than the nearest
+cell next to it; standing there is 0. On a map with stairs between levels
+give it the levels moves can come from (`with_levels(0..=2)`, C
+`sx_flow_distance_set_levels`); by default only level 0 and the cell's own
+level are looked at backwards. The sum of the step costs is divided by the
+straight step cost (octile: a diagonal adds 1.4 cells). Give it at least as many slots as
 destinations a tick asks about (the target plus one wish point per slot;
 in a crew also each keeper's goal), or the fields push each other out and
 every question is a search. A cell beyond the field's capacity counts as
 unreachable. Call `invalidate()` when the map changes. On hex the crew asks
-in offset coordinates, the map's; a plain squad on hex asks in axial ones.
+in offset coordinates, the map's; a plain squad on hex asks in axial ones,
+so wrap the provider in a `Distance` that converts (`from_axial`) and do not
+share one provider between such a squad and a crew.
 
 In C the provider is a callback on the handle, not a rules slot:
 
@@ -1988,7 +2000,9 @@ sx_crew_set_distance(crew, sx_flow_distance_fn, fd);      /* NULL clears */
 
 Your own `sx_distance_fn` gets `ctx` and two `int32_t[3]` positions and
 returns 1 with the cells in `*out`, or 0 for unreachable (anything but 1
-counts as unreachable). `sx_squad_set_distance` does the same on a squad
+counts as unreachable). A member cost callback (`sx_cost_ctx.built_in`)
+sees a member that cannot get there as `INT64_MAX`: compare it or return
+it, never add to it. `sx_squad_set_distance` does the same on a squad
 handle; both apply to every call of the handle, with or without
 `sx_squad_rules`. The example `walk_distance_scene` (Rust) and
 `examples/c/walk_distance.c` show the wall: the metric sends the guard

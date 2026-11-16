@@ -38,15 +38,26 @@ built with the new header refuses an older library.
 - **`FlowDistance`** (`sagax::walk`, prelude): `new(topology, slots,
   capacity)`, `DEFAULT_SLOTS` (4), `distance(&mut map, from, to)`,
   `on(&mut map)` (a `Distance` for `Walking`), `searches()`, `cached(to)`,
-  `invalidate()`. One field per destination, least recently used replaced;
-  cost divided by the straight step cost; beyond the capacity is
-  unreachable. Square and hex.
+  `invalidate()`, `with_levels` / `set_levels` (the levels stairs arrive
+  from). One field per destination, built over the moves turned round, so
+  the distance is the cost of walking from `from` to `to` (as a path search
+  finds it, also with enter costs, zone leave costs and one-way walls);
+  least recently used replaced; cost divided by the straight step cost;
+  beyond the capacity is unreachable. A walker on a blocked cell still walks
+  off it; a destination nobody can enter is walked up to (one cell more
+  than next to it); `from == to` is 0 without a search. Square and hex.
+- `sagax-nav`: **`Reversed`** (with `ReverseBuffers`), any graph with its
+  moves turned round (a candidate counts only if something can enter it);
+  `Topology::predecessors` and `Topology::reversed`; `FlowField::cost_from`
+  (the field's cost, or the cheapest first move into it).
 - **C:** `sx_distance_fn` (`ctx`, two `int32_t[3]`, `*out`; 1 = reachable),
   `sx_squad_set_distance` and `sx_crew_set_distance` (null clears; applies
   to every call of the handle); the handle `sx_flow_distance`
   (`sx_flow_distance_new(rules, slots)` with the capacity from
-  `rules->node_capacity`, `_free`, `_set_map`, `_invalidate`, `_searches`)
-  and its callback `sx_flow_distance_fn`.
+  `rules->node_capacity`, `_free`, `_set_map`, `_invalidate`,
+  `_set_levels`, `_searches`) and its callback `sx_flow_distance_fn` (map
+  cells: a plain hex squad converts its axial positions first). A member
+  cost callback sees an unreachable member as `INT64_MAX`.
 - Examples: `walk_distance_scene` (Rust) and `examples/c/walk_distance.c`:
   a wall between the squad and an enemy; the metric sends the guard behind
   it, the walking distance the one who gets there. Both print the same
