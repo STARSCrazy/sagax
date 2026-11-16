@@ -191,12 +191,30 @@ ROADMAP item moved to done; README if it lists features.
   (occupied by itself) walks off it, as `find_path` does (`cost_from`: the
   first move forward). A destination nobody can enter (the enemy's occupied
   cell) is unreachable for `find_path`; here it is walked up to: the field
-  is rooted at the cells next to it and the distance is one cell more,
+  is rooted at the cells a real move would enter it from were it free, and
+  the distance is one cell more. Second review: rooting at every neighbour
+  was wrong next to walls, one-way walls and on other levels. Forward
+  `neighbors(to)` (the moves out of `to`) was considered and rejected: a
+  one-way wall that lets one leave `to` but forbids entering it would make
+  a root. So `CellMap` got `step_unblocked(from, dx, dy)`, a move as if the
+  cell entered were free: `DenseGrid` (and so `sx_grid`, which the C map
+  adapter recognises) answers exactly; the default asks the move back,
+  exact for two-way walls. Corner cutting and four-way rules are checked
+  on top. This is
   because the squad asks for the enemy's own cell and an occupancy map must
   not make every enemy unreachable. `from == to` is 0 without a search.
 - **Levels:** moves are looked for backwards from neighbours on the cell's
-  own level and on `with_levels(lo..=hi)` (C `sx_flow_distance_set_levels`,
-  default 0..=0); a stair from another level is otherwise not seen. The
+  own level and one up and one down (default, second review: a fixed 0..=0
+  silently missed ordinary stairs), or on a fixed range
+  `with_levels(lo..=hi)` (C `sx_flow_distance_set_levels`) for moves that
+  jump further; `levels_around()` restores the default. A range is at most
+  64 levels: Rust cuts a wider one to its first 64 (documented), C refuses
+  it with `SX_ERROR_ARGUMENT` (a range of all `int32_t` would hang).
+- **Cost:** the reverse expansion asks every candidate for its moves and
+  checks it can be entered (needed: without it off-map cells, which
+  `DenseGrid` lets a walker leave, spread the search without end), some 25
+  to 70 times the map questions of a forward field. Kept and documented
+  (enough capacity, few destinations). The
   capacity bounds each field: a cell beyond it is unreachable (documented:
   size it for the farthest walk that should count).
 - **Review fixes, small:** a slot is unclaimed while its field is built (a

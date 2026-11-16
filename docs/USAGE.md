@@ -1973,10 +1973,16 @@ cell entered, zone leave costs and one-way walls count in the right
 direction (`start_step` is not used). A member on a cell the map blocks
 (occupied by itself) still walks off it; a destination nobody can enter
 (the enemy's occupied cell) is walked up to, one cell more than the nearest
-cell next to it; standing there is 0. On a map with stairs between levels
-give it the levels moves can come from (`with_levels(0..=2)`, C
-`sx_flow_distance_set_levels`); by default only level 0 and the cell's own
-level are looked at backwards. The sum of the step costs is divided by the
+cell a move would enter it from were it free (walls, one-way walls, stairs
+and corners still count: `CellMap::step_unblocked`, which `DenseGrid` and
+`sx_grid` answer exactly and other maps by asking the move back); standing
+there is 0. Moves are looked for backwards on the cell's own level and one
+up and one down, so ordinary stairs and ramps need no setup; a map whose
+moves jump further names its levels (`with_levels(0..=4)`, at most 64; C
+`sx_flow_distance_set_levels`). **Cost:** the map only answers moves
+forward, so a field asks every neighbour of a cell for its moves, some 25
+to 70 times the map questions of a plain flow field of the same size: give
+it the capacity it needs and ask about few destinations. The sum of the step costs is divided by the
 straight step cost (octile: a diagonal adds 1.4 cells). Give it at least as many slots as
 destinations a tick asks about (the target plus one wish point per slot;
 in a crew also each keeper's goal), or the fields push each other out and

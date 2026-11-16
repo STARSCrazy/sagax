@@ -38,14 +38,19 @@ built with the new header refuses an older library.
 - **`FlowDistance`** (`sagax::walk`, prelude): `new(topology, slots,
   capacity)`, `DEFAULT_SLOTS` (4), `distance(&mut map, from, to)`,
   `on(&mut map)` (a `Distance` for `Walking`), `searches()`, `cached(to)`,
-  `invalidate()`, `with_levels` / `set_levels` (the levels stairs arrive
-  from). One field per destination, built over the moves turned round, so
+  `invalidate()`, `with_levels` / `set_levels` / `levels_around` (default:
+  moves from the cell's own level and one up and one down; a named range of
+  at most `MAX_LEVELS` = 64, wider ranges are cut). One field per destination, built over the moves turned round, so
   the distance is the cost of walking from `from` to `to` (as a path search
   finds it, also with enter costs, zone leave costs and one-way walls);
   least recently used replaced; cost divided by the straight step cost;
   beyond the capacity is unreachable. A walker on a blocked cell still walks
   off it; a destination nobody can enter is walked up to (one cell more
-  than next to it); `from == to` is 0 without a search. Square and hex.
+  than to the nearest cell a real move would enter it from); `from == to`
+  is 0 without a search. Square and hex. A field asks the map 25 to 70
+  times as much as a plain flow field.
+- `CellMap::step_unblocked` (default: the move back; `DenseGrid` exact):
+  a move as if the cell entered were free.
 - `sagax-nav`: **`Reversed`** (with `ReverseBuffers`), any graph with its
   moves turned round (a candidate counts only if something can enter it);
   `Topology::predecessors` and `Topology::reversed`; `FlowField::cost_from`
@@ -55,7 +60,7 @@ built with the new header refuses an older library.
   to every call of the handle); the handle `sx_flow_distance`
   (`sx_flow_distance_new(rules, slots)` with the capacity from
   `rules->node_capacity`, `_free`, `_set_map`, `_invalidate`,
-  `_set_levels`, `_searches`) and its callback `sx_flow_distance_fn` (map
+  `_set_levels` (at most 64 levels), `_searches`) and its callback `sx_flow_distance_fn` (map
   cells: a plain hex squad converts its axial positions first). A member
   cost callback sees an unreachable member as `INT64_MAX`.
 - Examples: `walk_distance_scene` (Rust) and `examples/c/walk_distance.c`:
