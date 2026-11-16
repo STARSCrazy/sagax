@@ -155,9 +155,11 @@ Builder calls (made while building, from the spec's open points):
   with `a` the change minus the smallest change of that goal's options (so
   the best option has weight 1), computed as `2^(-t / ln 2)`: `t / ln 2`
   in 1/65536 (truncated, from `2^32 / ln 2`), the 16 fraction bits by 16
-  fixed factors in 1/2^32, the whole part by a shift (weights below
-  2^-63 are 0). Relative error below 2^-15, tested against `f64`. A step's
-  likelihood is clamped to 1/65536..1.
+  fixed factors in 1/2^32, the whole part by a shift. The error is at most
+  `w * 2^-15 + 2^-32` (the shift truncates to 1/2^32), so the relative
+  error is near 2^-15 only for weights well above 2^-32; weights below
+  2^-32 count as 0. Tested against `f64`. A step's likelihood is clamped
+  to 1/65536..1.
 - **Floor.** After the Bayes update a goal not ruled out that fell to 0 is
   lifted to 1/65536 (taken from the most likely goal). Without it a goal
   that had dropped below the precision could never come back when
@@ -167,7 +169,9 @@ Builder calls (made while building, from the spec's open points):
   the prior itself), as the spec says; `forget` above 256 counts as 256.
 - **Prior.** `set_prior` replaces the prior and starts over from it
   (chances = prior). A missing weight is 0, extra ones are ignored, all 0
-  (or none) is uniform; the start is uniform.
+  (or none) is uniform; the start is uniform. Only weight 0 rules a goal
+  out: a non-zero weight that would round to 0 keeps 1/65536 (taken from
+  the largest).
 - **`observe` returns `Result<(), StepError>`**: `per_goal` 0 or above
   `MAX_MOVES` (32) or a slice too short for the goals is
   `StepError::Shape`, nothing changes, a `Refused` record. `StepError`
@@ -187,10 +191,12 @@ Builder calls (made while building, from the spec's open points):
   `graph.neighbors(prev)`, standing still is not one of them. More than
   `MAX_MOVES` moves or a field count other than the goal count is
   `StepError::Shape`.
-- **Unreachable goals in the helper.** For a goal whose field does not
-  hold `prev`, or holds none of the moves, every change is 0 (the step
-  teaches nothing about it, likelihood 1 / moves); a single move outside
-  the field gets the largest known change of that goal (the least likely
+- **Unreachable goals in the helper** (replaces goal 8's "likelihood of
+  the least likely option" for a goal unreachable from the step): a goal
+  whose field does not hold `prev`, or holds none of the moves, learns
+  nothing from the step (every change 0, a neutral likelihood of
+  1 / moves). Only a single move outside the field of an otherwise
+  reachable goal gets that goal's largest known change (the least likely
   option), also when it is the step taken.
 - **Standing still** in the helper is `Ok` with no change and no record;
   the core `observe` has no notion of it (the game does not call it).

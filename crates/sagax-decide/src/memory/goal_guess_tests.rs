@@ -236,6 +236,25 @@ fn a_ruled_out_goal_stays_out() {
 }
 
 #[test]
+fn a_tiny_weight_is_not_ruled_out() {
+    let scene = Scene::new();
+    let mut g = GoalGuess::new(GoalGuessConfig::default(), 4);
+    g.set_prior(&[1_000_000, 1, 0, u32::MAX]);
+    assert_eq!(g.chance_fine(1), 1, "a tiny weight keeps 1/65536");
+    assert_eq!(g.chance_fine(2), 0, "only weight 0 rules out");
+    let sum: u32 = (0..4).map(|k| g.chance_fine(k)).sum();
+    assert_eq!(sum, 65536);
+    // He walks to exit 1: the tiny prior can still win.
+    let way = scene.way(1, (9, 7));
+    for w in way.windows(2) {
+        scene.observe(&mut g, w[0], w[1]);
+        assert_sums(&g);
+        assert_eq!(g.chance_fine(2), 0);
+    }
+    assert_eq!(g.best().map(|b| b.0), Some(1));
+}
+
+#[test]
 fn prior_weights_and_split() {
     let mut g = GoalGuess::new(GoalGuessConfig::default(), 3);
     g.set_prior(&[60, 30, 10]);

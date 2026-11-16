@@ -58,9 +58,10 @@ pub fn observe_flow<G: Graph, F: Borrow<FlowField<G::Node>>>(
 /// The moves are `graph.neighbors(prev)`; for each goal the change of
 /// walking distance of every move is `cost(move) - cost(prev)` from that
 /// goal's field. A move outside a field gets the largest known change of
-/// that goal (the least likely option); a goal whose field holds `prev` or
-/// none of the moves teaches nothing for this step (every change 0), so a
-/// blocked or unreachable goal never zeroes the others.
+/// that goal (the least likely option); a goal whose field does not hold
+/// `prev`, or holds none of the moves, learns nothing from this step
+/// (every change 0), so a blocked or unreachable goal never zeroes the
+/// others.
 ///
 /// `cur == prev` (standing still) teaches nothing: `Ok`, no change, no
 /// record. Refused with a `Refused` record and nothing changed:

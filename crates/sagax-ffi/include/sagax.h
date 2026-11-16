@@ -3404,9 +3404,10 @@ int32_t sx_contagion_set_trace(sx_contagion *c, sx_contagion_trace_fn trace, voi
  * what the observer saw (positions from its own percepts), never the true
  * goal or the true position.
  *
- * Integer only (chances in 1/65536, w by an integer exp2 with a relative
- * error below 2^-15): the same steps give the same chances everywhere. A
- * goal not ruled out never drops below 1/65536, so it can always come back.
+ * Integer only (chances in 1/65536, w by an integer exp2 with an error of
+ * at most w * 2^-15 + 2^-32; weights below 2^-32 count as 0): the same steps
+ * give the same chances everywhere. A goal not ruled out (any non-zero prior
+ * weight) never drops below 1/65536, so it can always come back.
  * One handle per observer; nothing allocates after sx_goal_guess_new. */
 
 typedef struct sx_goal_guess sx_goal_guess;
@@ -3433,7 +3434,8 @@ int32_t sx_goal_guess_goals(const sx_goal_guess *g);
 
 /* Sets the prior from count weights (any unit; missing ones 0, extra ones
  * ignored; all 0 is uniform) and starts over from it. A goal with weight 0
- * is ruled out until a new prior (forgetting skips it). Returns 0, or
+ * is ruled out until a new prior (forgetting skips it); any other weight,
+ * however small, keeps at least 1/65536. Returns 0, or
  * SX_ERROR_ARGUMENT for a null handle or a null weights with count > 0. */
 int32_t sx_goal_guess_set_prior(sx_goal_guess *g, const uint32_t *weights, uint32_t count);
 /* Back to the prior. Returns 0, or SX_ERROR_ARGUMENT. */
@@ -3452,8 +3454,9 @@ int32_t sx_goal_guess_observe(sx_goal_guess *g, const int32_t *moved, const int3
  * goal k; count is the goal count). The moves of prev come from map with the
  * rules of flows[0]; each move's change is its field cost minus the cost of
  * prev. A move outside a field gets that goal's largest known change (the
- * least likely option); a goal whose field holds prev or none of the moves
- * learns nothing from this step, so a blocked goal never zeroes the others.
+ * least likely option); a goal whose field does not hold prev, or holds none
+ * of the moves, learns nothing from this step, so a blocked goal never
+ * zeroes the others.
  * Returns 0 (learned; cur equal to prev: nothing to learn), 1 for a jump
  * (cur is not a move from prev, for example after the observer lost sight:
  * nothing changed, just go on from the new place), or SX_ERROR_ARGUMENT for

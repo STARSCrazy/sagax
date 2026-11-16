@@ -19,12 +19,13 @@ built with the new header refuses an older library.
     step, 10, 13 = about 5 %), `MAX_GOALS` (8), `MAX_MOVES` (32),
     `GOAL_COLUMNS` (2);
   - `new(config, goals)`, `set_prior(&weights)` (a goal with weight 0 is
-    ruled out; all 0 is uniform) and `reset()`;
+    ruled out, any other weight keeps at least 1/65536; all 0 is uniform) and `reset()`;
   - `observe(moved, options, per_goal)`: one step's changes of walking
     distance, likelihood `w(moved_k) / Σ_j w(options_k[j])` with
-    `w(x) = exp(-beta * x / (256 * unit))` by an integer exp2 (relative
-    error below 2^-15); chances in 1/65536 that always sum to 65536; a goal
-    not ruled out never drops below 1/65536; then `forget` of uniform over
+    `w(x) = exp(-beta * x / (256 * unit))` by an integer exp2 (error at
+    most `w * 2^-15 + 2^-32`; weights below 2^-32 count as 0); chances in
+    1/65536 that always sum to 65536; a goal not ruled out (any non-zero
+    prior weight) never drops below 1/65536; then `forget` of uniform over
     the goals not ruled out; `StepError::Shape` for numbers that do not fit;
   - `chance(k)` (0..256, all goals sum to exactly 256), `shares()`,
     `chance_fine(k)`, `best()`, `rank(k)`, `write_columns(k, row)`
@@ -37,8 +38,8 @@ built with the new header refuses an older library.
 - **`sagax::goal_guess::observe_flow`** (prelude) and `observe_flow_traced`:
   a seen step `prev -> cur` with one `FlowField` per goal and any nav
   graph, square or hex. A move outside a field gets that goal's largest
-  known change; a goal whose field holds neither `prev` nor any move learns
-  nothing, so a blocked goal zeroes nobody. Standing still teaches nothing;
+  known change; a goal whose field does not hold `prev`, or holds none of
+  the moves, learns nothing, so a blocked goal zeroes nobody. Standing still teaches nothing;
   `cur` not a move of `prev` is `StepError::Jump` (nothing changed).
   `moves` is reused memory: no allocation per step.
 - **C:** the handle `sx_goal_guess` (`sx_goal_guess_new`, `_free`,

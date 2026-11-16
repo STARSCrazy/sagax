@@ -1075,7 +1075,8 @@ guess.write_columns(goal, &mut row[4..]);       // chance, rank: plain Decider c
 - **Prior.** `set_prior(&weights)` (for example from the mission: "he
   probably wants the building with the objective") starts over from it;
   `reset()` goes back to it. A goal with weight 0 is ruled out and stays at
-  0, forgetting skips it; all weights 0 is uniform.
+  0, forgetting skips it; any other weight, however small, keeps at least
+  1/65536; all weights 0 is uniform.
 - **Read.** `chance(k)` 0..256 (all goals sum to exactly 256),
   `chance_fine(k)` in the internal 1/65536, `best()`, `rank(k)` (0 the most
   likely, ties by lower goal), `write_columns(k, row)` (`chance, rank` as
@@ -1083,14 +1084,16 @@ guess.write_columns(goal, &mut row[4..]);       // chance, rank: plain Decider c
   ties by lower goal, deterministic).
 - **A blocked goal zeroes nobody.** A move outside a goal's field gets
   that goal's largest known change (the least likely option); a goal whose
-  field holds neither `prev` nor any move learns nothing from the step. A
+  field does not hold `prev`, or holds none of the moves, learns nothing
+  from the step. A
   goal not ruled out never drops below 1/65536, so it can always come back.
 - **Jumps.** `cur` must be `prev` or one of its moves. After the observer
   lost sight, the next sighting is usually a jump: `StepError::Jump`,
   nothing changed; take the new place as the start of a new chain, the
   forgetting covers the gap.
-- Integer only (chances in 1/65536, `w` by an integer exp2 with a relative
-  error below 2^-15), deterministic, square and hex (the guess knows no
+- Integer only (chances in 1/65536, `w` by an integer exp2 with an error
+  of at most `w * 2^-15 + 2^-32`; weights below 2^-32 count as 0),
+  deterministic, square and hex (the guess knows no
   grid; `observe_flow` takes any nav graph). The guess is a plain `Copy`
   value: no heap, and `observe_flow` allocates nothing once `moves` has
   grown. Records: `set_prior_traced`, `reset_traced`, `observe_traced` and

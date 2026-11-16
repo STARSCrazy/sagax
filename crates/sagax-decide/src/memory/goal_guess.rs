@@ -40,9 +40,11 @@ const SHARE: u32 = 256;
 ///
 /// `w(x) = exp(-t)` with `t = beta * x / (256 * unit)` is computed as
 /// `2^(-t / ln 2)`: `t / ln 2` in 1/65536 (truncated), the fraction by 16
-/// fixed factors in 1/2^32, the whole part by a shift. The relative error
-/// of `w` is below 2^-15; weights below 2^-63 of the best option count as
-/// 0 (and a step's likelihood never drops below 1/65536).
+/// fixed factors in 1/2^32, the whole part by a shift. The error of `w`
+/// is at most `w * 2^-15 + 2^-32` (the shift truncates to 1/2^32), so the
+/// relative error stays near 2^-15 only for weights well above 2^-32;
+/// weights below 2^-32 of the best option count as 0 (and a step's
+/// likelihood never drops below 1/65536).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct GoalGuessConfig {
@@ -226,7 +228,8 @@ impl GoalGuess {
     /// Sets the prior from `weights` (one per goal, in any unit; a missing
     /// weight is 0, extra ones are ignored) and starts over from it. A goal
     /// with weight 0 is ruled out: it stays at 0 (forgetting skips it)
-    /// until a new prior. All weights 0 (or none) is the uniform prior. One
+    /// until a new prior; any other weight, however small, keeps at least
+    /// 1/65536. All weights 0 (or none) is the uniform prior. One
     /// `Prior` record per goal.
     pub fn set_prior_traced(&mut self, weights: &[u32], sink: &mut impl Sink<GoalGuessTrace>) {
         let n = self.goals();
@@ -239,6 +242,14 @@ impl GoalGuess {
         }
         self.prior = [0; MAX_GOALS];
         apportion(&w[..n], SCALE, &mut self.prior[..n]);
+        // Only weight 0 rules a goal out: a tiny weight keeps 1/65536.
+        for (k, &wk) in w[..n].iter().enumerate() {
+            if wk > 0 && self.prior[k] == 0 {
+                let top = (0..n).fold(0, |b, i| if self.prior[i] > self.prior[b] { i } else { b });
+                self.prior[top] -= 1;
+                self.prior[k] = 1;
+            }
+        }
         self.chance = self.prior;
         if sink.enabled() {
             let shares = self.shares();
@@ -474,6 +485,19 @@ mod tests {
                     (got - exact).abs() <= exact / 32768.0 + 1.0,
                     "beta {beta}, a {a}: {got} vs {exact}"
                 );
+            }
+        }
+        // Small weights: the error is at most w * 2^-15 + 2^-32, and below
+        // 2^-32 a weight counts as 0.
+        for a in (0..2000u64).step_by(7) {
+            let exact = (-(512.0 * a as f64) / 2560.0).exp() * 4294967296.0;
+            let got = weight(512, 10, a) as f64;
+            assert!((got - exact).abs() <= exact / 32768.0 + 1.0, "a {a}");
+            if exact < 1.0 {
+                assert!(got <= 1.0, "a {a}: {got}");
+            }
+            if exact < 0.5 {
+                assert_eq!(got, 0.0, "a {a}");
             }
         }
         assert_eq!(weight(512, 10, 10_000), 0);
