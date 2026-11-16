@@ -27,15 +27,21 @@
 //! let _rules = Walking::new(&mut walk);
 //! ```
 
+use std::ops::RangeInclusive;
+
 use sagax_decide::memory::Distance;
 use sagax_nav::flow::FlowField;
 use sagax_nav::search::{Cost, Limits};
+use sagax_nav::{ReverseBuffers, Reversed};
 
 use crate::prelude::{Cell, CellMap, Pos, Topology};
 
 /// One cached flow field and the destination it is rooted at.
 struct Slot {
     to: Option<Cell>,
+    /// The destination cannot be entered: the field is rooted at its
+    /// neighbours and every distance is one cell more.
+    beside: bool,
     used: u64,
     field: FlowField<Cell>,
 }
@@ -46,12 +52,26 @@ struct Slot {
 /// [`FlowDistance::distance`] builds (or reuses) the field rooted at `to`
 /// and reads the cost at `from`, so many members asking about the same
 /// few destinations (the target, a wish point, a goal) cost one search per
-/// new destination. The cost is turned into cells by dividing the sum by
-/// the straight step cost (rounded down: on an octile grid a diagonal
-/// counts 1.4 cells in the sum). A cell the field did not reach (no way,
-/// or beyond its node capacity: a field of `capacity` cells reaches about
-/// as far as a search of that many cells) is unreachable, so size the
-/// capacity for the farthest walk that should count.
+/// new destination. The field is built over the map's moves turned round
+/// ([`Reversed`]), so the cost at `from` is the cost of walking from
+/// `from` to `to`: what a path search from `from` finds (`find_path` on the
+/// topology's graph without a start cell; `start_step` is not used), also
+/// where moves cost differently in the two directions (the cell entered,
+/// leave costs of zones, one-way walls). The cell `from` stands on is only
+/// left, never entered, so a figure on a cell the map blocks (occupied by
+/// itself) still walks. A destination that cannot be entered (occupied by
+/// the enemy, blocked) is walked up to: the field is rooted at its
+/// neighbours and the distance is one cell more than to the nearest of
+/// them; a path search would call it unreachable. `from == to` is 0.
+///
+/// The cost is turned into cells by dividing the sum by the straight step
+/// cost (rounded down: on an octile grid a diagonal counts 1.4 cells in
+/// the sum). A cell the field did not reach (no way, or beyond its node
+/// capacity: a field of `capacity` cells reaches about as far as a search
+/// of that many cells) is unreachable, so size the capacity for the
+/// farthest walk that should count. On a map with several levels set the
+/// levels moves can arrive from ([`FlowDistance::with_levels`]); by default
+/// only moves from the same level or from level 0 are seen backwards.
 ///
 /// Positions are map cells `[x, y, level]`: on a hex map the game's offset
 /// coordinates, which is what a hex [`Crew`](crate::prelude::Crew) hands
@@ -63,6 +83,10 @@ pub struct FlowDistance {
     topology: Topology,
     capacity: usize,
     step: Cost,
+    levels: RangeInclusive<i32>,
+    buffers: ReverseBuffers<Cell>,
+    moves: Vec<(Cell, Cost)>,
+    roots: Vec<Cell>,
     slots: Vec<Slot>,
     clock: u64,
     searches: u64,
@@ -84,9 +108,14 @@ impl FlowDistance {
             topology,
             capacity,
             step,
+            levels: 0..=0,
+            buffers: ReverseBuffers::with_capacity(48, 8),
+            moves: Vec::with_capacity(8),
+            roots: Vec::with_capacity(48),
             slots: (0..slots.max(1))
                 .map(|_| Slot {
                     to: None,
+                    beside: false,
                     used: 0,
                     field: FlowField::with_capacity(capacity),
                 })
@@ -94,6 +123,21 @@ impl FlowDistance {
             clock: 0,
             searches: 0,
         }
+    }
+
+    /// The levels a move may arrive from (stairs, ramps; default `0..=0`):
+    /// a field looks for moves into a cell from its neighbours on the
+    /// cell's own level and on these. Forgets every field.
+    pub fn with_levels(mut self, levels: RangeInclusive<i32>) -> Self {
+        self.levels = levels;
+        self.invalidate();
+        self
+    }
+
+    /// Sets the levels as [`with_levels`](Self::with_levels).
+    pub fn set_levels(&mut self, levels: RangeInclusive<i32>) {
+        self.levels = levels;
+        self.invalidate();
     }
 
     /// Forgets every field (call it when the map changed).
@@ -120,6 +164,9 @@ impl FlowDistance {
     pub fn distance<M: CellMap>(&mut self, map: &mut M, from: Pos, to: Pos) -> Option<u32> {
         self.clock += 1;
         let (from, to) = (Cell::from(from), Cell::from(to));
+        if from == to {
+            return Some(0);
+        }
         let i = match self.slots.iter().position(|s| s.to == Some(to)) {
             Some(i) => i,
             None => {
@@ -131,20 +178,54 @@ impl FlowDistance {
                     .enumerate()
                     .min_by_key(|(i, s)| (s.to.is_some(), s.used, *i))
                     .map_or(0, |(i, _)| i);
-                let mut graph = self.topology.graph(&mut *map, None);
-                let limits = Limits {
-                    max_nodes: self.capacity,
-                    ..Limits::default()
-                };
-                self.slots[i].field.build(&mut graph, [to], limits);
+                // Unclaimed while it is built: a panic in the map leaves no
+                // half-built field behind a destination.
+                self.slots[i].to = None;
+                self.build(i, map, to);
                 self.slots[i].to = Some(to);
-                self.searches += 1;
                 i
             }
         };
         let slot = &mut self.slots[i];
         slot.used = self.clock;
-        slot.field.cost(from).map(|c| c / self.step)
+        // `from` is only left: a walker on a cell nobody enters (blocked
+        // under itself) takes its first move forward.
+        let mut graph = self.topology.graph(&mut *map, None);
+        let cost = slot.field.cost_from(&mut graph, from, &mut self.moves)?;
+        let cells = cost / self.step;
+        Some(if slot.beside {
+            cells.saturating_add(1)
+        } else {
+            cells
+        })
+    }
+
+    /// Builds slot `i`'s field over the reversed graph: rooted at `to`,
+    /// or, if nothing moves into `to`, at the cells next to it.
+    fn build<M: CellMap>(&mut self, i: usize, map: &mut M, to: Cell) {
+        let (topology, levels) = (self.topology, self.levels.clone());
+        let mut graph = Reversed::with_buffers(
+            topology.graph(&mut *map, None),
+            move |c: Cell, out: &mut Vec<Cell>| topology.predecessors(c, levels.clone(), out),
+            std::mem::take(&mut self.buffers),
+        );
+        let beside = !graph.enterable(to);
+        self.roots.clear();
+        if beside {
+            topology.predecessors(to, self.levels.clone(), &mut self.roots);
+        } else {
+            self.roots.push(to);
+        }
+        let limits = Limits {
+            max_nodes: self.capacity,
+            ..Limits::default()
+        };
+        let slot = &mut self.slots[i];
+        slot.field
+            .build(&mut graph, self.roots.iter().copied(), limits);
+        slot.beside = beside;
+        self.searches += 1;
+        self.buffers = graph.into_parts().1;
     }
 
     /// This provider on `map`, as a [`Distance`] to lend a squad.

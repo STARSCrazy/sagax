@@ -54,8 +54,8 @@ fn unreachable_is_none() {
     let mut fd = FlowDistance::new(octile(), 4, 100);
     assert_eq!(fd.distance(&mut map, [4, 0, 0], [6, 0, 0]), None);
     assert_eq!(fd.distance(&mut map, [7, 0, 0], [6, 0, 0]), Some(1));
-    // A wall cell cannot be walked from.
-    assert_eq!(fd.distance(&mut map, [5, 0, 0], [6, 0, 0]), None);
+    // A figure on a blocked cell (its own, occupied) still walks off it.
+    assert_eq!(fd.distance(&mut map, [5, 0, 0], [6, 0, 0]), Some(1));
     // Beyond the capacity of a field counts as no way.
     let mut tiny = FlowDistance::new(octile(), 1, 3);
     let mut open = DenseGrid::new(20, 20);
