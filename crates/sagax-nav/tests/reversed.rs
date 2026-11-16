@@ -94,3 +94,36 @@ fn cells_off_the_map_and_blocked_cells_are_no_predecessors() {
     assert!(!back.enterable(Cell::new(1, 0, 0)));
     assert!(!back.enterable(Cell::new(-1, 0, 0)));
 }
+
+/// A map that only answers `step` (the trait's default `step_unblocked`).
+struct Plain(DenseGrid);
+
+impl sagax_nav::grid::CellMap for Plain {
+    fn step(&mut self, from: Cell, dx: i32, dy: i32) -> Option<i32> {
+        self.0.step(from, dx, dy)
+    }
+}
+
+#[test]
+fn step_unblocked_ignores_only_the_blocked_cell() {
+    use sagax_nav::grid::CellMap;
+    let mut map = DenseGrid::with_levels(4, 4, 2);
+    map.set(2, 2, DenseGrid::BLOCKED);
+    // A one-way wall: from (2, 1) one cannot move to (2, 2), back one can.
+    map.set_wall_bits(2, 1, 1 << 2); // +y
+    assert!(map.link(Cell::new(1, 2, 1), Cell::new(2, 2, 0)));
+    let q = |x, y, l| Cell::new(x, y, l);
+    // Into the blocked cell: as if it were free.
+    assert_eq!(map.step(q(3, 2, 0), -1, 0), None);
+    assert_eq!(map.step_unblocked(q(3, 2, 0), -1, 0), Some(0));
+    // Walls and links still apply.
+    assert_eq!(map.step_unblocked(q(2, 1, 0), 0, 1), None);
+    assert_eq!(map.step_unblocked(q(1, 2, 1), 1, 0), Some(0));
+    // Off the map: no.
+    assert_eq!(map.step_unblocked(q(3, 2, 0), 1, 0), None);
+    // The default asks the move back: right for two-way walls, blind to
+    // the one-way wall (the move back from (2, 2) to (2, 1) is allowed).
+    let mut plain = Plain(map);
+    assert_eq!(plain.step_unblocked(q(3, 2, 0), -1, 0), Some(0));
+    assert_eq!(plain.step_unblocked(q(2, 1, 0), 0, 1), Some(0));
+}

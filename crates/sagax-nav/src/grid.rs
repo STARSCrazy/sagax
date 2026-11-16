@@ -26,6 +26,20 @@ pub trait CellMap {
         self.step(from, dx, dy)
     }
 
+    /// As [`step`](CellMap::step), but as if the cell entered were free
+    /// even when it is blocked (occupied, by the one walked up to): walls,
+    /// one-way walls, links and the map's edge still apply. Asked only to
+    /// find the cells next to a destination nobody can enter.
+    ///
+    /// The default asks the move back, from the neighbour (on `from`'s
+    /// level) toward `from`, and answers `from`'s level when that move
+    /// arrives on it: exact where walls and links work both ways; override
+    /// it when a wall can forbid entering a cell that may be left that way.
+    fn step_unblocked(&mut self, from: Cell, dx: i32, dy: i32) -> Option<i32> {
+        let there = Cell::new(from.x + dx, from.y + dy, from.level);
+        (self.step(there, -dx, -dy) == Some(from.level)).then_some(from.level)
+    }
+
     /// Extra cost of the move from `from` into `to` on top of the base cost
     /// (danger, rough ground, leaving an enemy's reach); `None` forbids the
     /// move. Defaults to 0.
@@ -570,6 +584,18 @@ impl CellMap for DenseGrid {
             .then_some(level)
     }
 
+    fn step_unblocked(&mut self, from: Cell, dx: i32, dy: i32) -> Option<i32> {
+        let dir = direction_index(dx, dy);
+        if dir.is_some_and(|i| self.wall_bits_at(from) & (1 << i) != 0) {
+            return None;
+        }
+        let level = dir
+            .and_then(|i| self.link_of(from, i))
+            .unwrap_or(from.level);
+        self.get_at(Cell::new(from.x + dx, from.y + dy, level))
+            .map(|_| level)
+    }
+
     fn move_cost(&mut self, from: Cell, to: Cell) -> Option<Cost> {
         let enter = self.get_at(to).filter(|&c| c != Self::BLOCKED)?;
         let left = self.zones_at(from) & !self.zones_at(to);
@@ -585,6 +611,10 @@ impl<M: CellMap + ?Sized> CellMap for &mut M {
 
     fn start_step(&mut self, from: Cell, dx: i32, dy: i32) -> Option<i32> {
         (**self).start_step(from, dx, dy)
+    }
+
+    fn step_unblocked(&mut self, from: Cell, dx: i32, dy: i32) -> Option<i32> {
+        (**self).step_unblocked(from, dx, dy)
     }
 
     fn move_cost(&mut self, from: Cell, to: Cell) -> Option<Cost> {

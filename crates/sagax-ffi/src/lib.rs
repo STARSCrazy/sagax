@@ -424,6 +424,17 @@ impl CellMap for CallbackMap {
         self.call(self.step_fn(true), from, dx, dy)
     }
 
+    /// An `sx_grid` answers exactly; another map by the move back (the
+    /// trait's default).
+    fn step_unblocked(&mut self, from: Cell, dx: i32, dy: i32) -> Option<i32> {
+        // SAFETY: a map from sx_grid_map has a live grid as its context.
+        if let Some(answer) = unsafe { grid::grid_step_unblocked(&self.map, from, dx, dy) } {
+            return answer;
+        }
+        let there = Cell::new(from.x + dx, from.y + dy, from.level);
+        (self.step(there, -dx, -dy) == Some(from.level)).then_some(from.level)
+    }
+
     fn move_cost(&mut self, from: Cell, to: Cell) -> Option<Cost> {
         self.extra(from, to)
     }

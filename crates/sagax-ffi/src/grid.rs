@@ -123,6 +123,30 @@ pub unsafe extern "C" fn sx_grid_map(grid: *mut SxGrid, out: *mut SxMap) -> i32 
     0
 }
 
+/// [`CellMap::step_unblocked`] of the grid behind `map`, if `map` is an
+/// [`sx_grid_map`] (exact for its one-way walls); `None` for another map.
+///
+/// # Safety
+/// `map`'s context is a live grid when its step is [`grid_step`].
+pub(crate) unsafe fn grid_step_unblocked(
+    map: &SxMap,
+    from: Cell,
+    dx: i32,
+    dy: i32,
+) -> Option<Option<i32>> {
+    let ours = map
+        .step
+        .is_some_and(|f| std::ptr::fn_addr_eq(f, grid_step as StepFnPtr));
+    if !ours {
+        return None;
+    }
+    // SAFETY: see above.
+    let g = unsafe { &mut (*map.context.cast::<SxGrid>()).0 };
+    Some(g.step_unblocked(from, dx, dy))
+}
+
+type StepFnPtr = unsafe extern "C" fn(*mut c_void, i32, i32, i32, i32, i32) -> i32;
+
 /// The `step` callback of [`sx_grid_map`].
 ///
 /// # Safety
