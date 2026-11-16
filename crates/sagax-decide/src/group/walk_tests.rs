@@ -304,6 +304,50 @@ fn between_picks_the_friend_by_walking() {
     assert_eq!(goal_pos(&by_walk), Some([6, 2, 0]));
 }
 
+#[test]
+fn a_friend_that_cannot_get_there_is_no_friend() {
+    // Target 10 at (6, 0); its only other target 11 stands on the wall at
+    // (5, 1), where nothing walks from. By the line 11 is the friend; by
+    // walking there is none, so the place is that of a lone target.
+    let mk = |friend: bool| {
+        let mut sq = squad_of(Metric::Chebyshev, &[member(1, 20, 0, 0)]);
+        sq.add_tactic(Tactic {
+            slots: vec![Slot {
+                roles: 0,
+                min: 1,
+                max: 1,
+                gather: None,
+                place: Place::Between,
+                kind: GoalKind::Move,
+                start: Start::Now,
+                want_tags: 0,
+                dist: 2,
+                gather_dist: 0,
+            }],
+            ..tactics::rush()
+        });
+        sq.knowledge_mut().learn(0, enemy(10, 6, 0, 0));
+        if friend {
+            sq.knowledge_mut().learn(0, enemy(11, 5, 1, 0));
+        }
+        sq
+    };
+    let goal_pos = |sq: &Squad| sq.pending_plan().unwrap().goals[0].1.pos;
+    let plan = |sq: &mut Squad| {
+        let mut w = walk(walled);
+        sq.plan_with(0, &[], &[], SEED, &mut Walking::new(&mut w))
+            .unwrap()
+    };
+    let mut by_line = mk(true);
+    by_line.plan(0, &[], &[], SEED).unwrap();
+    let (mut by_walk, mut alone) = (mk(true), mk(false));
+    plan(&mut by_walk);
+    plan(&mut alone);
+    assert_eq!(by_walk.pending_plan().unwrap().target, Some(10));
+    assert_eq!(goal_pos(&by_walk), goal_pos(&alone));
+    assert_ne!(goal_pos(&by_walk), goal_pos(&by_line));
+}
+
 fn spot_ctx(wish: Pos) -> SpotCtx {
     SpotCtx {
         tactic: 0,

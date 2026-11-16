@@ -1393,8 +1393,11 @@ impl Squad {
                 .iter()
                 .enumerate()
                 .filter(|&(j, _)| j != i)
-                .min_by_key(|&(j, f)| (self.friend_key(&mut *rules, me, f.pos), j))
-                .map(|(_, f)| f.pos)
+                .map(|(j, f)| (self.friend_key(&mut *rules, me, f.pos), j, f.pos))
+                // A friend that cannot get there is no nearest friend.
+                .filter(|&(key, _, _)| key != i128::MAX)
+                .min_by_key(|&(key, j, _)| (key, j))
+                .map(|(_, _, pos)| pos)
         });
         let tactic = &self.tactics[t];
         let target_id = target_fact.map(|f| f.subject);
@@ -1647,7 +1650,8 @@ impl Squad {
 
     /// The key that picks the friend of the target at `target` (lowest
     /// first): the metric distance to it, with a walking distance the way
-    /// from `other` to the target (`i128::MAX` when it cannot get there).
+    /// from `other` to the target (`i128::MAX` when it cannot get there:
+    /// never picked).
     fn friend_key(&self, rules: &mut dyn SquadRules, target: Pos, other: Pos) -> i128 {
         match rules.walk() {
             None => dist(self.metric, target, other),
