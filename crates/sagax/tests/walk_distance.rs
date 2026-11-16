@@ -23,7 +23,7 @@ fn octile() -> Topology {
 fn path_cells(map: &mut DenseGrid, topology: Topology, from: Pos, to: Pos) -> Option<u32> {
     let mut nav = Navigator::new(topology, 1000);
     let report = nav.find_path(map, Cell::from(from), &[Cell::from(to)], Budget::UNLIMITED);
-    (report.status == NavStatus::Found).then(|| report.cost / 10)
+    (report.status == NavStatus::Found).then_some(report.cost / 10)
 }
 
 #[test]
