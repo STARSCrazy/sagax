@@ -3568,7 +3568,11 @@ int32_t sx_crew_set_distance(sx_crew *crew, sx_distance_fn distance, void *conte
  * walked up to: one cell more than to the nearest cell a move would enter it
  * from were it free (walls, links and corners still count; an sx_grid
  * answers that exactly, another map by asking the move back out of the
- * destination, exact for two-way walls). from == to is 0. The positions are the map's cells (x, y, level): on hex the offset
+ * destination, exact for two-way walls; links into the destination from
+ * another level are not seen there). A map that is not an sx_grid must let
+ * a walker step out of a blocked cell, or occupied destinations come out
+ * unreachable (never a wrong number). from == to is 0. The positions are
+ * the map's cells (x, y, level): on hex the offset
  * coordinates a crew with hex_grid passes; a plain hex sx_squad passes axial
  * positions, so wrap sx_flow_distance_fn in your own sx_distance_fn that
  * converts them (sx_hex_from_axial), and do not share one sx_flow_distance

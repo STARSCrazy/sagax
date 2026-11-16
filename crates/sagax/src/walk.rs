@@ -66,6 +66,11 @@ struct Slot {
 /// ([`CellMap::step_unblocked`]: walls, one-way walls, links between
 /// levels and corners still count), and the distance is one cell more than
 /// to the nearest of them; a path search would call it unreachable.
+/// The default `step_unblocked` asks the move back out of the destination:
+/// exact for two-way walls, blind to one-way walls and to links into the
+/// destination from another level. A map of its own that refuses to step out
+/// of a blocked cell must implement `step_unblocked`, or occupied
+/// destinations come out unreachable (never a wrong number).
 /// `from == to` is 0.
 ///
 /// The cost is turned into cells by dividing the sum by the straight step
