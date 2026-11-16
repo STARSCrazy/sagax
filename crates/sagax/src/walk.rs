@@ -31,6 +31,7 @@ use std::ops::RangeInclusive;
 
 use sagax_decide::memory::Distance;
 use sagax_nav::flow::FlowField;
+use sagax_nav::grid::Moves;
 use sagax_nav::search::{Cost, Limits};
 use sagax_nav::{ReverseBuffers, Reversed};
 
@@ -60,18 +61,28 @@ struct Slot {
 /// leave costs of zones, one-way walls). The cell `from` stands on is only
 /// left, never entered, so a figure on a cell the map blocks (occupied by
 /// itself) still walks. A destination that cannot be entered (occupied by
-/// the enemy, blocked) is walked up to: the field is rooted at its
-/// neighbours and the distance is one cell more than to the nearest of
-/// them; a path search would call it unreachable. `from == to` is 0.
+/// the enemy, blocked) is walked up to: the field is rooted at the cells a
+/// real move would enter it from, were it free
+/// ([`CellMap::step_unblocked`]: walls, one-way walls, links between
+/// levels and corners still count), and the distance is one cell more than
+/// to the nearest of them; a path search would call it unreachable.
+/// `from == to` is 0.
 ///
 /// The cost is turned into cells by dividing the sum by the straight step
 /// cost (rounded down: on an octile grid a diagonal counts 1.4 cells in
 /// the sum). A cell the field did not reach (no way, or beyond its node
 /// capacity: a field of `capacity` cells reaches about as far as a search
 /// of that many cells) is unreachable, so size the capacity for the
-/// farthest walk that should count. On a map with several levels set the
-/// levels moves can arrive from ([`FlowDistance::with_levels`]); by default
-/// only moves from the same level or from level 0 are seen backwards.
+/// farthest walk that should count. Moves into a cell are looked for from
+/// its neighbours on its own level and the levels next to it (one up, one
+/// down), so ordinary stairs and ramps need no setup; a map whose moves
+/// jump further between levels names them ([`FlowDistance::with_levels`]).
+///
+/// **Cost.** The map only knows moves forward, so a field asks every
+/// neighbour of a cell for its moves: a field costs some 25 to 70 times the
+/// map questions of a plain flow field of the same size. Give it the
+/// capacity it needs and few destinations (the target, a wish point), not
+/// one per member.
 ///
 /// Positions are map cells `[x, y, level]`: on a hex map the game's offset
 /// coordinates, which is what a hex [`Crew`](crate::prelude::Crew) hands
@@ -83,7 +94,7 @@ pub struct FlowDistance {
     topology: Topology,
     capacity: usize,
     step: Cost,
-    levels: RangeInclusive<i32>,
+    levels: Option<RangeInclusive<i32>>,
     buffers: ReverseBuffers<Cell>,
     moves: Vec<(Cell, Cost)>,
     roots: Vec<Cell>,
@@ -108,7 +119,7 @@ impl FlowDistance {
             topology,
             capacity,
             step,
-            levels: 0..=0,
+            levels: None,
             buffers: ReverseBuffers::with_capacity(48, 8),
             moves: Vec::with_capacity(8),
             roots: Vec::with_capacity(48),
@@ -125,18 +136,31 @@ impl FlowDistance {
         }
     }
 
-    /// The levels a move may arrive from (stairs, ramps; default `0..=0`):
-    /// a field looks for moves into a cell from its neighbours on the
-    /// cell's own level and on these. Forgets every field.
+    /// The most levels [`with_levels`](Self::with_levels) looks at.
+    pub const MAX_LEVELS: i32 = 64;
+
+    /// The levels a move may arrive from, instead of the default (the
+    /// cell's own level and one up and one down): a field looks for moves
+    /// into a cell from its neighbours on the cell's own level and on
+    /// these. At most [`MAX_LEVELS`](Self::MAX_LEVELS): a wider range is cut
+    /// to its first 64 levels. Forgets every field.
     pub fn with_levels(mut self, levels: RangeInclusive<i32>) -> Self {
-        self.levels = levels;
-        self.invalidate();
+        self.set_levels(levels);
         self
     }
 
     /// Sets the levels as [`with_levels`](Self::with_levels).
     pub fn set_levels(&mut self, levels: RangeInclusive<i32>) {
-        self.levels = levels;
+        let (lo, hi) = levels.into_inner();
+        let hi = hi.min(lo.saturating_add(Self::MAX_LEVELS - 1));
+        self.levels = Some(lo..=hi);
+        self.invalidate();
+    }
+
+    /// Back to the default levels: the cell's own and one up and one down.
+    /// Forgets every field.
+    pub fn levels_around(&mut self) {
+        self.levels = None;
         self.invalidate();
     }
 
@@ -201,18 +225,24 @@ impl FlowDistance {
     }
 
     /// Builds slot `i`'s field over the reversed graph: rooted at `to`,
-    /// or, if nothing moves into `to`, at the cells next to it.
+    /// or, if nothing moves into `to`, at the cells a move would enter it
+    /// from were it free.
     fn build<M: CellMap>(&mut self, i: usize, map: &mut M, to: Cell) {
         let (topology, levels) = (self.topology, self.levels.clone());
+        let to_levels = window(&levels, to);
         let mut graph = Reversed::with_buffers(
             topology.graph(&mut *map, None),
-            move |c: Cell, out: &mut Vec<Cell>| topology.predecessors(c, levels.clone(), out),
+            move |c: Cell, out: &mut Vec<Cell>| topology.predecessors(c, window(&levels, c), out),
             std::mem::take(&mut self.buffers),
         );
         let beside = !graph.enterable(to);
         self.roots.clear();
         if beside {
-            topology.predecessors(to, self.levels.clone(), &mut self.roots);
+            // The cells a real move would enter `to` from, were it free.
+            topology.predecessors(to, to_levels, &mut self.roots);
+            let map = graph.graph.map_mut();
+            self.roots
+                .retain(|&q| moves_into(topology, &mut **map, q, to));
         } else {
             self.roots.push(to);
         }
@@ -231,6 +261,33 @@ impl FlowDistance {
     /// This provider on `map`, as a [`Distance`] to lend a squad.
     pub fn on<'a, M: CellMap>(&'a mut self, map: &'a mut M) -> FlowDistanceOn<'a, M> {
         FlowDistanceOn { cache: self, map }
+    }
+}
+
+/// The levels moves into `c` are looked for on: the set ones, else `c`'s
+/// own and one up and one down.
+fn window(levels: &Option<RangeInclusive<i32>>, c: Cell) -> RangeInclusive<i32> {
+    match levels {
+        Some(l) => l.clone(),
+        None => c.level.saturating_sub(1)..=c.level.saturating_add(1),
+    }
+}
+
+/// Whether a move from `q` would enter `to` if `to` were free
+/// ([`CellMap::step_unblocked`]), with the topology's rules: four or eight
+/// ways, no cutting corners of walls.
+fn moves_into<M: CellMap>(topology: Topology, map: &mut M, q: Cell, to: Cell) -> bool {
+    let (dx, dy) = (to.x - q.x, to.y - q.y);
+    if map.step_unblocked(q, dx, dy) != Some(to.level) {
+        return false;
+    }
+    match topology {
+        Topology::Square(rules) if dx != 0 && dy != 0 => {
+            rules.moves == Moves::Eight
+                && (rules.cut_corners
+                    || map.step(q, dx, 0).is_some() && map.step(q, 0, dy).is_some())
+        }
+        _ => true,
     }
 }
 

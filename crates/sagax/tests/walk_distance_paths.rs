@@ -209,18 +209,133 @@ fn a_destination_nobody_can_enter_is_walked_up_to() {
 }
 
 #[test]
-fn stairs_need_their_levels() {
-    // Two levels; a stair from (4, 0, 1) down to (5, 0, 0). The walker is
-    // upstairs, the destination downstairs.
+fn stairs_work_without_setup() {
+    // Two levels; a two-way stair between (4, 0, 1) and (5, 0, 0). The
+    // walker is upstairs, the destination downstairs.
     let mut map = DenseGrid::with_levels(10, 1, 2);
     assert!(map.link(Cell::new(4, 0, 1), Cell::new(5, 0, 0)));
     let (from, to) = ([0, 0, 1], [9, 0, 0]);
     let want = path_cells(&mut map, octile(), from, to);
     assert_eq!(want, Some(9));
-    let mut fd = FlowDistance::new(octile(), 4, 100).with_levels(0..=1);
+    // The default looks one level up and down: the stair is seen.
+    let mut fd = FlowDistance::new(octile(), 4, 100);
     assert_eq!(fd.distance(&mut map, from, to), want);
-    // With the default levels (0..=0) a move from level 1 is not seen
-    // backwards.
-    let mut flat = FlowDistance::new(octile(), 4, 100);
-    assert_eq!(flat.distance(&mut map, from, to), None);
+    assert_eq!(fd.distance(&mut map, [9, 0, 0], [0, 0, 1]), Some(9));
+    // Named levels replace the default: without level 1 the stair from
+    // it is not seen backwards.
+    fd.set_levels(0..=0);
+    assert_eq!(fd.distance(&mut map, from, to), None);
+    fd.levels_around();
+    assert_eq!(fd.distance(&mut map, from, to), want);
+}
+
+#[test]
+fn a_jump_over_two_levels_needs_its_levels() {
+    // A shaft from (4, 0, 2) down to (5, 0, 0): two levels apart.
+    let mut map = DenseGrid::with_levels(10, 1, 3);
+    assert!(map.link(Cell::new(4, 0, 2), Cell::new(5, 0, 0)));
+    let (from, to) = ([0, 0, 2], [9, 0, 0]);
+    assert_eq!(path_cells(&mut map, octile(), from, to), Some(9));
+    let mut fd = FlowDistance::new(octile(), 4, 100);
+    assert_eq!(fd.distance(&mut map, from, to), None);
+    let mut fd = fd.with_levels(0..=2);
+    assert_eq!(fd.distance(&mut map, from, to), Some(9));
+    // A huge range is cut to 64 levels (and does not hang).
+    fd.set_levels(i32::MIN..=i32::MAX);
+    assert_eq!(fd.distance(&mut map, [0, 0, 0], [9, 0, 0]), Some(9));
+}
+
+/// 11 x 11, the enemy's cell (5, 5) blocked (occupied).
+fn occupied() -> DenseGrid {
+    let mut map = DenseGrid::new(11, 11);
+    map.set(5, 5, DenseGrid::BLOCKED);
+    map
+}
+
+/// The wall bits that forbid every move toward +y.
+fn down_bits() -> u8 {
+    let mut down = 0u8;
+    for (i, &(_, dy)) in DenseGrid::DIRECTIONS.iter().enumerate() {
+        if dy == 1 {
+            down |= 1 << i;
+        }
+    }
+    down
+}
+
+#[test]
+fn walking_up_to_respects_walls_next_to_the_target() {
+    let to = [5, 5, 0];
+    // A) A wall of blocked cells along y 4 (open only at x 0): the walker
+    // at (5, 3) goes round, to the nearest cell next to the target.
+    let mut map = occupied();
+    for x in 1..=10 {
+        map.set(x, 4, DenseGrid::BLOCKED);
+    }
+    let mut fd = FlowDistance::new(octile(), 4, 1000);
+    let beside = [[4, 5, 0], [4, 6, 0], [5, 6, 0], [6, 5, 0], [6, 6, 0]]
+        .into_iter()
+        .filter_map(|n| path_cost(&mut map, octile(), [5, 3, 0], n))
+        .min()
+        .unwrap();
+    assert_eq!(fd.distance(&mut map, [5, 3, 0], to), Some(beside / 10 + 1));
+    assert!(beside / 10 + 1 > 5);
+
+    // B) One-way walls under row 4: nothing moves from y 4 down. A walker
+    // at y <= 4 can never get next to the target.
+    let mut map = occupied();
+    for x in 0..=10 {
+        map.set_wall_bits(x, 4, down_bits());
+    }
+    let mut fd = FlowDistance::new(octile(), 4, 1000);
+    assert_eq!(fd.distance(&mut map, [5, 4, 0], to), None);
+    assert_eq!(fd.distance(&mut map, [5, 0, 0], to), None);
+    // From below it is one step.
+    assert_eq!(fd.distance(&mut map, [5, 6, 0], to), Some(1));
+
+    // A one-way wall that lets one leave the target upward but not enter it
+    // from (5, 4): (5, 4) is no cell next to it; the walker steps to a
+    // diagonal neighbour first ((4, 4) moves down-right into the target).
+    let mut map = occupied();
+    map.set_wall_bits(5, 4, down_bits());
+    let mut fd = FlowDistance::new(octile(), 4, 1000);
+    assert_eq!(fd.distance(&mut map, [5, 4, 0], to), Some(2));
+
+    // Corners: with (4, 5) and (5, 6) blocked, the diagonals from (4, 6),
+    // (4, 4) and (6, 6) would cut them and are no moves into the target;
+    // only (5, 4), (6, 4) and (6, 5) are next to it.
+    let mut map = occupied();
+    map.set(4, 5, DenseGrid::BLOCKED);
+    map.set(5, 6, DenseGrid::BLOCKED);
+    let mut fd = FlowDistance::new(octile(), 4, 1000);
+    let beside = [[5, 4, 0], [6, 4, 0], [6, 5, 0]]
+        .into_iter()
+        .filter_map(|n| path_cost(&mut map, octile(), [4, 6, 0], n))
+        .min()
+        .unwrap();
+    assert_eq!(fd.distance(&mut map, [4, 6, 0], to), Some(beside / 10 + 1));
+    assert!(beside / 10 + 1 > 1);
+}
+
+#[test]
+fn walking_up_to_on_another_level_takes_the_stair() {
+    // C) Two levels, a stair only at (0, 0, 0) <-> (1, 0, 1); the enemy
+    // stands blocked at (5, 5, 1), the walker right below it at (5, 6, 0).
+    let mut map = DenseGrid::with_levels(11, 11, 2);
+    assert!(map.link(Cell::new(0, 0, 0), Cell::new(1, 0, 1)));
+    map.set_at(Cell::new(5, 5, 1), DenseGrid::BLOCKED);
+    let (from, to) = ([5, 6, 0], [5, 5, 1]);
+    let beside = [[4, 4, 1], [5, 4, 1], [6, 4, 1], [4, 5, 1], [6, 5, 1]]
+        .into_iter()
+        .chain([[4, 6, 1], [5, 6, 1], [6, 6, 1]])
+        .filter_map(|n| path_cost(&mut map, octile(), from, n))
+        .min()
+        .unwrap();
+    for mut fd in [
+        FlowDistance::new(octile(), 4, 1000),
+        FlowDistance::new(octile(), 4, 1000).with_levels(0..=1),
+    ] {
+        assert_eq!(fd.distance(&mut map, from, to), Some(beside / 10 + 1));
+    }
+    assert!(beside / 10 + 1 > 5);
 }
