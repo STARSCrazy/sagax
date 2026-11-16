@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.16.0
+
+Walking distance for the squad. The squad measured every distance as the
+crow flies, so behind a wall it sent the wrong member, called a target "in
+reach" that was forty steps around, and a keeper thought it was nearly
+there. Now the game can lend it a **walking distance**: every question
+"how far does a figure have to walk" asks that instead of the metric. A
+ready provider, `FlowDistance`, answers from flow fields cached by
+destination, so a squad asking all its members about one target costs one
+search. Without a provider nothing changes (the existing examples are
+byte-identical). **C API version 16.** `SX_API_VERSION` is 16, so a game
+built with the new header refuses an older library.
+
+### New
+
+- **`Distance`** (in `sagax_decide::memory`, prelude): `distance(from, to)
+  -> Option<u32>` in cells, `None` = unreachable; also for `&mut T`.
+- **`SquadRules::walk`**, slot 10 (default: none, the straight line), and
+  **`Walking`** (`sagax_decide::group`, prelude): `Walking::new(&mut d)`
+  (built-in rules) or `Walking::with(rules, &mut d)` lends a distance with
+  the rules to any `_with` call of squad and crew. `SquadRules` is now also
+  implemented for `&mut R`. `UNREACHABLE` (2^100): the member cost of a
+  member that cannot reach the wish point (still assignable, last).
+- Walking applies to: the member cost (member to wish point), the spot
+  radius and built-in spot score (spot to wish point), `IN_TARGET_DIST`
+  (the mean walking distance of the active members to the target, members
+  that cannot get there left out, none: `i32::MAX`) and
+  `Trigger::TargetInRadius` by the same measure, `IN_TARGET_FRIEND_DIST`
+  and the friend of `Place::Between`, and in a crew the arrive radius and
+  the keeper's distance. Euclid squares it where squares are compared.
+  Channel delays, headings, wish points, the nearest threat, `gather`,
+  `pick_spot` and `spot_score_builtin` stay straight.
+- `GoalKeeper::inputs_with(.., walk)` and `Crew::member_inputs_with(id,
+  now, &mut rules)`: the keeper's inputs with a walking distance. A hex
+  crew asks its distance in offset coordinates.
+- **`FlowDistance`** (`sagax::walk`, prelude): `new(topology, slots,
+  capacity)`, `DEFAULT_SLOTS` (4), `distance(&mut map, from, to)`,
+  `on(&mut map)` (a `Distance` for `Walking`), `searches()`, `cached(to)`,
+  `invalidate()`. One field per destination, least recently used replaced;
+  cost divided by the straight step cost; beyond the capacity is
+  unreachable. Square and hex.
+- **C:** `sx_distance_fn` (`ctx`, two `int32_t[3]`, `*out`; 1 = reachable),
+  `sx_squad_set_distance` and `sx_crew_set_distance` (null clears; applies
+  to every call of the handle); the handle `sx_flow_distance`
+  (`sx_flow_distance_new(rules, slots)` with the capacity from
+  `rules->node_capacity`, `_free`, `_set_map`, `_invalidate`, `_searches`)
+  and its callback `sx_flow_distance_fn`.
+- Examples: `walk_distance_scene` (Rust) and `examples/c/walk_distance.c`:
+  a wall between the squad and an enemy; the metric sends the guard behind
+  it, the walking distance the one who gets there. Both print the same
+  lines and `run.sh` diffs them; a golden test.
+
+### Changed
+
+- The guide's group section has a new part "Walking distance"; the slot
+  table lists `walk`.
+- The squad's trace records are unchanged; they already carry the
+  distance that decided (the member cost, the spot's distance, the row's
+  inputs).
+
 ## 0.15.0
 
 Goal recognition. A guard who watches the player walk now guesses **where

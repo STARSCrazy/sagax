@@ -28,6 +28,9 @@ dependencies).
   hands out goals with shout or radio delay, and strikes at the same moment.
   The `Crew` runs that loop in one call per tick. A rules object lets a game
   put its own logic (sight, costs, triggers) into nine fixed points.
+  **Walking distance**: the squad can measure how far a member really has
+  to walk (flow fields, cached by destination) instead of the straight
+  line, so the one behind a wall is not sent.
 - **Missions**: one character's motive, plan of steps, detours on a leash
   and replanning when the plan breaks (Rust and C); it sees only the
   `Knowledge` it is given.

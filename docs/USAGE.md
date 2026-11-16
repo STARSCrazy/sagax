@@ -1917,6 +1917,83 @@ static int32_t my_move_cost(void *ctx, int32_t x, int32_t y, int32_t lv,
 }
 ```
 
+### Walking distance
+
+The squad measures in its metric, a straight line. Behind a wall that is
+the wrong answer: a guard two cells away through the wall but forty around
+it counts as the nearest, so the squad sends it. Lend the squad a
+**walking distance** and every question "how far does a figure have to
+walk" asks it instead:
+
+```rust
+use sagax::prelude::*;
+
+let mut fd = FlowDistance::new(
+    Topology::Square(GridRules::preset(Preset::Octile)),
+    FlowDistance::DEFAULT_SLOTS, // 4 destinations cached
+    1000,                        // cells per field: the farthest walk that counts
+);
+// per tick: the map, the provider and your rules (or none) lent together
+let mut walk = fd.on(&mut map);
+crew.tick_with(now, &[], &[], seed, &mut Walking::new(&mut walk), &mut events)?;
+// with your own rules: Walking::with(&mut my_rules, &mut walk)
+```
+
+`Distance` (in `sagax::decide::memory`) is one method, `distance(from, to)
+-> Option<u32>`, in **cells** (the metric's unit, so `IN_TARGET_DIST`
+thresholds, slot `dist` and the arrive radius keep their meaning; Euclid
+compares squares and squares it). `None` is **unreachable**: infinitely far,
+out of every range, last in every ordering, never the straight line
+instead. Any game type can implement it (a table, your own path cache); the
+squad gets it from the rules' tenth slot, `SquadRules::walk`, which
+`Walking` answers, so a squad and a crew still store nothing and stay
+`Clone`.
+
+What walks: the member cost (member to wish point, so the one who can get
+there is sent; one who cannot is still sent last), the spot radius and the
+built-in spot score (spot to wish point), `IN_TARGET_DIST` (the **mean**
+walking distance of the active members to the target, members that cannot
+get there left out, none: `i32::MAX`; the centre of a group may stand in a
+wall) and `Trigger::TargetInRadius` by the same measure,
+`IN_TARGET_FRIEND_DIST` and the friend of `Place::Between`, and in a crew
+the arrive radius and the keeper's distance (`member_inputs_with`). What
+stays straight: channel delays (sound and radio do not walk), headings, the
+wish points themselves, the nearest threat a target-less tactic faces,
+`gather` and the free functions `pick_spot` and `spot_score_builtin`.
+Without a provider nothing changes.
+
+**`FlowDistance`** (facade) keeps one flow field per destination, rooted
+there, in a fixed number of slots; the least recently used is replaced.
+Many members asking about the same target cost one search, not one per
+member: `searches()` counts them, `cached(to)` tells whether a field is
+kept. The sum of the step costs is divided by the straight step cost
+(octile: a diagonal adds 1.4 cells). Give it at least as many slots as
+destinations a tick asks about (the target plus one wish point per slot;
+in a crew also each keeper's goal), or the fields push each other out and
+every question is a search. A cell beyond the field's capacity counts as
+unreachable. Call `invalidate()` when the map changes. On hex the crew asks
+in offset coordinates, the map's; a plain squad on hex asks in axial ones.
+
+In C the provider is a callback on the handle, not a rules slot:
+
+```c
+sx_rules rules;
+sx_rules_default(SX_GRID_SQUARE, SX_PRESET_OCTILE, &rules);
+rules.node_capacity = 1000;                     /* cells per field */
+sx_flow_distance *fd = sx_flow_distance_new(&rules, 0);   /* 0: 4 slots */
+sx_flow_distance_set_map(fd, &map);             /* kept until set again */
+sx_crew_set_distance(crew, sx_flow_distance_fn, fd);      /* NULL clears */
+/* ... ticks ...; sx_flow_distance_invalidate(fd) when the map changes */
+```
+
+Your own `sx_distance_fn` gets `ctx` and two `int32_t[3]` positions and
+returns 1 with the cells in `*out`, or 0 for unreachable (anything but 1
+counts as unreachable). `sx_squad_set_distance` does the same on a squad
+handle; both apply to every call of the handle, with or without
+`sx_squad_rules`. The example `walk_distance_scene` (Rust) and
+`examples/c/walk_distance.c` show the wall: the metric sends the guard
+behind it, the walking distance the one who gets there in half the time.
+
 ### The blocks in C and JavaScript
 
 ```c
@@ -1966,7 +2043,9 @@ character can see, what a hand sign costs, when an ambush strikes. Instead of
 forking the library, a squad calls your code at nine fixed points, the
 **slots**. All nine are methods of one trait, `SquadRules` (Rust), or fields
 of one struct, `sx_squad_rules` (C). Every slot has a default that does what
-the squad does without rules, so you write only the ones you need.
+the squad does without rules, so you write only the ones you need. Rust has
+a tenth, `walk`, the walking distance (see "Walking distance" above; C sets
+it on the handle).
 
 | # | Slot | Asked | Default |
 |---|------|-------|---------|
@@ -1979,6 +2058,7 @@ the squad does without rules, so you write only the ones you need.
 | 7 | `abort(id, view, ctx)` | per row, for an `Abort::Custom(id)` | never fires |
 | 8 | `channel_delay(id, ctx)` | when an order goes over a `Channel::Custom(id)` | never arrives |
 | 9 | `report(view, msg, now, actions)` | per report of a kind the core does not know | drops it |
+| 10 | `walk()` (Rust only) | whenever a figure's walk is measured | none: the metric's straight line |
 
 The order is fixed, never a hash order, and no slot gets a random number: in
 a plan 1, then 2 and 7 per candidate, then 3, 4 and 5; in a check first 9

@@ -123,3 +123,66 @@ ROADMAP item moved to done; README if it lists features.
 - Channel delays keep the straight line.
 - New example rather than changing an existing one.
 - 0.16.0 / C API 16.
+
+## Builder calls
+
+- **Plumbing:** a tenth rules slot, `SquadRules::walk() -> Option<&mut dyn
+  Distance>` (default `None`), and a combinator `Walking { rules, distance }`
+  that lends a distance together with any rules. No extra parameter on
+  `tick` / `plan` / `check`: every `_with` call of squad and crew walks, the
+  squad stays free of lifetimes and heap, and the plain calls (built-in
+  rules) are unchanged. For that `SquadRules` is also implemented for
+  `&mut R` (so `Walking::with(&mut my_rules, d)` works).
+- **`IN_TARGET_DIST`** walks as the **mean** walking distance of the active
+  members to the target (rounded down), not from the group centre: the
+  centre may stand in a wall or off the map's graph. Members that cannot
+  get there do not count; none can: `i32::MAX`. Without a provider it stays
+  the centre's metric distance (byte-equal). `Trigger::TargetInRadius`
+  uses the same measure when walking.
+- **`IN_TARGET_FRIEND_DIST`** and the friend of `Place::Between`: from the
+  other target to the target; an unreachable friend is infinitely far
+  (never picked as the nearest; the column `i32::MAX`).
+- **Member cost:** member to the slot's first wish point. Unreachable is
+  `UNREACHABLE` = 2^100, above every real cost but still assignable (the
+  slot is filled last by such a member rather than left empty; a game that
+  wants it empty uses `member_cost`). Euclid squares the walking distance.
+- **Spots:** spot to wish point, for the spot radius and the built-in spot
+  score; a spot that cannot reach the wish point is skipped.
+- **Crew:** the arrive radius walks (the level check is kept); the keeper's
+  distance through the new `GoalKeeper::inputs_with` and
+  `Crew::member_inputs_with(id, now, &mut rules)`.
+- **Straight line kept** for channel delays (as specified), headings, the
+  wish points themselves, `nearest_threat` (what a target-less tactic
+  faces: a direction, not a walk), the free function `gather` and the
+  public free functions `pick_spot` and `spot_score_builtin` (no rules
+  there; changing their signature had no use case).
+- **Trace:** no new record and no flag. The existing records already carry
+  the deciding value (`Assigned` cost, the spot's `Ranked` distance, the
+  `Decide` inputs), so a trace shows the walking value when one was used.
+  `FlowDistance` has `searches()` instead of its own trace.
+- **C callback** takes `const int32_t *` positions (three values each):
+  there is no `sx_pos` type in the header. Only a return of 1 counts as
+  reachable; anything else is unreachable (a callback cannot fail loudly
+  inside a decision).
+- **Deviation:** `sx_flow_distance_new(rules, slots)` takes the capacity
+  from `rules->node_capacity` instead of a third parameter, like
+  `sx_flow_new`; 0 slots means 4. `sx_flow_distance_searches` was added
+  (for tests and the example).
+- **Deviation:** Rust `FlowDistance::new(topology, slots, capacity)` needs
+  the topology, and the map is not stored: `distance(&mut map, from, to)`
+  or `on(&mut map)` gives a borrowed `Distance`. 0 slots means 1 in Rust
+  (the caller names a number) and 4 in C (0 is C's "default").
+- **Hex:** the crew hands its rules offset coordinates, so it asks the
+  distance in offset coordinates too (the map's cells, what `FlowDistance`
+  wants); a plain squad on hex keeps axial ones and the game converts.
+- **The field is rooted at `to`** and read at `from`; `from == to` gives 0
+  (the root; still one search, cached like any other). The capacity bounds each
+  field: a cell beyond it is unreachable (documented: size it for the
+  farthest walk that should count).
+- **Cache thrash:** per-member destinations (keeper goals, arrival) need one
+  slot each; with fewer slots than destinations per tick every question is
+  a search. Documented ("give at least as many slots as destinations"),
+  not auto-grown (no heap after `new`).
+- **Example:** the crew runs one tactic (one runner to the enemy's front);
+  the runner walks along its own flow field, one cell per tick. Both runs
+  print the crew's events; the walking run also the search count.
