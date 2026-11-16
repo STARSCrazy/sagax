@@ -143,6 +143,80 @@ observe/chance/best/rank/write_columns/split/set_trace` and
 - New example instead of changing an existing one.
 - 0.15.0 / C API 15.
 
+Builder calls (made while building, from the spec's open points):
+
+- **Precision.** Chances are kept in 1/65536 and always sum to exactly
+  65536 (every normalisation is a largest-remainder share, ties to the
+  lower goal). Read as 0..256 (`chance`, `shares`) they are shared the
+  same way, so they sum to exactly 256, not only within rounding.
+  `chance_fine` (C `sx_goal_guess_chance_fine`) reads the internal value;
+  `best`, `rank` and `split` compare in the internal precision.
+- **The exponential.** `w(x) = exp(-t)`, `t = beta * a / (256 * unit)`
+  with `a` the change minus the smallest change of that goal's options (so
+  the best option has weight 1), computed as `2^(-t / ln 2)`: `t / ln 2`
+  in 1/65536 (truncated, from `2^32 / ln 2`), the 16 fraction bits by 16
+  fixed factors in 1/2^32, the whole part by a shift (weights below
+  2^-63 are 0). Relative error below 2^-15, tested against `f64`. A step's
+  likelihood is clamped to 1/65536..1.
+- **Floor.** After the Bayes update a goal not ruled out that fell to 0 is
+  lifted to 1/65536 (taken from the most likely goal). Without it a goal
+  that had dropped below the precision could never come back when
+  `forget` is 0 (a long feint did exactly that). So "Bayes alone" recovers
+  too, only later than with forgetting.
+- **Forgetting** mixes uniform over the goals with a non-zero prior (not
+  the prior itself), as the spec says; `forget` above 256 counts as 256.
+- **Prior.** `set_prior` replaces the prior and starts over from it
+  (chances = prior). A missing weight is 0, extra ones are ignored, all 0
+  (or none) is uniform; the start is uniform.
+- **`observe` returns `Result<(), StepError>`**: `per_goal` 0 or above
+  `MAX_MOVES` (32) or a slice too short for the goals is
+  `StepError::Shape`, nothing changes, a `Refused` record. `StepError`
+  (`Shape`, `Jump`) lives in `sagax-decide` next to the trace, so the one
+  trace type carries the helper's refusals too.
+- **Goal count.** Rust `new` clamps to `MAX_GOALS` and allows 0 (then
+  `best` is `None`); C `sx_goal_guess_new` refuses 0 and more than
+  `SX_MAX_GOALS` (null), so `sx_goal_guess_best` always has an answer.
+  `rank` of a goal out of range is the goal count, `chance` 0,
+  `write_columns` writes `0, goals`.
+- **`observe_flow` shape.** `observe_flow(guess, graph, fields, prev, cur,
+  moves)`: `fields: &[F]` with `F: Borrow<FlowField<N>>` (a slice of
+  fields or of references; the C layer passes references to the fields of
+  separate `sx_flow` handles without copying), and `moves`, reused memory
+  for the moves of `prev`, so the helper allocates nothing per step (the
+  spec's "no heap"; the graph trait needs a `Vec`). The moves are
+  `graph.neighbors(prev)`, standing still is not one of them. More than
+  `MAX_MOVES` moves or a field count other than the goal count is
+  `StepError::Shape`.
+- **Unreachable goals in the helper.** For a goal whose field does not
+  hold `prev`, or holds none of the moves, every change is 0 (the step
+  teaches nothing about it, likelihood 1 / moves); a single move outside
+  the field gets the largest known change of that goal (the least likely
+  option), also when it is the step taken.
+- **Standing still** in the helper is `Ok` with no change and no record;
+  the core `observe` has no notion of it (the game does not call it).
+- **C `observe_flow`** takes `sx_flow *const *flows` (one per goal,
+  `count` the goal count) and `sx_point` by value; the moves come from the
+  map with the rules of `flows[0]`. Returns 0 (learned or standing still),
+  1 for a jump (nothing changed, a `REFUSED` record), `SX_ERROR_ARGUMENT`
+  for a null pointer, a wrong count or too many moves. The handle holds
+  the `moves` buffer (capacity `SX_MAX_MOVES`); the FFI test counts zero
+  allocations per step. `sx_goal_guess_config_default` fills the defaults.
+- **Trace records**: `Step { goal, moved, likelihood (1/65536), chance
+  (0..256) }` per goal after a step, `Prior { goal, chance }` per goal,
+  `Reset`, `Refused { error }`; C `sx_goal_guess_trace` (24 bytes) with
+  `SX_GOAL_GUESS_TRACE_*` and `SX_STEP_SHAPE` / `SX_STEP_JUMP`.
+- **Tests** live in `memory/goal_guess_tests.rs` (not the long
+  `memory/tests.rs`); the direct-walker test builds a 21 x 15 octile map
+  with a wall and four exits and its own Dijkstra, the facade repeats it
+  with flow fields on square and hex.
+- **Example.** Square only (hex is covered by the facade and FFI tests): a
+  tower guard, 21 x 15 yard, four exits, a roof where the runner is not
+  seen (his reappearance is a jump, the chain goes on from there), three
+  hunters split per tick; the feint is five steps towards exit 1, then
+  exit 2. With the floor above the recovery difference is modest (t=8
+  without forgetting, t=7 with it); the tests over many feints show
+  forgetting never slower and a third faster overall.
+
 ## Done means
 
 `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D

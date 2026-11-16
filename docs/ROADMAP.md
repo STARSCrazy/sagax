@@ -15,9 +15,11 @@
   pieces) are done, and so are the mission planner (0.11.0: motive, plan,
   leeway, detours, replanning; Rust and C), the trace round (0.12.0: one
   debugging pattern for every module), perception (0.13.0: view cones,
-  exact sight lines, attention, disguise, hearing; Rust and C) and indirect
+  exact sight lines, attention, disguise, hearing; Rust and C), indirect
   coordination (0.14.0: `Contagion`, a character joins in on the deeds it
-  saw its allies do; Rust and C).
+  saw its allies do; Rust and C) and goal recognition (0.15.0: `GoalGuess`,
+  where the one an observer watches is heading, from the steps it saw;
+  Rust and C).
 - **Missions, next:** a *search planner* (GOAP or HTN) behind the same plan
   format: it would build the plans that the game now writes by hand or
   scores from a playbook, and a mission would run them unchanged. A
@@ -50,6 +52,12 @@
   characters see allies attack or flee and join in, only on their own
   percepts); joining in on what was *heard* is left to the existing shout
   and radio channels.
+
+- **Goal recognition, next:** a **JavaScript binding** of `GoalGuess`
+  follows on demand. Not wired into the squad, crew or mission: a game
+  feeds `split` or the columns into its own orders. Open ideas: a group
+  that shares one guess (only what its members saw and told), a guess
+  that feeds the mission planner, and learning `beta` per player.
 
 Known limits: flow fields and D* Lite assume moves that work both ways.
 One-way moves (zones with a leave cost, one-sided walls) make their costs

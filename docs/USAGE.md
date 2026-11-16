@@ -183,6 +183,7 @@ There are two groups of exceptions, on purpose:
 | Who did I see, where, how long ago; where is it dangerous | Memory of the world | `sx_knowledge_*`, `sx_areas_*`, ... | `lib.knowledge()`, `lib.areas()` |
 | What can this character see and hear, and how soon does it notice? | Perception | `sx_perception_*` | not yet |
 | Join in on what allies are seen doing (charge, flee), without an order | Contagion | `sx_contagion_*` | not yet |
+| Where is the one I watch heading (which exit)? Split hunters over the likely goals | Goal guess | `sx_goal_guess_*` | not yet |
 | Several characters act together: flank, ambush, advance in line | Group tactics | `sx_crew_*` (the loop), `sx_squad_*`, `sx_keeper_*`, `sx_gather` | `lib.crew()` (the loop), `lib.squad()`, `lib.tactics`, `lib.keeper()` |
 | What one character does over time: patrol, guard, chase, and what when the plan breaks | Missions | `sx_mission_*` | not yet |
 
@@ -1017,6 +1018,101 @@ goal)` while building the grid's walls and costs before the search. When the
 areas are kept in cell coordinates, `Areas::cell_cost(to, start, goal)` (C
 `sx_areas_move_cost`, JavaScript `areas.cellCost`) does both in one call:
 section 9, "Areas to path costs".
+
+### Where is he heading: goal guess
+
+A guard who watches the player walk can guess **which goal he is heading
+for** (which exit, which terminal) and act on it: cut him off, send most
+hunters to the likely goal and one to the second. `GoalGuess` is a classic
+Bayes recogniser over up to `MAX_GOALS` (8) candidate goals that the game
+names. It assumes the walker is "mostly sensible": a step that brings him
+closer to a goal is more likely if that goal is his. It needs only the
+walking distance to each goal (one flow field per goal), no training.
+
+**No cheating:** the guess knows only the steps the game feeds it. Feed
+only what the observer saw (for instance positions from its own percepts),
+never the true goal or the true position.
+
+```rust
+use sagax::nav::Limits;
+use sagax::nav::flow::FlowField;
+use sagax::prelude::*;
+
+// one flow field per exit, built once
+let fields: Vec<FlowField<Cell>> = exits.iter().map(|&e| {
+    let mut f = FlowField::default();
+    f.build(&mut graph, [e], Limits::default());
+    f
+}).collect();
+let mut guess = GoalGuess::new(GoalGuessConfig::default(), exits.len());
+let mut moves = Vec::new();                     // reused memory for the moves of a step
+// every tick the guard sees him again:
+match observe_flow(&mut guess, &mut graph, &fields, last_seen, now_seen, &mut moves) {
+    Ok(()) => {}                                // learned (or he stood still)
+    Err(StepError::Jump) => {}                  // not a move from last_seen: go on from here
+    Err(e) => panic!("{e}"),                    // wrong number of fields
+}
+let (goal, chance) = guess.best().unwrap();     // chance 0..256
+let mut hunters = [0; 4];
+guess.split(3, &mut hunters);                   // e.g. 2 to the likely exit, 1 to the second
+guess.write_columns(goal, &mut row[4..]);       // chance, rank: plain Decider columns
+```
+
+- **One step.** For each goal `k` the change of walking distance of the
+  step taken, `moved_k = d_k(cur) - d_k(prev)`, and of every move possible
+  from `prev`, `options_k[j]`. Likelihood `w(moved_k) / Σ_j w(options_k[j])`
+  with `w(x) = exp(-beta * x / (256 * unit))`; chances become prior ×
+  likelihood, normalised. `observe(moved, options, per_goal)` takes these
+  numbers directly (goal-major: `options[k * per_goal + j]`), for a game
+  with its own distances; `observe_flow` computes them from the fields and
+  the graph's moves. Standing still teaches nothing.
+- **Config.** `beta` in 1/256 per `unit` (default 512, 2 per straight
+  step: the walker is quite sensible), `unit` the cost of a straight step
+  (10 with `Octile`), `forget` the share of uniform mixed back in after
+  every step (0..256, default 13, about 5 %). These defaults come from a
+  measurement: right 84 % of the time in the second half of the way, well
+  calibrated; forgetting recovers faster after a feint.
+- **Prior.** `set_prior(&weights)` (for example from the mission: "he
+  probably wants the building with the objective") starts over from it;
+  `reset()` goes back to it. A goal with weight 0 is ruled out and stays at
+  0, forgetting skips it; all weights 0 is uniform.
+- **Read.** `chance(k)` 0..256 (all goals sum to exactly 256),
+  `chance_fine(k)` in the internal 1/65536, `best()`, `rank(k)` (0 the most
+  likely, ties by lower goal), `write_columns(k, row)` (`chance, rank` as
+  two `i32`, `GOAL_COLUMNS`), `split(hunters, out)` (largest remainder,
+  ties by lower goal, deterministic).
+- **A blocked goal zeroes nobody.** A move outside a goal's field gets
+  that goal's largest known change (the least likely option); a goal whose
+  field holds neither `prev` nor any move learns nothing from the step. A
+  goal not ruled out never drops below 1/65536, so it can always come back.
+- **Jumps.** `cur` must be `prev` or one of its moves. After the observer
+  lost sight, the next sighting is usually a jump: `StepError::Jump`,
+  nothing changed; take the new place as the start of a new chain, the
+  forgetting covers the gap.
+- Integer only (chances in 1/65536, `w` by an integer exp2 with a relative
+  error below 2^-15), deterministic, square and hex (the guess knows no
+  grid; `observe_flow` takes any nav graph). The guess is a plain `Copy`
+  value: no heap, and `observe_flow` allocates nothing once `moves` has
+  grown. Records: `set_prior_traced`, `reset_traced`, `observe_traced` and
+  `sagax::goal_guess::observe_flow_traced` with `GoalGuessTrace` (`Step`
+  per goal with the likelihood and the new chance, `Prior`, `Reset`,
+  `Refused`).
+
+The tower guard example (`cargo run -p sagax --example goal_guess_scene`,
+`examples/c/goal_guess.c`) has a runner go straight to an exit, under a
+roof where the guard loses him (a jump when he comes out), and a runner who
+feints towards one exit and turns, once without forgetting and once with
+the default, which sees through the feint sooner.
+
+In C: `sx_goal_guess_new(&cfg, goals)` with an `sx_goal_guess_config`
+(`beta`, `unit`, `forget`; `sx_goal_guess_config_default` fills it),
+`sx_goal_guess_observe_flow(g, flows, count, &map, prev, cur)` with one
+`sx_flow` per goal (the moves come from the map with the rules of
+`flows[0]`; returns 0, 1 for a jump), `sx_goal_guess_observe` for the
+plain numbers, `_set_prior`, `_reset`, `_chance`, `_chance_fine`, `_best`,
+`_rank`, `_write_columns` (`SX_GOAL_COLUMNS` integers), `_split`,
+`_goals`, `_set_trace` (`sx_goal_guess_trace`, `SX_GOAL_GUESS_TRACE_*`),
+since API version 15.
 
 ## 8. Perception
 
@@ -2353,6 +2449,7 @@ Everything lives in `sagax::debug` (`use sagax::debug::*;`): the sink pieces
 | `Mission` | `MissionTrace` | `tick_traced` |
 | perception | `PerceptionTrace` | `observe_traced`, `look_traced`, `hear_traced` (and `learn_percepts_traced` with `KnowledgeTrace`) |
 | `Contagion` | `ContagionTrace` | `learn_traced`, `inputs_traced`, `write_columns_traced` |
+| `GoalGuess` | `GoalGuessTrace` | `set_prior_traced`, `reset_traced`, `observe_traced`, `goal_guess::observe_flow_traced` |
 
 Where an operation has a `_with(.., rules)` form, `op_traced` takes the rules
 too (pass the built-in rules for none); there is never an `op_with_traced`.
@@ -2426,6 +2523,7 @@ apply to the kind); a wrapped sub-record is a field by value (`decide`,
 | `sx_keeper` | `sx_keeper_set_trace` | `sx_keeper_trace` | `SX_KEEPER_TRACE_*` |
 | `sx_crew` | `sx_crew_set_trace` | `sx_crew_trace` | `SX_CREW_TRACE_*` |
 | `sx_perception` | `sx_perception_set_trace` | `sx_perception_trace` | `SX_PERCEPTION_TRACE_*` |
+| `sx_goal_guess` | `sx_goal_guess_set_trace` | `sx_goal_guess_trace` | `SX_GOAL_GUESS_TRACE_*` (STEP, PRIOR, RESET, REFUSED) |
 
 `sx_nav` covers everything that runs through it: `sx_nav_find_path`,
 `_continue`, `_reachable`, `_flee`, `_path_to`, `_way` (smoothing),

@@ -36,6 +36,9 @@ dependencies).
   on channels; what a character perceived becomes its `Knowledge`.
   **Indirect coordination**: a character joins an attack or a flight it
   saw its allies make, without an order and only on what it really saw.
+- **Goal recognition** (Rust and C): a guard guesses which exit the one it
+  watches is heading for, from the steps it saw (Bayes over walking
+  distances, integer only), and splits its hunters over the likely goals.
 - **Square and hex grids** (pointy or flat top, odd or even offset), 4 or 8
   directions, walls between cells, extra costs, zones that cost extra to
   leave (zones of control).
@@ -184,6 +187,7 @@ crew.free();
 | `examples/c/ambush_rules.c` | four guards ambush an intruder: the library's sight lines and percepts, the game's hand signs, kill zone and "seen" abort in an `sx_squad_rules` object |
 | `examples/c/perception.c` | one guard watches a street: smoke, a crowd and a shot |
 | `examples/c/contagion.c` | a guard post without orders: guards join the attack and the flight they see, square and hex |
+| `examples/c/goal_guess.c` | a tower guard guesses which exit a runner heads for, loses him under a roof, and sees through a feint |
 | `examples/c/trace.c` | a search and a decision traced into one small ring buffer in C |
 | `examples/js/quickstart.mjs` | the three jobs in JavaScript |
 | `examples/js/squad.mjs` | the same squad walk in JavaScript |
@@ -191,6 +195,7 @@ crew.free();
 | `crates/sagax/examples/ambush_rules.rs` | the ambush in Rust, with the game's own pieces in a `SquadRules` object (`cargo run -p sagax --example ambush_rules`) |
 | `crates/sagax/examples/perception_scene.rs`, `stealth_guard.rs` | the street of `perception.c` in Rust; a stealth guard on a hex grid that hears, looks and searches, by day and by night |
 | `crates/sagax/examples/contagion_scene.rs` | the guard post of `contagion.c` in Rust (`cargo run -p sagax --example contagion_scene`) |
+| `crates/sagax/examples/goal_guess_scene.rs` | the tower guard of `goal_guess.c` in Rust (`cargo run -p sagax --example goal_guess_scene`) |
 
 The three squad walks print the same lines, and the checks compare them.
 
@@ -200,7 +205,7 @@ The three squad walks print the same lines, and the checks compare them.
 |---|---|
 | `crates/sagax` | the umbrella crate: `use sagax::prelude::*;` brings the common names; `sagax::nav`, `sagax::decide`, `sagax::perception`, `sagax::debug` |
 | `crates/sagax-nav` | navigation: `Navigator`, search core, flow fields, smoothing, formations, D* Lite, grids |
-| `crates/sagax-decide` | decisions (utility AI), state machines, memory of the world, group tactics (`Squad`, `Crew`) |
+| `crates/sagax-decide` | decisions (utility AI), state machines, memory of the world (with the goal guess), group tactics (`Squad`, `Crew`) |
 | `crates/sagax-perception` | perception: view cones, exact sight lines with fog and light, attention, disguise, hearing, contagion (joining in on what allies are seen doing) |
 | `crates/sagax-ffi` | C interface: `sagax.dll` / `libsagax.so`, header in `include/sagax.h` |
 | `crates/sagax-wasm` | WebAssembly interface |

@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.15.0
+
+Goal recognition. A guard who watches the player walk now guesses **where
+he is heading** (which exit, which terminal) and can act on it: cut him
+off, send most hunters to the likely goal and one to the second. The new
+`GoalGuess` is a classic Bayes recogniser over the walking distances to the
+candidate goals (one flow field per goal), integer only, with forgetting so
+a feint is recovered from quickly. It knows only the steps the game feeds
+it. Purely additive; the existing examples are unchanged (their output is
+byte-identical). **C API version 15.** `SX_API_VERSION` is 15, so a game
+built with the new header refuses an older library.
+
+### New
+
+- **`GoalGuess`** (in `sagax_decide::memory`, the world memory; prelude):
+  - `GoalGuessConfig { beta, unit, forget }` (default 512 = 2 per straight
+    step, 10, 13 = about 5 %), `MAX_GOALS` (8), `MAX_MOVES` (32),
+    `GOAL_COLUMNS` (2);
+  - `new(config, goals)`, `set_prior(&weights)` (a goal with weight 0 is
+    ruled out; all 0 is uniform) and `reset()`;
+  - `observe(moved, options, per_goal)`: one step's changes of walking
+    distance, likelihood `w(moved_k) / Σ_j w(options_k[j])` with
+    `w(x) = exp(-beta * x / (256 * unit))` by an integer exp2 (relative
+    error below 2^-15); chances in 1/65536 that always sum to 65536; a goal
+    not ruled out never drops below 1/65536; then `forget` of uniform over
+    the goals not ruled out; `StepError::Shape` for numbers that do not fit;
+  - `chance(k)` (0..256, all goals sum to exactly 256), `shares()`,
+    `chance_fine(k)`, `best()`, `rank(k)`, `write_columns(k, row)`
+    (`chance, rank`), `split(hunters, out)` (largest remainder, ties by
+    lower goal);
+  - `GoalGuessTrace` (`Step` per goal with the likelihood and the new
+    chance, `Prior`, `Reset`, `Refused`) through `observe_traced`,
+    `set_prior_traced`, `reset_traced`; also in `sagax::debug`.
+  A plain `Copy` value: no heap.
+- **`sagax::goal_guess::observe_flow`** (prelude) and `observe_flow_traced`:
+  a seen step `prev -> cur` with one `FlowField` per goal and any nav
+  graph, square or hex. A move outside a field gets that goal's largest
+  known change; a goal whose field holds neither `prev` nor any move learns
+  nothing, so a blocked goal zeroes nobody. Standing still teaches nothing;
+  `cur` not a move of `prev` is `StepError::Jump` (nothing changed).
+  `moves` is reused memory: no allocation per step.
+- **C:** the handle `sx_goal_guess` (`sx_goal_guess_new`, `_free`,
+  `_set_trace`, `_goals`, `_set_prior`, `_reset`, `_observe`,
+  `_observe_flow`, `_chance`, `_chance_fine`, `_best`, `_rank`,
+  `_write_columns`, `_split`) with `sx_goal_guess_config` and
+  `sx_goal_guess_config_default`, `sx_goal_guess_trace` with
+  `SX_GOAL_GUESS_TRACE_*` and `SX_STEP_*`; `SX_MAX_GOALS`, `SX_MAX_MOVES`,
+  `SX_GOAL_COLUMNS`. `sx_goal_guess_observe_flow` takes one `sx_flow` per
+  goal and returns 1 for a jump. Layout asserts for both structs.
+- `sagax-abi`: the goal-guess trace codes and the `goal_guess_trace` codec.
+- Examples: `goal_guess_scene` (Rust) and `examples/c/goal_guess.c`: a
+  tower guard, four exits, a runner who goes straight to one (and is lost
+  under a roof, so his reappearance is a jump), and a runner who feints and
+  turns, without forgetting and with it. Both print the same lines and
+  `run.sh` diffs them; the golden test checks that only seen steps are
+  learned.
+
+### Changed
+
+- The guide's memory section has a new part "Where is he heading: goal
+  guess"; the building block table and both trace tables list it.
+
 ## 0.14.0
 
 Indirect coordination. A character now joins in on what it *saw* its
