@@ -17,6 +17,7 @@ use super::memory::{
     SxMessageTrace, pos3, put,
 };
 use super::rules::{CRules, SxSquadRules};
+use super::walk::{CDistance, DistanceFn, with_walk};
 use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, guarded, set_trace, slice_of, to_i32};
 use sagax_abi::convert;
 use sagax_decide::memory::{Areas, Knowledge};
@@ -705,6 +706,9 @@ pub struct SxSquad {
     /// Where `sx_squad_set_trace` sends the records of the calls through
     /// this handle.
     pub(crate) trace: TraceSlot<SxSquadTrace>,
+    /// The walking distance `sx_squad_set_distance` set for the plans and
+    /// checks through this handle.
+    pub(crate) walk: Option<CDistance>,
 }
 
 impl Drop for SxSquad {
@@ -811,6 +815,7 @@ pub unsafe extern "C" fn sx_squad_new(config: *const SxSquadConfig) -> *mut SxSq
             knowledge: std::ptr::null_mut(),
             areas: std::ptr::null_mut(),
             trace: None,
+            walk: None,
         })
     })
 }
@@ -1864,7 +1869,7 @@ pub unsafe extern "C" fn sx_squad_plan_with(
     plan: *mut u32,
 ) -> i32 {
     let h = get!(squad);
-    let trace = h.trace;
+    let (trace, walk) = (h.trace, h.walk);
     let s = &mut *h.squad;
     // SAFETY: see above.
     let Some((extra, spots)) = (unsafe { lists(extra, extra_count, spots, spot_count) }) else {
@@ -1873,19 +1878,18 @@ pub unsafe extern "C" fn sx_squad_plan_with(
     // SAFETY: null or valid (see above).
     let mut rules = unsafe { CRules::of(rules) };
     guarded(|| {
+        let mut built_in = BuiltInRules;
         let made = match rules.as_mut() {
-            Some(r) => traced!(trace, SxSquadTrace::of, |sink| s
-                .plan_traced(now, extra, spots, seed, r, sink)),
+            Some(r) => Ok(r as &mut dyn SquadRules),
             None if s.needs_rules() => Err(PlanError::NeedsRules),
-            None => traced!(trace, SxSquadTrace::of, |sink| s.plan_traced(
-                now,
-                extra,
-                spots,
-                seed,
-                &mut BuiltInRules,
-                sink
-            )),
-        };
+            None => Ok(&mut built_in as &mut dyn SquadRules),
+        }
+        .and_then(|r| {
+            with_walk(walk, r, |r| {
+                traced!(trace, SxSquadTrace::of, |sink| s
+                    .plan_traced(now, extra, spots, seed, r, sink))
+            })
+        });
         match made {
             Ok(Some(id)) => {
                 // SAFETY: see above.
@@ -1950,7 +1954,7 @@ pub unsafe extern "C" fn sx_squad_check_with(
     plan: *mut u32,
 ) -> i32 {
     let h = get!(squad);
-    let trace = h.trace;
+    let (trace, walk) = (h.trace, h.walk);
     let s = &mut *h.squad;
     // SAFETY: see above.
     let Some((extra, spots)) = (unsafe { lists(extra, extra_count, spots, spot_count) }) else {
@@ -1959,19 +1963,18 @@ pub unsafe extern "C" fn sx_squad_check_with(
     // SAFETY: null or valid (see above).
     let mut rules = unsafe { CRules::of(rules) };
     guarded(|| {
+        let mut built_in = BuiltInRules;
         let checked = match rules.as_mut() {
-            Some(r) => traced!(trace, SxSquadTrace::of, |sink| s
-                .check_traced(now, extra, spots, seed, r, sink)),
+            Some(r) => Ok(r as &mut dyn SquadRules),
             None if s.needs_rules() => Err(PlanError::NeedsRules),
-            None => traced!(trace, SxSquadTrace::of, |sink| s.check_traced(
-                now,
-                extra,
-                spots,
-                seed,
-                &mut BuiltInRules,
-                sink
-            )),
-        };
+            None => Ok(&mut built_in as &mut dyn SquadRules),
+        }
+        .and_then(|r| {
+            with_walk(walk, r, |r| {
+                traced!(trace, SxSquadTrace::of, |sink| s
+                    .check_traced(now, extra, spots, seed, r, sink))
+            })
+        });
         match checked.map(convert::squad_status) {
             Ok((code, id)) => {
                 if let Some(id) = id {
@@ -1984,6 +1987,22 @@ pub unsafe extern "C" fn sx_squad_check_with(
             Err(e) => unsafe { plan_error(e, std::ptr::null_mut(), std::ptr::null_mut()) },
         }
     })
+}
+
+/// `sx_squad_set_distance`: the walking distance the plans and checks
+/// through this handle ask (null `distance`: the metric's straight line).
+///
+/// # Safety
+/// `squad` is null or valid; `distance` and `context` stay valid while
+/// set.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_squad_set_distance(
+    squad: *mut SxSquad,
+    distance: Option<DistanceFn>,
+    context: *mut c_void,
+) -> i32 {
+    get!(squad).walk = CDistance::of(distance, context);
+    0
 }
 
 /// `sx_squad_orders_due`.

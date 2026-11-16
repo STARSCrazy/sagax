@@ -13,6 +13,7 @@ use super::group::{
 };
 use super::memory::{SxFact, SxMessage, pos3, put};
 use super::rules::{CRules, SxSquadRules};
+use super::walk::{CDistance, DistanceFn, with_walk};
 use super::{ERROR_ARGUMENT, TraceSlot, create, destroy, guarded, set_trace, to_i32};
 use sagax_abi::convert;
 
@@ -103,6 +104,8 @@ pub struct SxCrew {
     keepers: Vec<(u32, *mut SxKeeper)>,
     /// Where `sx_crew_set_trace` sends the records of the crew's calls.
     trace: TraceSlot<SxCrewTrace>,
+    /// The walking distance `sx_crew_set_distance` set.
+    walk: Option<CDistance>,
 }
 
 /// `sx_crew_trace`.
@@ -260,6 +263,7 @@ pub unsafe extern "C" fn sx_crew_new(config: *const SxCrewConfig) -> *mut SxCrew
             squad: std::ptr::null_mut(),
             keepers: Vec::new(),
             trace: None,
+            walk: None,
         })
     });
     if root.is_null() {
@@ -277,6 +281,7 @@ pub unsafe extern "C" fn sx_crew_new(config: *const SxCrewConfig) -> *mut SxCrew
         knowledge: std::ptr::null_mut(),
         areas: std::ptr::null_mut(),
         trace: None,
+        walk: None,
     }));
     // SAFETY: `root` was just made by `create` (Box::into_raw) and nothing
     // else refers to it yet.
@@ -509,21 +514,18 @@ pub unsafe extern "C" fn sx_crew_tick_with(
     // SAFETY: null or valid (see above).
     let mut rules = unsafe { CRules::of(rules) };
     guarded(|| {
-        let (crew, out) = (&mut c.crew, &mut c.events);
+        let (crew, out, walk) = (&mut c.crew, &mut c.events, c.walk);
         let result = match rules.as_mut() {
-            Some(r) => traced!(c.trace, SxCrewTrace::of, |sink| crew
-                .tick_traced(now, extra, spots, seed, r, out, sink)),
+            Some(r) => with_walk(walk, r, |r| {
+                traced!(c.trace, SxCrewTrace::of, |sink| crew
+                    .tick_traced(now, extra, spots, seed, r, out, sink))
+            }),
             // Refused: a squad that needs rules.
             None if crew.squad().needs_rules() => crew.tick(now, extra, spots, seed, out),
-            None => traced!(c.trace, SxCrewTrace::of, |sink| crew.tick_traced(
-                now,
-                extra,
-                spots,
-                seed,
-                &mut BuiltInRules,
-                out,
-                sink
-            )),
+            None => with_walk(walk, &mut BuiltInRules, |r| {
+                traced!(c.trace, SxCrewTrace::of, |sink| crew
+                    .tick_traced(now, extra, spots, seed, r, out, sink))
+            }),
         };
         // SAFETY: null or writable (see above).
         unsafe { put(total, u32::try_from(c.events.len()).unwrap_or(u32::MAX)) };
@@ -594,7 +596,11 @@ pub unsafe extern "C" fn sx_crew_member_inputs(
     if out.is_null() {
         return ERROR_ARGUMENT;
     }
-    match c.crew.member_inputs(id, now) {
+    let crew = &c.crew;
+    let inputs = with_walk(c.walk, &mut BuiltInRules, |r| {
+        crew.member_inputs_with(id, now, r)
+    });
+    match inputs {
         Some(i) => {
             // SAFETY: non-null and writable (see above).
             unsafe { put(out, SxMemberInputs::of(i)) };
@@ -602,6 +608,22 @@ pub unsafe extern "C" fn sx_crew_member_inputs(
         }
         None => 0,
     }
+}
+
+/// `sx_crew_set_distance`: the walking distance the crew's ticks and
+/// `sx_crew_member_inputs` ask, with offset coordinates on a hex grid
+/// (null `distance`: the metric's straight line).
+///
+/// # Safety
+/// `crew` is null or valid; `distance` and `context` stay valid while set.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_crew_set_distance(
+    crew: *mut SxCrew,
+    distance: Option<DistanceFn>,
+    context: *mut c_void,
+) -> i32 {
+    get!(crew).walk = CDistance::of(distance, context);
+    0
 }
 
 /// `sx_crew_member_chose`: 1, or 0 for an unknown id.

@@ -47,7 +47,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 15
+#define SX_API_VERSION 16
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -2175,7 +2175,9 @@ int32_t sx_crew_report(sx_crew *crew, uint32_t now, const sx_message *msg);
 int32_t sx_crew_report_with(sx_crew *crew, uint32_t now, const sx_message *msg,
                             const sx_squad_rules *rules);
 /* The member's decider inputs at now (its position, the squad's metric, the
- * signal and the discipline of its own skill) to *out. */
+ * signal and the discipline of its own skill) to *out. With
+ * sx_crew_set_distance the distance to the goal is the walking distance
+ * (INT32_MAX when it cannot be reached). */
 int32_t sx_crew_member_inputs(sx_crew *crew, uint32_t id, uint32_t now, sx_member_inputs *out);
 /* What the member chose at now: its goal (goal_won 1: the postpone clock is
  * reset) or something else (goal_won 0: the goal is postponed). */
@@ -3509,6 +3511,68 @@ typedef struct sx_goal_guess_trace {
  * must not call any function on the same handle. Returns 0. */
 typedef void (*sx_goal_guess_trace_fn)(void *context, const sx_goal_guess_trace *trace);
 int32_t sx_goal_guess_set_trace(sx_goal_guess *g, sx_goal_guess_trace_fn trace, void *context);
+
+/* ---- walking distance for the squad (since version 16) ------------------- */
+
+/* Behind a wall the straight line is wrong: an enemy two cells away through
+ * a wall but forty around it is not "close". With a walking distance set the
+ * squad (and the crew on top of it) asks it wherever a figure has to walk:
+ * a member's cost for a slot (member to wish point; the built-in cost of
+ * sx_squad_rules), the spot radius and the built-in spot score (spot to wish
+ * point), SX_IN_TARGET_DIST (the mean walking distance of the active
+ * members to the target, rounded down; members that cannot get there do not
+ * count) and the target-in-radius trigger by the same measure,
+ * SX_IN_TARGET_FRIEND_DIST and the friend of SX_PLACE_BETWEEN (from the
+ * other target to the target), and in a crew the arrive radius and the
+ * keeper's distance (sx_crew_member_inputs). The straight line stays for
+ * what does not walk: channel delays (shout, radio), headings, wish points,
+ * the threat a tactic without a target faces.
+ *
+ * Distances are in cells, so every threshold keeps its meaning; with
+ * SX_METRIC_EUCLID the walking distance is squared where squares are
+ * compared. A place that cannot be reached is infinitely far: out of every
+ * range, never the nearest, last in every ordering (member cost 2^100, a row
+ * value INT32_MAX), never the straight line instead. Without a distance
+ * nothing changes.
+ *
+ * sx_distance_fn: the walking distance from from to to (3 integers each,
+ * positions as the squad keeps them; a crew with hex_grid passes offset
+ * coordinates) to *out; return 1, anything else is unreachable. It must not
+ * call any function on the squad or crew that asks it. */
+typedef int32_t (*sx_distance_fn)(void *context, const int32_t *from, const int32_t *to,
+                                  uint32_t *out);
+/* distance is asked by sx_squad_plan, sx_squad_check and their _with forms
+ * through this handle (also a crew's squad handle; the crew's ticks use
+ * sx_crew_set_distance); NULL turns it off (the default). distance and
+ * context stay valid while set. Returns 0, or SX_ERROR_ARGUMENT. */
+int32_t sx_squad_set_distance(sx_squad *squad, sx_distance_fn distance, void *context);
+/* distance is asked by sx_crew_tick, sx_crew_tick_with and
+ * sx_crew_member_inputs; NULL turns it off. Returns 0, or SX_ERROR_ARGUMENT. */
+int32_t sx_crew_set_distance(sx_crew *crew, sx_distance_fn distance, void *context);
+
+/* A ready walking distance from flow fields, cached by destination: a query
+ * builds (or reuses) the flow field rooted at to and reads the cost at from,
+ * divided by rules->cost_straight (rounded down; a diagonal of 14 adds 1.4 to
+ * the sum). slots fields are kept (0: 4), the least recently used replaced;
+ * each holds up to rules->node_capacity cells, and a cell beyond that counts
+ * as unreachable. A squad asks many members about the same few destinations
+ * (the target, a wish point), so a tick costs about one search per new
+ * destination. sx_flow_distance_set_map gives it the map (the sx_map is
+ * copied; its callbacks and context stay valid while set; NULL clears it);
+ * sx_flow_distance_invalidate forgets every field (call it when the map
+ * changed). Then
+ *   sx_squad_set_distance(squad, sx_flow_distance_fn, fd);
+ * sx_flow_distance_fn answers as an sx_distance_fn (context: the
+ * sx_flow_distance): 1 and *out, 0 unreachable, SX_ERROR_ARGUMENT for a null
+ * pointer or no map. sx_flow_distance_searches: the fields built so far.
+ * Nothing allocates after sx_flow_distance_new. */
+typedef struct sx_flow_distance sx_flow_distance;
+sx_flow_distance *sx_flow_distance_new(const sx_rules *rules, uint32_t slots);
+void sx_flow_distance_free(sx_flow_distance *fd);
+int32_t sx_flow_distance_set_map(sx_flow_distance *fd, const sx_map *map);
+int32_t sx_flow_distance_invalidate(sx_flow_distance *fd);
+int64_t sx_flow_distance_searches(const sx_flow_distance *fd);
+int32_t sx_flow_distance_fn(void *context, const int32_t *from, const int32_t *to, uint32_t *out);
 
 #ifdef __cplusplus
 }

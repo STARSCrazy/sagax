@@ -22,7 +22,7 @@ use sagax_nav::search::SearchTrace;
 use sagax_nav::topology::Topology;
 
 /// Version of the C interface (`SX_API_VERSION`).
-pub const API_VERSION: u32 = 15;
+pub const API_VERSION: u32 = 16;
 
 /// `sx_step_fn`.
 pub type StepFn = unsafe extern "C" fn(*mut c_void, i32, i32, i32, i32, i32) -> i32;
@@ -1336,6 +1336,8 @@ pub unsafe extern "C" fn sx_dstar_set_trace(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod walk_tests;
 
 #[cfg(test)]
 mod bench;
@@ -1355,3 +1357,4 @@ pub mod group;
 pub mod mission;
 pub mod perception;
 pub mod rules;
+pub mod walk;

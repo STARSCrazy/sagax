@@ -79,7 +79,7 @@ fn wall_line() -> Walls {
 
 #[test]
 fn version_is_15() {
-    assert_eq!(sx_api_version(), 15);
+    assert_eq!(sx_api_version(), 16);
 }
 
 #[test]
@@ -1127,7 +1127,7 @@ mod squad {
         assert_eq!(size_of::<SxOrder>(), 72);
         assert_eq!(size_of::<SxPlan>(), 28);
         assert_eq!(size_of::<SxSkillTable>(), 204);
-        assert_eq!(define("SX_API_VERSION"), 15);
+        assert_eq!(define("SX_API_VERSION"), 16);
         assert_eq!(define("SX_ERROR_PLAN"), i64::from(ERROR_PLAN));
         assert_eq!(define("SX_IDLE"), i64::from(IDLE));
         let core = [
@@ -3108,7 +3108,7 @@ mod conventions {
     use std::ptr::null_mut;
 
     const HEADER: &str = include_str!("../include/sagax.h");
-    const SOURCES: [&str; 12] = [
+    const SOURCES: [&str; 13] = [
         include_str!("lib.rs"),
         include_str!("perception.rs"),
         include_str!("contagion.rs"),
@@ -3121,6 +3121,7 @@ mod conventions {
         include_str!("group.rs"),
         include_str!("crew.rs"),
         include_str!("rules.rs"),
+        include_str!("walk.rs"),
     ];
 
     /// Every `#[unsafe(no_mangle)]` function of the sources.
@@ -6915,7 +6916,7 @@ mod perception {
 
     #[test]
     fn perception_numbers_match_header() {
-        assert_eq!(define("SX_API_VERSION"), 15);
+        assert_eq!(define("SX_API_VERSION"), 16);
         let numbers = [
             ("SX_MAX_CHANNELS", rs::MAX_CHANNELS as i64),
             ("SX_MAX_CUES", rs::MAX_CUES as i64),
@@ -7417,7 +7418,7 @@ mod contagion {
 
     #[test]
     fn contagion_numbers_match_header() {
-        assert_eq!(define("SX_API_VERSION"), 15);
+        assert_eq!(define("SX_API_VERSION"), 16);
         let numbers = [
             ("SX_MAX_DEEDS", rs::MAX_DEEDS as i64),
             ("SX_DEED_COLUMNS", rs::DEED_COLUMNS as i64),
@@ -7802,7 +7803,7 @@ mod goal_guess {
 
     #[test]
     fn goal_guess_numbers_match_header() {
-        assert_eq!(define("SX_API_VERSION"), 15);
+        assert_eq!(define("SX_API_VERSION"), 16);
         let numbers = [
             ("SX_MAX_GOALS", MAX_GOALS as i64),
             ("SX_MAX_MOVES", MAX_MOVES as i64),
