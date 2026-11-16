@@ -1795,7 +1795,11 @@ typedef struct sx_place_ctx {
 } sx_place_ctx;
 
 /* Slot 4, member cost. built_in: the metric distance from the member to the
- * slot's first wish point (Euclid: squared). */
+ * slot's first wish point (Euclid: squared); with a walking distance set
+ * (sx_squad_set_distance, sx_crew_set_distance) the walking distance instead
+ * (Euclid: squared), and INT64_MAX when the member cannot get there (the
+ * built-in cost 2^100, saturated): do not add to it, it would overflow;
+ * compare it, or return it as it is. */
 typedef struct sx_cost_ctx {
 	int64_t built_in;
 	uint32_t tactic;
@@ -1813,7 +1817,9 @@ typedef struct sx_cost_ctx {
 typedef struct sx_spot_ctx {
 	int64_t built_in;
 	int64_t distance;           /* wish to spot in the squad's metric (Euclid:
-	                             * squared), saturated to int64_t */
+	                             * squared), saturated to int64_t; with a walking
+	                             * distance set: the walk from the spot to wish
+	                             * (spots that cannot get there are left out) */
 	uint32_t tactic;
 	uint32_t slot;
 	uint32_t index;             /* of the spot in the game's list */
@@ -3531,9 +3537,10 @@ int32_t sx_goal_guess_set_trace(sx_goal_guess *g, sx_goal_guess_trace_fn trace, 
  * Distances are in cells, so every threshold keeps its meaning; with
  * SX_METRIC_EUCLID the walking distance is squared where squares are
  * compared. A place that cannot be reached is infinitely far: out of every
- * range, never the nearest, last in every ordering (member cost 2^100, a row
- * value INT32_MAX), never the straight line instead. Without a distance
- * nothing changes.
+ * range, never the nearest, last in every ordering (member cost 2^100, which
+ * a member cost callback sees as INT64_MAX in sx_cost_ctx.built_in: do not
+ * add to it; a row value INT32_MAX), never the straight line instead.
+ * Without a distance nothing changes.
  *
  * sx_distance_fn: the walking distance from from to to (3 integers each,
  * positions as the squad keeps them; a crew with hex_grid passes offset
@@ -3551,9 +3558,22 @@ int32_t sx_squad_set_distance(sx_squad *squad, sx_distance_fn distance, void *co
 int32_t sx_crew_set_distance(sx_crew *crew, sx_distance_fn distance, void *context);
 
 /* A ready walking distance from flow fields, cached by destination: a query
- * builds (or reuses) the flow field rooted at to and reads the cost at from,
- * divided by rules->cost_straight (rounded down; a diagonal of 14 adds 1.4 to
- * the sum). slots fields are kept (0: 4), the least recently used replaced;
+ * builds (or reuses) the flow field rooted at to over the map's moves turned
+ * round and reads the cost at from, so it is the cost of walking from from
+ * to to (what sx_nav_find_path finds from from; start_step is not used),
+ * also where moves cost differently each way (the cell entered, zones, one-way
+ * walls). It is divided by rules->cost_straight (rounded down; a diagonal of
+ * 14 adds 1.4 to the sum). A walker on a blocked cell (occupied by itself)
+ * still walks off it; a destination nobody can enter (occupied, blocked) is
+ * walked up to: one cell more than to the nearest cell next to it. from == to
+ * is 0. The positions are the map's cells (x, y, level): on hex the offset
+ * coordinates a crew with hex_grid passes; a plain hex sx_squad passes axial
+ * positions, so wrap sx_flow_distance_fn in your own sx_distance_fn that
+ * converts them (sx_hex_from_axial), and do not share one sx_flow_distance
+ * between such a squad and a crew. Moves are seen backwards from neighbours on
+ * the cell's own level and on the levels of sx_flow_distance_set_levels (lo ..
+ * hi, default 0 .. 0; set it for stairs between levels).
+ * slots fields are kept (0: 4), the least recently used replaced;
  * each holds up to rules->node_capacity cells, and a cell beyond that counts
  * as unreachable. A squad asks many members about the same few destinations
  * (the target, a wish point), so a tick costs about one search per new
@@ -3571,6 +3591,7 @@ sx_flow_distance *sx_flow_distance_new(const sx_rules *rules, uint32_t slots);
 void sx_flow_distance_free(sx_flow_distance *fd);
 int32_t sx_flow_distance_set_map(sx_flow_distance *fd, const sx_map *map);
 int32_t sx_flow_distance_invalidate(sx_flow_distance *fd);
+int32_t sx_flow_distance_set_levels(sx_flow_distance *fd, int32_t lo, int32_t hi);
 int64_t sx_flow_distance_searches(const sx_flow_distance *fd);
 int32_t sx_flow_distance_fn(void *context, const int32_t *from, const int32_t *to, uint32_t *out);
 

@@ -581,7 +581,8 @@ pub unsafe extern "C" fn sx_crew_report_with(
     })
 }
 
-/// `sx_crew_member_inputs`: 1, or 0 for an unknown id.
+/// `sx_crew_member_inputs`: 1, or 0 for an unknown id (`SX_ERROR_INTERNAL`
+/// if the walking distance panicked).
 ///
 /// # Safety
 /// `crew` is null or valid; `out` is null or writable.
@@ -596,18 +597,20 @@ pub unsafe extern "C" fn sx_crew_member_inputs(
     if out.is_null() {
         return ERROR_ARGUMENT;
     }
-    let crew = &c.crew;
-    let inputs = with_walk(c.walk, &mut BuiltInRules, |r| {
-        crew.member_inputs_with(id, now, r)
-    });
-    match inputs {
-        Some(i) => {
-            // SAFETY: non-null and writable (see above).
-            unsafe { put(out, SxMemberInputs::of(i)) };
-            1
+    guarded(|| {
+        let crew = &c.crew;
+        let inputs = with_walk(c.walk, &mut BuiltInRules, |r| {
+            crew.member_inputs_with(id, now, r)
+        });
+        match inputs {
+            Some(i) => {
+                // SAFETY: non-null and writable (see above).
+                unsafe { put(out, SxMemberInputs::of(i)) };
+                1
+            }
+            None => 0,
         }
-        None => 0,
-    }
+    })
 }
 
 /// `sx_crew_set_distance`: the walking distance the crew's ticks and

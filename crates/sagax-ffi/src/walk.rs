@@ -132,6 +132,29 @@ pub unsafe extern "C" fn sx_flow_distance_invalidate(fd: *mut SxFlowDistance) ->
     0
 }
 
+/// `sx_flow_distance_set_levels`: the levels moves may arrive from (`lo`
+/// ..= `hi`, default 0 ..= 0); forgets every field. `SX_ERROR_ARGUMENT`
+/// for a null handle or `lo > hi`.
+///
+/// # Safety
+/// `fd` is null or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sx_flow_distance_set_levels(
+    fd: *mut SxFlowDistance,
+    lo: i32,
+    hi: i32,
+) -> i32 {
+    // SAFETY: null or valid (see above).
+    let Some(h) = (unsafe { fd.as_mut() }) else {
+        return ERROR_ARGUMENT;
+    };
+    if lo > hi {
+        return ERROR_ARGUMENT;
+    }
+    h.fd.set_levels(lo..=hi);
+    0
+}
+
 /// `sx_flow_distance_searches`: the fields built so far.
 ///
 /// # Safety

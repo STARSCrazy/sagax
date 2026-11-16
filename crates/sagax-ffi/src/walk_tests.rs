@@ -421,6 +421,17 @@ fn c_flow_distance_matches_rust() {
         assert_eq!(sx_flow_distance_invalidate(null_mut()), ERROR_ARGUMENT);
         assert_eq!(sx_flow_distance_searches(null()), i64::from(ERROR_ARGUMENT));
         assert!(sx_flow_distance_new(null(), 4).is_null());
+        // Levels: lo > hi and a null handle are refused; setting them
+        // forgets the fields.
+        assert_eq!(sx_flow_distance_set_levels(fd, 1, 0), ERROR_ARGUMENT);
+        assert_eq!(
+            sx_flow_distance_set_levels(null_mut(), 0, 0),
+            ERROR_ARGUMENT
+        );
+        let before = sx_flow_distance_searches(fd);
+        assert_eq!(sx_flow_distance_set_levels(fd, 0, 1), 0);
+        assert_eq!(ask(fd, &from, &to, &mut out), 1);
+        assert_eq!(sx_flow_distance_searches(fd), before + 1);
         // A map without a step callback is refused; clearing it works.
         let bad = SxMap { step: None, ..map };
         assert_eq!(sx_flow_distance_set_map(fd, &bad), ERROR_ARGUMENT);
