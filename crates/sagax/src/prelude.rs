@@ -17,15 +17,16 @@ pub use crate::perception::{
     Awareness, Contagion, ContagionConfig, DeedInputs, DeedRule, Eye, Percept, SenseProfile, Stats,
     Stimulus, Target, hear, learn_percepts, look, observe, sight_line,
 };
+pub use crate::walk::FlowDistance;
 pub use sagax_core::{Cell, HexLayout, Pos};
 pub use sagax_decide::group::Status as SquadStatus;
 pub use sagax_decide::group::{
     BuiltInRules, Crew, CrewConfig, CrewEvent, Goal, GoalKeeper, KeeperInputs, Member, MemberState,
-    Spot, Squad, SquadConfig, SquadRules, SquadView, Tactic, tactics,
+    Spot, Squad, SquadConfig, SquadRules, SquadView, Tactic, Walking, tactics,
 };
 pub use sagax_decide::memory::{
-    Areas, Evict, Fact, GoalGuess, GoalGuessConfig, Knowledge, Message, Metric, PointPattern,
-    StepError,
+    Areas, Distance, Evict, Fact, GoalGuess, GoalGuessConfig, Knowledge, Message, Metric,
+    PointPattern, StepError,
 };
 pub use sagax_decide::mission::BuiltInRules as MissionBuiltInRules;
 pub use sagax_decide::mission::{

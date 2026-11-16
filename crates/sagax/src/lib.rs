@@ -3,7 +3,8 @@
 //! `use sagax::prelude::*;` brings the types most games need. The parts are
 //! also reachable as [`nav`] and [`decide`]; [`perception`] holds sight
 //! and hearing with their nav and memory helpers; [`goal_guess`] feeds a
-//! goal guess from flow fields; [`debug`] holds
+//! goal guess from flow fields; [`walk`] gives the squad walking distances
+//! from flow fields; [`debug`] holds
 //! everything trace related.
 
 pub use sagax_core::{Cell, HexLayout, Pos};
@@ -14,6 +15,7 @@ pub mod goal_guess;
 pub mod perception;
 pub mod prelude;
 pub mod rules;
+pub mod walk;
 
 pub mod debug {
     //! Everything for tracing, in one place: `use sagax::debug::*;`.
