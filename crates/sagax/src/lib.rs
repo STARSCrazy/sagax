@@ -2,13 +2,15 @@
 //!
 //! `use sagax::prelude::*;` brings the types most games need. The parts are
 //! also reachable as [`nav`] and [`decide`]; [`perception`] holds sight
-//! and hearing with their nav and memory helpers; [`debug`] holds
+//! and hearing with their nav and memory helpers; [`goal_guess`] feeds a
+//! goal guess from flow fields; [`debug`] holds
 //! everything trace related.
 
 pub use sagax_core::{Cell, HexLayout, Pos};
 pub use sagax_decide as decide;
 pub use sagax_nav as nav;
 
+pub mod goal_guess;
 pub mod perception;
 pub mod prelude;
 pub mod rules;
@@ -40,7 +42,9 @@ pub mod debug {
     pub use sagax_core::{CallbackSink, MapSink, NoopSink, Sink};
     pub use sagax_debug::{Collector, Overflow, Record};
     pub use sagax_decide::group::{CrewTrace, KeeperTrace, SpotTrace, SquadTrace};
-    pub use sagax_decide::memory::{AreasTrace, KnowledgeTrace, MessageTrace, TimersTrace};
+    pub use sagax_decide::memory::{
+        AreasTrace, GoalGuessTrace, KnowledgeTrace, MessageTrace, TimersTrace,
+    };
     pub use sagax_decide::{DecideTrace, mission::MissionTrace, state::StateTrace};
     pub use sagax_nav::{
         formation::FormationTrace, nav::NavTrace, search::SearchTrace, smooth::SmoothTrace,

@@ -12,6 +12,7 @@
 //! d.add_consideration(o, c);
 //! ```
 
+pub use crate::goal_guess::observe_flow;
 pub use crate::perception::{
     Awareness, Contagion, ContagionConfig, DeedInputs, DeedRule, Eye, Percept, SenseProfile, Stats,
     Stimulus, Target, hear, learn_percepts, look, observe, sight_line,
@@ -22,7 +23,10 @@ pub use sagax_decide::group::{
     BuiltInRules, Crew, CrewConfig, CrewEvent, Goal, GoalKeeper, KeeperInputs, Member, MemberState,
     Spot, Squad, SquadConfig, SquadRules, SquadView, Tactic, tactics,
 };
-pub use sagax_decide::memory::{Areas, Evict, Fact, Knowledge, Message, Metric, PointPattern};
+pub use sagax_decide::memory::{
+    Areas, Evict, Fact, GoalGuess, GoalGuessConfig, Knowledge, Message, Metric, PointPattern,
+    StepError,
+};
 pub use sagax_decide::mission::BuiltInRules as MissionBuiltInRules;
 pub use sagax_decide::mission::{
     Action, BreakReason, Detour, DetourEnd, Fail, FailCtx, Leash, Leeway, Mission, MissionConfig,
