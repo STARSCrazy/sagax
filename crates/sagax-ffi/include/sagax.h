@@ -47,7 +47,7 @@
 extern "C" {
 #endif
 
-#define SX_API_VERSION 14
+#define SX_API_VERSION 15
 
 typedef struct sx_point {
 	int32_t x, y, level;
@@ -3388,6 +3388,125 @@ typedef struct sx_contagion_trace {
 typedef void (*sx_contagion_trace_fn)(void *context, const sx_contagion_trace *trace);
 int32_t sx_contagion_set_trace(sx_contagion *c, sx_contagion_trace_fn trace, void *context);
 
+/* ---- goal guess (since version 15) --------------------------------------- */
+
+/* Goal recognition: where is the one an observer watches heading (which
+ * exit, which terminal)? A classic Bayes recogniser over up to SX_MAX_GOALS
+ * candidate goals that assumes the walker is mostly sensible: for each goal k
+ * the likelihood of a step is w(moved_k) / sum_j w(options_k[j]) with
+ * w(x) = exp(-beta * x / (256 * unit)), where moved_k is the change of
+ * walking distance to goal k of the step taken and options_k[j] that of
+ * move j possible from the old place. Chances become prior x likelihood,
+ * normalised; then forget/256 of uniform over the goals not ruled out is
+ * mixed back in, so a feint is recovered from quickly.
+ *
+ * No cheating: the handle knows only the steps the game feeds it. Feed only
+ * what the observer saw (positions from its own percepts), never the true
+ * goal or the true position.
+ *
+ * Integer only (chances in 1/65536, w by an integer exp2 with a relative
+ * error below 2^-15): the same steps give the same chances everywhere. A
+ * goal not ruled out never drops below 1/65536, so it can always come back.
+ * One handle per observer; nothing allocates after sx_goal_guess_new. */
+
+typedef struct sx_goal_guess sx_goal_guess;
+
+#define SX_MAX_GOALS     8  /* candidate goals of one guess */
+#define SX_MAX_MOVES    32  /* moves of one observed step */
+#define SX_GOAL_COLUMNS  2  /* integers sx_goal_guess_write_columns writes */
+
+typedef struct sx_goal_guess_config {
+	uint32_t beta;              /* 1/256 per unit: 512 (2 per straight step); 0 learns nothing */
+	uint32_t unit;              /* cost of one straight step (10 with SX_PRESET_OCTILE; 0 counts as 1) */
+	uint32_t forget;            /* share of uniform mixed in per step, 0..256: 13 (about 5 percent) */
+} sx_goal_guess_config;
+
+/* beta 512, unit 10, forget 13. Returns 0, or SX_ERROR_ARGUMENT for null. */
+int32_t sx_goal_guess_config_default(sx_goal_guess_config *out);
+
+/* A guess over goals (1..SX_MAX_GOALS) goals with a uniform prior. Null for
+ * a null config or a goal count out of range. */
+sx_goal_guess *sx_goal_guess_new(const sx_goal_guess_config *cfg, uint32_t goals);
+void sx_goal_guess_free(sx_goal_guess *g);
+/* The number of goals, or SX_ERROR_ARGUMENT. */
+int32_t sx_goal_guess_goals(const sx_goal_guess *g);
+
+/* Sets the prior from count weights (any unit; missing ones 0, extra ones
+ * ignored; all 0 is uniform) and starts over from it. A goal with weight 0
+ * is ruled out until a new prior (forgetting skips it). Returns 0, or
+ * SX_ERROR_ARGUMENT for a null handle or a null weights with count > 0. */
+int32_t sx_goal_guess_set_prior(sx_goal_guess *g, const uint32_t *weights, uint32_t count);
+/* Back to the prior. Returns 0, or SX_ERROR_ARGUMENT. */
+int32_t sx_goal_guess_reset(sx_goal_guess *g);
+
+/* Learns one observed step: moved holds one change per goal, options the
+ * changes of the per_goal moves from the old place, goal-major
+ * (options[k * per_goal + j]; the same moves for every goal; standing still
+ * is not a move and teaches nothing, so do not call this for it). Returns 0,
+ * or SX_ERROR_ARGUMENT for a null pointer or per_goal 0 or above
+ * SX_MAX_MOVES (nothing changed). */
+int32_t sx_goal_guess_observe(sx_goal_guess *g, const int32_t *moved, const int32_t *options,
+                              uint32_t per_goal);
+
+/* The seen step prev -> cur with one flow field per goal (flows[k] built for
+ * goal k; count is the goal count). The moves of prev come from map with the
+ * rules of flows[0]; each move's change is its field cost minus the cost of
+ * prev. A move outside a field gets that goal's largest known change (the
+ * least likely option); a goal whose field holds prev or none of the moves
+ * learns nothing from this step, so a blocked goal never zeroes the others.
+ * Returns 0 (learned; cur equal to prev: nothing to learn), 1 for a jump
+ * (cur is not a move from prev, for example after the observer lost sight:
+ * nothing changed, just go on from the new place), or SX_ERROR_ARGUMENT for
+ * a null pointer, count not the goal count, or more than SX_MAX_MOVES
+ * moves. */
+int32_t sx_goal_guess_observe_flow(sx_goal_guess *g, sx_flow *const *flows, uint32_t count,
+                                   const sx_map *map, sx_point prev, sx_point cur);
+
+/* The chance of goal, 0..256 (all goals sum to exactly 256; 0 out of range),
+ * or SX_ERROR_ARGUMENT. */
+int32_t sx_goal_guess_chance(const sx_goal_guess *g, uint32_t goal);
+/* The same in the internal precision, 1/65536 (all goals sum to 65536). */
+int32_t sx_goal_guess_chance_fine(const sx_goal_guess *g, uint32_t goal);
+/* The most likely goal (ties: the lower goal), its chance 0..256 to chance
+ * unless null; or SX_ERROR_ARGUMENT. */
+int32_t sx_goal_guess_best(const sx_goal_guess *g, uint32_t *chance);
+/* The rank of goal: 0 the most likely, ties by the lower goal; the goal count
+ * for a goal out of range; or SX_ERROR_ARGUMENT. */
+int32_t sx_goal_guess_rank(const sx_goal_guess *g, uint32_t goal);
+/* chance, rank of goal as SX_GOAL_COLUMNS integers to row, for a Decider row
+ * (pass the address of the first of the two columns). Returns 0, or
+ * SX_ERROR_ARGUMENT. */
+int32_t sx_goal_guess_write_columns(const sx_goal_guess *g, uint32_t goal, int32_t *row);
+/* Shares hunters over the goals by chance (largest remainder; ties to the
+ * lower goal) to out[0..count]; entries past the goals are 0 (3 hunters with
+ * chances 60/30/10 percent give 2, 1, 0). Returns 0, or SX_ERROR_ARGUMENT for
+ * a null handle or a null out with count > 0. */
+int32_t sx_goal_guess_split(const sx_goal_guess *g, uint32_t hunters, uint32_t *out, uint32_t count);
+
+#define SX_GOAL_GUESS_TRACE_STEP     1  /* goal, moved, likelihood, chance: one goal after a step */
+#define SX_GOAL_GUESS_TRACE_PRIOR    2  /* goal, chance: one goal after a new prior */
+#define SX_GOAL_GUESS_TRACE_RESET    3  /* back to the prior */
+#define SX_GOAL_GUESS_TRACE_REFUSED  4  /* error: a step was refused, nothing changed */
+
+#define SX_STEP_SHAPE  1  /* the step does not fit the goals */
+#define SX_STEP_JUMP   2  /* the new place is not a move from the old one */
+
+/* One record; fields that do not apply to kind are 0. */
+typedef struct sx_goal_guess_trace {
+	uint32_t kind;              /* SX_GOAL_GUESS_TRACE_* */
+	uint32_t goal;              /* STEP, PRIOR */
+	int32_t moved;              /* STEP: change of walking distance of the step taken */
+	uint32_t likelihood;        /* STEP: the step's likelihood for the goal, 1/65536 */
+	uint32_t chance;            /* STEP, PRIOR: the goal's chance now, 0..256 */
+	uint32_t error;             /* REFUSED: SX_STEP_* */
+} sx_goal_guess_trace;
+
+/* trace gets every record of the following set_prior, reset, observe and
+ * observe_flow calls, with context; NULL turns it off (the default). trace
+ * must not call any function on the same handle. Returns 0. */
+typedef void (*sx_goal_guess_trace_fn)(void *context, const sx_goal_guess_trace *trace);
+int32_t sx_goal_guess_set_trace(sx_goal_guess *g, sx_goal_guess_trace_fn trace, void *context);
+
 #ifdef __cplusplus
 }
 #endif
@@ -3843,6 +3962,15 @@ _Static_assert(offsetof(sx_contagion_trace, old) == 8, "sx_contagion_trace.old l
 _Static_assert(offsetof(sx_contagion_trace, bits) == 12, "sx_contagion_trace.bits layout");
 _Static_assert(offsetof(sx_contagion_trace, deed) == 16, "sx_contagion_trace.deed layout");
 _Static_assert(offsetof(sx_contagion_trace, inputs) == 20, "sx_contagion_trace.inputs layout");
+_Static_assert(sizeof(sx_goal_guess_config) == 12, "sx_goal_guess_config layout");
+_Static_assert(offsetof(sx_goal_guess_config, unit) == 4, "sx_goal_guess_config.unit layout");
+_Static_assert(offsetof(sx_goal_guess_config, forget) == 8, "sx_goal_guess_config.forget layout");
+_Static_assert(sizeof(sx_goal_guess_trace) == 24, "sx_goal_guess_trace layout");
+_Static_assert(offsetof(sx_goal_guess_trace, goal) == 4, "sx_goal_guess_trace.goal layout");
+_Static_assert(offsetof(sx_goal_guess_trace, moved) == 8, "sx_goal_guess_trace.moved layout");
+_Static_assert(offsetof(sx_goal_guess_trace, likelihood) == 12, "sx_goal_guess_trace.likelihood layout");
+_Static_assert(offsetof(sx_goal_guess_trace, chance) == 16, "sx_goal_guess_trace.chance layout");
+_Static_assert(offsetof(sx_goal_guess_trace, error) == 20, "sx_goal_guess_trace.error layout");
 #endif
 
 #endif

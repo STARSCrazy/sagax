@@ -539,3 +539,17 @@ pub const CONTAGION_TRACE_REPLACED: u32 = 4;
 pub const CONTAGION_TRACE_DROPPED: u32 = 5;
 /// `SX_CONTAGION_TRACE_INPUTS`: the inputs of a deed were read.
 pub const CONTAGION_TRACE_INPUTS: u32 = 6;
+
+/// `SX_GOAL_GUESS_TRACE_STEP`: one goal after an observed step.
+pub const GOAL_GUESS_TRACE_STEP: u32 = 1;
+/// `SX_GOAL_GUESS_TRACE_PRIOR`: one goal after a new prior.
+pub const GOAL_GUESS_TRACE_PRIOR: u32 = 2;
+/// `SX_GOAL_GUESS_TRACE_RESET`: back to the prior.
+pub const GOAL_GUESS_TRACE_RESET: u32 = 3;
+/// `SX_GOAL_GUESS_TRACE_REFUSED`: an observed step was refused.
+pub const GOAL_GUESS_TRACE_REFUSED: u32 = 4;
+
+/// `SX_STEP_SHAPE`: the step does not fit the goals.
+pub const STEP_SHAPE: u32 = 1;
+/// `SX_STEP_JUMP`: the new place is not a move from the old one.
+pub const STEP_JUMP: u32 = 2;

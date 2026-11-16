@@ -78,8 +78,8 @@ fn wall_line() -> Walls {
 }
 
 #[test]
-fn version_is_14() {
-    assert_eq!(sx_api_version(), 14);
+fn version_is_15() {
+    assert_eq!(sx_api_version(), 15);
 }
 
 #[test]
@@ -1127,7 +1127,7 @@ mod squad {
         assert_eq!(size_of::<SxOrder>(), 72);
         assert_eq!(size_of::<SxPlan>(), 28);
         assert_eq!(size_of::<SxSkillTable>(), 204);
-        assert_eq!(define("SX_API_VERSION"), 14);
+        assert_eq!(define("SX_API_VERSION"), 15);
         assert_eq!(define("SX_ERROR_PLAN"), i64::from(ERROR_PLAN));
         assert_eq!(define("SX_IDLE"), i64::from(IDLE));
         let core = [
@@ -3108,10 +3108,11 @@ mod conventions {
     use std::ptr::null_mut;
 
     const HEADER: &str = include_str!("../include/sagax.h");
-    const SOURCES: [&str; 11] = [
+    const SOURCES: [&str; 12] = [
         include_str!("lib.rs"),
         include_str!("perception.rs"),
         include_str!("contagion.rs"),
+        include_str!("goal_guess.rs"),
         include_str!("grid.rs"),
         include_str!("memory.rs"),
         include_str!("mission.rs"),
@@ -3187,6 +3188,7 @@ mod conventions {
         use crate::contagion::{SxContagionConfig, SxContagionTrace, SxDeedInputs, SxDeedRule};
         use crate::crew::{SxCrewConfig, SxCrewEvent, SxCrewTrace, SxMemberInputs};
         use crate::decide::{SxCandidate, SxChoice, SxConsideration, SxDecideTrace};
+        use crate::goal_guess::{SxGoalGuessConfig, SxGoalGuessTrace};
         use crate::group::{
             SxGatherCandidate, SxGoal, SxKeeperTrace, SxMember, SxOrder, SxPlace, SxPlan,
             SxSkillTable, SxSlot, SxSpot, SxSquadConfig, SxSquadTrace,
@@ -3221,6 +3223,16 @@ mod conventions {
         }
         vec![
             layout!("sx_deed_rule", SxDeedRule, window),
+            layout!("sx_goal_guess_config", SxGoalGuessConfig, unit, forget),
+            layout!(
+                "sx_goal_guess_trace",
+                SxGoalGuessTrace,
+                goal,
+                moved,
+                likelihood,
+                chance,
+                error
+            ),
             layout!("sx_contagion_config", SxContagionConfig, count, deeds),
             layout!("sx_deed_inputs", SxDeedInputs, seen, share, nearest, since),
             layout!(
@@ -6903,7 +6915,7 @@ mod perception {
 
     #[test]
     fn perception_numbers_match_header() {
-        assert_eq!(define("SX_API_VERSION"), 14);
+        assert_eq!(define("SX_API_VERSION"), 15);
         let numbers = [
             ("SX_MAX_CHANNELS", rs::MAX_CHANNELS as i64),
             ("SX_MAX_CUES", rs::MAX_CUES as i64),
@@ -7027,7 +7039,7 @@ mod contagion {
     static ALLOCATOR: Counting = Counting;
 
     /// Allocations of this thread while `f` runs.
-    fn allocations(f: impl FnOnce()) -> usize {
+    pub(super) fn allocations(f: impl FnOnce()) -> usize {
         let before = ALLOCATIONS.with(|c| c.get());
         f();
         ALLOCATIONS.with(|c| c.get()) - before
@@ -7405,7 +7417,7 @@ mod contagion {
 
     #[test]
     fn contagion_numbers_match_header() {
-        assert_eq!(define("SX_API_VERSION"), 14);
+        assert_eq!(define("SX_API_VERSION"), 15);
         let numbers = [
             ("SX_MAX_DEEDS", rs::MAX_DEEDS as i64),
             ("SX_DEED_COLUMNS", rs::DEED_COLUMNS as i64),
@@ -7434,5 +7446,386 @@ mod contagion {
         for (name, value) in numbers {
             assert_eq!(define(name), value, "{name}");
         }
+    }
+}
+
+mod goal_guess {
+    //! C API 15: the goal guess through C equals the goal guess in Rust,
+    //! and neither allocates per step.
+
+    use super::contagion::allocations;
+    use super::squad::define;
+    use super::{map_of, rules, walls};
+    use crate::goal_guess::*;
+    use crate::{ERROR_ARGUMENT, Point, SxFlow, sx_flow_build, sx_flow_free, sx_flow_new};
+    use sagax_abi::codes::*;
+    use sagax_core::{CallbackSink, Cell, HexLayout};
+    use sagax_decide::memory::{
+        GOAL_COLUMNS, GoalGuess, GoalGuessConfig, GoalGuessTrace, MAX_GOALS, MAX_MOVES, StepError,
+    };
+    use sagax_facade::goal_guess::observe_flow_traced;
+    use sagax_nav::Limits;
+    use sagax_nav::flow::FlowField;
+    use sagax_nav::grid::{DenseGrid, GridRules, Preset};
+    use sagax_nav::topology::Topology;
+    use std::ffi::c_void;
+    use std::ptr::{null, null_mut};
+
+    const BLOCKED: [(i32, i32); 9] = [
+        (9, 3),
+        (9, 4),
+        (9, 5),
+        (9, 6),
+        (9, 8),
+        (9, 9),
+        (9, 10),
+        (9, 11),
+        (9, 12),
+    ];
+    const EXITS: [(i32, i32); 4] = [(0, 0), (19, 0), (0, 19), (19, 19)];
+
+    unsafe extern "C" fn collect(ctx: *mut c_void, t: *const SxGoalGuessTrace) {
+        let out = unsafe { &mut *ctx.cast::<Vec<SxGoalGuessTrace>>() };
+        out.push(unsafe { *t });
+    }
+
+    fn c_config() -> SxGoalGuessConfig {
+        let mut c = SxGoalGuessConfig {
+            beta: 0,
+            unit: 0,
+            forget: 0,
+        };
+        assert_eq!(unsafe { sx_goal_guess_config_default(&mut c) }, 0);
+        c
+    }
+
+    /// One walk through C and Rust: same chances, same records, per step.
+    fn same_walk(grid: u32, topology: Topology, start: Cell, exit: usize) {
+        let mut w = walls(&BLOCKED);
+        let map = map_of(&mut w);
+        let mut dense = DenseGrid::new(20, 20);
+        for &(x, y) in &BLOCKED {
+            dense.set(x, y, DenseGrid::BLOCKED);
+        }
+        let mut graph = topology.graph(&mut dense, None);
+        let mut fields: Vec<FlowField<Cell>> = Vec::new();
+        let mut flows: Vec<*mut SxFlow> = Vec::new();
+        let r = rules(grid);
+        for &(x, y) in &EXITS {
+            let mut f = FlowField::default();
+            f.build(&mut graph, [Cell::new(x, y, 0)], Limits::default());
+            fields.push(f);
+            let flow = unsafe { sx_flow_new(&r) };
+            let goal = Point::new(x, y, 0);
+            assert_eq!(
+                unsafe { sx_flow_build(flow, &map, &goal, 1, i32::MAX, null_mut()) },
+                0
+            );
+            flows.push(flow);
+        }
+        let mut way = Vec::new();
+        assert!(fields[exit].path(&mut graph, start, &mut way));
+
+        let c = unsafe { sx_goal_guess_new(&c_config(), 4) };
+        let mut c_log: Vec<SxGoalGuessTrace> = Vec::new();
+        unsafe {
+            sx_goal_guess_set_trace(c, Some(collect), (&mut c_log as *mut Vec<_>).cast());
+        }
+        let mut rs = GoalGuess::new(GoalGuessConfig::default(), 4);
+        let mut rs_log = Vec::new();
+        let mut moves = Vec::new();
+        let ptrs: Vec<*const SxFlow> = flows.iter().map(|&f| f.cast_const()).collect();
+        for pair in way.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            observe_flow_traced(
+                &mut rs,
+                &mut graph,
+                &fields,
+                a,
+                b,
+                &mut moves,
+                &mut CallbackSink(|e| rs_log.push(SxGoalGuessTrace::of(e))),
+            )
+            .unwrap();
+            let got = unsafe {
+                sx_goal_guess_observe_flow(
+                    c,
+                    ptrs.as_ptr().cast(),
+                    4,
+                    &map,
+                    Point::new(a.x, a.y, a.level),
+                    Point::new(b.x, b.y, b.level),
+                )
+            };
+            assert_eq!(got, 0);
+            for k in 0..4u32 {
+                assert_eq!(
+                    unsafe { sx_goal_guess_chance_fine(c, k) },
+                    rs.chance_fine(k as usize) as i32
+                );
+                assert_eq!(
+                    unsafe { sx_goal_guess_chance(c, k) },
+                    rs.chance(k as usize) as i32
+                );
+                assert_eq!(
+                    unsafe { sx_goal_guess_rank(c, k) },
+                    rs.rank(k as usize) as i32
+                );
+            }
+        }
+        assert_eq!(c_log, rs_log);
+        assert!(c_log.len() >= 4 * (way.len() - 1));
+        let mut chance = 0u32;
+        assert_eq!(unsafe { sx_goal_guess_best(c, &mut chance) }, exit as i32);
+        assert_eq!(Some((exit, chance)), rs.best());
+        unsafe {
+            sx_goal_guess_free(c);
+            for f in flows {
+                sx_flow_free(f);
+            }
+        }
+    }
+
+    #[test]
+    fn observe_flow_through_c_equals_rust_on_square_and_hex() {
+        let square = Topology::Square(GridRules::preset(Preset::Octile));
+        let hex = Topology::hex(HexLayout::OddR, Preset::Octile);
+        for exit in 0..4 {
+            for start in [Cell::new(8, 7, 0), Cell::new(12, 9, 0)] {
+                same_walk(GRID_SQUARE, square, start, exit);
+                same_walk(GRID_HEX_ODD_R, hex, start, exit);
+            }
+        }
+    }
+
+    #[test]
+    fn observe_and_reads_through_c_equal_rust() {
+        let c = unsafe { sx_goal_guess_new(&c_config(), 3) };
+        let mut rs = GoalGuess::new(GoalGuessConfig::default(), 3);
+        let weights = [5u32, 3, 0];
+        assert_eq!(
+            unsafe { sx_goal_guess_set_prior(c, weights.as_ptr(), 3) },
+            0
+        );
+        rs.set_prior(&weights);
+        let moved = [-10, 10, 0];
+        let options = [-10, 10, 14, 10, -10, -14, 0, 0, 0];
+        for _ in 0..3 {
+            assert_eq!(
+                unsafe { sx_goal_guess_observe(c, moved.as_ptr(), options.as_ptr(), 3) },
+                0
+            );
+            rs.observe(&moved, &options, 3).unwrap();
+        }
+        for k in 0..4u32 {
+            assert_eq!(
+                unsafe { sx_goal_guess_chance(c, k) },
+                rs.chance(k as usize) as i32
+            );
+        }
+        let mut row = [0i32; GOAL_COLUMNS];
+        let mut rs_row = [0i32; GOAL_COLUMNS];
+        assert_eq!(
+            unsafe { sx_goal_guess_write_columns(c, 1, row.as_mut_ptr()) },
+            0
+        );
+        rs.write_columns(1, &mut rs_row);
+        assert_eq!(row, rs_row);
+        let mut out = [9u32; 5];
+        let mut rs_out = [0u32; 5];
+        assert_eq!(unsafe { sx_goal_guess_split(c, 3, out.as_mut_ptr(), 5) }, 0);
+        rs.split(3, &mut rs_out);
+        assert_eq!(out, rs_out);
+        assert_eq!(unsafe { sx_goal_guess_goals(c) }, 3);
+        assert_eq!(unsafe { sx_goal_guess_reset(c) }, 0);
+        rs.reset();
+        assert_eq!(unsafe { sx_goal_guess_chance(c, 0) }, rs.chance(0) as i32);
+        assert_eq!(unsafe { sx_goal_guess_chance(c, 2) }, 0, "ruled out");
+        unsafe { sx_goal_guess_free(c) };
+    }
+
+    #[test]
+    fn bad_arguments_are_refused() {
+        unsafe {
+            assert!(sx_goal_guess_new(null(), 2).is_null());
+            assert!(sx_goal_guess_new(&c_config(), 0).is_null());
+            assert!(sx_goal_guess_new(&c_config(), MAX_GOALS as u32 + 1).is_null());
+            assert_eq!(sx_goal_guess_config_default(null_mut()), ERROR_ARGUMENT);
+            assert_eq!(sx_goal_guess_goals(null()), ERROR_ARGUMENT);
+            assert_eq!(sx_goal_guess_chance(null(), 0), ERROR_ARGUMENT);
+            assert_eq!(sx_goal_guess_best(null(), null_mut()), ERROR_ARGUMENT);
+            assert_eq!(sx_goal_guess_reset(null_mut()), ERROR_ARGUMENT);
+            let g = sx_goal_guess_new(&c_config(), 2);
+            let mut log: Vec<SxGoalGuessTrace> = Vec::new();
+            sx_goal_guess_set_trace(g, Some(collect), (&mut log as *mut Vec<_>).cast());
+            let before = sx_goal_guess_chance_fine(g, 0);
+            assert_eq!(sx_goal_guess_set_prior(g, null(), 2), ERROR_ARGUMENT);
+            assert_eq!(
+                sx_goal_guess_set_prior(g, null(), 0),
+                0,
+                "0 weights: uniform"
+            );
+            let moved = [0i32; 2];
+            let options = [0i32; 2 * (MAX_MOVES + 1)];
+            assert_eq!(
+                sx_goal_guess_observe(g, moved.as_ptr(), options.as_ptr(), 0),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_goal_guess_observe(g, moved.as_ptr(), options.as_ptr(), MAX_MOVES as u32 + 1),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_goal_guess_observe(g, null(), options.as_ptr(), 1),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(sx_goal_guess_chance_fine(g, 0), before);
+            assert_eq!(
+                sx_goal_guess_write_columns(g, 0, null_mut()),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(sx_goal_guess_split(g, 3, null_mut(), 2), ERROR_ARGUMENT);
+            assert_eq!(sx_goal_guess_split(g, 3, null_mut(), 0), 0);
+            let refused = log
+                .iter()
+                .filter(|t| t.kind == GOAL_GUESS_TRACE_REFUSED && t.error == STEP_SHAPE)
+                .count();
+            assert_eq!(refused, 3);
+
+            // observe_flow: wrong count, null flows, a jump.
+            let mut w = walls(&[]);
+            let map = map_of(&mut w);
+            let r = rules(0);
+            let a = sx_flow_new(&r);
+            let b = sx_flow_new(&r);
+            let ga = Point::new(0, 0, 0);
+            let gb = Point::new(19, 19, 0);
+            sx_flow_build(a, &map, &ga, 1, i32::MAX, null_mut());
+            sx_flow_build(b, &map, &gb, 1, i32::MAX, null_mut());
+            let two: [*const SxFlow; 2] = [a, b];
+            let one_null: [*const SxFlow; 2] = [a, null()];
+            let p = Point::new(5, 5, 0);
+            assert_eq!(
+                sx_goal_guess_observe_flow(g, two.as_ptr().cast(), 1, &map, p, p),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_goal_guess_observe_flow(g, one_null.as_ptr().cast(), 2, &map, p, p),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_goal_guess_observe_flow(g, null(), 2, &map, p, p),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_goal_guess_observe_flow(g, two.as_ptr().cast(), 2, null(), p, p),
+                ERROR_ARGUMENT
+            );
+            assert_eq!(
+                sx_goal_guess_observe_flow(g, two.as_ptr().cast(), 2, &map, p, p),
+                0,
+                "standing still"
+            );
+            let far = Point::new(9, 9, 0);
+            assert_eq!(
+                sx_goal_guess_observe_flow(g, two.as_ptr().cast(), 2, &map, p, far),
+                1,
+                "a jump"
+            );
+            assert_eq!(sx_goal_guess_chance_fine(g, 0), before);
+            let last = log.last().copied().unwrap();
+            assert_eq!(
+                (last.kind, last.error),
+                (GOAL_GUESS_TRACE_REFUSED, STEP_JUMP)
+            );
+            sx_goal_guess_free(g);
+            sx_flow_free(a);
+            sx_flow_free(b);
+        }
+    }
+
+    #[test]
+    fn no_allocation_per_step() {
+        let mut w = walls(&BLOCKED);
+        let map = map_of(&mut w);
+        let r = rules(0);
+        let flows: Vec<*mut SxFlow> = EXITS
+            .iter()
+            .map(|&(x, y)| {
+                let f = unsafe { sx_flow_new(&r) };
+                let goal = Point::new(x, y, 0);
+                unsafe { sx_flow_build(f, &map, &goal, 1, i32::MAX, null_mut()) };
+                f
+            })
+            .collect();
+        let ptrs: Vec<*const SxFlow> = flows.iter().map(|&f| f.cast_const()).collect();
+        let c = unsafe { sx_goal_guess_new(&c_config(), 4) };
+        let mut log: Vec<SxGoalGuessTrace> = Vec::with_capacity(4096);
+        unsafe { sx_goal_guess_set_trace(c, Some(collect), (&mut log as *mut Vec<_>).cast()) };
+        let mut out = [0u32; 4];
+        let n = allocations(|| {
+            for x in 3..9 {
+                let got = unsafe {
+                    sx_goal_guess_observe_flow(
+                        c,
+                        ptrs.as_ptr().cast(),
+                        4,
+                        &map,
+                        Point::new(x, 14, 0),
+                        Point::new(x + 1, 15, 0),
+                    )
+                };
+                assert_eq!(got, 0);
+                unsafe { sx_goal_guess_split(c, 3, out.as_mut_ptr(), 4) };
+            }
+        });
+        assert_eq!(n, 0, "no heap per step");
+        assert_eq!(unsafe { sx_goal_guess_best(c, null_mut()) }, 3);
+
+        // The Rust guess is a plain value: no heap at all.
+        let mut rs = GoalGuess::new(GoalGuessConfig::default(), 4);
+        let n = allocations(|| {
+            for _ in 0..10 {
+                rs.observe(&[-10, 10, 0, 14], &[-10, 10, 10, -10, 0, 0, 14, -14], 2)
+                    .unwrap();
+                rs.split(3, &mut out);
+            }
+        });
+        assert_eq!(n, 0);
+        unsafe {
+            sx_goal_guess_free(c);
+            for f in flows {
+                sx_flow_free(f);
+            }
+        }
+    }
+
+    #[test]
+    fn goal_guess_numbers_match_header() {
+        assert_eq!(define("SX_API_VERSION"), 15);
+        let numbers = [
+            ("SX_MAX_GOALS", MAX_GOALS as i64),
+            ("SX_MAX_MOVES", MAX_MOVES as i64),
+            ("SX_GOAL_COLUMNS", GOAL_COLUMNS as i64),
+            ("SX_GOAL_GUESS_TRACE_STEP", i64::from(GOAL_GUESS_TRACE_STEP)),
+            (
+                "SX_GOAL_GUESS_TRACE_PRIOR",
+                i64::from(GOAL_GUESS_TRACE_PRIOR),
+            ),
+            (
+                "SX_GOAL_GUESS_TRACE_RESET",
+                i64::from(GOAL_GUESS_TRACE_RESET),
+            ),
+            (
+                "SX_GOAL_GUESS_TRACE_REFUSED",
+                i64::from(GOAL_GUESS_TRACE_REFUSED),
+            ),
+            ("SX_STEP_SHAPE", i64::from(STEP_SHAPE)),
+            ("SX_STEP_JUMP", i64::from(STEP_JUMP)),
+        ];
+        for (name, value) in numbers {
+            assert_eq!(define(name), value, "{name}");
+        }
+        let _ = (StepError::Jump, GoalGuessTrace::Reset);
     }
 }

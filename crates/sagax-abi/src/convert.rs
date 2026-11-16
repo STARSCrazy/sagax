@@ -86,6 +86,10 @@ use crate::codes::{
     REASON_TRANSITION,
 };
 use crate::codes::{
+    GOAL_GUESS_TRACE_PRIOR, GOAL_GUESS_TRACE_REFUSED, GOAL_GUESS_TRACE_RESET,
+    GOAL_GUESS_TRACE_STEP, STEP_JUMP, STEP_SHAPE,
+};
+use crate::codes::{
     NAV_TRACE_FLEE_BEST, NAV_TRACE_PLACED, NAV_TRACE_SEARCH, NAV_TRACE_SHORTCUT,
     NAV_TRACE_UNPLACED, SEARCH_TRACE_EXPANDED, SEARCH_TRACE_FINISHED, SEARCH_TRACE_IMPROVED,
     SEARCH_TRACE_PAUSED, SEARCH_TRACE_STARTED,
@@ -2314,6 +2318,70 @@ pub fn contagion_trace(event: sagax_perception::ContagionTrace) -> ContagionTrac
             deed: u32::from(deed),
             inputs,
             ..of(CONTAGION_TRACE_INPUTS, 0)
+        },
+    }
+}
+
+// ---- goal guess ---------------------------------------------------------------
+
+/// The `SX_STEP_*` code of a refused step.
+pub fn step_error(error: sagax_decide::memory::StepError) -> u32 {
+    use sagax_decide::memory::StepError as E;
+    match error {
+        E::Shape => STEP_SHAPE,
+        E::Jump => STEP_JUMP,
+    }
+}
+
+/// The numbers of a goal-guess trace record (`sx_goal_guess_trace`).
+/// Fields that do not apply to `kind` are 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GoalGuessTraceCode {
+    /// `SX_GOAL_GUESS_TRACE_*`.
+    pub kind: u32,
+    /// `STEP`, `PRIOR`: the goal.
+    pub goal: u32,
+    /// `STEP`: the change of walking distance of the step taken.
+    pub moved: i32,
+    /// `STEP`: the step's likelihood for the goal, 1/65536.
+    pub likelihood: u32,
+    /// `STEP`, `PRIOR`: the goal's chance now, 0..256.
+    pub chance: u32,
+    /// `REFUSED`: `SX_STEP_*`.
+    pub error: u32,
+}
+
+/// The numbers of a goal-guess trace record.
+pub fn goal_guess_trace(event: sagax_decide::memory::GoalGuessTrace) -> GoalGuessTraceCode {
+    use sagax_decide::memory::GoalGuessTrace as T;
+    match event {
+        T::Step {
+            goal,
+            moved,
+            likelihood,
+            chance,
+        } => GoalGuessTraceCode {
+            kind: GOAL_GUESS_TRACE_STEP,
+            goal: u32::from(goal),
+            moved,
+            likelihood,
+            chance,
+            error: 0,
+        },
+        T::Prior { goal, chance } => GoalGuessTraceCode {
+            kind: GOAL_GUESS_TRACE_PRIOR,
+            goal: u32::from(goal),
+            chance,
+            ..GoalGuessTraceCode::default()
+        },
+        T::Reset => GoalGuessTraceCode {
+            kind: GOAL_GUESS_TRACE_RESET,
+            ..GoalGuessTraceCode::default()
+        },
+        T::Refused { error } => GoalGuessTraceCode {
+            kind: GOAL_GUESS_TRACE_REFUSED,
+            error: step_error(error),
+            ..GoalGuessTraceCode::default()
         },
     }
 }

@@ -1476,3 +1476,42 @@ fn contagion_trace_all_records() {
         (CONTAGION_TRACE_INPUTS, 0, 1, inputs)
     );
 }
+
+#[test]
+fn goal_guess_trace_all_records() {
+    use sagax_decide::memory::{GoalGuessTrace as T, StepError};
+    let step = goal_guess_trace(T::Step {
+        goal: 2,
+        moved: -14,
+        likelihood: 40000,
+        chance: 99,
+    });
+    assert_eq!(
+        step,
+        GoalGuessTraceCode {
+            kind: GOAL_GUESS_TRACE_STEP,
+            goal: 2,
+            moved: -14,
+            likelihood: 40000,
+            chance: 99,
+            error: 0,
+        }
+    );
+    let prior = goal_guess_trace(T::Prior {
+        goal: 1,
+        chance: 64,
+    });
+    assert_eq!(
+        (prior.kind, prior.goal, prior.chance, prior.moved),
+        (GOAL_GUESS_TRACE_PRIOR, 1, 64, 0)
+    );
+    assert_eq!(goal_guess_trace(T::Reset).kind, GOAL_GUESS_TRACE_RESET);
+    let jump = goal_guess_trace(T::Refused {
+        error: StepError::Jump,
+    });
+    assert_eq!(
+        (jump.kind, jump.error),
+        (GOAL_GUESS_TRACE_REFUSED, STEP_JUMP)
+    );
+    assert_eq!(step_error(StepError::Shape), STEP_SHAPE);
+}
