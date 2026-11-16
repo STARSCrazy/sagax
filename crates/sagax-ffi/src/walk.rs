@@ -133,8 +133,9 @@ pub unsafe extern "C" fn sx_flow_distance_invalidate(fd: *mut SxFlowDistance) ->
 }
 
 /// `sx_flow_distance_set_levels`: the levels moves may arrive from (`lo`
-/// ..= `hi`, default 0 ..= 0); forgets every field. `SX_ERROR_ARGUMENT`
-/// for a null handle or `lo > hi`.
+/// ..= `hi`, at most 64; default: the cell's own and one up and one down);
+/// forgets every field. `SX_ERROR_ARGUMENT` for a null handle, `lo > hi`
+/// or more than 64 levels.
 ///
 /// # Safety
 /// `fd` is null or valid.
@@ -148,7 +149,7 @@ pub unsafe extern "C" fn sx_flow_distance_set_levels(
     let Some(h) = (unsafe { fd.as_mut() }) else {
         return ERROR_ARGUMENT;
     };
-    if lo > hi {
+    if lo > hi || i64::from(hi) - i64::from(lo) >= i64::from(FlowDistance::MAX_LEVELS) {
         return ERROR_ARGUMENT;
     }
     h.fd.set_levels(lo..=hi);

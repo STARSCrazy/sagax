@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 
 use crate::crew::*;
-use crate::grid::{SxGrid, sx_grid_free, sx_grid_map, sx_grid_new, sx_grid_set};
+use crate::grid::{SxGrid, sx_grid_add_wall, sx_grid_free, sx_grid_map, sx_grid_new, sx_grid_set};
 use crate::group::*;
 use crate::walk::*;
 use crate::{ERROR_ARGUMENT, Point, SxMap, SxRules, sx_rules_default};
@@ -428,6 +428,13 @@ fn c_flow_distance_matches_rust() {
             sx_flow_distance_set_levels(null_mut(), 0, 0),
             ERROR_ARGUMENT
         );
+        // More than 64 levels are refused (a range that would hang).
+        assert_eq!(
+            sx_flow_distance_set_levels(fd, i32::MIN, i32::MAX),
+            ERROR_ARGUMENT
+        );
+        assert_eq!(sx_flow_distance_set_levels(fd, 0, 64), ERROR_ARGUMENT);
+        assert_eq!(sx_flow_distance_set_levels(fd, 0, 63), 0);
         let before = sx_flow_distance_searches(fd);
         assert_eq!(sx_flow_distance_set_levels(fd, 0, 1), 0);
         assert_eq!(ask(fd, &from, &to, &mut out), 1);
@@ -499,5 +506,44 @@ fn c_hex_crew_asks_offset_coordinates() {
         // Member 2 at offset (2, 3) to its goal, the leader's offset (6, 0).
         assert!(asked.contains(&([2, 3, 0], [6, 0, 0])), "{asked:?}");
         sx_crew_free(c);
+    }
+}
+
+#[test]
+fn c_walks_up_to_an_occupied_target_as_rust() {
+    unsafe {
+        // 11 x 11, the target (5, 5) blocked, a wall between (5, 4) and
+        // (5, 5) and the cell (4, 5) blocked.
+        let grid = sx_grid_new(11, 11, 1);
+        assert_eq!(sx_grid_set(grid, Point::new(5, 5, 0), -1), 0);
+        assert_eq!(sx_grid_set(grid, Point::new(4, 5, 0), -1), 0);
+        assert_eq!(sx_grid_add_wall(grid, Point::new(5, 4, 0), 0, 1), 0);
+        let mut map = SxMap {
+            step: None,
+            start_step: None,
+            move_cost: None,
+            steps: None,
+            context: null_mut(),
+        };
+        assert_eq!(sx_grid_map(grid, &mut map), 0);
+        let mut dense = DenseGrid::new(11, 11);
+        dense.set(5, 5, DenseGrid::BLOCKED);
+        dense.set(4, 5, DenseGrid::BLOCKED);
+        dense.add_wall(5, 4, 0, 1);
+        let fd = sx_flow_distance_new(&octile_rules(), 0);
+        assert_eq!(sx_flow_distance_set_map(fd, &map), 0);
+        let mut rust = rust_flow(4);
+        let to = [5, 5, 0];
+        for from in [[5, 4, 0], [4, 4, 0], [5, 0, 0], [0, 10, 0], [6, 6, 0]] {
+            let mut out = 0;
+            let got = sx_flow_distance_fn(fd.cast(), from.as_ptr(), to.as_ptr(), &mut out);
+            let want = rust.distance(&mut dense, from, to);
+            assert_eq!((got == 1).then_some(out), want, "{from:?}");
+            assert!(want.is_some());
+        }
+        // (5, 4) is behind the wall: not one step.
+        assert_eq!(rust.distance(&mut dense, [5, 4, 0], to), Some(2));
+        sx_flow_distance_free(fd);
+        sx_grid_free(grid);
     }
 }

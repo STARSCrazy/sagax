@@ -3565,14 +3565,20 @@ int32_t sx_crew_set_distance(sx_crew *crew, sx_distance_fn distance, void *conte
  * walls). It is divided by rules->cost_straight (rounded down; a diagonal of
  * 14 adds 1.4 to the sum). A walker on a blocked cell (occupied by itself)
  * still walks off it; a destination nobody can enter (occupied, blocked) is
- * walked up to: one cell more than to the nearest cell next to it. from == to
- * is 0. The positions are the map's cells (x, y, level): on hex the offset
+ * walked up to: one cell more than to the nearest cell a move would enter it
+ * from were it free (walls, links and corners still count; an sx_grid
+ * answers that exactly, another map by asking the move back out of the
+ * destination, exact for two-way walls). from == to is 0. The positions are the map's cells (x, y, level): on hex the offset
  * coordinates a crew with hex_grid passes; a plain hex sx_squad passes axial
  * positions, so wrap sx_flow_distance_fn in your own sx_distance_fn that
  * converts them (sx_hex_from_axial), and do not share one sx_flow_distance
  * between such a squad and a crew. Moves are seen backwards from neighbours on
- * the cell's own level and on the levels of sx_flow_distance_set_levels (lo ..
- * hi, default 0 .. 0; set it for stairs between levels).
+ * the cell's own level and one up and one down, so ordinary stairs need no
+ * setup; sx_flow_distance_set_levels(fd, lo, hi) replaces that by the fixed
+ * levels lo .. hi (at most 64; for moves that jump further). Cost: the map
+ * only answers moves forward, so a field asks every neighbour of a cell for
+ * its moves, some 25 to 70 times the callbacks of an sx_flow of the same
+ * size; give it enough node_capacity and ask about few destinations.
  * slots fields are kept (0: 4), the least recently used replaced;
  * each holds up to rules->node_capacity cells, and a cell beyond that counts
  * as unreachable. A squad asks many members about the same few destinations
