@@ -1,5 +1,10 @@
 # Roadmap
 
+- **Decider: an "or" combine** (wish from the Syndicate autopilot, 2026-11-20):
+  `SX_COMBINE_MAXIMUM`, the strongest factor decides. Today the factors of an
+  option are always combined like an "and" (product, minimum, mean ...), so
+  "raise adrenaline because the way is long *or* enemies are near *or* the
+  target is in sight" needs three options with the same effect.
 - **HPA\*** (hierarchical search): cut the map into blocks, search coarsely
   over blocks, then finely. Pays off only for very large maps or very many
   searches per frame.
