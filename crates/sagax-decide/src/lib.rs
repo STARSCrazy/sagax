@@ -208,6 +208,9 @@ pub enum Combine {
     Average = 3,
     /// The middle factor: single outliers, high or low, do not count.
     Median = 4,
+    /// The strongest factor decides: an "or". One good reason is enough;
+    /// a 0 rules out only when all factors are 0.
+    Maximum = 5,
 }
 
 impl Combine {
@@ -219,6 +222,7 @@ impl Combine {
             2 => Self::Minimum,
             3 => Self::Average,
             4 => Self::Median,
+            5 => Self::Maximum,
             _ => return None,
         })
     }
@@ -300,6 +304,7 @@ pub fn combine(how: Combine, values: &mut [u32]) -> u32 {
         Combine::Product => compensate(values.iter().fold(ONE, |p, &v| mul(p, v)), n),
         Combine::GeometricMean => geometric_mean(values),
         Combine::Minimum => values.iter().copied().min().unwrap_or(ONE),
+        Combine::Maximum => values.iter().copied().max().unwrap_or(ONE),
         Combine::Average => (values.iter().map(|&v| u64::from(v)).sum::<u64>() / n as u64) as u32,
         Combine::Median => {
             values.sort_unstable();

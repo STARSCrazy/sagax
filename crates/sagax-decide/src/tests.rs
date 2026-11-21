@@ -370,6 +370,9 @@ fn combines() {
     assert_eq!(combine(Combine::Average, &mut [0, ONE]), H);
     assert_eq!(combine(Combine::Median, &mut [ONE, 0, H]), H);
     assert_eq!(combine(Combine::Median, &mut [0, 100, 200, ONE]), 150);
+    assert_eq!(combine(Combine::Maximum, &mut [0, 100, H]), H);
+    assert_eq!(combine(Combine::Maximum, &mut [0, 0]), 0);
+    assert_eq!(Combine::from_u32(5), Some(Combine::Maximum));
     // a 0 rules out in product, mean and minimum, not in average and median
     for how in [Combine::Product, Combine::GeometricMean, Combine::Minimum] {
         assert_eq!(combine(how, &mut [0, ONE, ONE]), 0, "{how:?}");

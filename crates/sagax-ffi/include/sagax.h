@@ -492,6 +492,7 @@ typedef struct sx_decide_trace {
 #define SX_COMBINE_MINIMUM        2   /* the weakest factor decides */
 #define SX_COMBINE_AVERAGE        3   /* factors make up for each other; 0 does not rule out */
 #define SX_COMBINE_MEDIAN         4   /* single outliers do not count */
+#define SX_COMBINE_MAXIMUM        5   /* the strongest factor decides: an "or" */
 
 #define SX_APPLY_COMBINE  0   /* goes into the combine */
 #define SX_APPLY_MULTIPLY 1   /* multiplied onto the result afterwards: a true factor */

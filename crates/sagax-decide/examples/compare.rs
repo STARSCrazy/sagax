@@ -3,12 +3,13 @@
 
 use sagax_decide::{Combine, ONE, combine, pull};
 
-const HOW: [(Combine, &str); 5] = [
+const HOW: [(Combine, &str); 6] = [
     (Combine::Product, "product"),
     (Combine::GeometricMean, "geo mean"),
     (Combine::Minimum, "minimum"),
     (Combine::Average, "average"),
     (Combine::Median, "median"),
+    (Combine::Maximum, "maximum"),
 ];
 
 fn f(v: f64) -> u32 {
